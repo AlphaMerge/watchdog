@@ -12732,20 +12732,90 @@ because each is a decision rather than a defect:
         separate validation change. `objectFields` keeps its own literal 100 and 50 rather than
         `MAX_TAG` and `MAX_TAGS`.
 
-- [ ] **P-348 — a database sensor's `extract` key can take a built-in channel's name** · XS ·
+- [x] **P-348 — a database sensor's `extract` key can take a built-in channel's name** · XS ·
       P-320 · Found 2026-10-09 in `P-320`. The schema (`^[A-Za-z0-9_.-]+$`) accepts `value`, `rows`,
       `queryTime` or `connectTime`, which gives two readings under one key in one result and a
       key `dbChannels` declares twice. **Done when** those names are reserved by the schema, with a
       test, and existing sensors that use one are named in the outcome.
 
-- [ ] **P-349 — `exe.script.advanced` with `primaryChannel` `runtime` declares it twice** · XS ·
+      **P-348 outcome. Reserved by the schema shared by `db.postgresql`, `db.mysql` and
+      `db.mssql`: a `pattern` with a negative lookahead,
+      `^(?!(?:value|rows|queryTime|connectTime)$)[A-Za-z0-9_.-]+$`, built from a new
+      `DB_OWN_KEYS` constant in `db-shared.ts`.** A validation change, no migration, no protocol
+      change, `execute` untouched.
+      - **Why a pattern and not `not: {enum}`.** Both compile under Ajv strict mode, but the sensor
+        form (`web/src/forms/validate.ts`) checks `pattern` and knows nothing of `not`, so the
+        pattern is refused before the write as well as by the API (`/extract/N/key`, *must match
+        pattern*). The pattern is the message, so the key's description now names the four.
+        Exact and case-sensitive: `Value`, `values`, `rows2` and `queryTime.p95` are still keys.
+      - **Existing sensors.** No shipped device template uses one (searched), and there is no field
+        installation yet; an operator can find any with
+        `SELECT object_id FROM sensor_config WHERE type LIKE 'db.%' AND params->'extract' @> '[{"key":"rows"}]'`
+        (once per name). Such a sensor **keeps running unchanged**: nothing re-validates stored
+        parameters on a read, a clone (`copySubtree` copies the row), a start or the probe (which
+        runs what it is sent), so it goes on reporting two readings under the key, of which the
+        sample INSERT's `ON CONFLICT DO NOTHING` keeps one and counts the other in
+        `duplicateSamples`, as before. **An edit that sends `params` is refused** with a 400 naming
+        `/extract/N/key` until the key is renamed (which starts a new channel, as the key's
+        description says); an edit that does not (name, interval, pause, move) passes.
+      - **Tests.** `db-shared.test.ts`: each of the four refused as an `extract` key by each of the
+        three engines through the shipped catalogue, the problem at `/extract/0/key` (12); six keys
+        that only resemble one accepted and declared once by `dbChannels` (3); `DB_OWN_KEYS` is
+        exactly the keys `dbChannels({})` declares, so the two cannot drift.
+      - **Mutation** (restored byte for byte, `dist` rebuilt): the old pattern fails the 12
+        refusals.
+      - **Not done.** Nothing names such a stored sensor on its own: a start-up pass that validates
+        every stored sensor's parameters against its type and logs the ones that fail would, for
+        this and any later schema tightening alike (a follow-up).
+
+- [x] **P-349 — `exe.script.advanced` with `primaryChannel` `runtime` declares it twice** · XS ·
       P-320 · Found 2026-10-09 in `P-320`. `channels()` declares `runtime` twice and `execute` drops
       the script's `runtime` for its own. **Done when** the name is refused or the two are told
       apart, with a test.
 
-- [ ] **P-350 — nothing makes a new sensor type consider `declaresEveryChannel`** · XS · P-320 ·
+      **P-349 outcome. Refused: `primaryChannel`'s pattern is now `^(?!runtime$)[A-Za-z0-9_.-]+$`,
+      and its description says why.** Telling the two apart would mean renaming one of them, and
+      either rename moves a channel's history or changes a key every existing sensor has; a primary
+      called `runtime` was never a working sensor (it was judged by how long the program took, the
+      program's own reading dropped). `execute` still drops a script's own non-primary `runtime`,
+      as it always has. A stored sensor with it keeps running as before, and an edit sending
+      `params` is refused naming `/primaryChannel`, as in `P-348`. `sensor-reference.md`
+      regenerated (`--check` current). **Test** (`exe-script.test.ts`): `runtime` refused at
+      `/primaryChannel`; `value`, `runtime2`, `Runtime`, `script.runtime`, `free_space` accepted,
+      each declaring no key twice. **Mutation**: the old pattern fails it.
+
+- [x] **P-350 — nothing makes a new sensor type consider `declaresEveryChannel`** · XS · P-320 ·
       Found 2026-10-09 in `P-320`. **Done when** the catalogue (or a test) requires each type to
       set the flag or be on an explicit "keys from what it reads" list with a reason.
+
+      **P-350 outcome. The catalogue requires it at registration: a type sets
+      `declaresEveryChannel: true` or gives `channelsFromWhatItReads`, a new optional string on the
+      contract saying why it cannot — exactly one of the two.** Neither (including
+      `declaresEveryChannel: false` alone and a blank reason) and both are refused with
+      `BAD_SENSOR_TYPE` naming the type. No behaviour change for any type: the reason is read by
+      nothing but the check, and unflagged stays unflagged.
+      - **Why on the type, not a list in a test.** A type stays one file: its answer sits beside
+        its `channels()`, and a type added without one fails at the first start, in every test that
+        registers it, rather than in one test somebody has to know to edit. `retired-channels.test.ts`
+        keeps its exact 41 + 3 lists (and now asserts the three give the reason) as the record of
+        which shipped types were read for it.
+      - **The three.** `exe.script.advanced` (keys the program printed), `windows.cpu` (a
+        `core_<name>` key per logical processor), `windows.volume` (`free_`, `freebytes_`,
+        `size_` per drive letter).
+      - **Test types.** Every type the test suites register now answers: the sensors and probe
+        test types that report only declared keys set the flag; the core's test types, and the
+        core's stand-ins for shipped ones in `support/sensor-types.ts`, give a reason, so that no
+        core test changes what it calls retired. `channel-provisioning.test.ts`'s two flagged
+        types built from `test.columns` spread it without its reason.
+      - **Docs.** `adding-a-sensor-type.md`: the shape example sets the flag; the section is now
+        "`declaresEveryChannel`, or `channelsFromWhatItReads` saying why not (one of the two)";
+        a paragraph on refusing your own keys in a parameter that names keys (`P-348`, `P-349`);
+        a row in the registration-checks table.
+      - **Tests.** `catalogue.test.ts`: neither refused (absent, `false`, `''`, blank), both refused,
+        each alone accepted, and the shipped catalogue's reasoned types exactly the three.
+        `retired-channels.test.ts`: the three are exactly the types with a reason.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): accepting neither fails the
+        neither case; accepting both fails the both case.
 
 - [x] **P-351 — about fifteen more fixed-value response strings have no enum** · S · P-342 · Found
       2026-10-09 in `P-342`. `actor.kind`, `dependency.masterState`, `objectKind` (audit,

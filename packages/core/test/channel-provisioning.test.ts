@@ -37,6 +37,7 @@ const columns: SensorType = {
   id: 'test.columns',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -72,13 +73,16 @@ const columns: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
+/** `test.columns` without its answer to `declaresEveryChannel`, for a type that gives the other. */
+const { channelsFromWhatItReads: _unflagged, ...columnsShape } = columns;
+
 /**
  * `test.columns` with `snmp.table`'s promise (`P-310`): every key it reports is one its
  * parameters declare. A column named `broken` makes `channels()` throw, as parameters an older
  * build stored might.
  */
 const promised: SensorType = {
-  ...columns,
+  ...columnsShape,
   id: 'test.promised',
   declaresEveryChannel: true,
   channels: (params) => {
@@ -98,6 +102,7 @@ const brittle: SensorType = {
   id: 'test.brittle',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   secretDestinations: { token: [] },
   paramsSchema: {
     type: 'object',
@@ -932,7 +937,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     // A fallback is not the type's answer for the sensor, so it holds nothing to it either.
     const promising = new SensorCatalogue();
     promising.register({
-      ...columns,
+      ...columnsShape,
       id: 'test.promising',
       declaresEveryChannel: true,
       channels: (params) => {
@@ -958,6 +963,7 @@ const defaulted: SensorType = {
   id: 'test.defaulted',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -1050,6 +1056,7 @@ const unranked: SensorType = {
   id: 'test.unranked',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
   channels: () => [
     { key: 'a', name: 'A' },

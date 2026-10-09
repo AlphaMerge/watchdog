@@ -40,14 +40,17 @@ export const exeScriptAdvanced: SensorType = {
         type: 'string',
         minLength: 1,
         maxLength: 40,
-        pattern: '^[A-Za-z0-9_.-]+$',
+        // Not `runtime`, this sensor's own channel (`P-349`): the type's reading would replace
+        // the program's, and the sensor would be judged by how long the program took.
+        pattern: '^(?!runtime$)[A-Za-z0-9_.-]+$',
         default: 'value',
         title: 'Primary channel',
         description:
           'The key of the channel this sensor is judged by. The program must return it every ' +
           'scan; the rest of what it returns becomes channels on their own the first time they ' +
           'appear. For a PRTG-format script this is the first channel’s name in lower case with ' +
-          'spaces as underscores — “Free Space” is `free_space`.',
+          'spaces as underscores — “Free Space” is `free_space`. Not `runtime`, which is the ' +
+          'sensor’s own: how long the program took.',
       },
       primaryName: {
         type: 'string',
@@ -59,6 +62,10 @@ export const exeScriptAdvanced: SensorType = {
       primaryUnit: { type: 'string', maxLength: 20, default: '', title: 'Primary channel unit' },
     },
   },
+
+  // Not `declaresEveryChannel` (`P-320`, `P-350`).
+  channelsFromWhatItReads:
+    'every key but the primary and `runtime` is one the program printed, which no parameter names',
 
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const key = typeof params['primaryChannel'] === 'string' ? params['primaryChannel'] : 'value';

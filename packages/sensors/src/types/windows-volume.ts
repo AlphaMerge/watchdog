@@ -64,6 +64,11 @@ export const windowsVolume: SensorType = {
     },
   },
 
+  // Not `declaresEveryChannel` (`P-320`, `P-350`).
+  channelsFromWhatItReads:
+    '`free_`, `freebytes_` and `size_` keys per drive letter the machine reports, named by the ' +
+    'machine',
+
   channels(): readonly ChannelDef[] {
     return [{ key: 'lowest', name: 'Lowest free space', unit: '%', isPrimary: true }];
   },

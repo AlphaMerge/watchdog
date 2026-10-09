@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { standardCatalogue } from '../src/index.js';
 import {
+  DB_OWN_KEYS,
+  dbChannels,
   numberFromCell,
   readDbMappings,
   rowsAccepted,
@@ -264,4 +267,40 @@ describe('a database check', () => {
     });
     assert.equal(seen.sql, 'select pg_is_in_recovery()');
   });
+});
+
+describe('an extract key (P-348)', () => {
+  const ENGINES = ['db.postgresql', 'db.mysql', 'db.mssql'] as const;
+  const catalogue = standardCatalogue();
+  const withKey = (key: string): Record<string, unknown> => ({
+    query: 'select 1, 2',
+    extract: [{ key }],
+  });
+
+  it('names exactly the keys the sensor reports of its own', () => {
+    const own = dbChannels({}).map((channel) => channel.key);
+    assert.deepEqual([...own].sort(), [...DB_OWN_KEYS].sort());
+  });
+
+  for (const engine of ENGINES) {
+    for (const key of DB_OWN_KEYS) {
+      it(`${engine} refuses "${key}", one of the sensor's own channels`, () => {
+        const outcome = catalogue.validate(engine, withKey(key));
+        assert.ok(!outcome.valid, key);
+        assert.deepEqual(
+          outcome.problems.map((problem) => problem.path),
+          ['/extract/0/key'],
+        );
+      });
+    }
+
+    it(`${engine} still takes a key that only resembles one`, () => {
+      for (const key of ['lag', 'values', 'Value', 'rows2', 'queryTime.p95', 'my_value']) {
+        const outcome = catalogue.validate(engine, withKey(key));
+        assert.ok(outcome.valid, key);
+        const declared = dbChannels(outcome.params).filter((channel) => channel.key === key);
+        assert.equal(declared.length, 1, key);
+      }
+    });
+  }
 });

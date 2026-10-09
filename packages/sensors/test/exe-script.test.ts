@@ -953,4 +953,28 @@ describe('exe.script.advanced', () => {
     );
     assert.equal(defs[defs.length - 1]?.key, 'runtime');
   });
+
+  it('refuses `runtime` as the primary, the sensor’s own channel (P-349)', () => {
+    // Taken, `channels()` would declare `runtime` twice and `execute` would report the type's
+    // run time in place of the program's reading: a sensor judged by how long its script took.
+    const catalogue = new SensorCatalogue().register(exeScriptAdvanced).seal();
+    const refused = catalogue.validate(exeScriptAdvanced.id, {
+      program: 'advanced.sh',
+      primaryChannel: 'runtime',
+    });
+    assert.ok(!refused.valid);
+    assert.deepEqual(
+      refused.problems.map((problem) => problem.path),
+      ['/primaryChannel'],
+    );
+    for (const key of ['value', 'runtime2', 'Runtime', 'script.runtime', 'free_space']) {
+      const fine = catalogue.validate(exeScriptAdvanced.id, {
+        program: 'advanced.sh',
+        primaryChannel: key,
+      });
+      assert.ok(fine.valid, key);
+      const declared = exeScriptAdvanced.channels(fine.params).map((def) => def.key);
+      assert.equal(new Set(declared).size, declared.length, key);
+    }
+  });
 });

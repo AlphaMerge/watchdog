@@ -41,6 +41,7 @@ const snmpPinned: SensorType = {
   id: 'test.snmp.pinned',
   category: 'SNMP',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   credentialKinds: ['snmp'],
   pinnedKinds: ['snmp'],
   secretDestinations: { 'kind:snmp': ['port'] },

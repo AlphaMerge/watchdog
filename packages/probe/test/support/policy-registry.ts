@@ -13,6 +13,7 @@ const echo: SensorType = {
   id: 'test.policy',
   category: 'Test',
   costHint: 'light',
+  declaresEveryChannel: true,
   paramsSchema: { type: 'object', additionalProperties: true, properties: {} },
   channels() {
     return [{ key: 'value', name: 'Value', unit: '#', isPrimary: true }];

@@ -88,6 +88,54 @@ describe('registration', () => {
     }
   });
 
+  describe('whether a type declares every key it reports (P-350)', () => {
+    const { declaresEveryChannel: _flag, ...unanswered } = pingType;
+    const REASON = 'a key per thing the check found, named by what it found';
+    const refusedFor = (type: SensorType, said: RegExp): void => {
+      assert.throws(
+        () => new SensorCatalogue().register(type),
+        (error: unknown) =>
+          error instanceof SensorTypeError &&
+          error.code === 'BAD_SENSOR_TYPE' &&
+          error.message.includes(`"${type.id}"`) &&
+          said.test(error.message),
+      );
+    };
+
+    it('refuses a type that answers neither way', () => {
+      refusedFor(unanswered, /neither sets `declaresEveryChannel` nor says/);
+      refusedFor({ ...unanswered, declaresEveryChannel: false }, /neither/);
+      // A reason with nothing in it is not one.
+      refusedFor({ ...unanswered, channelsFromWhatItReads: '' }, /neither/);
+      refusedFor({ ...unanswered, channelsFromWhatItReads: '   ' }, /neither/);
+    });
+
+    it('refuses a type that answers both ways', () => {
+      refusedFor(
+        { ...unanswered, declaresEveryChannel: true, channelsFromWhatItReads: REASON },
+        /sets `declaresEveryChannel` and gives a reason it cannot/,
+      );
+    });
+
+    it('takes either answer alone', () => {
+      new SensorCatalogue().register({ ...unanswered, declaresEveryChannel: true });
+      new SensorCatalogue().register({ ...unanswered, channelsFromWhatItReads: REASON });
+      new SensorCatalogue().register({
+        ...unanswered,
+        declaresEveryChannel: false,
+        channelsFromWhatItReads: REASON,
+      });
+    });
+
+    it('has every shipped type answer, and only three with a reason', () => {
+      const shipped = standardCatalogue(sensorTypesFor('full'));
+      const reasoned = shipped
+        .ids()
+        .filter((id) => shipped.declaration(id).channelsFromWhatItReads !== undefined);
+      assert.deepEqual(reasoned, ['exe.script.advanced', 'windows.cpu', 'windows.volume']);
+    });
+  });
+
   it('holds a return for Probe Health alone among the shipped types (M-18)', () => {
     // Every other type ends its alarm at the return, as before: the hold is for outages that
     // come in bursts the core samples between, and today that is a restarting probe.

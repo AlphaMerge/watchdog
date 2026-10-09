@@ -17,6 +17,8 @@ export const portType: SensorType = {
   id: 'net.port',
   category: 'Network',
   costHint: 'light',
+  // Every key `execute` reports is one `channels()` declares. Required one way or the other.
+  declaresEveryChannel: true,
 
   paramsSchema: {
     type: 'object',
@@ -299,7 +301,15 @@ the answer differs from `{}`'s. For a type without the flag, it throws on a chan
 that only real parameters produce, the one place such a channel is ever seen. Either refuses that
 sensor's create or edit with a 400 naming the type, and logs a warning for you (`P-296`).
 
-### `declaresEveryChannel` (optional)
+### `declaresEveryChannel`, or `channelsFromWhatItReads` saying why not (one of the two)
+
+**Every type answers this question one way or the other** (`P-350`): it sets
+`declaresEveryChannel: true`, or it gives `channelsFromWhatItReads`, a sentence saying why its
+readings name keys its declaration cannot. The catalogue refuses a type at registration that gives
+neither (an empty or blank sentence is not one), and one that gives both. Both members are
+optional in the contract only so that each type names one; leaving both out is not the safe
+default it was before, because nobody can tell a type that cannot promise from one whose author
+never asked.
 
 `true` promises that every key `execute` reports is one `channels(params)` declares for the
 parameters it ran with, on every path. Then a channel a sensor has and its stored parameters no
@@ -333,14 +343,25 @@ with the same function `channels` does and reports nothing else: `ssh.script` re
 script printed but reports only the keys its `channels` parameter declares, and the database
 types report only `extract`'s keys besides their own.
 
-Leave it unset when your keys come from what the check ran into — a script's own keys
-(`exe.script.advanced`), a channel per processor or per volume the machine has (`windows.cpu`,
-`windows.volume`), a query's columns — because a key your declaration does not name is then one
-your readings may, and the core would call a channel that is still read retired. Unset is safe:
-none of your channels is ever called retired, which is how every channel looked before. The types
-that set it, and the three that do not, are listed in `retired-channels.test.ts`, each checked by
-reading its `execute`; add yours there. If a simulator can run it, add a test that every key it
-reports is one it declares (`assertDeclaresEveryKey` in `packages/sensors/test/support`).
+Give `channelsFromWhatItReads` instead when your keys come from what the check ran into — a
+script's own keys (`exe.script.advanced`), a channel per processor or per volume the machine has
+(`windows.cpu`, `windows.volume`), a query's columns — because a key your declaration does not
+name is then one your readings may, and the core would call a channel that is still read retired.
+Say which keys and where they come from, as those three do; the sentence is for whoever reads the
+type next and is never shown to an operator. Such a type is safe: none of its channels is ever
+called retired, which is how every channel looked before. The types that set the flag, and the
+three that give a reason, are listed in `retired-channels.test.ts`, each checked by reading its
+`execute`; add yours there. If a simulator can run it, add a test that every key it reports is one
+it declares (`assertDeclaresEveryKey` in `packages/sensors/test/support`).
+
+**A key the operator names in the parameters must not be one of yours.** If your type reports
+channels of its own beside keys a parameter names, refuse your own keys in that parameter's
+schema, as the database types refuse `value`, `rows`, `queryTime` and `connectTime` as an
+`extract` key (`P-348`) and `exe.script.advanced` refuses `runtime` as its primary (`P-349`) — a
+`pattern` with a negative lookahead, which the sensor form checks too, and say so in the
+parameter's description, since the form's message is the pattern. Otherwise one result
+carries two readings under the key, of which the core stores one, and `channels()` declares it
+twice.
 
 ### `execute(context)`
 
@@ -567,6 +588,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |
 | `evaluatedBy: 'core'` declares `references` or `requires` | its readings are the core's own data, republished (`A-29`) |
 | `recoveryHoldSeconds` is whole seconds, 0 to 86,400 | a typo would be an alarm that never ends, or ends at the return it was meant to hold (`M-18`) |
+| exactly one of `declaresEveryChannel: true` and a non-blank `channelsFromWhatItReads` | a type that never considered the promise would quietly be one that cannot keep it, and one that gives both says two things (`P-350`) |
 
 ---
 

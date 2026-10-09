@@ -49,6 +49,7 @@ const sshLoad: SensorType = {
   id: 'test.ssh.load',
   category: 'SSH',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   credentialKinds: ['ssh'],
   secretDestinations: { 'kind:ssh': ['port'] },
   paramsSchema: {

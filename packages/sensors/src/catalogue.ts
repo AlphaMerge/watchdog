@@ -222,6 +222,7 @@ export class SensorCatalogue {
     const fixed = limitsOnlyOnFixedChannels(type, validate);
     assertSaysWhatItReads(type);
     assertHoldIsADuration(type);
+    assertAnswersWhetherItDeclaresEveryKey(type);
 
     this.#types.set(type.id, type);
     if (fixed !== null) this.#fixed.set(type.id, fixed);
@@ -608,6 +609,29 @@ function assertHoldIsADuration(type: SensorType): void {
     'BAD_SENSOR_TYPE',
     `sensor type "${type.id}" declares a recovery hold of ${String(hold)} s; it must be a whole ` +
       `number of seconds from 0 to ${String(MAX_RECOVERY_HOLD_SECONDS)}`,
+  );
+}
+
+/**
+ * Every type says whether its readings name only keys it declares (`P-350`): `declaresEveryChannel`,
+ * or a reason in `channelsFromWhatItReads` that it cannot. Both optional on the contract, so
+ * without this a new type that never thought about it leaves both out and is silently the
+ * second kind, whose channels are never called retired (`P-310`). Both at once is a type that
+ * says two things.
+ */
+function assertAnswersWhetherItDeclaresEveryKey(type: SensorType): void {
+  const promises = type.declaresEveryChannel === true;
+  const reason = type.channelsFromWhatItReads;
+  const explains = typeof reason === 'string' && reason.trim() !== '';
+  if (promises !== explains) return;
+  throw new SensorTypeError(
+    'BAD_SENSOR_TYPE',
+    promises
+      ? `sensor type "${type.id}" sets \`declaresEveryChannel\` and gives a reason it cannot ` +
+          '(`channelsFromWhatItReads`); it is one or the other'
+      : `sensor type "${type.id}" neither sets \`declaresEveryChannel\` nor says in ` +
+          '`channelsFromWhatItReads` why its readings name keys its declaration does not; ' +
+          'every type answers one of the two (docs/adding-a-sensor-type.md)',
   );
 }
 

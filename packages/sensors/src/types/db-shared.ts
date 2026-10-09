@@ -86,6 +86,12 @@ export function readDbMappings(params: Readonly<Record<string, unknown>>): DbMap
   return out;
 }
 
+/**
+ * The keys every database sensor reports of its own, which `dbChannels` declares besides
+ * `extract`'s (`P-348`). The schema refuses them as an `extract` key.
+ */
+export const DB_OWN_KEYS = ['value', 'rows', 'queryTime', 'connectTime'] as const;
+
 export const DB_SCHEMA: Readonly<Record<string, JsonSchema>> = {
   port: {
     type: 'integer',
@@ -183,9 +189,13 @@ export const DB_SCHEMA: Readonly<Record<string, JsonSchema>> = {
           type: 'string',
           minLength: 1,
           maxLength: 40,
-          pattern: '^[A-Za-z0-9_.-]+$',
+          // Not one of the sensor's own keys (`P-348`): a result would carry two readings under
+          // it, of which the core keeps one, and `dbChannels` would declare it twice.
+          pattern: `^(?!(?:${DB_OWN_KEYS.join('|')})$)[A-Za-z0-9_.-]+$`,
           title: 'Channel key',
-          description: 'Stable. Renaming it starts a new channel with no history.',
+          description:
+            'Stable. Renaming it starts a new channel with no history. Not ' +
+            `${DB_OWN_KEYS.map((key) => `\`${key}\``).join(', ')}: the sensor’s own channels.`,
         },
         name: { type: 'string', maxLength: 80, default: '', title: 'Channel name' },
         unit: { type: 'string', maxLength: 20, default: '', title: 'Unit' },

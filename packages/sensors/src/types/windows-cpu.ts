@@ -46,6 +46,11 @@ export const windowsCpu: SensorType = {
     },
   },
 
+  // Not `declaresEveryChannel` (`P-320`, `P-350`).
+  channelsFromWhatItReads:
+    'with per-core channels on (the default), a `core_<name>` key per logical processor, named ' +
+    'by the machine',
+
   channels(): readonly ChannelDef[] {
     return [{ key: 'total', name: 'Total', unit: '%', isPrimary: true }];
   },

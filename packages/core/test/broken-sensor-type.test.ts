@@ -30,6 +30,7 @@ const shifting: SensorType = {
   id: 'test.shifting',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   fixedChannels: true,
   paramsSchema: {
     type: 'object',
@@ -48,6 +49,7 @@ const limited: SensorType = {
   id: 'test.limited',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -85,6 +87,7 @@ const throwing: SensorType = {
   id: 'test.throwing',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   secretDestinations: { community: [] },
   paramsSchema: {
     type: 'object',

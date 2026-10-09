@@ -34,6 +34,7 @@ const watched: SensorType = {
   id: 'test.watched',
   category: 'System',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   // What lets it declare limits at all (`P-293`): `{}` is every sensor's answer.
   fixedChannels: true,
   paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
@@ -86,6 +87,7 @@ const shaped: SensorType = {
   id: 'test.shaped',
   category: 'System',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,

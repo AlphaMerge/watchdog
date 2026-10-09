@@ -21,6 +21,7 @@ const ping: SensorType = {
   id: 'icmp.ping',
   category: 'Availability',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -47,6 +48,7 @@ const snmpTraffic: SensorType = {
   id: 'snmp.traffic',
   category: 'SNMP',
   costHint: 'medium',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   credentialKinds: ['snmp'],
   // The parameter to the device the sensor is on, and nowhere a parameter chooses (`A-40`); the
   // inherited set to that device's `port` (`A-41`), as the real SNMP types declare it.
@@ -85,6 +87,7 @@ const factory: SensorType = {
   id: 'core.factory',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   evaluatedBy: 'core',
   references: (params) => coreFactory.references?.(params) ?? [],
   paramsSchema: {

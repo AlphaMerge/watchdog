@@ -458,6 +458,7 @@ describe('the catalogue hands a check the exception it arrived with', () => {
     id: 'test.exception-witness',
     category: 'Test',
     costHint: 'light',
+    declaresEveryChannel: true,
     paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
     channels: () => [{ key: 'ok', name: 'Ok', isPrimary: true }],
     execute: (context) => {

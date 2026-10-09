@@ -84,6 +84,7 @@ const script: SensorType = {
   id: 'test.script',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'its readings name whatever the script printed',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -685,6 +686,14 @@ describe('which types say a channel is retired', () => {
     // a key none of their declarations names may be one their readings do.
     assert.deepEqual(
       BUILT_IN_SENSOR_TYPES.filter((type) => type.declaresEveryChannel !== true)
+        .map((type) => type.id)
+        .sort(),
+      ['exe.script.advanced', 'windows.cpu', 'windows.volume'],
+    );
+    // And each says why, as the catalogue requires of a type without the flag (`P-350`); no
+    // flagged type gives a reason too.
+    assert.deepEqual(
+      BUILT_IN_SENSOR_TYPES.filter((type) => (type.channelsFromWhatItReads ?? '').trim() !== '')
         .map((type) => type.id)
         .sort(),
       ['exe.script.advanced', 'windows.cpu', 'windows.volume'],

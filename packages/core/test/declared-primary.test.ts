@@ -32,6 +32,7 @@ const columns: SensorType = {
   id: 'test.columns',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -67,6 +68,7 @@ const brittle: SensorType = {
   id: 'test.brittle',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -84,6 +86,7 @@ const unranked: SensorType = {
   id: 'test.unranked',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
   channels: () => [
     { key: 'a', name: 'A' },

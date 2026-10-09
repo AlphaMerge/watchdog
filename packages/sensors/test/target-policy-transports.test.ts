@@ -531,6 +531,7 @@ describe('the probe’s setting', () => {
     id: 'test.witness',
     category: 'Test',
     costHint: 'light',
+    declaresEveryChannel: true,
     paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
     channels: () => [{ key: 'ok', name: 'Ok', isPrimary: true }],
     execute: (context) => {

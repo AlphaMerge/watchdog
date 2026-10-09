@@ -429,6 +429,7 @@ describe('a resolver that does not answer', () => {
       credentialKinds: ['snmp'],
       pinnedKinds: ['snmp'],
       secretDestinations: { 'kind:snmp': [] },
+      declaresEveryChannel: true,
       paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
       channels: () => [{ key: 'value', name: 'Value', unit: '', isPrimary: true }],
       execute: () => {

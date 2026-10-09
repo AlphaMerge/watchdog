@@ -539,8 +539,20 @@ export interface SensorType {
    * key, and with this set each channel it reports beyond its declaration would be shown retired
    * while it is still being read. Absent, nothing of the type is ever called retired: the core
    * cannot tell a retired channel from one the readings named.
+   *
+   * **Every type answers this one way or the other** (`P-350`): it sets this, or it says in
+   * `channelsFromWhatItReads` why it cannot. The catalogue refuses a type that does neither, and
+   * one that does both.
    */
   readonly declaresEveryChannel?: boolean;
+  /**
+   * Why this type cannot set `declaresEveryChannel` (`P-350`): its readings name keys that come
+   * from what the check read — a script's own keys, a channel per processor the machine has —
+   * which its declaration cannot list. A sentence for whoever reads the type next, never shown
+   * to an operator. Required, non-empty, exactly when `declaresEveryChannel` is not `true`, so a
+   * new type cannot leave the question unanswered by leaving the flag out.
+   */
+  readonly channelsFromWhatItReads?: string;
   execute(context: CheckContext): Promise<CheckExecution>;
   /**
    * A dry run against a pasted document (`U-13`), for types with a mapping language.

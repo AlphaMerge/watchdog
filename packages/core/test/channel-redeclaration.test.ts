@@ -49,6 +49,7 @@ const columns: SensorType = {
   id: 'test.columns',
   category: 'Custom',
   costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
   paramsSchema: {
     type: 'object',
     additionalProperties: false,
