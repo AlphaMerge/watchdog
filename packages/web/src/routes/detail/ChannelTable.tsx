@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
 import { channelLinkFor } from './credentials-model';
+import { HideRetired } from './HideRetired';
 import { formatValue, howLongAgo } from './model';
 
 /**
@@ -69,30 +70,13 @@ export function ChannelTable({
 
   return (
     <div className="overflow-x-auto">
-      {/* Only where there is something to hide: a control that changes nothing is noise. */}
       {retiredCount > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-          <label className="flex min-h-6 items-center gap-1.5 text-sm text-text-muted">
-            <input
-              type="checkbox"
-              checked={hideRetired}
-              onChange={(event) => {
-                onHideRetiredChange(event.target.checked);
-              }}
-            />
-            Hide retired channels
-          </label>
-          {/* Said in text, so a table that is shorter than the sensor's channel count is never
-              mistaken for the whole of it; a live region present before it changes, so the
-              count is announced when the box is ticked. */}
-          <p className="text-xs text-text-muted" role="status">
-            {!hideRetired
-              ? ''
-              : retiredCount === 1
-                ? '1 retired channel hidden.'
-                : `${String(retiredCount)} retired channels hidden.`}
-          </p>
-        </div>
+        <HideRetired
+          count={retiredCount}
+          hidden={hideRetired}
+          onChange={onHideRetiredChange}
+          className="mb-2"
+        />
       )}
       <table className="w-full min-w-[36rem] text-sm">
         <caption className="sr-only">

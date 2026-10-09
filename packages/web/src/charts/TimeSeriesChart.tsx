@@ -3,7 +3,8 @@ import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { seriesColour, seriesWash, type ChartTheme } from '@ms/shared/charts';
 import { readChartTheme } from './palette';
-import { dataFor, rowsFor, type ChartSeries } from './time-series-model';
+import { dataFor, rowsFor, seriesName, type ChartSeries } from './time-series-model';
+import { tooltipPlugin } from './tooltip';
 
 export interface TimeSeriesChartProps {
   /** Bucket starts, epoch seconds — what uPlot's time scale expects. */
@@ -111,13 +112,15 @@ function optionsFor(options: {
   series.forEach((entry, index) => {
     const colour = seriesColour(theme, entry.slot);
     const rows = rowsFor(index);
+    // uPlot's own name for it, which its hidden legend would use, is the legend's (`U-55`).
+    const name = seriesName(entry);
     // min and max are invisible in themselves; they exist so the band has two edges to fill
     // between. Drawing them as lines as well would be three lines per channel and unreadable.
     plotted.push(
-      { label: `${entry.label} min`, stroke: 'transparent', points: { show: false } },
-      { label: `${entry.label} max`, stroke: 'transparent', points: { show: false } },
+      { label: `${name} min`, stroke: 'transparent', points: { show: false } },
+      { label: `${name} max`, stroke: 'transparent', points: { show: false } },
       {
-        label: entry.label,
+        label: name,
         stroke: colour,
         width: 2,
         // Round join and cap, per the mark spec. `points` stay off: a point per bucket at 961
@@ -169,103 +172,5 @@ function optionsFor(options: {
     // carries the accessible name and the description.
     class: 'ms-chart',
     plugins: [tooltipPlugin({ theme, series, format, label })],
-  };
-}
-
-/**
- * The hover layer.
- *
- * **One tooltip, every series.** The pointer never has to land on a line: it names the bucket
- * and lists every channel's value at that bucket, so a reader comparing two channels reads both
- * numbers at once rather than hunting for the second line.
- *
- * A gap is reported as "no reading" rather than omitted. Leaving the row out would let a reader
- * conclude the channel does not exist here, when what happened is that nothing was measured —
- * and telling them apart is the whole point of the null.
- *
- * Labels go in with `textContent`. A channel name comes from a sensor type, an SNMP walk or a
- * device's own reply; it is data, and data does not get to write markup.
- */
-function tooltipPlugin(options: {
-  theme: ChartTheme;
-  series: readonly ChartSeries[];
-  format: (value: number) => string;
-  label: string;
-}): uPlot.Plugin {
-  const { theme, series, format } = options;
-  let box: HTMLDivElement | null = null;
-
-  return {
-    hooks: {
-      init: (self) => {
-        box = document.createElement('div');
-        box.className = 'ms-chart-tooltip';
-        box.setAttribute('role', 'status');
-        box.style.display = 'none';
-        self.over.appendChild(box);
-      },
-      setCursor: (self) => {
-        const tip = box;
-        if (tip === null) return;
-        const index = self.cursor.idx;
-        const left = self.cursor.left ?? -1;
-        if (index === null || index === undefined || left < 0) {
-          tip.style.display = 'none';
-          return;
-        }
-
-        const times = self.data[0];
-        const at = times[index];
-        tip.replaceChildren();
-
-        const when = document.createElement('div');
-        when.className = 'ms-chart-tooltip-when';
-        when.textContent = at === undefined ? '' : new Date(at * 1_000).toLocaleString();
-        tip.appendChild(when);
-
-        series.forEach((entry, order) => {
-          const rows = rowsFor(order);
-          const value = self.data[rows.avg]?.[index] ?? null;
-          const low = self.data[rows.min]?.[index] ?? null;
-          const high = self.data[rows.max]?.[index] ?? null;
-
-          const row = document.createElement('div');
-          row.className = 'ms-chart-tooltip-row';
-
-          const key = document.createElement('span');
-          key.className = 'ms-chart-tooltip-key';
-          key.style.background = seriesColour(theme, entry.slot);
-          row.appendChild(key);
-
-          // Value leads, label follows: the reader already has the series and wants the number.
-          const readout = document.createElement('span');
-          readout.className = 'ms-chart-tooltip-value';
-          readout.textContent =
-            value === null
-              ? 'no reading'
-              : low !== null && high !== null && low !== high
-                ? `${format(value)} (${format(low)}–${format(high)})`
-                : format(value);
-          row.appendChild(readout);
-
-          const name = document.createElement('span');
-          name.className = 'ms-chart-tooltip-label';
-          name.textContent = entry.label;
-          row.appendChild(name);
-
-          tip.appendChild(row);
-        });
-
-        tip.style.display = 'block';
-        // Flips to the left of the crosshair near the right edge, so it never leaves the plot.
-        const flip = left > self.over.clientWidth / 2;
-        tip.style.left = `${String(left)}px`;
-        tip.style.transform = flip ? 'translate(calc(-100% - 12px), 8px)' : 'translate(12px, 8px)';
-      },
-      destroy: () => {
-        box?.remove();
-        box = null;
-      },
-    },
   };
 }

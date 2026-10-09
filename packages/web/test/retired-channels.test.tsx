@@ -323,7 +323,14 @@ describe('a retired channel in the History tab’s legend (`U-37`)', () => {
           : new Response('{}', { status: 404 }),
       ),
     );
-    render(<HistoryPanel sensorId={9} channels={channels} />);
+    render(
+      <HistoryPanel
+        sensorId={9}
+        channels={channels}
+        hideRetired={false}
+        onHideRetiredChange={() => undefined}
+      />,
+    );
   };
 
   it('says retired in the entry’s text, and a live channel’s entry does not', async () => {

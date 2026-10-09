@@ -25587,13 +25587,71 @@ because each is a decision rather than a defect:
         refused action on a row, `TriggersPanel`'s refused delete, and `TemplatesView`'s
         `Failure` and refused delete.
 
-- [ ] **U-55 — what is left of retired channels in the History tab** · S · U-37 · Found
+- [x] **U-55 — what is left of retired channels in the History tab** · S · U-37 · Found
       2026-10-09 in `U-37`. The chart's hover tooltip shows the bare channel name where the legend
       says retired; the History tab marks retired channels but cannot hide them; and both it and
       the channel table use the channel list read when the page opened, so a channel a reading
       makes live again still says retired until a reload. **Done when** the tooltip says it, the
       History tab has the same hide control (held in the URL, as `U-38`'s is), and the channel
       list is re-read when a reading arrives for a retired channel, with tests.
+
+      **U-55 outcome. The tooltip says "(retired)" as the legend does, the History tab hides
+      retired channels with the channel table's own `?retired=hide`, and the channel list is
+      read again when a values poll disagrees with it.** No migration, no protocol change, no
+      route.
+      - **The tooltip.** `retired` is now a field of each `ChartSeries` rather than an array
+        beside the series, and one `seriesName` writes `Column b (retired)` for the legend, the
+        hover tooltip (`charts/tooltip.ts`, moved out of `TimeSeriesChart.tsx` so it can be
+        tested without a canvas) and uPlot's own series label. The tooltip's label keeps its
+        `--ms-text-muted` ink; only the key wears the series colour (`dataviz`). With the mark on
+        the series, `SeriesLegend` lost its `retired` prop: an array that has to be kept aligned
+        is one a hidden series can misalign, so there is no such array any more.
+      - **The History tab's hide control shares `?retired=hide`.** One choice for the page: the
+        box says the same thing on both tabs, a link opens both the same way, and the parameter
+        already survives a change of tab (`U-38`). A separate parameter would allow "hidden in
+        the table, shown in the charts", which is defensible (history is where a retired
+        channel's data still means something) but is a second meaning for the same words on the
+        same page; the box is on the History tab, so a reader who wants them there unticks it.
+        The control (`detail/HideRetired.tsx`, now shared with the channel table) sits in the
+        filter row, only where a charted channel is retired, with the same live region. Hidden
+        **after** `groupByUnit`, so every remaining channel keeps its colour slot; a panel left
+        empty goes, the table view drops the column, and a sensor whose every channel is retired
+        and hidden says so.
+      - **The list re-read.** The page learns of readings only from the 15 s `/values` poll (the
+        state stream carries states, not channels), and `/values` carries the list's own
+        `retired` (`U-38`). So `channelListIsStale` (`detail/model.ts`) compares the two: a
+        channel the list holds retired that `/values` answers `false` (a reading after the
+        edit) re-reads the list. Also the other way round (retired since the page opened, by an
+        edit elsewhere), which is the same staleness and was one line. Compared on `retired`, not
+        on whether a reading is present: a reading taken before the edit is shown but leaves the
+        channel retired, so a re-read for it would answer the same. An agreeing poll asks for
+        nothing. **Bounded** to one re-read per `RELIST_MIN_MS` (60 s, `performance.now()`), so
+        a flapping channel, or two answers that keep disagreeing, cannot turn each poll (or each
+        return to a hidden tab, which polls at once) into a second request. While the list is
+        read again the page keeps the last one it read for that object, so the table and its box
+        do not vanish for the length of a request.
+      - **Tests.** `retired-history.test.tsx`: the tooltip's labels for a/b(retired)/c, no
+        inline style on a label, the legend saying the same words; nothing retired, nothing said;
+        the History tab with a retired channel in the middle of four, hidden: the legend and the
+        series handed to the chart both read `a, c, d` with no mark on `c`, the slots stay
+        `0, 2, 3`, the table view drops the column; no box when nothing charted is retired; the
+        staleness rule's five cases. `retired-history-page.test.tsx` (the whole page, stream and
+        canvas stubbed): ticked on History the URL reads `?tab=history&retired=hide`; a failed
+        history read and its retry, the Overview tab (ticked there too), a failed `/values` poll
+        and the next, back to History, and a remount from the address all keep it; unticked, it
+        goes. The list is read once across two agreeing polls, again when a reading makes
+        Column b live (its mark and the box go), and not after; with a list that keeps
+        disagreeing, four more polls read it no more until a minute has passed, then once; and
+        the table and its ticked box stay while a re-read is in flight. **Mutations** (restored
+        byte for byte): the tooltip writing the bare label fails 1;
+        the History tab's choice held in its own state fails 1 (at the URL); the retired marks
+        taken from the unfiltered group by position (the misaligned array) fails 2; hiding before
+        grouping fails 1 (the slots); the list never re-read fails 3; re-read on every poll fails
+        1 (the ordinary polls); no bound fails 1 (the flapping case); the list not held during a
+        re-read fails 1. The web package has no `dist`; its tests run the source.
+      - **Not done.** The History tab does not poll, so a channel made live while only that tab
+        is open is noticed when the Overview tab polls again; its history is read once per range
+        anyway.
 
 - [ ] **U-56 — refusals with no live region at all** · XS · U-54 · Found 2026-10-09 in `U-54`.
       A refused row action in `AlarmsView` (around line 361), a refused delete in `TriggersPanel`

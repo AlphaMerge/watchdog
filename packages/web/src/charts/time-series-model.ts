@@ -16,6 +16,21 @@ export interface ChartSeries {
   readonly avg: readonly (number | null)[];
   readonly min: readonly (number | null)[];
   readonly max: readonly (number | null)[];
+  /**
+   * A channel an edit took out of the sensor's parameters (`P-310`). On the series rather than in
+   * an array beside it (`U-55`), so a series hidden from the middle of a panel cannot leave
+   * another series wearing its mark.
+   */
+  readonly retired?: boolean;
+}
+
+/**
+ * What a series is called wherever its name is written — the legend and the hover tooltip
+ * (`U-55`) — so the two cannot disagree about whether it is retired. In words, because the
+ * line's colour or where it ends cannot say it to anyone who does not already know.
+ */
+export function seriesName(entry: Pick<ChartSeries, 'label' | 'retired'>): string {
+  return entry.retired === true ? `${entry.label} (retired)` : entry.label;
 }
 
 /**

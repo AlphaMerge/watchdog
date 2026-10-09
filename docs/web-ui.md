@@ -259,9 +259,16 @@ the sensor's state. **Hide retired channels**, above the table where any channel
 takes them out of it and says how many it hid; it starts unticked, so a channel an edit has just
 retired stays in sight (`U-38`). Ticked, it is `?retired=hide` in the page's address, so it
 survives a failed poll of the readings, a change of tab and a reload. On the **History** tab its line stops at the edit, as a gap, and
-its legend entry (or, charted alone, its heading) and its column in the table view say
-**(retired)** in words, not by colour (`U-37`). `GET /sensors/:id/values` carries the same
-`retired` as the channel list. Put the column back and it is read again, with its history. Only a type that promises its readings name no channel it does not declare is
+its legend entry (or, charted alone, its heading), the chart's hover tooltip and its column in
+the table view say **(retired)** in words, in text ink and not by colour (`U-37`, `U-55`). The
+History tab has the same **Hide retired channels** box in its filter row, and it is the same
+`?retired=hide`: one choice for the page, so the box says the same thing on either tab and a link
+opens both the same way. Hiding one keeps every other channel's colour, since a colour follows the
+channel and not its place on screen. `GET /sensors/:id/values` carries the same `retired` as the
+channel list, and when a poll answers otherwise than the list the page holds, about any channel,
+the list is read again (at most once a minute), so a channel a new reading makes live stops
+saying retired without a reload. An ordinary poll does not ask for the list. Put the column back
+and it is read again, with its history. Only a type that promises its readings name no channel it does not declare is
 marked this way (`P-310`): every shipped type but three (`P-320`). An advanced script's extra
 channels, and Windows CPU's per-processor and Windows Volume's per-drive channels, come from what
 was read, so no channel of those three types is ever called retired. Nor is a channel

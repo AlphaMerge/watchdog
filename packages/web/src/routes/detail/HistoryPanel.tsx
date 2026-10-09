@@ -6,7 +6,8 @@ import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '@ms/shar
 import { SeriesLegend } from '../../charts/SeriesLegend';
 import { SeriesTable } from '../../charts/SeriesTable';
 import { TimeSeriesChart } from '../../charts/TimeSeriesChart';
-import type { ChartSeries } from '../../charts/time-series-model';
+import { seriesName, type ChartSeries } from '../../charts/time-series-model';
+import { HideRetired } from './HideRetired';
 import {
   RANGES,
   describe,
@@ -27,6 +28,8 @@ import {
 export function HistoryPanel({
   sensorId,
   channels = null,
+  hideRetired,
+  onHideRetiredChange,
 }: {
   sensorId: number;
   /**
@@ -34,6 +37,12 @@ export function HistoryPanel({
    * and asking the list rather than a second derivation keeps the two from disagreeing.
    */
   channels?: readonly ChannelRecord[] | null;
+  /**
+   * Whether retired channels are left out (`U-55`): the page's `?retired=hide`, the same choice
+   * the channel table makes, held by the page so it survives what unmounts this panel.
+   */
+  hideRetired: boolean;
+  onHideRetiredChange: (hide: boolean) => void;
 }): React.JSX.Element {
   const [range, setRange] = useState<RangeId>('2d');
   const [asTable, setAsTable] = useState(false);
@@ -62,6 +71,8 @@ export function HistoryPanel({
       new Set((channels ?? []).filter((channel) => channel.retired).map((channel) => channel.id)),
     [channels],
   );
+  // The retired channels this answer charts, which is what the box would hide.
+  const retiredCount = showing?.channels.filter((channel) => retired.has(channel.id)).length ?? 0;
 
   return (
     <div className="space-y-4">
@@ -101,6 +112,11 @@ export function HistoryPanel({
         >
           {asTable ? 'Show charts' : 'Show table'}
         </button>
+
+        {/* In the filter row, with everything else that scopes what is below it. */}
+        {retiredCount > 0 && (
+          <HideRetired count={retiredCount} hidden={hideRetired} onChange={onHideRetiredChange} />
+        )}
       </div>
 
       {history.status === 'error' && <ErrorPanel error={history.error} retry={history.reload} />}
@@ -110,7 +126,7 @@ export function HistoryPanel({
           className={history.status === 'loading' ? 'opacity-50 transition-opacity' : undefined}
           aria-busy={history.status === 'loading'}
         >
-          <Series series={showing} asTable={asTable} retired={retired} />
+          <Series series={showing} asTable={asTable} retired={retired} hideRetired={hideRetired} />
         </div>
       )}
     </div>
@@ -121,12 +137,32 @@ function Series({
   series,
   asTable,
   retired,
+  hideRetired,
 }: {
   series: HistorySeries;
   asTable: boolean;
   retired: ReadonlySet<number>;
+  hideRetired: boolean;
 }): React.JSX.Element {
-  const groups = useMemo(() => groupByUnit(series.channels), [series.channels]);
+  // Hidden after grouping, never before: a channel's colour slot is its place in the whole list
+  // (`groupByUnit`), and filtering first would repaint every channel after a hidden one. A panel
+  // left with nothing goes with it.
+  const groups = useMemo(
+    () =>
+      groupByUnit(series.channels)
+        .map((group) =>
+          hideRetired
+            ? { ...group, series: group.series.filter(({ channel }) => !retired.has(channel.id)) }
+            : group,
+        )
+        .filter((group) => group.series.length > 0),
+    [series.channels, retired, hideRetired],
+  );
+  const tabled = useMemo(
+    () =>
+      hideRetired ? series.channels.filter((channel) => !retired.has(channel.id)) : series.channels,
+    [series.channels, retired, hideRetired],
+  );
   // uPlot's time scale wants epoch seconds.
   const times = useMemo(
     () => series.buckets.map((bucket) => Math.round(Date.parse(bucket) / 1_000)),
@@ -140,6 +176,13 @@ function Series({
       </Empty>
     );
   }
+  if (tabled.length === 0) {
+    return (
+      <Empty because="Untick “Hide retired channels” to see their history.">
+        Every channel of this sensor is retired, and retired channels are hidden.
+      </Empty>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -147,7 +190,7 @@ function Series({
       {asTable ? (
         <Card title="Readings">
           <SeriesTable
-            channels={series.channels}
+            channels={tabled}
             buckets={series.buckets}
             format={(channel, value) => formatValue(value, channel.unit, null)}
             caption={`Every bucket from ${new Date(series.from).toLocaleString()} to ${new Date(series.to).toLocaleString()}, one column per channel. A dash is a bucket with no reading.`}
@@ -183,6 +226,8 @@ function Panel({
   buckets: readonly string[];
   retired: ReadonlySet<number>;
 }): React.JSX.Element {
+  // Each series carries its own retired mark (`U-55`), which the legend and the tooltip both
+  // read, so no array beside the series can fall out of step when one is hidden.
   const chartSeries = useMemo<ChartSeries[]>(
     () =>
       group.series.map(({ channel, slot }) => ({
@@ -191,8 +236,9 @@ function Panel({
         avg: channel.avg,
         min: channel.min,
         max: channel.max,
+        retired: retired.has(channel.id),
       })),
-    [group],
+    [group, retired],
   );
 
   const decimals = group.series[0]?.channel.decimals ?? null;
@@ -202,11 +248,11 @@ function Panel({
   const drawable = group.series.filter(({ channel }) => hasReadings(channel));
   // Which series are retired channels (`U-37`): the legend says so in words, and a panel of one
   // series, which has no legend, says so in its heading.
-  const retiredSeries = group.series.map(({ channel }) => retired.has(channel.id));
-  const only = group.series.length === 1 ? group.series[0]?.channel : undefined;
+  const anyRetired = chartSeries.some((entry) => entry.retired === true);
+  const only = chartSeries.length === 1 ? chartSeries[0] : undefined;
   const heading =
-    group.series.length === 1
-      ? `${only?.name ?? ''}${retiredSeries[0] === true ? ' (retired)' : ''}`
+    only !== undefined
+      ? seriesName(only)
       : `${group.unit === '' ? 'Unitless' : group.unit} channels`;
 
   const latest = group.series.map(({ channel }) => {
@@ -242,8 +288,8 @@ function Panel({
         </figure>
       )}
 
-      <SeriesLegend series={chartSeries} latest={latest} retired={retiredSeries} />
-      {retiredSeries.includes(true) && (
+      <SeriesLegend series={chartSeries} latest={latest} />
+      {anyRetired && (
         <p className="mt-2 text-xs text-text-muted">
           A retired channel was taken out of the sensor’s parameters by an edit; nothing reads it
           any more, so its line ends there.

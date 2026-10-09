@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useApi } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
@@ -25,7 +25,7 @@ import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
 import { ActorLink, MoreButton } from './LogsView';
 import { usePaged } from './logs-model';
-import { tabsFor } from './detail/model';
+import { RELIST_MIN_MS, channelListIsStale, tabsFor } from './detail/model';
 import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';
@@ -67,6 +67,29 @@ export function ObjectDetailView(): React.JSX.Element {
     object.status === 'ready' ? `/objects/${id}/ancestors` : null,
   );
   const channels = useApi<{ items: ChannelRecord[] }>(isSensor ? `/objects/${id}/channels` : null);
+  // The list last read for this object, kept while it is read again (`U-55`), so a re-read does
+  // not take the table away, and the hide box with it, for the length of a request.
+  const heldChannels = useRef<{ id: string; items: readonly ChannelRecord[] } | null>(null);
+  useEffect(() => {
+    if (channels.status === 'ready') heldChannels.current = { id, items: channels.data.items };
+  }, [channels, id]);
+  const channelList =
+    channels.status === 'ready'
+      ? channels.data.items
+      : heldChannels.current?.id === id
+        ? heldChannels.current.items
+        : null;
+  // Re-read when the values poll says the list is stale about a retired channel (`U-55`), at
+  // most once a minute: a channel flapping, or a list and a poll that keep disagreeing, cannot
+  // turn every poll into a second request. Monotonic, as anything measuring an interval is.
+  const lastRelist = useRef<number | null>(null);
+  const reloadChannels = channels.reload;
+  const relist = useCallback(() => {
+    const now = performance.now();
+    if (lastRelist.current !== null && now - lastRelist.current < RELIST_MIN_MS) return;
+    lastRelist.current = now;
+    reloadChannels();
+  }, [reloadChannels]);
   const settings = useApi<{ settings: SettingView[] }>(
     object.status === 'ready' ? `/objects/${id}/settings` : null,
   );
@@ -132,10 +155,11 @@ export function ObjectDetailView(): React.JSX.Element {
                 <LiveChannels
                   sensorId={detail.id}
                   sensorType={detail.sensorType}
-                  channels={channels.status === 'ready' ? channels.data.items : null}
+                  channels={channelList}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                   hideRetired={hideRetired}
                   onHideRetiredChange={setHideRetired}
+                  onListStale={relist}
                 />
               </Card>
             )}
@@ -163,9 +187,12 @@ export function ObjectDetailView(): React.JSX.Element {
 
       {active === 'history' && (
         <TabPanel id="history">
+          {/* The same `?retired=hide` as the channel table (`U-55`): one choice for the page. */}
           <HistoryPanel
             sensorId={detail.id}
-            channels={channels.status === 'ready' ? channels.data.items : null}
+            channels={channelList}
+            hideRetired={hideRetired}
+            onHideRetiredChange={setHideRetired}
           />
         </TabPanel>
       )}
@@ -348,6 +375,11 @@ function Breadcrumb({
  * Polled rather than streamed — see the note on the page above. The interval is cleared while
  * the tab is hidden, so a page left open on a second monitor is not asking every fifteen
  * seconds for a table nobody is looking at.
+ *
+ * The poll is also how the page learns its channel list is stale (`U-55`): the list is read once,
+ * and `/values` carries the list's own `retired`, so an answer that disagrees with it (a reading
+ * has made a retired channel live) asks the page to read the list again. An answer that agrees
+ * asks for nothing.
  */
 function LiveChannels({
   sensorId,
@@ -356,6 +388,7 @@ function LiveChannels({
   lookups,
   hideRetired,
   onHideRetiredChange,
+  onListStale,
 }: {
   sensorId: number;
   sensorType: string | undefined;
@@ -363,8 +396,17 @@ function LiveChannels({
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
+  /** Called when a poll answers otherwise than the list about a channel's retirement. */
+  onListStale: () => void;
 }): React.JSX.Element {
   const values = useApi<SensorValues>(`/sensors/${String(sensorId)}/values`);
+  // Once per answer: keyed on the answer itself, not on every render of this component.
+  const answer = values.status === 'ready' ? values.data : null;
+  useEffect(() => {
+    if (answer !== null && channels !== null && channelListIsStale(channels, answer)) {
+      onListStale();
+    }
+  }, [answer, channels, onListStale]);
   // Only to force a re-render on the interval. The ages themselves come from `Date.now()` at
   // render time — holding "now" in state means a component that re-renders for any other reason
   // redraws with a stale clock, and "58s ago" that has stopped counting is worse than no age.

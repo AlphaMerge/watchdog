@@ -1,4 +1,10 @@
-import type { HistoryChannel, SettingView, TriggerKind } from '../../api/types';
+import type {
+  ChannelRecord,
+  HistoryChannel,
+  SensorValues,
+  SettingView,
+  TriggerKind,
+} from '../../api/types';
 import type { ChartGroup } from '@ms/shared/charts';
 import type { TabDefinition } from '../../components/tabs-model';
 import { labelFor, seedDefaults, type FieldModel, type JsonSchema } from '../../forms/schema';
@@ -269,3 +275,37 @@ export function modeChangesOf(error: {
       : [];
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// The channel list kept current (U-55).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Whether the channel list the page holds has gone stale about retirement (`U-55`).
+ *
+ * The page reads the list once, when it opens, and polls `/values`, which carries the list's own
+ * `retired` from the same derivation (`U-38`). A channel is retired until a reading newer than
+ * the sensor's last change arrives (`P-322`), so the poll is where the page learns a retired
+ * channel is read again: `/values` answers `false` for a channel the list still holds as
+ * retired. The other way round is an edit made elsewhere since the page opened. Either way the
+ * list is re-read; an ordinary poll, on which the two agree, asks for nothing more.
+ *
+ * Compared on `retired`, not on whether a reading is present: a reading a probe took before the
+ * edit is still shown while it is recent, and it does not make the channel live, so a re-read
+ * for it would answer the same and be asked for again. A channel `/values` names and the list
+ * does not hold is not compared: `false` is what the route says of one it has not worked out.
+ */
+export function channelListIsStale(list: readonly ChannelRecord[], values: SensorValues): boolean {
+  const held = new Map(list.map((channel) => [channel.id, channel.retired]));
+  return values.channels.some((channel) => {
+    const retired = held.get(channel.id);
+    return retired !== undefined && retired !== channel.retired;
+  });
+}
+
+/**
+ * The least time between two re-reads of the channel list (`U-55`). A channel whose retirement
+ * flips back and forth, or a list and a poll that keep disagreeing, re-read it at most this
+ * often, however often the page polls (a hidden tab brought back polls at once).
+ */
+export const RELIST_MIN_MS = 60_000;
