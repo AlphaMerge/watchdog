@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api/client';
 import { MapDesigner } from '../src/maps/MapDesigner';
 import { CELL, readCanvas, type Canvas } from '../src/maps/canvas';
+import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The designer, driven the way `U-11` says it has to be drivable: from the keyboard (`G-03`).
@@ -272,5 +273,49 @@ describe('the designer canvas', () => {
     expect(screen.getByText(/Somebody else saved this map/)).toBeDefined();
     expect(tileNamed('Router, Status, column 4, row 3, 6 by 4')).toBeDefined();
     expect(saveButton().disabled).toBe(false);
+  });
+});
+
+/**
+ * A refused save, announced (`U-54`): said through an `ErrorPanel` in a region that is in the tree
+ * and empty before anything is saved, with what a `MAP_CHANGED` means said inside it; the next
+ * save empties it as it starts, so the same words are said again; one accepted leaves it empty.
+ */
+describe('a refused save (U-54)', () => {
+  it('is said in the region under the toolbar, again, and emptied by one accepted', async () => {
+    const answers = [true, true, false];
+    const save = vi.fn<(canvas: Canvas) => Promise<void>>(() =>
+      answers.shift() === true
+        ? Promise.reject(new ApiError(412, 'MAP_CHANGED', 'map 4 has moved on', 'abc'))
+        : Promise.resolve(),
+    );
+    designer(save);
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+    const tile = router();
+    fireEvent.focus(tile);
+    fireEvent.keyDown(tile, { key: 'ArrowRight' });
+    const saved = async (): Promise<void> => {
+      await waitFor(() => {
+        expect(saveButton().disabled).toBe(false);
+      });
+      fireEvent.click(saveButton());
+    };
+
+    await saved();
+    expect(await alertSaying('MAP_CHANGED')).toBe(region);
+    expect(region.textContent).toMatch(/Somebody else saved this map/u);
+    await saved();
+    expect(region.matches(':empty')).toBe(true);
+    expect(await alertSaying('MAP_CHANGED')).toBe(region);
+    await saved();
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(save).toHaveBeenCalledTimes(3);
+    });
+    await waitFor(() => {
+      expect(saveButton().disabled).toBe(true);
+    });
+    expect(speaking()).toEqual([]);
   });
 });

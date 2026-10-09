@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ApiError, send } from '../api/client';
 import type { ReportFrequency, ReportKind, ReportSummary } from '../api/types';
-import { Card, ErrorPanel } from '../components/Panels';
+import { Card, RefusalPanel } from '../components/Panels';
 import {
   REPORT_KINDS,
   badRecipients,
@@ -451,28 +451,30 @@ export function ReportSettings({
           )}
         </fieldset>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="submit"
-            disabled={saving || wrongAddresses.length > 0}
-            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-          {saved && <span className="text-xs text-text-muted">Saved.</span>}
-        </div>
+        {/* The buttons and the refusal under them are one block, the form's last child: the
+            refusal is always there (`U-54`), and `space-y-5` gives every child but the last a
+            margin, which would sit under the buttons while it says nothing (`U-52`). */}
+        <div>
+          <div className="flex items-center gap-3">
+            <button
+              type="submit"
+              disabled={saving || wrongAddresses.length > 0}
+              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            {saved && <span className="text-xs text-text-muted">Saved.</span>}
+          </div>
 
-        {failure !== null && (
-          <div className="space-y-2">
-            <ErrorPanel error={failure} />
-            {failure.code === 'REPORT_CHANGED' && (
-              <p className="text-sm text-text-muted">
+          <RefusalPanel error={failure} className="mt-5 empty:mt-0">
+            {failure?.code === 'REPORT_CHANGED' && (
+              <p className="mt-2 text-sm text-text-muted">
                 Somebody else saved this report while it was open. Nothing here has been thrown away
                 — open the report again in another tab to see what changed before saving over it.
               </p>
             )}
-          </div>
-        )}
+          </RefusalPanel>
+        </div>
       </form>
     </Card>
   );

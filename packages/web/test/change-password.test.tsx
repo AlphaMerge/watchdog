@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SessionProvider } from '../src/auth/SessionProvider';
+import { SAY_AGAIN_MS } from '../src/components/refusal';
+import { alertSaying, expectQuiet } from './support/refusal-region';
 
 /**
  * The password the operator did not choose (`U-17`).
@@ -123,8 +125,7 @@ describe('a password somebody else chose', () => {
     await type('New password again', 'a-password-of-my-owm');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('do not match');
+    await alertSaying('do not match');
     expect(asked.some((call) => call.url === PASSWORD)).toBe(false);
   });
 
@@ -138,8 +139,7 @@ describe('a password somebody else chose', () => {
     await type('New password again', 'short');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('12 characters');
+    await alertSaying('12 characters');
     expect(asked.some((call) => call.url === PASSWORD)).toBe(false);
   });
 
@@ -161,10 +161,112 @@ describe('a password somebody else chose', () => {
     await type('New password again', 'a-password-of-my-own');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('current password was not accepted');
+    await alertSaying('current password was not accepted');
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Change your password' })).toBeDefined();
     });
+  });
+});
+
+/**
+ * The refusal, announced (`U-54`): in the tree and empty before anything is sent, every refusal —
+ * the form's own and the core's — in that same node, emptied by an attempt that is accepted, and
+ * said again in the same words: after a round trip, or a moment after the form decides it.
+ */
+describe('a refused password change (U-54)', () => {
+  const WRONG = 'the current password was not accepted';
+  const refused = {
+    status: 400,
+    body: { error: { code: 'ACCOUNT_PASSWORD_WRONG', message: WRONG } },
+  };
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function fill(confirm = 'a-password-of-my-own'): Promise<void> {
+    await type('Current password', 'the-generated-one');
+    await type('New password', 'a-password-of-my-own');
+    await type('New password again', confirm);
+  }
+
+  it('is there empty before, says a refusal in the same node, and an accepted change empties it', async () => {
+    // Still forced after the change, so the form stays to be looked at.
+    stubFetch([principal(true)], { status: 200, body: { endedSessions: 0 } });
+    mount();
+    await screen.findByRole('heading', { name: 'Change your password' });
+
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+
+    await fill('a-password-of-my-owm');
+    submit();
+    expect(await alertSaying('do not match')).toBe(region);
+
+    await fill();
+    submit();
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Change password' })).toHaveProperty(
+        'disabled',
+        false,
+      );
+    });
+    expect(region.matches(':empty')).toBe(true);
+    expect(screen.getByRole('alert')).toBe(region);
+  });
+
+  it('empties as an attempt starts, so the core refusing twice in the same words is said twice', async () => {
+    stubFetch([principal(true)], refused);
+    mount();
+    await screen.findByRole('heading', { name: 'Change your password' });
+    const region = screen.getByRole('alert');
+    await fill();
+    submit();
+    await waitFor(() => {
+      expect(region.textContent).toBe(WRONG);
+    });
+
+    submit();
+    // Committed empty before the core answers: React did not fold the two into one.
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(region.textContent).toBe(WRONG);
+    });
+    expect(screen.getByRole('alert')).toBe(region);
+  });
+
+  it('says its own refusal again, emptied first and filled a moment later', async () => {
+    stubFetch([principal(true)], refused);
+    mount();
+    await screen.findByRole('heading', { name: 'Change your password' });
+    const region = screen.getByRole('alert');
+    await fill('a-password-of-my-owm');
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      submit();
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS);
+      });
+      expect(region.textContent).toBe('Those two do not match.');
+
+      submit();
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS - 1);
+      });
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(region.textContent).toBe('Those two do not match.');
+      expect(screen.getByRole('alert')).toBe(region);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, send } from '../api/client';
+import { useRefusal } from '../components/refusal';
 import { useSession } from './session';
 
 const FIELD = 'mt-1 w-full border border-control bg-surface px-2 py-1.5 text-sm text-text';
@@ -24,7 +25,7 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [message, setMessage] = useState('');
+  const [message, setMessage, sayAgain] = useRefusal<string>();
   const [done, setDone] = useState<PasswordChanged | null>(null);
   const [busy, setBusy] = useState(false);
   const first = useRef<HTMLInputElement>(null);
@@ -38,22 +39,24 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
     if (busy) return;
 
     // Checked here as well as at the core. The confirmation field has no server side at all —
-    // it exists so a typo in a password nobody can read back does not become a lockout.
+    // it exists so a typo in a password nobody can read back does not become a lockout. Each is
+    // decided in this handler, which may have just said the same thing, so it is emptied now and
+    // said a moment later (`U-54`).
     if (next.length < MINIMUM) {
-      setMessage(`A password must be at least ${String(MINIMUM)} characters.`);
+      sayAgain(`A password must be at least ${String(MINIMUM)} characters.`);
       return;
     }
     if (next !== confirm) {
-      setMessage('Those two do not match.');
+      sayAgain('Those two do not match.');
       return;
     }
     if (next === current) {
-      setMessage('That is the password you are replacing.');
+      sayAgain('That is the password you are replacing.');
       return;
     }
 
     setBusy(true);
-    setMessage('');
+    setMessage(null);
     send<PasswordChanged>('POST', '/auth/password', {
       currentPassword: current,
       newPassword: next,
@@ -162,14 +165,16 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
           />
         </div>
 
-        {message !== '' && (
-          <p
-            role="alert"
-            className="mt-3 border border-down-border bg-down-bg px-3 py-2 text-sm text-down-fg"
-          >
-            {message}
-          </p>
-        )}
+        {/* **Always there, empty until a refusal** (`U-54`), as `LoginView`'s: a region added
+            with its text already in it is not reliably announced (`U-41`). The box is inside it,
+            and `empty:mt-0` gives back its margin while it says nothing (`U-45`). */}
+        <div role="alert" className="mt-3 empty:mt-0">
+          {message !== null && (
+            <p className="border border-down-border bg-down-bg px-3 py-2 text-sm text-down-fg">
+              {message}
+            </p>
+          )}
+        </div>
 
         <p className="mt-3 text-xs text-text-muted">
           Every other session this account has open will be signed out. The one you are using will

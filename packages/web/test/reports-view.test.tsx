@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReportRun, ReportSubjects, ReportSummary } from '../src/api/types';
 import { ReportsView } from '../src/routes/ReportsView';
 import { ReportView } from '../src/routes/ReportView';
+import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The reports pages, rendered (`E-11`).
@@ -92,6 +93,11 @@ function stubApi(
     subjects?: ReportSubjects;
     /** What a save is refused with, when it is. */
     refuseSave?: { status: number; code: string; message: string };
+    /** Any other write refused, when this answers one for it. */
+    refuse?: (
+      method: string,
+      path: string,
+    ) => { status: number; code: string; message: string } | undefined;
   } = {},
 ): { calls: { method: string; path: string; body: unknown }[] } {
   const calls: { method: string; path: string; body: unknown }[] = [];
@@ -107,8 +113,10 @@ function stubApi(
           headers: { 'content-type': 'application/json' },
         }),
       );
-    const refusal = over.refuseSave;
-    if (init?.method === 'PATCH' && refusal !== undefined) {
+    const refusal =
+      over.refuse?.(init?.method ?? 'GET', path) ??
+      (init?.method === 'PATCH' ? over.refuseSave : undefined);
+    if (refusal !== undefined) {
       return Promise.resolve(
         new Response(JSON.stringify({ error: { code: refusal.code, message: refusal.message } }), {
           status: refusal.status,
@@ -351,9 +359,7 @@ describe('the settings form', () => {
     fireEvent.change(name, { target: { value: 'Monthly uptime, renamed' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toContain('REPORT_CHANGED');
-    });
+    await alertSaying('REPORT_CHANGED');
     expect(screen.getByText(/Somebody else saved this report/u)).toBeDefined();
     expect((name as HTMLInputElement).value).toBe('Monthly uptime, renamed');
     expect(screen.queryByText('Saved.')).toBeNull();
@@ -373,5 +379,135 @@ describe('the settings form', () => {
     // whether or not anything was reported.
     expect(screen.getByText(/Not addresses this system will send to: no-at-sign/u)).toBeDefined();
     expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+  });
+});
+
+/**
+ * The three refusals on these pages, announced (`U-54`): a create, a run and a save. Each is said
+ * through an `ErrorPanel` inside a region that is in the tree and empty before anything is sent,
+ * so the refusal lands in a node that was there before it; the next attempt empties it as it
+ * starts, so the same words are said again; one that is accepted leaves it empty.
+ */
+describe('a refused report change (U-54)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  let left = 0;
+  beforeEach(() => {
+    left = 2;
+  });
+
+  /** Refuses `method` on paths ending `suffix` twice in `code`'s words, then lets it through. */
+  const twice =
+    (method: string, suffix: string, code: string) =>
+    (
+      asked: string,
+      path: string,
+    ): { status: number; code: string; message: string } | undefined => {
+      if (asked !== method || !path.endsWith(suffix) || left === 0) return undefined;
+      left -= 1;
+      return { status: 409, code, message: 'refused here' };
+    };
+
+  it('says a refused create in the region that was there, again, and empties on one accepted', async () => {
+    stubApi({ refuse: twice('POST', '/reports', 'REPORT_INVALID') });
+    render(
+      <MemoryRouter>
+        <ReportsView />
+      </MemoryRouter>,
+    );
+    await screen.findByRole('heading', { name: 'Reports', level: 1 });
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Weekly' } });
+    const create = screen.getByRole('button', { name: 'Create' });
+
+    fireEvent.click(create);
+    expect(await alertSaying('REPORT_INVALID')).toBe(region);
+    // The panel inside it is not an alert of its own: one region, said once.
+    expect(screen.getAllByRole('alert')).toEqual([region]);
+    await screen.findByRole('button', { name: 'Create' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    // Committed empty before the core answers: React did not fold the two into one.
+    expect(region.matches(':empty')).toBe(true);
+    await alertSaying('REPORT_INVALID');
+    expect(screen.getByRole('alert')).toBe(region);
+    await screen.findByRole('button', { name: 'Create' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(left).toBe(0);
+    });
+    expect(speaking()).toEqual([]);
+  });
+
+  it('says a refused run in the region under the title, again, and empties on one accepted', async () => {
+    const api = await showReport({ refuse: twice('POST', '/runs', 'REPORT_BUSY') });
+    const run = (): void => {
+      fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
+    };
+    const region = screen
+      .getAllByRole('alert')
+      .find((one) => one.closest('form') === null) as HTMLElement;
+    expectQuiet(region, ['mt-4', 'empty:mt-0']);
+    // Under the title row, in one block with it, so it never stands alone in the page's stack.
+    expect(
+      region.parentElement?.firstElementChild?.contains(screen.getByRole('heading', { level: 1 })),
+    ).toBe(true);
+
+    run();
+    expect(await alertSaying('REPORT_BUSY')).toBe(region);
+    await screen.findByRole('button', { name: 'Run now' });
+    run();
+    expect(region.matches(':empty')).toBe(true);
+    expect(await alertSaying('REPORT_BUSY')).toBe(region);
+    await screen.findByRole('button', { name: 'Run now' });
+    run();
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(api.calls.filter((call) => call.method === 'POST')).toHaveLength(3);
+    });
+    await screen.findByRole('button', { name: 'Run now' });
+    expect(speaking()).toEqual([]);
+  });
+
+  it('says a refused save in the form’s region, again, and empties on one accepted', async () => {
+    const api = await showReport({ refuse: twice('PATCH', '/reports/7', 'REPORT_CHANGED') });
+    const form = screen.getByRole('button', { name: 'Save' }).closest('form') as HTMLElement;
+    const region = within(form).getByRole('alert');
+    expectQuiet(region, ['mt-5', 'empty:mt-0']);
+    // The buttons and the region are one block, the form's last child.
+    expect(region.parentElement?.lastElementChild).toBe(region);
+    expect(form.lastElementChild).toBe(region.parentElement);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'Monthly uptime, renamed' },
+    });
+    const save = (): void => {
+      fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
+    };
+
+    save();
+    expect(await alertSaying('REPORT_CHANGED')).toBe(region);
+    // What follows the panel is said with it, inside the same region.
+    expect(within(region).getByText(/Somebody else saved this report/u)).toBeDefined();
+    await within(form).findByRole('button', { name: 'Save' });
+    save();
+    expect(region.matches(':empty')).toBe(true);
+    expect(await alertSaying('REPORT_CHANGED')).toBe(region);
+    await within(form).findByRole('button', { name: 'Save' });
+    save();
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(api.calls.filter((call) => call.method === 'PATCH')).toHaveLength(3);
+    });
+    // Accepted: the report is read again and the form drawn from it, saying nothing.
+    await screen.findByRole('button', { name: 'Save' });
+    expect(speaking()).toEqual([]);
   });
 });

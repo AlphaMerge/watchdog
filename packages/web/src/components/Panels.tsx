@@ -25,6 +25,33 @@ export function Card({
   );
 }
 
+/**
+ * A refused action, said through `ErrorPanel` in a region that is always there (`U-54`).
+ *
+ * **Empty until there is a refusal**, as `U-48` and `U-52` did for a line of text: focus is on
+ * the control that was used when the core refuses, and a region added with its text already in it
+ * is not reliably announced (`U-41`), which is what an `ErrorPanel` mounted on failure is. The
+ * caller empties it as each attempt starts, so a second refusal in the same words is said again,
+ * and gives its margin with an `empty:` twin, so it takes no space while it says nothing (`U-45`).
+ * `children` follow the panel, and only while there is one.
+ */
+export function RefusalPanel({
+  error,
+  className,
+  children,
+}: {
+  error: ApiError | null;
+  className: string;
+  children?: ReactNode;
+}): React.JSX.Element {
+  return (
+    <div role="alert" className={className}>
+      {error !== null && <ErrorPanel error={error} inRegion />}
+      {error !== null && children}
+    </div>
+  );
+}
+
 export function Loading({ what }: { what: string }): React.JSX.Element {
   return (
     <p className="text-sm text-text-muted" role="status">
@@ -42,13 +69,19 @@ export function Loading({ what }: { what: string }): React.JSX.Element {
 export function ErrorPanel({
   error,
   retry,
+  inRegion = false,
 }: {
   error: ApiError;
   retry?: () => void;
+  /** Shown inside a region that is already an alert (`RefusalPanel`), so not one of its own. */
+  inRegion?: boolean;
 }): React.JSX.Element {
   const unreachable = error.code === 'UNREACHABLE';
   return (
-    <div role="alert" className="border border-down-border bg-down-bg p-4 text-sm text-down-fg">
+    <div
+      role={inRegion ? undefined : 'alert'}
+      className="border border-down-border bg-down-bg p-4 text-sm text-down-fg"
+    >
       <p className="ms-label text-down-fg">
         {unreachable ? 'The core is not reachable' : `Request failed — ${error.code}`}
       </p>

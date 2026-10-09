@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../api/client';
-import { ErrorPanel } from '../components/Panels';
+import { RefusalPanel } from '../components/Panels';
 import { ObjectPicker } from './ObjectPicker';
 import { MapBackgroundControl } from './MapBackgroundControl';
 import { MapGeoPanel } from './MapGeoPanel';
@@ -316,136 +316,137 @@ export function MapDesigner({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-        <label className="text-xs text-text-muted">
-          <span className="ms-label block">Widget</span>
-          <select
-            value={kind}
-            onChange={(event) => {
-              setKind(event.target.value as WidgetKind);
-            }}
-            className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
-          >
-            {WIDGET_KINDS.map((one) => (
-              <option key={one} value={one}>
-                {KIND_LABELS[one]}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {needsObject && (
-          <ObjectPicker
-            kind={kind}
-            value={target}
-            onPick={(picked) => {
-              setTarget(picked);
-            }}
-          />
-        )}
-
-        <button
-          type="button"
-          onClick={add}
-          disabled={(needsObject && target === null) || disabled}
-          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-        >
-          Add widget
-        </button>
-
-        {/*
-          Only for a graph, and only when one is selected: a control that is present for every
-          tile and does nothing on four of them is a control that teaches people to ignore it.
-        */}
-        {selectedTile?.kind === 'graph' && (
+      {/* The toolbar and the refusal under it are one block of the stack: the refusal is always
+          there (`U-54`), and as a child of its own `space-y-3` would give it a margin while it
+          says nothing. */}
+      <div>
+        <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
           <label className="text-xs text-text-muted">
-            <span className="ms-label block">Range</span>
+            <span className="ms-label block">Widget</span>
             <select
-              value={selectedTile.rangeMinutes}
+              value={kind}
               onChange={(event) => {
-                apply(
-                  retimeTile(canvas, selectedTile.id, Number(event.target.value)),
-                  `${nameOf(selectedTile)} showing ${rangeLabel(Number(event.target.value))}`,
-                );
+                setKind(event.target.value as WidgetKind);
               }}
               className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
             >
-              {RANGES.map((range) => (
-                <option key={range.minutes} value={range.minutes}>
-                  {range.label}
+              {WIDGET_KINDS.map((one) => (
+                <option key={one} value={one}>
+                  {KIND_LABELS[one]}
                 </option>
               ))}
             </select>
           </label>
-        )}
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {needsObject && (
+            <ObjectPicker
+              kind={kind}
+              value={target}
+              onPick={(picked) => {
+                setTarget(picked);
+              }}
+            />
+          )}
+
           <button
             type="button"
-            onClick={stepBack}
-            disabled={!canUndo(line)}
-            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            onClick={stepForward}
-            disabled={!canRedo(line)}
-            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
-          >
-            Redo
-          </button>
-          <button
-            type="button"
-            aria-pressed={connecting !== null}
-            onClick={() => {
-              if (connecting !== null) {
-                setConnecting(null);
-                announce('Connection abandoned');
-                return;
-              }
-              if (selectedTile === undefined) return;
-              setConnecting(selectedTile.id);
-              announce(`Connecting from ${nameOf(selectedTile)} — now choose the other widget`);
-            }}
-            disabled={(selected === null && connecting === null) || disabled}
-            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
-          >
-            {connecting === null ? 'Connect' : 'Cancel'}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (selected !== null) remove(selected);
-            }}
-            disabled={selected === null || disabled}
-            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
-          >
-            Remove
-          </button>
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={!dirty || saving || disabled}
+            onClick={add}
+            disabled={(needsObject && target === null) || disabled}
             className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
           >
-            {saving ? 'Saving…' : 'Save'}
+            Add widget
           </button>
-        </div>
-      </div>
 
-      {failure !== null && (
-        <div className="space-y-2">
-          <ErrorPanel error={failure} />
-          {failure.code === 'MAP_CHANGED' && (
-            <p className="text-sm text-text-muted">
+          {/*
+          Only for a graph, and only when one is selected: a control that is present for every
+          tile and does nothing on four of them is a control that teaches people to ignore it.
+        */}
+          {selectedTile?.kind === 'graph' && (
+            <label className="text-xs text-text-muted">
+              <span className="ms-label block">Range</span>
+              <select
+                value={selectedTile.rangeMinutes}
+                onChange={(event) => {
+                  apply(
+                    retimeTile(canvas, selectedTile.id, Number(event.target.value)),
+                    `${nameOf(selectedTile)} showing ${rangeLabel(Number(event.target.value))}`,
+                  );
+                }}
+                className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
+              >
+                {RANGES.map((range) => (
+                  <option key={range.minutes} value={range.minutes}>
+                    {range.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={stepBack}
+              disabled={!canUndo(line)}
+              className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Undo
+            </button>
+            <button
+              type="button"
+              onClick={stepForward}
+              disabled={!canRedo(line)}
+              className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Redo
+            </button>
+            <button
+              type="button"
+              aria-pressed={connecting !== null}
+              onClick={() => {
+                if (connecting !== null) {
+                  setConnecting(null);
+                  announce('Connection abandoned');
+                  return;
+                }
+                if (selectedTile === undefined) return;
+                setConnecting(selectedTile.id);
+                announce(`Connecting from ${nameOf(selectedTile)} — now choose the other widget`);
+              }}
+              disabled={(selected === null && connecting === null) || disabled}
+              className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+            >
+              {connecting === null ? 'Connect' : 'Cancel'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (selected !== null) remove(selected);
+              }}
+              disabled={selected === null || disabled}
+              className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Remove
+            </button>
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={!dirty || saving || disabled}
+              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+        <RefusalPanel error={failure} className="mt-3 empty:mt-0">
+          {failure?.code === 'MAP_CHANGED' && (
+            <p className="mt-2 text-sm text-text-muted">
               Somebody else saved this map while it was open. Nothing here has been thrown away —
               open the map again in another tab to see what changed before saving over it.
             </p>
           )}
-        </div>
-      )}
+        </RefusalPanel>
+      </div>
 
       <p className="text-xs text-text-muted">
         Tab reaches a widget. Arrow keys move it, Shift and an arrow resizes it, Delete removes it,

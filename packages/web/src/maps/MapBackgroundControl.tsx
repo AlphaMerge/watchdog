@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { ApiError } from '../api/client';
-import { ErrorPanel } from '../components/Panels';
+import { RefusalPanel } from '../components/Panels';
+import { useRefusal } from '../components/refusal';
 import { MAX_IMAGE_BYTES, backgroundUrl } from './background';
 
 /**
@@ -31,7 +32,7 @@ export function MapBackgroundControl({
   readonly disabled?: boolean;
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<ApiError | null>(null);
+  const [failure, setFailure, sayAgain] = useRefusal<ApiError>();
   const field = useRef<HTMLInputElement>(null);
 
   const send = async (method: 'POST' | 'DELETE', file?: File): Promise<void> => {
@@ -84,9 +85,10 @@ export function MapBackgroundControl({
             const file = event.target.files?.[0];
             if (file === undefined) return;
             // Refused here as well as by the core and by Fastify's body limit, because this is the
-            // only one of the three that can say so without spending the upload first.
+            // only one of the three that can say so without spending the upload first. Decided in
+            // this handler, which may have just said the same, so emptied first (`U-54`).
             if (file.size > MAX_IMAGE_BYTES) {
-              setFailure(
+              sayAgain(
                 new ApiError(
                   0,
                   'MAP_INVALID',
@@ -110,10 +112,14 @@ export function MapBackgroundControl({
           Remove background
         </button>
       </div>
-      <p className="text-xs text-text-muted">
-        PNG, JPEG or WebP, at most 2 MiB and 4096 pixels a side. SVG is not accepted.
-      </p>
-      {failure !== null && <ErrorPanel error={failure} />}
+      {/* One block, the stack's last child, with the refusal always in it (`U-54`), as in
+          `MapPriority`. */}
+      <div>
+        <p className="text-xs text-text-muted">
+          PNG, JPEG or WebP, at most 2 MiB and 4096 pixels a side. SVG is not accepted.
+        </p>
+        <RefusalPanel error={failure} className="mt-2 empty:mt-0" />
+      </div>
     </div>
   );
 }

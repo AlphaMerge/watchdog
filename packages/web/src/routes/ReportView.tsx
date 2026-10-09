@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type { ReportRun, ReportSubjects, ReportSummary } from '../api/types';
-import { Card, ErrorPanel, Loading } from '../components/Panels';
+import { Card, ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { ReportSettings } from '../reports/ReportSettings';
 import {
@@ -62,23 +62,29 @@ export function ReportView(): React.JSX.Element {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <PageTitle title={report.status === 'ready' ? report.data.name : 'Report'} />
-        {report.status === 'ready' && (
-          <button
-            type="button"
-            onClick={runNow}
-            disabled={running}
-            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-          >
-            {running ? 'Running…' : 'Run now'}
-          </button>
-        )}
+      {/* The title row and a refused run under it are one block of the stack: the refusal is
+          always there (`U-54`), and as a child of its own `space-y-4` would give it a margin
+          while it says nothing. */}
+      <div>
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <PageTitle title={report.status === 'ready' ? report.data.name : 'Report'} />
+          {report.status === 'ready' && (
+            <button
+              type="button"
+              onClick={runNow}
+              disabled={running}
+              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+            >
+              {running ? 'Running…' : 'Run now'}
+            </button>
+          )}
+        </div>
+
+        <RefusalPanel error={runFailure} className="mt-4 empty:mt-0" />
       </div>
 
       {report.status === 'loading' && <Loading what="the report" />}
       {report.status === 'error' && <ErrorPanel error={report.error} retry={report.reload} />}
-      {runFailure !== null && <ErrorPanel error={runFailure} />}
 
       {report.status === 'ready' && (
         <>

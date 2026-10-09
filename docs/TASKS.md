@@ -25169,12 +25169,73 @@ because each is a decision rather than a defect:
         audit cursor, a library node id) still answer a failed `pattern` with Ajv's *must match
         pattern "…"*; they are not sensor parameters, and nothing here reads them.
 
-- [ ] **U-54 — eight more refusal lines appear only with their text** · S · U-52 · Found
+- [x] **U-54 — eight more refusal lines appear only with their text** · S · U-52 · Found
       2026-10-09 in `U-52`. `ParamsForm`, `CredentialsPanel`, `RediscoveryPanel` (two),
       `DiscoveryView` (three), `LoginView`, `ChangePasswordForm` and `RecipientsEditor` add their
       `role="alert"` line only once it has text, which `U-41` found is not reliably announced.
       **Done when** each is always in the tree and empty until a refusal, as `U-48` and `U-52`
       did, with a test per component that a refusal lands in the node present before it.
+
+      **U-54 outcome. Every refusal region is in the tree from the start, empty, and the refusal
+      lands in it; so are the eight refusals said through an `ErrorPanel` mounted on failure.**
+      - **The ten named lines.** Each is always rendered, empty until a refusal, `role="alert"`,
+        with its margin and an `empty:` twin that takes it away while it says nothing (`U-45`).
+        Where the refusal is a box (`LoginView`, `ChangePasswordForm`, `ParamsForm`'s
+        channel-mode explanation, `RediscoveryPanel`'s form with its *Show the rule as it is now*)
+        the region is an unstyled wrapper and the box is inside it, so an empty region draws no
+        border. `ParamsForm` has one region for both shapes of refusal, and `ModeRefusal` lost its
+        own role. The correlation id stays where it was shown, in the `ml-2 font-mono` span
+        (`ParamsForm`, `CredentialsPanel`); the others never showed one.
+      - **Spacing, container by container.** Where the line was a child of a `space-y-*` stack —
+        `ParamsForm` (`space-y-4`), `CredentialsPanel`'s row actions (`space-y-2`) and form
+        (`space-y-4`) — it now shares a plain block with the buttons, as `U-52` did, so no empty
+        last child leaves the stack's margin under them; in the form it stays above the buttons
+        (`mb-4 empty:mb-0`) and the confirmation, which it never shows beside. The others sit in
+        blocks spaced by their own margins (`Card` bodies, the login forms), where an empty node
+        with no margin takes no space wherever it is. `RecipientsEditor`'s sits in a `gap-2`
+        row, where a gap opens for an empty item, so it is `empty:absolute` instead: out of the
+        flow while empty, and still in the accessibility tree as `sr-only` text is. The built CSS
+        was checked: each `empty:` rule comes after the utility it undoes.
+      - **Said again in the same words.** Every attempt that goes to the core already emptied its
+        region as it started, or now does (`DiscoveryView`'s start and cancel, `LoginView`); a
+        round trip later the refusal is a change. A refusal the form decides itself — a login or
+        password left empty, two passwords that differ, a background over 2 MiB — is set in the
+        handler that empties it, and React 19 commits both as one, so nothing changed and nothing
+        was said. `useRefusal` (`components/refusal.ts`) empties now and fills after
+        `SAY_AGAIN_MS` (100 ms, the delay live-announcer libraries use for a repeated message), and
+        an edit in between drops the waiting refusal.
+      - **Where it lands in `RecipientsEditor`.** The list failure was rendered in place of the
+        picker, so it arrived with its text whenever a row became a user or a group after the
+        list failed. Every row now has its region from the start, the row decides whether the
+        picker is shown, and the failure lands in the row's own node.
+      - **Also done: the refusals said through `ErrorPanel`.** `ErrorPanel` is itself
+        `role="alert"`, and eight callers mount it only when an action is refused: `MapsView`'s
+        create, `MapSharePanel`, `MapPriority`, `MapBackgroundControl`, `MapDesigner`'s save,
+        `ReportsView`'s create, `ReportView`'s run and `ReportSettings`' save. `RefusalPanel`
+        (`components/Panels.tsx`) is the always-present region they now use, with the panel
+        inside it (`inRegion`, so not an alert of its own) and anything that explains a code
+        (`MAP_CHANGED`, `REPORT_CHANGED`) said with it; each sits beside what precedes it in one
+        block of its stack, as above.
+      - **Tests.** `test/support/refusal-region.ts`: `alertSaying`, `speaking` and `expectQuiet`
+        (empty, `role="alert"`, the margin and its `empty:` twin, no `space-y-*` parent, no `gap-*`
+        parent unless out of flow, not hidden in four ways). Per component, against the existing
+        stubbed cores (new `params-form-refused.test.tsx` and `discovery-view.test.tsx` where
+        there were none): the region exists empty before anything is sent; the refusal lands in
+        that same node, with the id in a `font-mono ml-2` span where one is shown; the next
+        attempt empties it before the core answers and the same words fill it again; an attempt
+        accepted (or an edit, *Discard changes*, a row back to an address) leaves it empty. The
+        form-decided refusals are driven with fake timers: empty at once, still empty at 99 ms,
+        said at 100. Existing tests that took the first alert now wait for the one that says
+        something. Mutations, each failing: rendered only with text in `LoginView` 3 and in
+        `CredentialsPanel`'s `Refusal` 2; no role on `ParamsForm`'s region 7; `useRefusal`
+        filling at once 3.
+      - **Not done.** The range preview's refusal stays an alert though it changes as the
+        operator types (`U-48` kept such regions polite), and a different range refused in the
+        same words is not said again. `RunPanel` shows a first read that failed as plain text
+        before the run's card exists. `ErrorPanel`s mounted for a failed read are not refusals
+        and were left; nor were the refusal lines that are not live regions at all: `AlarmsView`'s
+        refused action on a row, `TriggersPanel`'s refused delete, and `TemplatesView`'s
+        `Failure` and refused delete.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

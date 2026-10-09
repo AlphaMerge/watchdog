@@ -5,6 +5,7 @@ import type { MapShare } from '../src/api/types';
 import { MapSharePanel } from '../src/maps/MapSharePanel';
 import { shareLinkFor, sharedBackgroundUrl, sharedMapPath } from '../src/maps/shareUrl';
 import { SharedMapView } from '../src/routes/SharedMapView';
+import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * Publishing a map, and reading one that was published (`G-06`).
@@ -225,5 +226,45 @@ describe('the page a stranger opens', () => {
     // Expired, revoked and never-existed are one answer on purpose: the difference is the only
     // useful thing a guesser could learn.
     expect(screen.getByText(/may have expired, or been revoked/)).toBeDefined();
+  });
+});
+
+/**
+ * A refused link, announced (`U-54`): said through an `ErrorPanel` in a region that is in the tree
+ * and empty before anything is sent, so the refusal lands in a node that was there before it; the
+ * next attempt empties it as it starts, so the same words are said again; one accepted leaves it
+ * empty.
+ */
+describe('a refused link (U-54)', () => {
+  it('is said in the region under the form, again, and emptied by one accepted', async () => {
+    const refusals = [true, true, false];
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      if (init?.method !== 'POST') return Promise.resolve(json({ items: [] }));
+      return Promise.resolve(
+        refusals.shift() === true
+          ? json({ error: { code: 'MAP_SHARE_INVALID', message: 'expiry too far' } }, 400)
+          : json({ share: LIVE, token: 'the-secret-token' }, 201),
+      );
+    });
+    render(<MapSharePanel mapId={4} />);
+    await screen.findByText('No public links.');
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+    // The form and the region are one block of the panel's stack.
+    expect(region.parentElement?.firstElementChild?.tagName).toBe('FORM');
+    const make = async (): Promise<void> => {
+      fireEvent.change(screen.getByLabelText(/What it is for/), { target: { value: 'NOC' } });
+      fireEvent.click(await screen.findByRole('button', { name: 'Make a link' }));
+    };
+
+    await make();
+    expect(await alertSaying('MAP_SHARE_INVALID')).toBe(region);
+    await make();
+    expect(region.matches(':empty')).toBe(true);
+    expect(await alertSaying('MAP_SHARE_INVALID')).toBe(region);
+    await make();
+    expect(region.matches(':empty')).toBe(true);
+    await screen.findByText(/\/shared\/the-secret-token$/);
+    expect(speaking()).toEqual([]);
   });
 });

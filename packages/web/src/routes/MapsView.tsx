@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type { MapSummary } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, Empty, ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { listedName, sharedNames } from './names';
 
@@ -68,11 +68,8 @@ export function MapsView(): React.JSX.Element {
             {creating ? 'Creating…' : 'Create'}
           </button>
         </form>
-        {failure !== null && (
-          <div className="mt-3">
-            <ErrorPanel error={failure} />
-          </div>
-        )}
+        {/* A refused create, in a region always there and empty until one (`U-54`). */}
+        <RefusalPanel error={failure} className="mt-3 empty:mt-0" />
       </Card>
 
       <Card title="Maps">

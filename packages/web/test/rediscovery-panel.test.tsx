@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectSummary, RediscoveryRule } from '../src/api/types';
 import { RediscoveryPanel } from '../src/routes/RediscoveryPanel';
+import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The rediscovery rules on the discovery page, rendered (`D-11`).
@@ -63,12 +64,15 @@ interface Call {
   headers: Record<string, string>;
 }
 
-/** Answers by path; a write answers `answer` when given, so a refusal can be staged. */
-function stubApi(
-  rules: RediscoveryRule[],
-  answer?: { status: number; body: unknown },
-): { calls: Call[] } {
+type Answer = { status: number; body: unknown };
+
+/**
+ * Answers by path; a write answers `answer` when given, so a refusal can be staged — or, given a
+ * list, each write the next one, and accepted once the list is spent.
+ */
+function stubApi(rules: RediscoveryRule[], answer?: Answer | Answer[]): { calls: Call[] } {
   const calls: Call[] = [];
+  const queue = Array.isArray(answer) ? [...answer] : undefined;
   vi.stubGlobal('fetch', (path: string, init?: RequestInit) => {
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined;
     const method = init?.method ?? 'GET';
@@ -80,7 +84,11 @@ function stubApi(
           headers: { 'content-type': 'application/json' },
         }),
       );
-    if (method !== 'GET') return reply(answer?.status ?? 200, answer?.body ?? RULE);
+    if (method !== 'GET') {
+      const next = queue === undefined ? answer : queue.shift();
+      const one = Array.isArray(next) ? undefined : next;
+      return reply(one?.status ?? 200, one?.body ?? RULE);
+    }
     if (path.endsWith('/discovery/schedules')) return reply(200, { items: rules });
     if (path.endsWith('/schedules'))
       return reply(200, { items: [{ id: 2, name: 'Change freeze', description: '' }] });
@@ -89,7 +97,7 @@ function stubApi(
   return { calls };
 }
 
-const show = async (rules: RediscoveryRule[], answer?: { status: number; body: unknown }) => {
+const show = async (rules: RediscoveryRule[], answer?: Answer | Answer[]) => {
   const api = stubApi(rules, answer);
   render(<RediscoveryPanel probes={PROBES} groups={GROUPS} templates={[]} />);
   await waitFor(() => {
@@ -200,8 +208,7 @@ describe('the rediscovery rules', () => {
     fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Mine' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toMatch(/Somebody else changed this rule/u);
+    const alert = await alertSaying(/Somebody else changed this rule/u);
     const reads = api.calls.filter((call) => call.path.endsWith('/discovery/schedules')).length;
     fireEvent.click(within(alert).getByRole('button', { name: 'Show the rule as it is now' }));
     await waitFor(() => {
@@ -243,5 +250,111 @@ describe('the rediscovery rules', () => {
       expect(writes(api.calls)).toHaveLength(1);
     });
     expect(writes(api.calls)[0]?.method).toBe('DELETE');
+  });
+});
+
+/**
+ * The two refusals, announced (`U-54`): each region in the tree and empty before anything is
+ * sent, the refusal in that same node, emptied as the next attempt starts so the same words are
+ * said again, and empty after one that is accepted.
+ */
+describe('a refused rule change (U-54)', () => {
+  const GONE = { status: 404, body: { error: { code: 'NOT_FOUND', message: 'no such rule' } } };
+  const INVALID = {
+    status: 400,
+    body: { error: { code: 'DISCOVERY_SCHEDULE_INVALID', message: 'that range is not valid' } },
+  };
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const switchOff = (): void => {
+    fireEvent.click(screen.getByRole('button', { name: 'Switch off Nightly' }));
+  };
+
+  it('says a refused switch in the panel’s region, and says it again on the next attempt', async () => {
+    await show([RULE], [GONE, GONE]);
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+
+    switchOff();
+    expect(await alertSaying('no such rule')).toBe(region);
+    expect(region.textContent).toBe('no such rule');
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
+        'disabled',
+        false,
+      );
+    });
+    switchOff();
+    // Committed empty before the core answers: React did not fold the two into one.
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(region.textContent).toBe('no such rule');
+    });
+    expect(screen.getAllByRole('alert')).toEqual([region]);
+  });
+
+  it('empties the panel’s region on an attempt that is accepted', async () => {
+    await show([RULE], [GONE]);
+    const region = screen.getByRole('alert');
+    switchOff();
+    await waitFor(() => {
+      expect(region.textContent).toBe('no such rule');
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
+        'disabled',
+        false,
+      );
+    });
+    switchOff();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
+        'disabled',
+        false,
+      );
+    });
+    expect(region.matches(':empty')).toBe(true);
+    expect(speaking()).toEqual([]);
+  });
+
+  it('says a refused save in the form’s region, again on the next attempt, and empties on one accepted', async () => {
+    await show([RULE], [INVALID, INVALID]);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Nightly' }));
+    const form = screen.getByRole('form', { name: 'Edit Nightly' });
+    const region = within(form).getByRole('alert');
+    expectQuiet(region, ['mt-4', 'empty:mt-0']);
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Mine' } });
+    const save = within(form).getByRole('button', { name: 'Save changes' });
+
+    fireEvent.click(save);
+    expect(await alertSaying('that range is not valid')).toBe(region);
+    await waitFor(() => {
+      expect(save).toHaveProperty('disabled', false);
+    });
+
+    fireEvent.click(save);
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(region.textContent).toBe('that range is not valid');
+    });
+    expect(within(form).getByRole('alert')).toBe(region);
+    await waitFor(() => {
+      expect(save).toHaveProperty('disabled', false);
+    });
+
+    // Accepted: the form closes, and nothing on the panel says anything.
+    fireEvent.click(save);
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(screen.queryByRole('form', { name: 'Edit Nightly' })).toBeNull();
+    });
+    expect(speaking()).toEqual([]);
   });
 });

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ApiError, send, useApi } from '../api/client';
 import type { MapShare } from '../api/types';
-import { ErrorPanel, Loading } from '../components/Panels';
+import { ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
 import { shareLinkFor } from './shareUrl';
 
 /**
@@ -92,45 +92,49 @@ export function MapSharePanel({ mapId }: { readonly mapId: number }): React.JSX.
         open anything else. A link stops working when it expires or when you revoke it.
       </p>
 
-      <form onSubmit={create} className="flex flex-wrap items-end gap-3">
-        <label className="text-xs text-text-muted">
-          <span className="ms-label block">What it is for</span>
-          <input
-            value={label}
-            onChange={(event) => {
-              setLabel(event.target.value);
-            }}
-            maxLength={100}
-            placeholder="NOC wall display"
-            className="mt-1 w-56 max-w-full border border-control bg-surface px-2 py-1 text-sm text-text"
-          />
-        </label>
-        <label className="text-xs text-text-muted">
-          <span className="ms-label block">Expires in</span>
-          <select
-            value={days}
-            onChange={(event) => {
-              setDays(Number(event.target.value));
-            }}
-            className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
+      {/* The form and its refusal are one block of the stack: the refusal is always there
+          (`U-54`), and as a child of its own `space-y-3` would give it a margin while it says
+          nothing. Its own margin goes while it is empty. */}
+      <div>
+        <form onSubmit={create} className="flex flex-wrap items-end gap-3">
+          <label className="text-xs text-text-muted">
+            <span className="ms-label block">What it is for</span>
+            <input
+              value={label}
+              onChange={(event) => {
+                setLabel(event.target.value);
+              }}
+              maxLength={100}
+              placeholder="NOC wall display"
+              className="mt-1 w-56 max-w-full border border-control bg-surface px-2 py-1 text-sm text-text"
+            />
+          </label>
+          <label className="text-xs text-text-muted">
+            <span className="ms-label block">Expires in</span>
+            <select
+              value={days}
+              onChange={(event) => {
+                setDays(Number(event.target.value));
+              }}
+              className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
+            >
+              {EXPIRIES.map((entry) => (
+                <option key={entry.days} value={entry.days}>
+                  {entry.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="submit"
+            disabled={label.trim() === '' || busy}
+            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
           >
-            {EXPIRIES.map((entry) => (
-              <option key={entry.days} value={entry.days}>
-                {entry.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="submit"
-          disabled={label.trim() === '' || busy}
-          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-        >
-          {busy ? 'Making…' : 'Make a link'}
-        </button>
-      </form>
-
-      {failure !== null && <ErrorPanel error={failure} />}
+            {busy ? 'Making…' : 'Make a link'}
+          </button>
+        </form>
+        <RefusalPanel error={failure} className="mt-3 empty:mt-0" />
+      </div>
 
       {minted !== null && (
         <div className="border border-accent bg-surface p-3">

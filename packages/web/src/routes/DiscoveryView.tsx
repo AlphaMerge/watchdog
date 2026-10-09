@@ -123,7 +123,8 @@ function StartPanel({
   templates: DeviceTemplateSummary[];
   error: ApiError | null;
   onStarted: (run: DiscoveryRun) => void;
-  onError: (error: ApiError) => void;
+  /** Told `null` as an attempt starts, so a second refusal in the same words is said again. */
+  onError: (error: ApiError | null) => void;
 }): React.JSX.Element {
   const [preview, setPreview] = useState<DiscoveryPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -168,6 +169,7 @@ function StartPanel({
   const start = useCallback(() => {
     if (draft.probeId === null || draft.groupId === null) return;
     setStarting(true);
+    onError(null);
     send<DiscoveryRun>('POST', '/discovery', {
       groupId: draft.groupId,
       probeId: draft.probeId,
@@ -264,11 +266,13 @@ function StartPanel({
             />
           )}
         </Field>
-        {previewError !== null && (
-          <p id="range-problem" role="alert" className="mt-2 text-sm text-down-fg">
-            {previewError}
-          </p>
-        )}
+        {/* **Always there, empty until the range is refused** (`U-54`): the refusal comes a
+            debounce and a round trip after the last keystroke, and a region added with its text
+            already in it is not reliably announced (`U-41`). Named by the box only while it says
+            something (above); `empty:mt-0` gives back its margin while it does not (`U-45`). */}
+        <p id="range-problem" role="alert" className="mt-2 text-sm text-down-fg empty:mt-0">
+          {previewError}
+        </p>
         {preview !== null && (
           <p className="mt-2 text-sm text-text-muted">
             {preview.total.toLocaleString()} addresses.
@@ -347,11 +351,12 @@ function StartPanel({
         </div>
       )}
 
-      {error !== null && (
-        <p role="alert" className="mt-4 text-sm text-down-fg">
-          {error.message}
-        </p>
-      )}
+      {/* A refused start, in a region always there and empty until one (`U-54`, as `U-48` did):
+          focus is on *Start discovery* when the core refuses, and a region added with its text
+          already in it is not reliably announced (`U-41`). `start` empties it as it begins. */}
+      <p role="alert" className="mt-4 text-sm text-down-fg empty:mt-0">
+        {error?.message}
+      </p>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
@@ -437,6 +442,8 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
 
   const cancel = useCallback(() => {
     setCancelling(true);
+    // Emptied as the attempt starts, so a refusal in the words already there is said (`U-54`).
+    setProblem(null);
     send('POST', `/discovery/${String(runId)}/cancel`)
       .catch((failure: unknown) => {
         setProblem(
@@ -529,11 +536,13 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
         </div>
       )}
 
-      {problem !== null && (
-        <p role="alert" className="mt-3 text-sm text-down-fg">
-          {problem}
-        </p>
-      )}
+      {/* A refused cancel, or a run that could not be read. **Always there, empty until one**
+          (`U-54`): a region added with its text already in it is not reliably announced
+          (`U-41`). A poll that fails again in the same words leaves it alone, so it is said once
+          and not every five seconds. */}
+      <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
+        {problem}
+      </p>
     </Card>
   );
 }

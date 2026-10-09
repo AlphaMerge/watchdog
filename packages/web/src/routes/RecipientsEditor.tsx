@@ -67,6 +67,10 @@ export function RecipientsEditor({
           const number = String(index + 1);
           const rowId = `recipient-${String(index)}`;
           const list = recipient.kind === 'user' ? accounts : groups;
+          const failed =
+            choosePeople && recipient.kind !== 'address' && list.status === 'error'
+              ? list.error.message
+              : null;
           return (
             <li key={index} className="flex flex-wrap items-center gap-2">
               {choosePeople ? (
@@ -112,12 +116,11 @@ export function RecipientsEditor({
                     className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
                   />
                 </>
-              ) : choosePeople ? (
+              ) : failed !== null ? null : choosePeople ? (
                 <PersonPicker
                   id={rowId}
                   label={`Recipient ${number}: ${recipient.kind === 'user' ? 'account' : 'group'}`}
                   loading={list.status === 'loading'}
-                  failed={list.status === 'error' ? list.error.message : null}
                   choices={
                     recipient.kind === 'user'
                       ? accountChoices(accountList ?? [])
@@ -133,6 +136,17 @@ export function RecipientsEditor({
                   {describeRecipient(recipient, null, null)}
                 </span>
               )}
+
+              {/* **A list that could not be read, in a region every row has from the start**
+                  (`U-54`): the failure arrives after the row is drawn, or is already there when
+                  an address row is switched to a user or a group, and a region added with its
+                  text already in it is not reliably announced (`U-41`). While it says nothing it
+                  is taken out of the row's flow (`empty:absolute`), so the row's `gap-2`
+                  does not open a gap for it; it stays in the accessibility tree, as `sr-only`
+                  text does. */}
+              <span role="alert" className="text-xs text-down-fg empty:absolute">
+                {failed !== null && `Could not load the list: ${failed}`}
+              </span>
 
               <button
                 type="button"
@@ -173,7 +187,6 @@ function PersonPicker({
   id,
   label,
   loading,
-  failed,
   choices,
   chosen,
   onPick,
@@ -181,7 +194,6 @@ function PersonPicker({
   readonly id: string;
   readonly label: string;
   readonly loading: boolean;
-  readonly failed: string | null;
   readonly choices: readonly Choice[];
   readonly chosen: string;
   readonly onPick: (id: number) => void;
@@ -198,14 +210,6 @@ function PersonPicker({
       })),
     [found],
   );
-
-  if (failed !== null) {
-    return (
-      <span role="alert" className="text-xs text-down-fg">
-        Could not load the list: {failed}
-      </span>
-    );
-  }
 
   return (
     <span className="flex flex-wrap items-center gap-2">

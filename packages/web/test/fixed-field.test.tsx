@@ -13,6 +13,7 @@ import {
 } from '../src/forms/schema';
 import { modeChangesOf } from '../src/routes/detail/model';
 import { ParamsForm } from '../src/routes/detail/ParamsForm';
+import { alertSaying } from './support/refusal-region';
 
 /**
  * A parameter fixed once the sensor exists (`U-34`).
@@ -450,9 +451,8 @@ describe('the refusal, when the core still sends it', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
 
-    const alert = await waitFor(() => screen.getByRole('alert'));
+    const alert = await alertSaying('Not saved: this edit would change what a channel stores.');
     expect(calls.map((call) => call.method)).toEqual(['PATCH']);
-    expect(alert.textContent).toContain('Not saved: this edit would change what a channel stores.');
     expect(within(alert).getByRole('listitem').textContent).toBe(
       'Channel col8: a gauge cannot become a counter.',
     );
@@ -555,8 +555,7 @@ describe('the refusal, when the core still sends it', () => {
     expect(fixedBox(document.body).readOnly).toBe(true);
     fireEvent.change(screen.getByRole('textbox', { name: 'Unit' }), { target: { value: 'C' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
-    const alert = await waitFor(() => screen.getByRole('alert'));
-    expect(alert.textContent).toContain('stale');
+    const alert = await alertSaying('stale');
     expect(alert.textContent).toContain('somebody else changed this sensor');
     expect(within(alert).queryByRole('listitem')).toBeNull();
   });

@@ -598,7 +598,9 @@ function SetActions({
   };
 
   return (
-    <div className="space-y-2">
+    // Not a stack: the refusal under the buttons is always there, and `space-y-*` would put a
+    // margin under whatever is above it while it says nothing (`U-52`). It brings its own.
+    <div>
       {asked === null ? (
         <div className="flex flex-wrap items-center gap-2">
           {editable && (
@@ -649,16 +651,31 @@ function SetActions({
           </div>
         </div>
       )}
-      {failure !== null && <Refusal error={failure} />}
+      <Refusal error={failure} className="mt-2 empty:mt-0" />
     </div>
   );
 }
 
-function Refusal({ error }: { error: ApiError }): React.JSX.Element {
+/**
+ * A refused check, save or removal (`U-54`).
+ *
+ * **Always rendered, empty until there is a refusal**, as `U-48` and `U-52` did: focus is on the
+ * button that was used when the core refuses, and a region added with its text already in it is
+ * not reliably announced (`U-41`). Each attempt empties it as it starts, so a second refusal in
+ * the same words is a change and is said again. The caller gives the margin with its `empty:`
+ * twin, so it takes no space while it says nothing (`U-45`).
+ */
+function Refusal({
+  error,
+  className,
+}: {
+  error: ApiError | null;
+  className: string;
+}): React.JSX.Element {
   return (
-    <p role="alert" className="text-sm text-down-fg">
-      {error.message}
-      {error.correlationId !== undefined && (
+    <p role="alert" className={`text-sm text-down-fg ${className}`}>
+      {error?.message}
+      {error?.correlationId !== undefined && (
         <span className="ml-2 font-mono text-xs">{error.correlationId}</span>
       )}
     </p>
@@ -818,73 +835,78 @@ function CredentialForm({
 
       {changes !== null && <p className="text-xs text-text-muted">{changes}</p>}
 
-      {pending !== null && (
-        <div
-          ref={confirmation}
-          tabIndex={-1}
-          role="group"
-          aria-label="Confirm this save"
-          className="space-y-2 border border-warning-border bg-warning-bg px-3 py-2 text-sm text-warning-fg"
-        >
-          <p className="font-medium">Before this is saved</p>
-          {withheld !== null && <p>{withheld}</p>}
-          {pending.withholds > 0 && <p>{OUTSIDE_MEANS}</p>}
-          {cleared !== null && <p>{cleared}</p>}
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={write}
-              className="border border-warning-fg px-2 py-1 text-sm text-warning-fg hover:bg-surface disabled:opacity-50"
-            >
-              {busy === 'saving' ? 'Saving…' : 'Save anyway'}
-            </button>
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => {
-                setPending(null);
-                setBackToSubmit(true);
-              }}
-              className={BUTTON}
-            >
-              Go back
-            </button>
-          </div>
-        </div>
-      )}
-
-      {failure !== null && <Refusal error={failure} />}
-
-      {pending === null && (
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            ref={submit}
-            type="submit"
-            disabled={held || !dirty || problems.length > 0}
-            className={PRIMARY}
+      {/* The confirmation or the buttons, with the refusal above them, as one block: the refusal
+          is always there, and as a child of the form's stack it would add the stack's margin
+          while it says nothing (`U-52`). The refusal and the confirmation are never both up: a
+          refusal takes the confirmation away, and a check empties the refusal as it starts. */}
+      <div>
+        <Refusal error={failure} className="mb-4 empty:mb-0" />
+        {pending !== null && (
+          <div
+            ref={confirmation}
+            tabIndex={-1}
+            role="group"
+            aria-label="Confirm this save"
+            className="space-y-2 border border-warning-border bg-warning-bg px-3 py-2 text-sm text-warning-fg"
           >
-            {busy === 'checking'
-              ? 'Checking…'
-              : busy === 'saving'
-                ? 'Saving…'
-                : set === null
-                  ? `Store ${kind.name} credentials`
-                  : 'Save changes'}
-          </button>
-          <button type="button" disabled={busy !== null} onClick={onCancel} className={BUTTON}>
-            Cancel
-          </button>
-          {problems.length > 0 && (
-            <span className="text-xs text-text-muted">
-              {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'} attention
-            </span>
-          )}
-          {problems.length === 0 && !dirty && (
-            <span className="text-xs text-text-muted">Nothing has changed yet.</span>
-          )}
-        </div>
-      )}
+            <p className="font-medium">Before this is saved</p>
+            {withheld !== null && <p>{withheld}</p>}
+            {pending.withholds > 0 && <p>{OUTSIDE_MEANS}</p>}
+            {cleared !== null && <p>{cleared}</p>}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={write}
+                className="border border-warning-fg px-2 py-1 text-sm text-warning-fg hover:bg-surface disabled:opacity-50"
+              >
+                {busy === 'saving' ? 'Saving…' : 'Save anyway'}
+              </button>
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() => {
+                  setPending(null);
+                  setBackToSubmit(true);
+                }}
+                className={BUTTON}
+              >
+                Go back
+              </button>
+            </div>
+          </div>
+        )}
+
+        {pending === null && (
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              ref={submit}
+              type="submit"
+              disabled={held || !dirty || problems.length > 0}
+              className={PRIMARY}
+            >
+              {busy === 'checking'
+                ? 'Checking…'
+                : busy === 'saving'
+                  ? 'Saving…'
+                  : set === null
+                    ? `Store ${kind.name} credentials`
+                    : 'Save changes'}
+            </button>
+            <button type="button" disabled={busy !== null} onClick={onCancel} className={BUTTON}>
+              Cancel
+            </button>
+            {problems.length > 0 && (
+              <span className="text-xs text-text-muted">
+                {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'} attention
+              </span>
+            )}
+            {problems.length === 0 && !dirty && (
+              <span className="text-xs text-text-muted">Nothing has changed yet.</span>
+            )}
+          </div>
+        )}
+      </div>
     </form>
   );
 }

@@ -128,11 +128,14 @@ export function RediscoveryPanel({
         />
       )}
 
-      {problem !== null && (
-        <p role="alert" className="mt-3 text-sm text-down-fg">
-          {problem}
-        </p>
-      )}
+      {/* A refused switch or delete. **Always there, empty until a refusal** (`U-54`, as `U-48`
+          did): focus is on the row's button when the core refuses, and a region added with its
+          text already in it is not reliably announced (`U-41`). `act` empties it as an attempt
+          starts, so a second refusal in the same words is said again; `empty:mt-0` gives back
+          its margin while it says nothing (`U-45`). */}
+      <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
+        {problem}
+      </p>
 
       {rules.data.items.length === 0 ? (
         <div className="mt-3">
@@ -598,23 +601,23 @@ function RuleForm({
         </span>
       </label>
 
-      {failure !== null && (
-        <div role="alert" className="mt-4 text-sm text-down-fg">
-          <p>{failure.message}</p>
-          {isStale(failure) && (
-            <p className="mt-1">
-              Somebody else changed this rule since the form was opened.{' '}
-              <button
-                type="button"
-                onClick={onStale}
-                className="text-accent underline underline-offset-2"
-              >
-                Show the rule as it is now
-              </button>
-            </p>
-          )}
-        </div>
-      )}
+      {/* A refused save, in a region always there and empty until one (`U-54`), for the
+          reasons the panel's own is; `save` empties it as it starts. */}
+      <div role="alert" className="mt-4 text-sm text-down-fg empty:mt-0">
+        {failure !== null && <p>{failure.message}</p>}
+        {failure !== null && isStale(failure) && (
+          <p className="mt-1">
+            Somebody else changed this rule since the form was opened.{' '}
+            <button
+              type="button"
+              onClick={onStale}
+              className="text-accent underline underline-offset-2"
+            >
+              Show the rule as it is now
+            </button>
+          </p>
+        )}
+      </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button

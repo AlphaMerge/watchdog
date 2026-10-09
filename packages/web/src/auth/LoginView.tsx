@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, send } from '../api/client';
+import { useRefusal } from '../components/refusal';
 import { AuthPage } from './AuthPage';
 import { feedbackFor, type LoginFeedback, type LoginStage } from './login-model';
 import { useSession, type Principal } from './session';
@@ -20,7 +21,7 @@ export function LoginView(): React.JSX.Element {
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [stage, setStage] = useState<LoginStage>('credentials');
-  const [feedback, setFeedback] = useState<LoginFeedback | null>(null);
+  const [feedback, setFeedback, sayAgain] = useRefusal<LoginFeedback>();
   const [busy, setBusy] = useState(false);
   const loginField = useRef<HTMLInputElement>(null);
   const codeField = useRef<HTMLInputElement>(null);
@@ -58,7 +59,9 @@ export function LoginView(): React.JSX.Element {
     // whose message is Ajv's JSON Pointer. Saying it here costs a round trip and reads like a
     // sentence.
     if (login === '' || password === '') {
-      setFeedback({
+      // Decided here, in the handler that may have just said the same thing: emptied now and
+      // filled a moment later, so it is said again (`U-54`).
+      sayAgain({
         stage,
         message: 'Type a login and a password.',
         focus: 'login',
@@ -69,6 +72,8 @@ export function LoginView(): React.JSX.Element {
     }
 
     setBusy(true);
+    // Emptied as the attempt starts, so a second refusal in the same words is a change (`U-54`).
+    setFeedback(null);
     // The password is sent again with the code, because `POST /auth/login` is one exchange and
     // not two: there is no half-authenticated state on the core to hold a password between them,
     // which is why there is nothing to expire and nothing to clean up.
@@ -177,14 +182,17 @@ export function LoginView(): React.JSX.Element {
           </div>
         )}
 
-        {feedback !== null && (
-          <p
-            role="alert"
-            className="mt-3 border border-down-border bg-down-bg px-3 py-2 text-sm text-down-fg"
-          >
-            {feedback.message}
-          </p>
-        )}
+        {/* **Always there, empty until a refusal** (`U-54`, as `U-48` did for a refused setting):
+            a region added with its text already in it is not reliably announced (`U-41`). The
+            box is inside it, so an empty region draws nothing, and `empty:mt-0` gives back its
+            margin while it says nothing (`U-45`). */}
+        <div role="alert" className="mt-3 empty:mt-0">
+          {feedback !== null && (
+            <p className="border border-down-border bg-down-bg px-3 py-2 text-sm text-down-fg">
+              {feedback.message}
+            </p>
+          )}
+        </div>
 
         <div className="mt-4 flex items-center gap-3">
           <button

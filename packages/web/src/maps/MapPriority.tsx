@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ApiError, send } from '../api/client';
 import type { MapSummary } from '../api/types';
-import { ErrorPanel } from '../components/Panels';
+import { RefusalPanel } from '../components/Panels';
 import { HOME_PRIORITY } from '../routes/home-maps';
 
 /**
@@ -74,12 +74,17 @@ export function MapPriority({
           ))}
         </select>
       </label>
-      <p className="text-xs text-text-muted">
-        {priority >= HOME_PRIORITY
-          ? 'On the Overview page, because it is starred.'
-          : `A map at ${String(HOME_PRIORITY)} stars appears on the Overview page.`}
-      </p>
-      {failure !== null && <ErrorPanel error={failure} />}
+      {/* The sentence and the refusal under it are one block, the stack's last child: the
+          refusal is always there (`U-54`), and `space-y-2` gives every child but the last a
+          margin, which would sit under the sentence while it says nothing (`U-52`). */}
+      <div>
+        <p className="text-xs text-text-muted">
+          {priority >= HOME_PRIORITY
+            ? 'On the Overview page, because it is starred.'
+            : `A map at ${String(HOME_PRIORITY)} stars appears on the Overview page.`}
+        </p>
+        <RefusalPanel error={failure} className="mt-2 empty:mt-0" />
+      </div>
     </div>
   );
 }

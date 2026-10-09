@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountChoice, TemplateRecipient, UserGroupView } from '../src/api/types';
 import { RecipientsEditor } from '../src/routes/RecipientsEditor';
+import { alertSaying, expectQuiet } from './support/refusal-region';
 
 /**
  * The recipients editor, rendered (`M-20`).
@@ -197,8 +198,7 @@ describe('the recipients editor', () => {
   it('says so when a list cannot be loaded, rather than offering an empty one', async () => {
     stubApi({ status: 403, code: 'AUTH_FORBIDDEN', message: 'this action needs one of: admin' });
     show([{ kind: 'user', value: '4' }], true);
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toMatch(/Could not load the list: this action needs one of: admin/u);
+    await alertSaying(/Could not load the list: this action needs one of: admin/u);
     expect(screen.queryByRole('combobox', { name: 'Recipient 1: account' })).toBeNull();
   });
 
@@ -221,5 +221,79 @@ describe('the recipients editor', () => {
     }
     expect(screen.getByRole('textbox', { name: 'Recipient 1: address' })).toBeDefined();
     expect(screen.getByRole('combobox', { name: 'Recipient 2: account' })).toBeDefined();
+  });
+});
+
+/**
+ * A list that could not be read, announced (`U-54`). Every row has its region from the start,
+ * empty, so the failure lands in a node that was there before it — whether it arrives after the
+ * row is drawn, or is already known when an address row is switched to a user. While empty it is
+ * out of the row's flow, so the row's `gap-2` does not open for it.
+ */
+describe('a list that could not be read (U-54)', () => {
+  const FORBIDDEN = {
+    status: 403,
+    code: 'AUTH_FORBIDDEN',
+    message: 'this action needs one of: admin',
+  };
+  const SAID = 'Could not load the list: this action needs one of: admin';
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('is said in the row’s own region when a row is switched to a user, and goes with the address', async () => {
+    const asked = stubApi(FORBIDDEN);
+    show([{ kind: 'address', value: 'ops@example.test' }], true);
+    const region = within(screen.getByRole('listitem')).getByRole('alert');
+    expectQuiet(region, ['empty:absolute']);
+
+    // Both lists are refused while the row is an address, which needs neither: nothing is said.
+    await waitFor(() => {
+      expect(asked).toHaveLength(2);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(region.matches(':empty')).toBe(true);
+
+    const kind = screen.getByLabelText('Recipient 1: kind');
+    fireEvent.change(kind, { target: { value: 'user' } });
+    expect(region.textContent).toBe(SAID);
+    expect(within(screen.getByRole('listitem')).getByRole('alert')).toBe(region);
+    expect(screen.queryByRole('combobox', { name: 'Recipient 1: account' })).toBeNull();
+
+    fireEvent.change(kind, { target: { value: 'address' } });
+    expect(region.matches(':empty')).toBe(true);
+    expect(within(screen.getByRole('listitem')).getByRole('alert')).toBe(region);
+  });
+
+  it('is said in the region a user row already had when the list fails after it is drawn', async () => {
+    let refuse: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      refuse = resolve;
+    });
+    vi.stubGlobal('fetch', () =>
+      held.then(
+        () =>
+          new Response(
+            JSON.stringify({ error: { code: FORBIDDEN.code, message: FORBIDDEN.message } }),
+            { status: FORBIDDEN.status, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    show([{ kind: 'user', value: '4' }], true);
+    const region = within(screen.getByRole('listitem')).getByRole('alert');
+    expectQuiet(region, ['empty:absolute']);
+    expect(screen.getByRole('combobox', { name: 'Recipient 1: account' })).toBeDefined();
+
+    refuse();
+    await waitFor(() => {
+      expect(region.textContent).toBe(SAID);
+    });
+    expect(within(screen.getByRole('listitem')).getByRole('alert')).toBe(region);
   });
 });

@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_IMAGE_BYTES, backgroundUrl } from '../src/maps/background';
 import { MapBackgroundControl } from '../src/maps/MapBackgroundControl';
 import { MapBackgroundImage } from '../src/maps/MapBackgroundImage';
+import { SAY_AGAIN_MS } from '../src/components/refusal';
+import { expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * Putting a floor plan behind a map (`G-05`, `ADR-003`).
@@ -126,5 +128,82 @@ describe('drawing one', () => {
     const image = container.querySelector('img');
     expect(image?.getAttribute('alt')).toBe('');
     expect(image?.getAttribute('aria-hidden')).toBe('true');
+  });
+});
+
+/**
+ * A refused background, announced (`U-54`): said through an `ErrorPanel` in a region that is in
+ * the tree and empty before anything is chosen. The size refusal is decided in the handler that
+ * may have just said the same thing, so it empties first and fills a moment later; an upload the
+ * core accepts empties it as it starts.
+ */
+describe('a refused background (U-54)', () => {
+  it('says the same size refusal twice, emptied first, and empties on an upload accepted', async () => {
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(new Response(JSON.stringify({ mediaType: 'image/png' }), { status: 200 })),
+    );
+    render(<MapBackgroundControl mapId={4} onChanged={() => undefined} />);
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-2', 'empty:mt-0']);
+    expect(region.parentElement?.lastElementChild).toBe(region);
+    expect(region.parentElement?.parentElement?.lastElementChild).toBe(region.parentElement);
+    const choose = (bytes: number): void => {
+      fireEvent.change(screen.getByLabelText('Background image'), {
+        target: { files: [fileOf(bytes)] },
+      });
+    };
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      choose(MAX_IMAGE_BYTES + 1);
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS);
+      });
+      expect(region.textContent).toContain('a background may be 2 MiB');
+      const said = region.textContent;
+
+      // The same refusal again: emptied as it is chosen, and only then filled.
+      choose(MAX_IMAGE_BYTES + 1);
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS - 1);
+      });
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(region.textContent).toBe(said);
+      expect(screen.getByRole('alert')).toBe(region);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    choose(64);
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLInputElement>('Background image').disabled).toBe(false);
+    });
+    expect(speaking()).toEqual([]);
+  });
+
+  it('says the core’s refusal in that same node', async () => {
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ error: { code: 'MAP_INVALID', message: 'SVG is not accepted' } }),
+          { status: 400 },
+        ),
+      ),
+    );
+    render(<MapBackgroundControl mapId={4} onChanged={() => undefined} />);
+    const region = screen.getByRole('alert');
+    fireEvent.change(screen.getByLabelText('Background image'), {
+      target: { files: [fileOf(64)] },
+    });
+    await waitFor(() => {
+      expect(region.textContent).toContain('SVG is not accepted');
+    });
+    expect(screen.getAllByRole('alert')).toEqual([region]);
   });
 });

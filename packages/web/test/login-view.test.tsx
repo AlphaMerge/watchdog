@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SessionProvider } from '../src/auth/SessionProvider';
+import { SAY_AGAIN_MS } from '../src/components/refusal';
+import { alertSaying, expectQuiet } from './support/refusal-region';
 
 /**
  * The login form, end to end against a scripted core (`U-17`).
@@ -166,8 +168,7 @@ describe('logging in', () => {
     await type('Authenticator code', '000000');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('not accepted');
+    await alertSaying('not accepted');
     // The password box is untouched. Emptying it would make somebody retype a credential the
     // core has already told us is right.
     expect(screen.getByLabelText<HTMLInputElement>('Password').value).toBe('a-real-password');
@@ -191,8 +192,7 @@ describe('logging in', () => {
     await type('Password', 'a-real-password');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('administrator');
+    await alertSaying('administrator');
     // No field appears that this account has nothing to type into, and the button stops
     // offering an attempt that will answer the same way for ever.
     expect(screen.queryByLabelText('Authenticator code')).toBeNull();
@@ -243,8 +243,7 @@ describe('logging in', () => {
     await screen.findByLabelText('Login');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('Type a login and a password');
+    await alertSaying('Type a login and a password');
     expect(asked.some((call) => call.url === LOGIN)).toBe(false);
   });
 
@@ -260,7 +259,101 @@ describe('logging in', () => {
     await type('Password', 'wrong');
     submit();
 
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('30 seconds');
+    await alertSaying('30 seconds');
+  });
+});
+
+/**
+ * The refusal, announced (`U-54`): in the tree and empty before anything is sent, the refusal in
+ * that same node, emptied as the next attempt starts or a field is edited, and said again when it
+ * is the same words — after a round trip from the core, or a moment after the form decides it.
+ */
+describe('a refused login (U-54)', () => {
+  const REJECTED = 'that login and password were not accepted';
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('is there empty before, says the refusal in the same node, and empties on an edit', async () => {
+    stubFetch([refusal(401, 'AUTH_REJECTED', REJECTED)]);
+    mount();
+    await screen.findByLabelText('Login');
+
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+
+    await type('Login', 'ops');
+    await type('Password', 'wrong');
+    submit();
+    expect(await alertSaying(REJECTED)).toBe(region);
+    expect(region.textContent).toBe(REJECTED);
+
+    await type('Password', 'right');
+    expect(region.matches(':empty')).toBe(true);
+    expect(screen.getByRole('alert')).toBe(region);
+  });
+
+  it('empties as an attempt starts, so a second refusal in the same words is said again', async () => {
+    stubFetch([refusal(401, 'AUTH_REJECTED', REJECTED), refusal(401, 'AUTH_REJECTED', REJECTED)]);
+    mount();
+    await type('Login', 'ops');
+    await type('Password', 'wrong');
+    const region = screen.getByRole('alert');
+    submit();
+    await waitFor(() => {
+      expect(region.textContent).toBe(REJECTED);
+    });
+
+    submit();
+    // Committed empty before the core answers: React did not fold the two into one.
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(region.textContent).toBe(REJECTED);
+    });
+    expect(screen.getByRole('alert')).toBe(region);
+  });
+
+  it('says an empty form again, emptied first and filled a moment later', async () => {
+    stubFetch([]);
+    mount();
+    await screen.findByLabelText('Login');
+    const region = screen.getByRole('alert');
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      submit();
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS);
+      });
+      expect(region.textContent).toBe('Type a login and a password.');
+
+      // The same refusal again: emptied as the button is pressed, and only then filled.
+      submit();
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS - 1);
+      });
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(region.textContent).toBe('Type a login and a password.');
+      expect(screen.getByRole('alert')).toBe(region);
+
+      // An edit before it is said drops it: nothing is said about what was there before.
+      submit();
+      fireEvent.change(screen.getByLabelText('Login'), { target: { value: 'ops' } });
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS);
+      });
+      expect(region.matches(':empty')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

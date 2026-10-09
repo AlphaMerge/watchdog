@@ -3,6 +3,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MapSummary } from '../src/api/types';
 import { MapPriority } from '../src/maps/MapPriority';
+import { MapsView } from '../src/routes/MapsView';
+import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
 import { HOME_LIMIT, HOME_PRIORITY, starredMaps } from '../src/routes/home-maps';
 
 /**
@@ -133,5 +135,98 @@ describe('starring one', () => {
       expect(screen.getByRole('alert').textContent).toContain('MAP_CHANGED');
     });
     expect(screen.getByLabelText<HTMLSelectElement>('Priority').value).toBe('3');
+  });
+});
+
+/**
+ * A refused star and a refused new map, announced (`U-54`): each said through an `ErrorPanel` in a
+ * region that is in the tree and empty before anything is sent, so the refusal lands in a node
+ * that was there before it; the next attempt empties it as it starts, so the same words are said
+ * again; one the core accepts leaves it empty.
+ */
+describe('a refused map change (U-54)', () => {
+  /** Each write takes the next answer: a 412 for `true`, accepted for `false`. */
+  function core(...refusals: boolean[]): { writes: () => number } {
+    let writes = 0;
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      const json = (status: number, body: unknown): Promise<Response> =>
+        Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      if ((init?.method ?? 'GET') === 'GET') return json(200, { items: [] });
+      writes += 1;
+      return refusals.shift() === true
+        ? json(412, { error: { code: 'MAP_CHANGED', message: 'moved on' } })
+        : json(200, map(9, 5));
+    });
+    return { writes: () => writes };
+  }
+
+  it('says a refused star in the region under the sentence, again, and empties on one accepted', async () => {
+    const { writes } = core(true, true, false);
+    render(
+      <MemoryRouter>
+        <MapPriority map={map(4, 3)} version={() => 7} onSaved={() => undefined} />
+      </MemoryRouter>,
+    );
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-2', 'empty:mt-0']);
+    // The sentence and the region are one block, the control's last child (`space-y-2`).
+    expect(region.parentElement?.lastElementChild).toBe(region);
+    expect(region.parentElement?.parentElement?.lastElementChild).toBe(region.parentElement);
+    const choose = (stars: string): void => {
+      fireEvent.change(screen.getByLabelText('Priority'), { target: { value: stars } });
+    };
+    const idle = async (): Promise<void> => {
+      await waitFor(() => {
+        expect(screen.getByLabelText<HTMLSelectElement>('Priority').disabled).toBe(false);
+      });
+    };
+
+    choose('5');
+    expect(await alertSaying('MAP_CHANGED')).toBe(region);
+    expect(screen.getAllByRole('alert')).toEqual([region]);
+    await idle();
+    choose('4');
+    // Committed empty before the core answers: React did not fold the two into one.
+    expect(region.matches(':empty')).toBe(true);
+    expect(await alertSaying('MAP_CHANGED')).toBe(region);
+    await idle();
+    choose('5');
+    expect(region.matches(':empty')).toBe(true);
+    await idle();
+    expect(writes()).toBe(3);
+    expect(speaking()).toEqual([]);
+  });
+
+  it('says a refused new map in the card’s region, again, and empties on one accepted', async () => {
+    const { writes } = core(true, true, false);
+    render(
+      <MemoryRouter>
+        <MapsView />
+      </MemoryRouter>,
+    );
+    await screen.findByText('No maps yet.');
+    const region = screen.getByRole('alert');
+    expectQuiet(region, ['mt-3', 'empty:mt-0']);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Floor 2' } });
+    const create = async (): Promise<void> => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Create' }));
+    };
+
+    await create();
+    expect(await alertSaying('MAP_CHANGED')).toBe(region);
+    await create();
+    expect(region.matches(':empty')).toBe(true);
+    expect(await alertSaying('MAP_CHANGED')).toBe(region);
+    await create();
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(writes()).toBe(3);
+    });
+    expect(speaking()).toEqual([]);
   });
 });

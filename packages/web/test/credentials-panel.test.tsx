@@ -16,6 +16,7 @@ import { ChannelTable } from '../src/routes/detail/ChannelTable';
 import { CredentialsPanel } from '../src/routes/detail/CredentialsPanel';
 import { OUTSIDE_MEANS } from '../src/routes/detail/credentials-model';
 import { UnboundedCredentialsView } from '../src/routes/UnboundedCredentialsView';
+import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The Credentials tab, rendered (`U-21`).
@@ -140,9 +141,10 @@ interface Stub {
   kinds?: CredentialKindSummary[];
   /** What `GET …/access/effective` answers; a number is a refusal with that status. */
   right?: 'none' | 'read' | 'write' | 'full' | number;
-  preview?: CredentialWrite | Refused;
+  /** A list is answered one entry per request, for a case that asks more than once. */
+  preview?: CredentialWrite | Refused | (CredentialWrite | Refused)[];
   write?: CredentialWrite | Refused;
-  removalPreview?: CredentialRemoval | Refused;
+  removalPreview?: CredentialRemoval | Refused | (CredentialRemoval | Refused)[];
   removal?: CredentialRemoval | Refused;
   unbounded?: UnboundedCredential[];
   /**
@@ -176,10 +178,12 @@ function stubApi(stub: Stub): { calls: Call[] } {
         headers: { 'content-type': 'application/json' },
       }),
     );
-  const staged = (answer: unknown): Promise<Response> =>
-    typeof answer === 'object' && answer !== null && 'status' in answer && 'body' in answer
+  const staged = (staging: unknown): Promise<Response> => {
+    const answer: unknown = Array.isArray(staging) ? staging.shift() : staging;
+    return typeof answer === 'object' && answer !== null && 'status' in answer && 'body' in answer
       ? reply((answer as { status: number }).status, (answer as { body: unknown }).body)
       : reply(200, answer);
+  };
 
   vi.stubGlobal('fetch', (path: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
@@ -648,8 +652,7 @@ describe('the credentials tab', () => {
       anyway.focus();
       fireEvent.click(anyway);
 
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toContain('needs write on that probe');
+      await alertSaying('needs write on that probe');
       expect(writes(calls)).toHaveLength(2);
       expect(screen.queryByRole('group', { name: 'Confirm this save' })).toBeNull();
       // Waited for: the alert is in the document a moment before the effect that moves focus.
@@ -737,8 +740,7 @@ describe('the credentials tab', () => {
       });
       narrow(form);
 
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toContain('the database went away');
+      const alert = await alertSaying('the database went away');
       // The save was made, and the tab still says so, with the list it had.
       expect(screen.getByText('Saved the SNMP set on Rack A.').getAttribute('role')).toBe('status');
       expect(screen.getByRole('heading', { name: 'Credential sets' })).toBeDefined();
@@ -752,7 +754,7 @@ describe('the credentials tab', () => {
       failing = false;
       fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
       await waitFor(() => {
-        expect(screen.queryByRole('alert')).toBeNull();
+        expect(speaking()).toEqual([]);
       });
       expect(editButton('SNMP').disabled).toBe(false);
       expect(screen.getByText('Saved the SNMP set on Rack A.')).toBeDefined();
@@ -904,8 +906,7 @@ describe('the credentials tab', () => {
         },
       });
       narrow(form);
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toContain('allowed target 2');
+      await alertSaying('allowed target 2');
       const entry = within(form).getByLabelText('Allowed targets 2');
       const describedBy = entry.getAttribute('aria-describedby') ?? '';
       expect(describedBy).not.toBe('');
@@ -943,7 +944,7 @@ describe('the credentials tab', () => {
       /** The second target, once the refusal is on it. */
       const refused = async (form: HTMLElement): Promise<HTMLInputElement> => {
         narrow(form);
-        await screen.findByRole('alert');
+        await alertSaying(SAID);
         const second = targets(form)[1];
         if (second === undefined) throw new Error('two targets expected');
         await waitFor(() => {
@@ -1069,8 +1070,7 @@ describe('the credentials tab', () => {
       sure.focus();
       fireEvent.click(sure);
 
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toContain('needs write on that probe');
+      await alertSaying('needs write on that probe');
       expect(writes(calls)).toHaveLength(2);
       expect(screen.queryByRole('group', { name: 'Confirm removing SNMP credentials' })).toBeNull();
       await waitFor(() => {
@@ -1125,8 +1125,7 @@ describe('the credentials tab', () => {
       });
       fireEvent.click(within(confirm).getByRole('button', { name: 'Remove the set' }));
 
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toContain('the database went away');
+      const alert = await alertSaying('the database went away');
       expect(within(alert).getByRole('button', { name: 'Try again' })).toBeDefined();
       expect(
         screen.getByText(
@@ -1149,8 +1148,7 @@ describe('the credentials tab', () => {
           },
         },
       });
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toContain('needs write on that probe');
+      await alertSaying('needs write on that probe');
       expect(screen.queryByRole('group', { name: 'Confirm removing SNMP credentials' })).toBeNull();
       expect(writes(calls)).toHaveLength(1);
     });
@@ -1271,5 +1269,130 @@ describe('Core Health’s count of sets without bounds', () => {
       </MemoryRouter>,
     );
     expect(screen.queryByRole('link')).toBeNull();
+  });
+});
+
+/**
+ * The refusals, announced (`U-54`). A row's check or removal and a form's check or save each have
+ * a region in the tree and empty before anything is sent; the refusal lands in that same node with
+ * its correlation id, is said again in the same words because the next attempt empties it as it
+ * starts, and an attempt the core accepts leaves it empty.
+ */
+describe('a refused credential change (U-54)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const SAID = 'needs write on that probe';
+  const REFUSED_WITH_ID: Refused = {
+    status: 403,
+    body: { error: { code: 'AUTH_FORBIDDEN', message: SAID, correlationId: 'req-54' } },
+  };
+  const ACCEPTED_REMOVAL: CredentialRemoval = {
+    kind: 'snmp',
+    removed: true,
+    sensors: 0,
+    nowInherited: null,
+  };
+
+  /** The id in the alert itself, so it is said with the message, set apart as elsewhere. */
+  const expectId = (region: HTMLElement): void => {
+    const id = within(region).getByText('req-54');
+    expect(id.tagName).toBe('SPAN');
+    expect(id.classList.contains('font-mono')).toBe(true);
+    expect(id.classList.contains('ml-2')).toBe(true);
+  };
+
+  it('says a refused removal check in the row’s region, again on the next, and empties on one accepted', async () => {
+    await show({
+      sets: [OWN_SNMP],
+      removalPreview: [REFUSED_WITH_ID, REFUSED_WITH_ID, ACCEPTED_REMOVAL],
+    });
+    const region = within(row('SNMP')).getByRole('alert');
+    expectQuiet(region, ['mt-2', 'empty:mt-0']);
+    const remove = (): void => {
+      fireEvent.click(within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }));
+    };
+
+    remove();
+    expect(await alertSaying(SAID)).toBe(region);
+    expect(region.textContent).toBe(`${SAID}req-54`);
+    expectId(region);
+    await waitFor(() => {
+      expect(
+        within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }),
+      ).toHaveProperty('disabled', false);
+    });
+
+    remove();
+    // Committed empty before the core answers: React did not fold the two into one.
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(region.textContent).toBe(`${SAID}req-54`);
+    });
+    expect(within(row('SNMP')).getByRole('alert')).toBe(region);
+    await waitFor(() => {
+      expect(
+        within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }),
+      ).toHaveProperty('disabled', false);
+    });
+
+    remove();
+    await screen.findByRole('group', { name: 'Confirm removing SNMP credentials' });
+    expect(region.matches(':empty')).toBe(true);
+    expect(within(row('SNMP')).getByRole('alert')).toBe(region);
+    expect(speaking()).toEqual([]);
+  });
+
+  it('says a refused save check in the form’s region, again on the next, and empties on one accepted', async () => {
+    const { form } = await editSnmp({
+      preview: [REFUSED_WITH_ID, REFUSED_WITH_ID, written({ withholds: 1, newlyWithheld: 1 })],
+    });
+    const region = within(form).getByRole('alert');
+    expectQuiet(region, ['mb-4', 'empty:mb-0']);
+    // The confirmation or the buttons follow it in one block, so it never ends the form's stack.
+    expect(region.parentElement?.firstElementChild).toBe(region);
+    expect(region.parentElement?.parentElement).toBe(form);
+    expect(form.lastElementChild).toBe(region.parentElement);
+
+    fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
+    fireEvent.change(within(form).getByLabelText('Allowed targets 2'), {
+      target: { value: '10.9.0.0/16' },
+    });
+    const save = (): void => {
+      fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+    };
+
+    save();
+    expect(await alertSaying(SAID)).toBe(region);
+    expectId(region);
+    await waitFor(() => {
+      expect(within(form).getByRole('button', { name: 'Save changes' })).toHaveProperty(
+        'disabled',
+        false,
+      );
+    });
+
+    save();
+    expect(region.matches(':empty')).toBe(true);
+    await waitFor(() => {
+      expect(region.textContent).toBe(`${SAID}req-54`);
+    });
+    await waitFor(() => {
+      expect(within(form).getByRole('button', { name: 'Save changes' })).toHaveProperty(
+        'disabled',
+        false,
+      );
+    });
+
+    save();
+    const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
+    expect(region.matches(':empty')).toBe(true);
+    expect(within(form).getByRole('alert')).toBe(region);
+    // Still the block's first child, above the confirmation that took the buttons' place.
+    expect(region.nextElementSibling).toBe(confirm);
   });
 });

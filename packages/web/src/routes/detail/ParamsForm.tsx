@@ -133,53 +133,66 @@ export function ParamsForm({
 
       {type.hasPreview && <MappingPreview typeId={type.id} params={values} />}
 
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="submit"
-          disabled={saving || !dirty || problems.length > 0}
-          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-        >
-          {saving ? 'Saving…' : 'Save parameters'}
-        </button>
-        <button
-          type="button"
-          disabled={saving || !dirty}
-          onClick={() => {
-            setValues(stored);
-            setReplacing(new Set());
-            setServerProblems([]);
-            setFailed(null);
-          }}
-          className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
-        >
-          Discard changes
-        </button>
-        {problems.length > 0 && (
-          <span className="text-xs text-text-muted">
-            {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'} attention
-          </span>
-        )}
-        {saved && !dirty && (
-          <span className="text-xs text-up-fg" role="status">
-            Saved. The probe picks the change up on its next configuration push.
-          </span>
-        )}
-      </div>
-
-      {failed !== null && modeChanges !== null && (
-        <ModeRefusal error={failed} changes={modeChanges} />
-      )}
-      {failed !== null && modeChanges === null && (
-        <p className="text-xs text-down-fg" role="alert">
-          {failed.message}
-          {failed.status === 412 &&
-            ' — somebody else changed this sensor since this form was opened. Reload to see' +
-              ' their change before saving over it.'}
-          {failed.correlationId !== undefined && (
-            <span className="ml-2 font-mono"> {failed.correlationId}</span>
+      {/* The buttons and the refusal under them are one block, the form's last child: the refusal
+          is always there, and `space-y-4` gives every child but the last a margin, so as a child
+          of its own it would put that margin under the buttons while it says nothing (`U-52`). */}
+      <div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="submit"
+            disabled={saving || !dirty || problems.length > 0}
+            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save parameters'}
+          </button>
+          <button
+            type="button"
+            disabled={saving || !dirty}
+            onClick={() => {
+              setValues(stored);
+              setReplacing(new Set());
+              setServerProblems([]);
+              setFailed(null);
+            }}
+            className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Discard changes
+          </button>
+          {problems.length > 0 && (
+            <span className="text-xs text-text-muted">
+              {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'} attention
+            </span>
           )}
-        </p>
-      )}
+          {saved && !dirty && (
+            <span className="text-xs text-up-fg" role="status">
+              Saved. The probe picks the change up on its next configuration push.
+            </span>
+          )}
+        </div>
+
+        {/* **A refused save, in a region always there and empty until a refusal** (`U-54`, as
+          `U-48` and `U-52` did): focus is on Save when the core refuses, nothing moves it, and a
+          region added with its text already in it is not reliably announced (`U-41`). One region
+          for both shapes of refusal, so the one that comes is said whichever it is. `save` and
+          *Discard changes* empty it, so a second refusal in the same words is a change again.
+          No space while it says nothing (`empty:mt-0`, `U-45`). */}
+        <div role="alert" className="mt-4 empty:mt-0">
+          {failed !== null && modeChanges !== null && (
+            <ModeRefusal error={failed} changes={modeChanges} />
+          )}
+          {failed !== null && modeChanges === null && (
+            <p className="text-xs text-down-fg">
+              {failed.message}
+              {failed.status === 412 &&
+                ' — somebody else changed this sensor since this form was opened. Reload to see' +
+                  ' their change before saving over it.'}
+              {failed.correlationId !== undefined && (
+                <span className="ml-2 font-mono"> {failed.correlationId}</span>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
     </form>
   );
 }
@@ -191,8 +204,10 @@ export function ParamsForm({
  * **Said in full, not as a line of small red text under the buttons.** The refusal is not a typo
  * to correct: the edit cannot be made to this sensor at all, and the way forward is a different
  * action — put the value back, or add a new sensor. So it names each channel and direction, and
- * keeps the core's own sentence, which says why. `role="alert"` because it appears after a submit,
- * away from where focus is, and nothing else would tell a screen reader the save did not happen.
+ * keeps the core's own sentence, which says why. Said by the form's refusal region, which is an
+ * alert because it appears after a submit, away from where focus is, and nothing else would tell a
+ * screen reader the save did not happen; not an alert of its own, since it is added with its text
+ * and would not be reliably announced (`U-54`).
  */
 function ModeRefusal({
   error,
@@ -202,7 +217,7 @@ function ModeRefusal({
   changes: readonly ModeChange[];
 }): React.JSX.Element {
   return (
-    <div role="alert" className="space-y-2 border border-down-border bg-down-bg p-3 text-sm">
+    <div className="space-y-2 border border-down-border bg-down-bg p-3 text-sm">
       <p className="font-medium text-down-fg">
         Not saved: this edit would change what{' '}
         {changes.length > 1 ? 'these channels store' : 'a channel stores'}.
