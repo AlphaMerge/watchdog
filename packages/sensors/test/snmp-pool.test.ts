@@ -8,6 +8,7 @@ import {
   type SnmpCredentials,
 } from '../src/support/snmp/index.js';
 import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
+import { pollWithin } from './support/within.js';
 
 const SYS_DESCR = '1.3.6.1.2.1.1.1.0';
 const MIB: AgentEntry[] = [{ oid: SYS_DESCR, type: 'OctetString', value: 'ms-target router' }];
@@ -239,11 +240,7 @@ describe('eviction', () => {
     const session = lease.session;
     lease.release();
 
-    const deadline = Date.now() + 2_000;
-    while (!session.closed && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    assert.equal(session.closed, true, 'the sweeper should have closed an idle session');
+    await pollWithin(2_000, 'the sweeper to close an idle session', () => session.closed);
     assert.ok(pool.stats().evicted >= 1);
   });
 

@@ -6,6 +6,7 @@ import {
   openTrapReceiver,
   type ReceivedTrap,
 } from '../src/support/snmp/receiver.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * A real socket, a real sender, and both wire formats.
@@ -26,12 +27,16 @@ let receiver: { close(): Promise<void> };
 /** Set to make the next notification's handler throw, as a defect downstream would. */
 let throwNext = false;
 
-/** Waits for the receiver to have `count` notifications, or gives up. */
-async function settle(count: number, withinMs = 3_000): Promise<void> {
-  const deadline = Date.now() + withinMs;
-  while (received.length < count && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+/**
+ * Waits for the receiver to have `count` notifications, or fails saying how many it had. A
+ * caller closes its sender in a `finally`: a failure here no longer falls through to it.
+ */
+async function settle(count: number, what = `${String(count)} notifications`): Promise<void> {
+  await pollWithin(
+    3_000,
+    () => `${what}; the receiver had ${String(received.length)}`,
+    () => received.length >= count,
+  );
 }
 
 before(() => {
@@ -68,9 +73,12 @@ describe('receiving notifications over a real socket', () => {
   it('receives a v1 trap and maps it onto its v2c equivalent', async () => {
     received = [];
     const session = sender(snmp.Version1);
-    session.trap(2 /* linkDown */, () => undefined);
-    await settle(1);
-    session.close();
+    try {
+      session.trap(2 /* linkDown */, () => undefined);
+      await settle(1, 'a v1 trap');
+    } finally {
+      session.close();
+    }
 
     const [trap] = received;
     assert.ok(trap, 'no v1 trap arrived');
@@ -85,9 +93,12 @@ describe('receiving notifications over a real socket', () => {
   it('receives a v2c trap and reads its OID out of the varbinds', async () => {
     received = [];
     const session = sender(snmp.Version2c);
-    session.trap(LINK_DOWN, [], () => undefined);
-    await settle(1);
-    session.close();
+    try {
+      session.trap(LINK_DOWN, [], () => undefined);
+      await settle(1, 'a v2c trap');
+    } finally {
+      session.close();
+    }
 
     const [trap] = received;
     assert.ok(trap, 'no v2c trap arrived');
@@ -120,19 +131,22 @@ describe('receiving notifications over a real socket', () => {
   it('carries the varbinds a device sent, decoded', async () => {
     received = [];
     const session = sender(snmp.Version2c);
-    session.trap(
-      LINK_DOWN,
-      [
-        {
-          oid: '1.3.6.1.4.1.9999.1.1',
-          type: snmp.ObjectType['OctetString'] ?? 4,
-          value: 'disk failed',
-        },
-      ],
-      () => undefined,
-    );
-    await settle(1);
-    session.close();
+    try {
+      session.trap(
+        LINK_DOWN,
+        [
+          {
+            oid: '1.3.6.1.4.1.9999.1.1',
+            type: snmp.ObjectType['OctetString'] ?? 4,
+            value: 'disk failed',
+          },
+        ],
+        () => undefined,
+      );
+      await settle(1, 'a trap with varbinds');
+    } finally {
+      session.close();
+    }
 
     const [trap] = received;
     assert.ok(trap);
@@ -150,26 +164,28 @@ describe('receiving notifications over a real socket', () => {
     malformed = [];
     const { createSocket } = await import('node:dgram');
     const socket = createSocket('udp4');
-    await new Promise<void>((resolve) => {
-      socket.send(Buffer.from([0x00, 0x01, 0x02, 0x03]), PORT, '127.0.0.1', () => {
-        resolve();
+    try {
+      await new Promise<void>((resolve) => {
+        socket.send(Buffer.from([0x00, 0x01, 0x02, 0x03]), PORT, '127.0.0.1', () => {
+          resolve();
+        });
       });
-    });
-    const deadline = Date.now() + 2_000;
-    while (malformed.length === 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await pollWithin(2_000, 'the garbage to be reported', () => malformed.length > 0);
+    } finally {
+      socket.close();
     }
-    socket.close();
-
-    assert.equal(malformed.length, 1, 'the garbage should have been reported, not thrown');
+    assert.equal(malformed.length, 1, 'the garbage should have been reported once');
 
     // And the receiver is still usable, which is the assertion that matters.
     received = [];
     const session = sender(snmp.Version2c);
-    session.trap(LINK_DOWN, [], () => undefined);
-    await settle(1);
-    session.close();
-    assert.equal(received.length, 1, 'the receiver stopped working after a bad packet');
+    try {
+      session.trap(LINK_DOWN, [], () => undefined);
+      await settle(1, 'a trap after a bad packet');
+    } finally {
+      session.close();
+    }
+    assert.equal(received.length, 1, 'one trap, received once');
   });
 });
 
@@ -181,20 +197,23 @@ describe('a handler that throws (P-217)', () => {
     malformed = [];
     throwNext = true;
     const first = sender(snmp.Version2c);
-    first.trap(LINK_DOWN, [], () => undefined);
-    const deadline = Date.now() + 3_000;
-    while (malformed.length === 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      first.trap(LINK_DOWN, [], () => undefined);
+      await pollWithin(3_000, 'the throw to be reported', () => malformed.length > 0);
+    } finally {
+      first.close();
     }
-    first.close();
     assert.deepEqual(malformed, ['handling a trap threw: a defect in whatever handles the trap']);
 
     received = [];
     const second = sender(snmp.Version2c);
-    second.trap(LINK_DOWN, [], () => undefined);
-    await settle(1);
-    second.close();
-    assert.equal(received.length, 1, 'the receiver stopped working after a handler threw');
+    try {
+      second.trap(LINK_DOWN, [], () => undefined);
+      await settle(1, 'a trap after a handler threw');
+    } finally {
+      second.close();
+    }
+    assert.equal(received.length, 1, 'one trap, received once');
   });
 });
 

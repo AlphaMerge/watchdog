@@ -5,7 +5,6 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { setTimeout as delay } from 'node:timers/promises';
 import type { ProbeConfig } from '@ms/shared';
 import { dispatchTables, probeCatalogue } from '../src/catalogue.js';
 import { buildFindings } from '../src/config-problems.js';
@@ -15,9 +14,9 @@ import {
   generateCerts,
   opensslAvailable,
   startProbe,
-  within,
   type RunningProbe,
 } from './support/probe-process.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * A probe that runs as root and would run its scripts as root (`P-276`).
@@ -321,23 +320,17 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
       what: string,
       pick: (one: Record<string, unknown>) => boolean,
     ): Promise<Record<string, unknown>> => {
-      // An object, so the loop reads what `finally` wrote rather than what it was when narrowed.
-      const waiting = { over: false };
-      try {
-        return await within(
-          60_000,
-          what,
-          (async () => {
-            for (;;) {
-              const found = probe.logs().find(pick);
-              if (found !== undefined || waiting.over) return found ?? {};
-              await delay(25);
-            }
-          })(),
-        );
-      } finally {
-        waiting.over = true;
-      }
+      let found: Record<string, unknown> | undefined;
+      await pollWithin(
+        60_000,
+        what,
+        () => {
+          found = probe.logs().find(pick);
+          return found !== undefined;
+        },
+        25,
+      );
+      return found ?? {};
     };
     const said = (pattern: RegExp) => (one: Record<string, unknown>) =>
       typeof one['msg'] === 'string' && pattern.test(one['msg']);

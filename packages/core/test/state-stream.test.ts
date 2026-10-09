@@ -952,13 +952,20 @@ describe(
           return epochNow();
         },
       });
-      /** Lets a sweep the mocked timer started run to its end: its awaits are real queries. */
+      /**
+       * Lets a sweep the mocked timer started run to its end: its awaits are real queries. Only
+       * `setInterval` is mocked here, so `pollWithin`'s timers — the global `setTimeout` and
+       * `node:timers/promises`' — are real ones, and `Date` is too. The interval is 0 where the
+       * loop it replaced turned on `setImmediate`.
+       */
       const swept = async (expected: number): Promise<void> => {
-        const deadline = Date.now() + 5_000;
-        while (reads < expected) {
-          if (Date.now() > deadline) assert.fail('the timer started no sweep');
-          await new Promise((resolve) => setImmediate(resolve));
-        }
+        await pollWithin(
+          5_000,
+          () =>
+            `the timer to start sweep ${String(expected)}; the epoch was read ${String(reads)} times`,
+          () => reads >= expected,
+          0,
+        );
         await new Promise((resolve) => setTimeout(resolve, 50));
       };
 
@@ -2653,11 +2660,8 @@ describe(
           const frame = Buffer.from([0x81, 0x81, 0, 0, 0, 0, 0x35]);
           client.write(Buffer.concat(Array.from({ length: junk }, () => frame)));
 
-          const deadline = Date.now() + 30_000;
-          while (stream.stats.severed === 0 && Date.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
-          assert.equal(stream.stats.severed, 1, 'the socket was never closed');
+          await pollWithin(30_000, 'the core to sever the socket', () => stream.stats.severed > 0);
+          assert.equal(stream.stats.severed, 1, 'one socket, severed once');
 
           // What it can still read is what the kernel held when the core let go, not the 7 MiB.
           let received = 0;

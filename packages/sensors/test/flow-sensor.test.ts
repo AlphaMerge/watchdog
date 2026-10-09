@@ -4,6 +4,7 @@ import { exportNetflowV5 } from '@ms/simulators';
 import type { CheckContext, ReceivedBatch, ReceivedNotification } from '../src/contract.js';
 import { openFlowReceiver, type ReceivedFlow } from '../src/support/flow/receiver.js';
 import { flowCollector, inCidr, matchesFlow, readCustomChannels } from '../src/types/flow.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * The flow sensor type (`B-04`).
@@ -380,11 +381,7 @@ describe('which exporters are this device (`P-246`)', () => {
     await exportNetflowV5({ host: from, port }, [
       { srcAddr: '10.0.0.1', dstAddr: '10.0.0.2', protocol: 6, packets: 1, octets },
     ]);
-    const deadline = Date.now() + 5_000;
-    while (seen.length === 0) {
-      if (Date.now() > deadline) throw new Error(`no flow arrived from ${from}`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await pollWithin(5_000, `a flow from ${from}`, () => seen.length > 0, 10);
     const [one] = seen;
     assert.ok(one !== undefined);
     return { ...flow({ octets }), source: one.source };

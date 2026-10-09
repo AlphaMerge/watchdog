@@ -13326,7 +13326,7 @@ because each is a decision rather than a defect:
       `uniqueItems` on each (a validation change, said in the outcome) or repeats left harmless on
       purpose with a comment, with a route test either way.
 
-- [ ] **P-366 — the hand-rolled waits `P-355` listed and left** · S · P-355 · Found 2026-10-09 in
+- [x] **P-366 — the hand-rolled waits `P-355` listed and left** · S · P-355 · Found 2026-10-09 in
       `P-355`'s review. core `state-stream.test.ts` (the 30 s `severed` poll, and `swept` under
       `t.mock.timers`); probe `pool-sizer.test.ts:158`, `pool-memory-cap.test.ts:285` (its poll
       calls `feed()`), `root-scripts.test.ts:331`; sensors `snmp-trap.test.ts:371`,
@@ -13335,6 +13335,41 @@ because each is a decision rather than a defect:
       120 ms `settle()` and `http-server.test.ts`'s unbounded idle-socket `connect`. **Done
       when** each is `pollWithin` or `within` (or said in the outcome why not, such as a mocked
       timer), with one mutation per package.
+
+      **P-366 outcome. All of them are `pollWithin` or `within` now, none left aside, at the
+      bound and interval each had; where a loop gave up silently, or fell through to an assert on
+      its own condition, it now fails at its bound saying what it saw.** Test code only.
+      - **core `state-stream`:** the 30 s `severed` loop is `pollWithin(30_000, 'the core to
+        sever the socket', …)`; the assert after it stays, since it asks for exactly one. `swept`
+        is `pollWithin` at 5 s and an interval of 0 where it turned on `setImmediate`, failing
+        with "…start sweep N; the epoch was read M times". That test mocks `setInterval` only,
+        and node's mock timers touch `node:timers/promises`' `setTimeout` only when `setTimeout`
+        is among the mocked APIs, so the poll's sleep and bound are real timers; the run and the
+        mutation (which failed at 5,000 ms, not at the test's timeout) agree.
+      - **probe:** `pool-sizer`'s 5 s poll at 5 ms, its "got N" kept. `pool-memory-cap`'s 10 s
+        loop is `pollWithin` at 20 ms whose predicate still calls `feed()` while the pool is over
+        3, commented as the side effect it is. `root-scripts`' `line` was a `within` around a
+        `for (;;)` with a flag to stop it; it is one `pollWithin` at 60 s and 25 ms, and takes
+        `within` from `support/within.js` rather than its re-export.
+      - **sensors:** `snmp-trap`'s resend loop sends from its predicate, once per 100 ms poll,
+        commented likewise; `flow-sensor`'s and `snmp-pool`'s polls are one call each (the
+        latter's same-condition assert is its `what`). `snmp-receiver`'s `settle` gave up
+        silently and its two `malformed` polls fell through: all three are `pollWithin` now, and
+        each sender is closed in a `finally`, since a failure no longer reaches the `close()`
+        after it and an open `dgram` socket would hold the file's process. Asserts that ask for
+        exactly one, or for what the report said, stay after the wait.
+      - **simulators:** `syslog-sender`'s fixed 120 ms `settle()` is `arrived`, a 5 s
+        `pollWithin` for what each case sent (two datagrams, the frame's last bytes, two
+        newlines, the whole split message, the third message's end), with the collector closed
+        in a `finally`; the asserts on framing and counts follow. `http-server`'s idle-socket
+        `connect` is bounded at 5 s inside the `try`, whose `finally` now also stops the
+        simulator (a no-op once stopped) so a connection that never came up cannot leave it
+        listening.
+      - **Mutations, one per package**, each a converted wait made never true: core's `swept`
+        failed "timed out after 5000 ms waiting for the timer to start sweep 1; the epoch was
+        read 1 times"; probe's `pool-memory-cap` "…10000 ms waiting for the pool to give the
+        memory back, down to 3; it has 3"; sensors' `settle` failed its five callers at 3,000 ms
+        and the file still ended; simulators' UDP case "…5000 ms waiting for 2 datagrams; got 2".
 
 - [ ] **P-367 — a mended sensor stays counted until the next start** · XS · P-358 · Found
       2026-10-09 in `P-358`. `sensorsWithInvalidParams` is computed once per start, so an operator

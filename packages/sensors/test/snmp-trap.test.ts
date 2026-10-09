@@ -3,6 +3,7 @@ import { after, before, describe, it } from 'node:test';
 import snmp from 'net-snmp';
 import { snmpTrap } from '../src/types/snmp-trap.js';
 import { openTrapReceiver, type ReceivedTrap } from '../src/support/snmp/receiver.js';
+import { pollWithin } from './support/within.js';
 import {
   genericNameOf,
   renderTrap,
@@ -367,13 +368,18 @@ describe('which senders are this device (`P-246`)', () => {
     });
     try {
       // Sent again until one lands: the receiver binds after it returns, and UDP says nothing
-      // about a datagram that reached no socket.
-      const deadline = Date.now() + 5_000;
-      while (seen.length === 0) {
-        if (Date.now() > deadline) throw new Error(`no trap arrived from ${from}`);
-        session.trap(2 /* linkDown */, () => undefined);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      // about a datagram that reached no socket. **The send is the poll's side effect**, once
+      // per poll while nothing has arrived.
+      await pollWithin(
+        5_000,
+        `a trap from ${from}`,
+        () => {
+          if (seen.length > 0) return true;
+          session.trap(2 /* linkDown */, () => undefined);
+          return false;
+        },
+        100,
+      );
     } finally {
       session.close();
     }

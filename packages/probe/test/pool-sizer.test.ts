@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pino } from 'pino';
 import type { DemandInput } from '../src/runner/demand.js';
 import { poolSizer, type PoolSizerDeps, type SizerPool } from '../src/pool-sizer.js';
+import { pollWithin } from './support/within.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -155,9 +156,12 @@ describe('the derived pool ceiling (P-34, P-40, P-44)', () => {
     const h = harness({ intervalMs: 5, min: 4 }, pool);
 
     h.sizer.start();
-    const deadline = Date.now() + 5_000;
-    while (pool.set.length < 2 && Date.now() < deadline) await delay(5);
-    assert.ok(pool.set.length >= 2, `the timer fired (${String(pool.set.length)} times)`);
+    await pollWithin(
+      5_000,
+      () => `the timer to fire twice; it fired ${String(pool.set.length)} times`,
+      () => pool.set.length >= 2,
+      5,
+    );
 
     // Deterministic, and worth keeping for that reason: `stop` clears the interval and `size` is
     // synchronous, so no tick can be in flight when this returns. Anything after it is a timer

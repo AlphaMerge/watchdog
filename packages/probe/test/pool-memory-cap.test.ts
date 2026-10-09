@@ -282,12 +282,18 @@ describe('a pool bounded by memory (P-236)', () => {
     feed();
     await until(() => pool.stats().size === 8, 'the pool to grow to 8');
     allowed = 3;
-    const deadline = Date.now() + 10_000;
-    while (pool.stats().size > 3) {
-      if (Date.now() > deadline) throw new Error('the pool never gave the memory back');
-      feed();
-      await sleep(20);
-    }
+    await pollWithin(
+      10_000,
+      () => `the pool to give the memory back, down to 3; it has ${String(pool.stats().size)}`,
+      () => {
+        if (pool.stats().size <= 3) return true;
+        // **A side effect, on purpose:** each poll tops the queue up again, so the pool stays
+        // saturated while it sheds and no worker is ever spare for the over-ceiling sweep.
+        feed();
+        return false;
+      },
+      20,
+    );
     // And stops there, rather than giving up more while the first ones are still exiting: their
     // memory is on its way back, and counting it as still taken would shed the pool to its floor.
     for (let round = 0; round < 15; round += 1) {

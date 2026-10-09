@@ -149,16 +149,21 @@ describe('the HTTP simulator', () => {
     const hanging = new HttpSimulator({ routes: { '/hang': { hang: true } } });
     const port = await hanging.start();
     const idle = new Socket();
-    await new Promise<void>((resolve, reject) => {
-      idle.once('connect', resolve);
-      idle.once('error', reject);
-      idle.connect(port, '127.0.0.1');
-    });
-
     try {
+      await within(
+        5_000,
+        'the silent connection to connect',
+        new Promise<void>((resolve, reject) => {
+          idle.once('connect', resolve);
+          idle.once('error', reject);
+          idle.connect(port, '127.0.0.1');
+        }),
+      );
       await within(5_000, 'the simulator to stop with a silent connection open', hanging.stop());
     } finally {
       idle.destroy();
+      // A no-op once it has stopped; what stops it when the connection never came up.
+      await within(5_000, 'the simulator to stop', hanging.stop());
     }
   });
 

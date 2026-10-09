@@ -4,6 +4,7 @@ import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { describe, it } from 'node:test';
 import { close, listen } from '../src/net.js';
 import { renderMessage, sendTcp, sendUdp } from '../src/syslog-sender.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * The sender's own tests (`P-06`), asserting the **bytes**.
@@ -78,13 +79,25 @@ describe('the syslog sender', () => {
       return { port, chunks, server };
     };
 
-    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 120));
+    /**
+     * Until what was sent has arrived, rather than a fixed 120 ms after the send returned: a
+     * loaded machine can take longer, and an idle one wastes the rest. Each caller closes its
+     * collector in a `finally`, which a failure here no longer falls through to.
+     */
+    const arrived = (what: () => string, met: () => boolean): Promise<void> =>
+      pollWithin(5_000, what, met);
 
     it('sends one datagram per message over UDP', async () => {
       const { port, lines, socket } = await collectUdp();
-      await sendUdp(port, [{ message: 'first' }, { message: 'second' }]);
-      await settle();
-      socket.close();
+      try {
+        await sendUdp(port, [{ message: 'first' }, { message: 'second' }]);
+        await arrived(
+          () => `2 datagrams; got ${String(lines.length)}`,
+          () => lines.length >= 2,
+        );
+      } finally {
+        socket.close();
+      }
 
       assert.equal(lines.length, 2);
       assert.match(lines[0] ?? '', /first$/);
@@ -93,9 +106,15 @@ describe('the syslog sender', () => {
 
     it('frames TCP by octet count, which is RFC 6587 and unambiguous', async () => {
       const { port, chunks, server } = await collectTcp();
-      await sendTcp(port, [{ message: 'counted' }], { framing: 'octet-counting' });
-      await settle();
-      await close(server);
+      try {
+        await sendTcp(port, [{ message: 'counted' }], { framing: 'octet-counting' });
+        await arrived(
+          () => `the frame; got ${JSON.stringify(chunks.join(''))}`,
+          () => chunks.join('').endsWith('counted'),
+        );
+      } finally {
+        await close(server);
+      }
 
       const wire = chunks.join('');
       const [length] = wire.split(' ', 1);
@@ -107,11 +126,17 @@ describe('the syslog sender', () => {
       // A receiver that assumes the wrong one silently corrupts message boundaries — which gets
       // blamed on the sender for weeks. Being able to send both is how that is tested.
       const { port, chunks, server } = await collectTcp();
-      await sendTcp(port, [{ message: 'one' }, { message: 'two' }], {
-        framing: 'non-transparent',
-      });
-      await settle();
-      await close(server);
+      try {
+        await sendTcp(port, [{ message: 'one' }, { message: 'two' }], {
+          framing: 'non-transparent',
+        });
+        await arrived(
+          () => `two frames; got ${JSON.stringify(chunks.join(''))}`,
+          () => chunks.join('').split('\n').length > 2,
+        );
+      } finally {
+        await close(server);
+      }
 
       const wire = chunks.join('');
       assert.equal(wire.split('\n').filter((line) => line !== '').length, 2);
@@ -122,22 +147,33 @@ describe('the syslog sender', () => {
       // A receiver that assumes one `data` event is one message works perfectly until the day
       // the network disagrees. This makes that day reproducible.
       const { port, chunks, server } = await collectTcp();
-      await sendTcp(port, [{ message: 'split me down the middle' }], { splitAt: 12 });
-      await settle();
-      await close(server);
+      try {
+        await sendTcp(port, [{ message: 'split me down the middle' }], { splitAt: 12 });
+        await arrived(
+          () => `the whole message; got ${JSON.stringify(chunks.join(''))}`,
+          () => /split me down the middle$/.test(chunks.join('')),
+        );
+      } finally {
+        await close(server);
+      }
 
       assert.ok(
         chunks.length >= 2,
         `expected the send to arrive in pieces, got ${String(chunks.length)}`,
       );
-      assert.match(chunks.join(''), /split me down the middle$/);
     });
 
     it('sends every message down one connection, so boundaries are exercised', async () => {
       const { port, chunks, server } = await collectTcp();
-      await sendTcp(port, [{ message: 'a' }, { message: 'b' }, { message: 'c' }]);
-      await settle();
-      await close(server);
+      try {
+        await sendTcp(port, [{ message: 'a' }, { message: 'b' }, { message: 'c' }]);
+        await arrived(
+          () => `three messages; got ${JSON.stringify(chunks.join(''))}`,
+          () => chunks.join('').endsWith(' - - - c'),
+        );
+      } finally {
+        await close(server);
+      }
 
       assert.equal(chunks.join('').match(/<\d+>1 /g)?.length, 3);
     });
