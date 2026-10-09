@@ -36,9 +36,24 @@ export async function alertSaying(text: string | RegExp): Promise<HTMLElement> {
  * no margin but sits in a row whose `gap-*` would open for it. Its parent does not space its
  * children itself — `space-y-*` margins every child but the last, and a `gap-*` opens for an empty
  * child too — unless the region is taken out of the flow while empty.
+ *
+ * `live` is `'polite'` for a region that waits its turn (`U-48`, `U-57`): not an alert, polite by
+ * `aria-live` or by `role="status"`, and said whole — `aria-atomic`, or the status role's own —
+ * so a change to part of it is not read as that part alone.
  */
-export function expectQuiet(region: HTMLElement, spacing: readonly string[]): void {
-  expect(region.getAttribute('role')).toBe('alert');
+export function expectQuiet(
+  region: HTMLElement,
+  spacing: readonly string[],
+  live: 'alert' | 'polite' = 'alert',
+): void {
+  if (live === 'alert') {
+    expect(region.getAttribute('role')).toBe('alert');
+  } else {
+    const status = region.getAttribute('role') === 'status';
+    expect(region.getAttribute('role')).not.toBe('alert');
+    expect(region.getAttribute('aria-live') ?? (status ? 'polite' : null)).toBe('polite');
+    expect(region.getAttribute('aria-atomic') ?? (status ? 'true' : null)).toBe('true');
+  }
   expect(region.matches(':empty')).toBe(true);
   for (const one of spacing) expect(region.classList.contains(one)).toBe(true);
   const parent = region.parentElement?.className ?? '';
@@ -49,4 +64,20 @@ export function expectQuiet(region: HTMLElement, spacing: readonly string[]): vo
   expect(region.classList.contains('hidden')).toBe(false);
   expect(region.classList.contains('sr-only')).toBe(false);
   expect(getComputedStyle(region).display).not.toBe('none');
+}
+
+/**
+ * The correlation id `region` says after its message (`U-51`, `U-59`): one `ml-2 font-mono` span
+ * holding the core's id, after a space so a screen reader does not run it into the message — or,
+ * for a refusal the page decided itself or a core that never answered (`undefined`), none.
+ */
+export function expectCorrelation(region: HTMLElement, id: string | undefined): void {
+  const spans = [...region.querySelectorAll('span.font-mono')];
+  if (id === undefined) {
+    expect(spans).toEqual([]);
+    return;
+  }
+  expect(spans).toHaveLength(1);
+  expect(spans[0]?.classList.contains('ml-2')).toBe(true);
+  expect(spans[0]?.textContent).toBe(` ${id}`);
 }

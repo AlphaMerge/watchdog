@@ -108,6 +108,23 @@ describe('reading a login refusal', () => {
     expect(feedback.stage).toBe('credentials');
   });
 
+  it('carries the core’s correlation id for every answer it gave, and none for one it did not (U-59)', () => {
+    const cases: readonly [string, Record<string, string>][] = [
+      ['AUTH_REJECTED', {}],
+      ['MFA_REQUIRED', { enrolled: 'true' }],
+      ['MFA_REQUIRED', {}],
+      ['MFA_CODE_INVALID', {}],
+      ['AUTH_THROTTLED', { retryAfterSeconds: '30' }],
+      ['SOMETHING_ELSE', {}],
+    ];
+    for (const [code, context] of cases) {
+      const refused = new ApiError(401, code, 'refused', 'req-59', {}, context);
+      expect(feedbackFor(refused, 'credentials').correlationId, code).toBe('req-59');
+    }
+    const unreachable = new ApiError(0, 'UNREACHABLE', 'the core is not reachable', undefined);
+    expect(feedbackFor(unreachable, 'credentials').correlationId).toBeUndefined();
+  });
+
   it('rounds a wait rather than pretending to count it down', () => {
     expect(waitFor(0)).toBe('shortly');
     expect(waitFor(1)).toBe('in 1 second');

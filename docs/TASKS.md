@@ -25675,16 +25675,111 @@ because each is a decision rather than a defect:
         guard on the values answer's path was tried and dropped: no test could fail it, since
         channel ids are not shared between sensors and the list is null on that render.
 
-- [ ] **U-56 — refusals with no live region at all** · XS · U-54 · Found 2026-10-09 in `U-54`.
+- [x] **U-56 — refusals with no live region at all** · XS · U-54 · Found 2026-10-09 in `U-54`.
       A refused row action in `AlarmsView` (around line 361), a refused delete in `TriggersPanel`
       (around 233) and in `TemplatesView` (around 612, and its `Failure` around 698), and
       `DiscoveryView`'s `RunPanel` failing its first read, are plain text. **Done when** each is an
       always-present region as `U-54`'s are, with a test each.
 
-- [ ] **U-57 — a discovery range refusal is an alert that changes as you type** · XS · U-54 ·
+      **U-56 outcome. Each is a region in the tree from the start, empty until it has something
+      to say; the four refusals of an action are alerts, the first read and the preview polite.**
+      - **The refused actions** — `AlarmsView`'s acknowledge, un-acknowledge and pause,
+        `TriggersPanel`'s delete, `TemplatesView`'s save, test send and delete — are
+        `role="alert"`, for `U-48`'s reason: focus is on the button when the core refuses, and
+        what they say is that what the operator just did did not happen. Each attempt empties its
+        region as it starts (`TriggersPanel`'s delete did not, and now does), so a second refusal
+        in the same words is said again.
+      - **`TemplatesView`'s `Failure`** takes `ApiError | null` and is always rendered, the
+        problems the core listed inside it. The delete's region holds the message and the
+        triggers that still name the template; the question (*Delete it?*) and *Close* sit
+        beside it, so it is the same node before *Delete*, after a refusal and after *Close*.
+      - **The preview's refusal is polite** (`aria-live="polite"`, `aria-atomic`): it answers the
+        draft as it is typed. It is said again for a different draft refused in the same words,
+        as `U-57` does for a range, and an answer about a draft edited since is dropped. The old
+        rendering is cleared with a refusal, so it does not show for the moment the refusal waits.
+      - **`RunPanel`'s first read failing is `role="status"`, not an alert.** Nothing the operator
+        asked for was refused: the start was accepted and said so, the card asks again every five
+        seconds by itself, and a read that succeeds replaces it with the run. It is the same kind
+        of news as the *Loading the run…* status it takes the place of, and is said the same way.
+      - **Spacing.** Rows that stacked with `space-y-1` (`AlarmsView`, `TriggersPanel`) are
+        spaced by margins (`mt-1`, the region `mt-1 empty:mt-0`); the template form's buttons and
+        the test send's button share a block with their region (`U-52`); the delete's and the
+        preview's regions need no margin, since what they replace is not shown beside them.
+      - **The correlation id** is said in every one of them, in `U-59`'s `CorrelationId`.
+        `AlarmsView`'s span had no leading space and ran into the message; it now has one.
+      - **Tests.** New `alarms-refused.test.tsx`, `triggers-refused.test.tsx` and
+        `templates-refused.test.tsx`, and `discovery-view.test.tsx`: each region present and empty
+        before; the refusal in that same node with its id; emptied as the next attempt starts and
+        filled again; empty after one accepted; no id when the core never answered. The preview:
+        a `MutationObserver` sees the region go empty and fill again for a second draft refused in
+        the same words. The first read, under fake timers: polite and empty while the read is held,
+        the failure in that node with the loading line gone, a core refusal's id five seconds on,
+        and the run's own card, saying nothing, once read. `expectQuiet` takes `'polite'`.
+        Mutations, each failing: `AlarmsView`'s region rendered only on failure 2; the template
+        delete's region an alert only once refused 1; the first-read region live only once failed
+        1; `TriggersPanel`'s delete not emptied as it starts 2; the preview filled at once 1.
+      - **Not done.** A refused template delete removes *Yes, delete*, which had focus, so focus
+        falls to the page; the alert says the refusal, but focus could move to *Close*. A refused
+        cancel in `RunPanel` shares its region with the poll, and the next successful poll (two
+        seconds while a run is active) empties it.
+
+- [x] **U-57 — a discovery range refusal is an alert that changes as you type** · XS · U-54 ·
       Found 2026-10-09 in `U-54`. `U-48` kept such regions polite; this one is `role="alert"`,
       and a different range refused in the same words is not said again. **Done when** it is
       `aria-live="polite"` and re-says a new refusal in the same words, with a test.
+
+      **U-57 outcome. The range region is `aria-live="polite"` and `aria-atomic`, and each refusal
+      is emptied and said `SAY_AGAIN_MS` later through `useRefusal`.**
+      - **Why it was not said again.** Each answer is about a different range, but React leaves a
+        text node whose string did not change alone, and a live region that does not change says
+        nothing — polite or not. Emptying it as the request goes out is not enough on its own: a
+        local core answers in milliseconds, and a screen reader can read the tree after both
+        changes. So the answer is handed to `sayAgain`, which empties now and fills 100 ms later,
+        as `U-54` does for a refusal a form decides itself. The refusal of the last range stays
+        shown while the next is typed and asked about; only its answer replaces it.
+      - **`aria-atomic`**, since a polite region without it reads only what changed: the id after
+        the same sentence (`U-59`) would be said alone.
+      - **An answer about a range no longer in the box is dropped** (the effect's cleanup marks
+        it stale); before, a slow answer could land after a newer one.
+      - **Tests.** `discovery-view.test.tsx`: the existing case now holds the region polite and
+        atomic and not an alert; a new one, under fake timers, types `/7` after `/8` was refused in
+        the same words — the old refusal stands until the answer, then the region is empty, still
+        empty at 99 ms, says it at 100, in the same node; then `/6`, refused with an id, says it
+        after the sentence. Mutations, each failing: the answer set at once rather than through
+        `sayAgain` 1; the region an alert again 2.
+
+- [x] **U-59 — five refusals show no correlation id** · XS · U-54 · Found 2026-10-09 in `U-54`.
+      `RediscoveryPanel`, `DiscoveryView`, `LoginView`, `ChangePasswordForm` and
+      `RecipientsEditor` refuse without the id `ParamsForm` and `CredentialsPanel` show. **Done
+      when** each shows it in the same `ml-2 font-mono` span, with a test each.
+
+      **U-59 outcome. Each says the core's id after its message, in `CorrelationId`
+      (`components/Panels.tsx`), and a refusal the page decided itself says none.**
+      - **One component** for the span `ParamsForm` and `SettingsPanel` write out: `ml-2
+        font-mono`, its text starting with a space so a screen reader does not run the id into the
+        message's last word, nothing when there is no id. Used by everything this commit touched;
+        the four that already had the span are unchanged.
+      - **Where the refusal was a string it is now the `ApiError`** (`RediscoveryPanel`'s panel,
+        `DiscoveryView`'s range and run, `RecipientsEditor`), or carries the id beside the message
+        (`ChangePasswordForm`'s `Refusal`, `LoginFeedback.correlationId`). Refusals built in the
+        browser — an unreachable core, a form's own checks — have none and show none.
+      - **`LoginView` says nothing new.** The id is a random UUID (`newCorrelationId`) already in
+        the response the browser holds; `feedbackFor` carries it from every answer the core gave
+        and nothing else of it — `AUTH_REJECTED` is still the core's one sentence, and `context`
+        and `details` are not shown.
+      - **A run read failing every five seconds is not said every five seconds.** Each answer has
+        its own id, so a poll failing again in the same words now keeps the failure already shown,
+        id and all; before, the words alone did that.
+      - **Tests.** Per component, a core refusal carrying an id puts *message id* in the same
+        region with the id in one `ml-2 font-mono` span (`expectCorrelation`), and one without (or
+        an unreachable core, or a form's own refusal) shows no span: `rediscovery-panel` (switch
+        and save), `discovery-view` (range, start, cancel, first read), `recipients-editor`,
+        `change-password`, `login-view` (a UUID; a refusal carrying `context` and `details` says
+        the message and the id only), and `login-model` (six codes carry it, `UNREACHABLE` none).
+        Mutations, each failing: `CorrelationId` rendering nothing 14 across all eight files; a
+        repeated poll failure replacing the one shown 1.
+      - **Not done.** `ParamsForm`, `SettingsPanel`, `AddSensor` and `CredentialsPanel` still
+        write the span out themselves; `ErrorPanel` says the id on a line of its own.
 
 - [ ] **U-58 — should a failed read be announced?** · XS · U-54 · Found 2026-10-09 in `U-54`.
       About thirty `ErrorPanel`s are mounted with their text already in them when a read fails.

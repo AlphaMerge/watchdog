@@ -52,6 +52,18 @@ export function RefusalPanel({
   );
 }
 
+/**
+ * The correlation id after a refusal's message, when the core sent one (`U-51`, `U-59`).
+ *
+ * The span `ParamsForm` and `SettingsPanel` use, inside the refusal's own region so it is said with
+ * the message. Its text starts with a space: a margin separates the two on screen but not in the
+ * text a screen reader reads, where the id would run into the message's last word. A refusal the
+ * page decided itself has no id, and gets nothing.
+ */
+export function CorrelationId({ id }: { id: string | undefined }): React.JSX.Element | null {
+  return id === undefined ? null : <span className="ml-2 font-mono"> {id}</span>;
+}
+
 export function Loading({ what }: { what: string }): React.JSX.Element {
   return (
     <p className="text-sm text-text-muted" role="status">

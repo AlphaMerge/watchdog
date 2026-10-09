@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, send, useApi } from '../../api/client';
 import type { TemplateView, TriggerKind, TriggerView } from '../../api/types';
-import { Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { CorrelationId, Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { SchemaForm } from '../../forms/SchemaForm';
 import type { JsonSchema } from '../../forms/schema';
 import { seedFrom } from './model';
@@ -167,7 +167,7 @@ function OwnRow({
   const [confirming, setConfirming] = useState(false);
 
   return (
-    <li className="space-y-1 py-2">
+    <li className="py-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="text-sm font-medium text-text">{trigger.kindName}</span>
         <span className="text-sm text-text-muted">{trigger.summary}</span>
@@ -193,6 +193,9 @@ function OwnRow({
               <button
                 type="button"
                 onClick={() => {
+                  // Emptied as the attempt starts, so a second refusal in the same words is a
+                  // change and is said again (`U-56`).
+                  setFailed(null);
                   send('DELETE', `/triggers/${String(trigger.id)}`)
                     .then(onDeleted)
                     .catch((error: unknown) => {
@@ -230,7 +233,16 @@ function OwnRow({
           )}
         </span>
       </div>
-      {failed !== null && <p className="text-xs text-down-fg">{failed.message}</p>}
+      {/* A refused delete. **Always there, empty until a refusal** (`U-56`, as `U-54`'s are):
+          focus is on *Yes, delete* when the core refuses, and a region added with its text
+          already in it is not reliably announced (`U-41`). An alert, for `U-48`'s reason: the
+          trigger the operator thinks they removed is still there. Not in a `space-y-*` stack,
+          which would margin the line above it while it says nothing; `empty:mt-0` gives its own
+          margin back (`U-45`). */}
+      <p role="alert" className="mt-1 text-xs text-down-fg empty:mt-0">
+        {failed?.message}
+        <CorrelationId id={failed?.correlationId} />
+      </p>
     </li>
   );
 }

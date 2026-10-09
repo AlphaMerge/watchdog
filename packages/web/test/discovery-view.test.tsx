@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DiscoveryRun, ObjectSummary } from '../src/api/types';
 import { DiscoveryView } from '../src/routes/DiscoveryView';
-import { alertSaying, expectQuiet } from './support/refusal-region';
+import { SAY_AGAIN_MS } from '../src/components/refusal';
+import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The discovery page's three refusals, announced (`U-54`).
@@ -65,10 +66,44 @@ const RUN: DiscoveryRun = {
   finishedAt: null,
 };
 
-/** A refusal the core sends, or `null` for an attempt it accepts. */
-type Answer = { readonly status: number; readonly message: string } | null;
+/**
+ * A refusal the core sends — with its correlation id when `id` is given — `null` for an attempt
+ * it accepts, or `'unreachable'` for a core that never answered.
+ */
+type Answer =
+  | { readonly status: number; readonly message: string; readonly id?: string }
+  | null
+  | 'unreachable';
 
-function core({ starts = [], cancels = [] }: { starts?: Answer[]; cancels?: Answer[] }): void {
+/** Ranges the core will not sweep, all in `TOO_BIG`'s words; only the last with an id. */
+const REFUSED_RANGES: Readonly<Record<string, string | undefined>> = {
+  '10.0.0.0/8': undefined,
+  '10.0.0.0/7': undefined,
+  '10.0.0.0/6': 'req-range',
+};
+
+/**
+ * A response read in promises alone, for the preview: a real `Response` reads its body through a
+ * stream, which the fake-timer case below cannot count turns of.
+ */
+const answered = (status: number, data: unknown): Promise<Response> =>
+  Promise.resolve({
+    ok: status < 300,
+    status,
+    statusText: '',
+    json: () => Promise.resolve(data),
+  } as Response);
+
+function core({
+  starts = [],
+  cancels = [],
+  reads = [],
+}: {
+  starts?: Answer[];
+  cancels?: Answer[];
+  /** The run's reads in turn, each held until its promise settles; read as it is once spent. */
+  reads?: Promise<Answer>[];
+}): void {
   const reply = (status: number, data: unknown): Promise<Response> =>
     Promise.resolve(
       new Response(JSON.stringify(data), {
@@ -76,12 +111,20 @@ function core({ starts = [], cancels = [] }: { starts?: Answer[]; cancels?: Answ
         headers: { 'content-type': 'application/json' },
       }),
     );
-  const answer = (queue: Answer[], accepted: unknown): Promise<Response> => {
-    const next = queue.shift() ?? null;
+  const said = (next: Answer, accepted: unknown): Promise<Response> => {
+    if (next === 'unreachable') return Promise.reject(new TypeError('Failed to fetch'));
     return next === null
       ? reply(200, accepted)
-      : reply(next.status, { error: { code: 'DISCOVERY_REFUSED', message: next.message } });
+      : reply(next.status, {
+          error: {
+            code: 'DISCOVERY_REFUSED',
+            message: next.message,
+            ...(next.id === undefined ? {} : { correlationId: next.id }),
+          },
+        });
   };
+  const answer = (queue: Answer[], accepted: unknown): Promise<Response> =>
+    said(queue.shift() ?? null, accepted);
   vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
     const path = url.replace(/^.*\/api\/v1/u, '');
     const method = init?.method ?? 'GET';
@@ -90,9 +133,17 @@ function core({ starts = [], cancels = [] }: { starts?: Answer[]; cancels?: Answ
         typeof init?.body === 'string'
           ? (JSON.parse(init.body) as { range: string })
           : { range: '' };
-      return range === '10.0.0.0/8'
-        ? reply(400, { error: { code: 'DISCOVERY_RANGE_INVALID', message: TOO_BIG } })
-        : reply(200, {
+      return range in REFUSED_RANGES
+        ? answered(400, {
+            error: {
+              code: 'DISCOVERY_RANGE_INVALID',
+              message: TOO_BIG,
+              ...(REFUSED_RANGES[range] === undefined
+                ? {}
+                : { correlationId: REFUSED_RANGES[range] }),
+            },
+          })
+        : answered(200, {
             range,
             total: 6,
             levels: [
@@ -108,7 +159,10 @@ function core({ starts = [], cancels = [] }: { starts?: Answer[]; cancels?: Answ
     if (path.startsWith('/objects?kind=group')) {
       return reply(200, { items: [object(20, 10, 'group', 'Datacentre')] });
     }
-    if (path === '/discovery/7') return reply(200, RUN);
+    if (path === '/discovery/7') {
+      const next = reads.shift();
+      return next === undefined ? reply(200, RUN) : next.then((one) => said(one, RUN));
+    }
     if (path.startsWith('/objects/20/discovery')) return reply(200, { items: [] });
     if (path === '/device-templates' || path === '/discovery/schedules' || path === '/schedules') {
       return reply(200, { items: [] });
@@ -172,7 +226,7 @@ describe('a range the core will not sweep (U-54)', () => {
     core({});
     const card = await open();
     const region = rangeProblem();
-    expectQuiet(region, ['mt-2', 'empty:mt-0']);
+    expectQuiet(region, ['mt-2', 'empty:mt-0'], 'polite');
     expect(range(card).getAttribute('aria-describedby') ?? '').not.toContain('range-problem');
 
     fireEvent.change(range(card), { target: { value: '10.0.0.0/8' } });
@@ -199,10 +253,91 @@ describe('a range the core will not sweep (U-54)', () => {
   });
 });
 
+/** Lets the event loop turn until `done`, at most `turns` times, inside `act`. */
+async function turnUntil(done: () => boolean, what: string, turns = 200): Promise<void> {
+  for (let turn = 0; turn < turns && !done(); turn += 1) {
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    });
+  }
+  if (!done()) throw new Error(`${what} within ${String(turns)} turns`);
+}
+
+/**
+ * A range refusal, polite and said again (`U-57`).
+ *
+ * The region answers the range as it is typed, so it waits its turn rather than cutting into the
+ * operator's typing (`U-48`). Each answer is about a different range, so a second range refused in
+ * the same words is a new refusal — but React would leave the same text alone, and a live region
+ * that does not change says nothing. What is relied on is that the region is emptied as the answer
+ * arrives and filled `SAY_AGAIN_MS` later, so it is seen empty in between however fast the core
+ * answered.
+ */
+describe('a range refused in the same words as the last (U-57)', () => {
+  it('is emptied as the answer arrives and said again a moment later, in the same node', async () => {
+    core({});
+    const card = await open();
+    const region = rangeProblem();
+    fireEvent.change(range(card), { target: { value: '10.0.0.0/8' } });
+    await waitFor(
+      () => {
+        expect(region.textContent).toBe(TOO_BIG);
+      },
+      { timeout: 3_000 },
+    );
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      fireEvent.change(range(card), { target: { value: '10.0.0.0/7' } });
+      // Typed, not yet asked about: the last range's refusal stands until the next is answered.
+      expect(region.textContent).toBe(TOO_BIG);
+
+      // The debounce runs out, the core answers, and the region is emptied.
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync();
+      });
+      await turnUntil(() => region.matches(':empty'), 'the region was not emptied');
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS - 1);
+      });
+      expect(region.matches(':empty')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(region.textContent).toBe(TOO_BIG);
+      expect(rangeProblem()).toBe(region);
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      expect(region.getAttribute('role')).toBeNull();
+      expectCorrelation(region, undefined);
+
+      // A refusal the core gave an id says it, after the same words.
+      fireEvent.change(range(card), { target: { value: '10.0.0.0/6' } });
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync();
+      });
+      await turnUntil(() => region.matches(':empty'), 'the region was not emptied');
+      act(() => {
+        vi.advanceTimersByTime(SAY_AGAIN_MS);
+      });
+      expect(region.textContent).toBe(`${TOO_BIG} req-range`);
+      expectCorrelation(region, 'req-range');
+      expect(rangeProblem()).toBe(region);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('a start the core refused (U-54)', () => {
   it('is said in the region that was there before, again in the same words, and emptied by one accepted', async () => {
     core({
-      starts: [{ status: 409, message: NO_START }, { status: 409, message: NO_START }, null],
+      starts: [
+        { status: 409, message: NO_START, id: 'req-start' },
+        { status: 409, message: NO_START },
+        null,
+      ],
     });
     const card = await open();
     const region = startRegion(card);
@@ -211,7 +346,8 @@ describe('a start the core refused (U-54)', () => {
 
     fireEvent.click(start);
     expect(await alertSaying(NO_START)).toBe(region);
-    expect(region.textContent).toBe(NO_START);
+    expect(region.textContent).toBe(`${NO_START} req-start`);
+    expectCorrelation(region, 'req-start');
     await waitFor(() => {
       expect(start.disabled).toBe(false);
     });
@@ -222,6 +358,8 @@ describe('a start the core refused (U-54)', () => {
     await waitFor(() => {
       expect(region.textContent).toBe(NO_START);
     });
+    // The core gave this one no id, and none is shown.
+    expectCorrelation(region, undefined);
     expect(startRegion(card)).toBe(region);
     await waitFor(() => {
       expect(start.disabled).toBe(false);
@@ -239,7 +377,7 @@ describe('a cancel the core refused (U-54)', () => {
   it('is said in the run’s region, again in the same words, and emptied by one accepted', async () => {
     core({
       cancels: [
-        { status: 409, message: NO_CANCEL },
+        { status: 409, message: NO_CANCEL, id: 'req-cancel' },
         { status: 409, message: NO_CANCEL },
       ],
     });
@@ -256,6 +394,8 @@ describe('a cancel the core refused (U-54)', () => {
 
     cancel();
     expect(await alertSaying(NO_CANCEL)).toBe(region);
+    expect(region.textContent).toBe(`${NO_CANCEL} req-cancel`);
+    expectCorrelation(region, 'req-cancel');
     await within(panel).findByRole('button', { name: 'Cancel' });
 
     cancel();
@@ -263,6 +403,7 @@ describe('a cancel the core refused (U-54)', () => {
     await waitFor(() => {
       expect(region.textContent).toBe(NO_CANCEL);
     });
+    expectCorrelation(region, undefined);
     expect(within(panel).getByRole('alert')).toBe(region);
     await within(panel).findByRole('button', { name: 'Cancel' });
 
@@ -270,5 +411,95 @@ describe('a cancel the core refused (U-54)', () => {
     expect(region.matches(':empty')).toBe(true);
     await within(panel).findByRole('button', { name: 'Cancel' });
     expect(region.matches(':empty')).toBe(true);
+  });
+});
+
+/**
+ * The run's first read failing (`U-56`).
+ *
+ * The card is drawn as the run is started and reads it at once; until that read succeeds there is
+ * no run to show, and a failure was plain text in place of *Loading the run…*. It is said in a
+ * region that was there, empty, before the read went out — polite, as the loading status it takes
+ * the place of: the start was accepted and nothing the operator asked for was refused, and the
+ * card asks again by itself. The core's id is shown when it answered, and a read that succeeds
+ * replaces the card with the run's, which says nothing.
+ */
+describe('a run whose first read failed (U-56)', () => {
+  it('is said politely in the region that was there before, with the id when the core answered', async () => {
+    let unreachable: () => void = () => undefined;
+    const held = new Promise<Answer>((resolve) => {
+      unreachable = () => {
+        resolve('unreachable');
+      };
+    });
+    const reads = [
+      held,
+      Promise.resolve<Answer>({ status: 404, message: 'no such run', id: 'req-read' }),
+      Promise.resolve<Answer>({ status: 404, message: 'no such run', id: 'req-read-again' }),
+    ];
+    core({ reads });
+    const card = await open();
+    const start = await ready(card);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      fireEvent.click(start);
+      const runCard = (): HTMLElement | null =>
+        screen.queryByRole('heading', { name: 'Run' })?.closest('section') ?? null;
+      await turnUntil(() => runCard() !== null, 'the run card was not drawn');
+      const panel = runCard();
+      if (panel === null) throw new Error('no run card');
+      const region = within(panel)
+        .getAllByRole('status')
+        .find((one) => !one.textContent.startsWith('Loading'));
+      if (region === undefined) throw new Error('no first-read region');
+      expectQuiet(region, [], 'polite');
+      expect(within(panel).getByText('Loading the run…')).toBeDefined();
+
+      // The core is not reached: said, with no id, in that node, and the loading line gone.
+      unreachable();
+      await turnUntil(() => region.textContent !== '', 'the failure was not said');
+      expect(region.textContent).toBe('the core is not reachable');
+      expectCorrelation(region, undefined);
+      expect(within(panel).queryByText('Loading the run…')).toBeNull();
+      expect(speaking()).toEqual([]);
+
+      // Asked again five seconds on, and refused by the core: its id is said with it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      await turnUntil(
+        () => region.textContent.startsWith('no such run'),
+        'the refusal was not said',
+      );
+      expect(region.textContent).toBe('no such run req-read');
+      expectCorrelation(region, 'req-read');
+
+      // Refused again in the same words, with the core's next id: what is shown stays, so the
+      // same failure is not said again every five seconds. The next read being scheduled is the
+      // sign this answer was taken: it is the only timer there is.
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      await turnUntil(
+        () => reads.length === 0 && vi.getTimerCount() === 1,
+        'the third read was not answered',
+      );
+      expect(region.textContent).toBe('no such run req-read');
+
+      // Read at last: the run's own card, whose region says nothing.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      await turnUntil(
+        () => screen.queryByRole('heading', { name: 'Run 7 — 10.0.0.0/29' }) !== null,
+        'the run was not shown',
+      );
+      expect(screen.queryByRole('heading', { name: 'Run' })).toBeNull();
+      expect(speaking()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useApi } from '../api/client';
 import type { AccountChoice, TemplateRecipient, UserGroupView } from '../api/types';
 import { Combobox, type ComboboxOption } from '../components/Combobox';
+import { CorrelationId } from '../components/Panels';
 import {
   accountChoices,
   describeRecipient,
@@ -69,7 +70,7 @@ export function RecipientsEditor({
           const list = recipient.kind === 'user' ? accounts : groups;
           const failed =
             choosePeople && recipient.kind !== 'address' && list.status === 'error'
-              ? list.error.message
+              ? list.error
               : null;
           return (
             <li key={index} className="flex flex-wrap items-center gap-2">
@@ -145,7 +146,8 @@ export function RecipientsEditor({
                   does not open a gap for it; it stays in the accessibility tree, as `sr-only`
                   text does. */}
               <span role="alert" className="text-xs text-down-fg empty:absolute">
-                {failed !== null && `Could not load the list: ${failed}`}
+                {failed !== null && `Could not load the list: ${failed.message}`}
+                <CorrelationId id={failed?.correlationId} />
               </span>
 
               <button

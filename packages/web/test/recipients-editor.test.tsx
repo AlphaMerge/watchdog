@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountChoice, TemplateRecipient, UserGroupView } from '../src/api/types';
 import { RecipientsEditor } from '../src/routes/RecipientsEditor';
-import { alertSaying, expectQuiet } from './support/refusal-region';
+import { alertSaying, expectCorrelation, expectQuiet } from './support/refusal-region';
 
 /**
  * The recipients editor, rendered (`M-20`).
@@ -31,7 +31,12 @@ const GROUPS: UserGroupView[] = [
 ];
 
 /** Answers the two lists, or refuses them all with `refuse`. Records every path asked for. */
-function stubApi(refuse?: { status: number; code: string; message: string }): string[] {
+function stubApi(refuse?: {
+  status: number;
+  code: string;
+  message: string;
+  correlationId?: string;
+}): string[] {
   const asked: string[] = [];
   vi.stubGlobal('fetch', (path: string) => {
     asked.push(path);
@@ -43,7 +48,13 @@ function stubApi(refuse?: { status: number; code: string; message: string }): st
         }),
       );
     if (refuse !== undefined) {
-      return reply(refuse.status, { error: { code: refuse.code, message: refuse.message } });
+      return reply(refuse.status, {
+        error: {
+          code: refuse.code,
+          message: refuse.message,
+          ...(refuse.correlationId === undefined ? {} : { correlationId: refuse.correlationId }),
+        },
+      });
     }
     if (path.endsWith('/accounts')) return reply(200, { items: ACCOUNTS });
     if (path.endsWith('/groups')) return reply(200, { items: GROUPS });
@@ -263,6 +274,8 @@ describe('a list that could not be read (U-54)', () => {
     const kind = screen.getByLabelText('Recipient 1: kind');
     fireEvent.change(kind, { target: { value: 'user' } });
     expect(region.textContent).toBe(SAID);
+    // The core sent no id with this one, and none is shown (`U-59`).
+    expectCorrelation(region, undefined);
     expect(within(screen.getByRole('listitem')).getByRole('alert')).toBe(region);
     expect(screen.queryByRole('combobox', { name: 'Recipient 1: account' })).toBeNull();
 
@@ -295,5 +308,39 @@ describe('a list that could not be read (U-54)', () => {
       expect(region.textContent).toBe(SAID);
     });
     expect(within(screen.getByRole('listitem')).getByRole('alert')).toBe(region);
+  });
+});
+
+describe('a list that could not be read, with the core’s id (U-59)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says the id after the failure, in the row’s region', async () => {
+    stubApi({
+      status: 403,
+      code: 'AUTH_FORBIDDEN',
+      message: 'this action needs one of: admin',
+      correlationId: 'req-59',
+    });
+    show([{ kind: 'user', value: '4' }], true);
+    const region = within(screen.getByRole('listitem')).getByRole('alert');
+    expect(await alertSaying('Could not load the list')).toBe(region);
+    expect(region.textContent).toBe(
+      'Could not load the list: this action needs one of: admin req-59',
+    );
+    expectCorrelation(region, 'req-59');
+  });
+
+  it('gives no id when the core never answered', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject(new TypeError('Failed to fetch')));
+    show([{ kind: 'user', value: '4' }], true);
+    const region = within(screen.getByRole('listitem')).getByRole('alert');
+    expect(await alertSaying('Could not load the list')).toBe(region);
+    expect(region.textContent).toBe('Could not load the list: the core is not reachable');
+    expectCorrelation(region, undefined);
   });
 });

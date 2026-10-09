@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, send } from '../api/client';
+import { CorrelationId } from '../components/Panels';
 import { useRefusal } from '../components/refusal';
 import { AuthPage } from './AuthPage';
 import { feedbackFor, type LoginFeedback, type LoginStage } from './login-model';
@@ -67,6 +68,7 @@ export function LoginView(): React.JSX.Element {
         focus: 'login',
         retryAfterSeconds: 0,
         stuck: false,
+        correlationId: undefined,
       });
       return;
     }
@@ -190,6 +192,7 @@ export function LoginView(): React.JSX.Element {
           {feedback !== null && (
             <p className="border border-down-border bg-down-bg px-3 py-2 text-sm text-down-fg">
               {feedback.message}
+              <CorrelationId id={feedback.correlationId} />
             </p>
           )}
         </div>

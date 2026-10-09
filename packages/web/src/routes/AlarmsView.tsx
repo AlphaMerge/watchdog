@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import { SETTLE_MS, useSettledReload, useStateStream } from '../api/stream';
 import type { Alarm, AlarmKind, AlarmPage, HeldReturn } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { RecoveringBadge, StatusBadge } from '../components/StatusBadge';
 import { formatDuration } from './detail/model';
 import { kindOf, useConfirmReload, whereSteps } from './alarms-model';
@@ -330,7 +330,7 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
   );
 
   return (
-    <li className="space-y-1 py-2.5">
+    <li className="py-2.5">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <KindBadge kind={kindOf(alarm)} />
         <span className="tabular-nums text-xs text-text-muted" title="Priority, 5 is highest">
@@ -348,7 +348,7 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
         </span>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-1">
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 pl-1">
         {alarm.recovering !== null && <HeldNote held={alarm.recovering} />}
         <span className="text-xs text-text-muted">{alarm.cause}</span>
         {alarm.message !== '' && (
@@ -357,14 +357,18 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
         <Actions alarm={alarm} busy={busy} act={act} />
       </div>
 
-      {failed !== null && (
-        <p className="pl-1 text-xs text-down-fg">
-          {failed.message}
-          {failed.correlationId !== undefined && (
-            <span className="ml-2 font-mono">{failed.correlationId}</span>
-          )}
-        </p>
-      )}
+      {/* A refused acknowledge, un-acknowledge or pause. **Always there, empty until a refusal**
+          (`U-56`, as `U-54`'s are): focus is on the row's button when the core refuses, and a
+          region added with its text already in it is not reliably announced (`U-41`). An alert,
+          for `U-48`'s reason: what it says is that the change the operator thinks they made did
+          not happen. `act` empties it as an attempt starts, so a second refusal in the same words
+          is said again. The row's lines are spaced by their own margins rather than `space-y-1`,
+          which would margin the line above this one while it says nothing; `empty:mt-0` gives
+          its own back (`U-45`). */}
+      <p role="alert" className="mt-1 pl-1 text-xs text-down-fg empty:mt-0">
+        {failed?.message}
+        <CorrelationId id={failed?.correlationId} />
+      </p>
     </li>
   );
 }

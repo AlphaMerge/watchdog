@@ -7,7 +7,7 @@ import type {
   RediscoveryRule,
   ScheduleSummary,
 } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { descendantsOf } from './discovery-model';
 import { Field, INPUT, SELECT, TemplatePicker } from './discovery-fields';
 import {
@@ -51,7 +51,7 @@ export function RediscoveryPanel({
   const windows = useApi<{ items: ScheduleSummary[] }>('/schedules');
   /** `null` is the list; `'new'` is a rule being written; a rule is that rule being edited. */
   const [editing, setEditing] = useState<RediscoveryRule | 'new' | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<number | null>(null);
 
@@ -70,7 +70,7 @@ export function RediscoveryPanel({
           rules.reload();
         })
         .catch((failure: unknown) => {
-          setProblem(failure instanceof ApiError ? failure.message : failed);
+          setProblem(failure instanceof ApiError ? failure : new ApiError(0, 'UNKNOWN', failed));
         })
         .finally(() => {
           setBusy(null);
@@ -134,7 +134,8 @@ export function RediscoveryPanel({
           starts, so a second refusal in the same words is said again; `empty:mt-0` gives back
           its margin while it says nothing (`U-45`). */}
       <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
-        {problem}
+        {problem?.message}
+        <CorrelationId id={problem?.correlationId} />
       </p>
 
       {rules.data.items.length === 0 ? (
@@ -604,7 +605,12 @@ function RuleForm({
       {/* A refused save, in a region always there and empty until one (`U-54`), for the
           reasons the panel's own is; `save` empties it as it starts. */}
       <div role="alert" className="mt-4 text-sm text-down-fg empty:mt-0">
-        {failure !== null && <p>{failure.message}</p>}
+        {failure !== null && (
+          <p>
+            {failure.message}
+            <CorrelationId id={failure.correlationId} />
+          </p>
+        )}
         {failure !== null && isStale(failure) && (
           <p className="mt-1">
             Somebody else changed this rule since the form was opened.{' '}

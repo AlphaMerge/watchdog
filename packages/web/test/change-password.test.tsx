@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SessionProvider } from '../src/auth/SessionProvider';
 import { SAY_AGAIN_MS } from '../src/components/refusal';
-import { alertSaying, expectQuiet } from './support/refusal-region';
+import { alertSaying, expectCorrelation, expectQuiet } from './support/refusal-region';
 
 /**
  * The password the operator did not choose (`U-17`).
@@ -205,6 +205,8 @@ describe('a refused password change (U-54)', () => {
     await fill('a-password-of-my-owm');
     submit();
     expect(await alertSaying('do not match')).toBe(region);
+    // Decided here, with no request made: there is no id to show (`U-59`).
+    expectCorrelation(region, undefined);
 
     await fill();
     submit();
@@ -268,5 +270,37 @@ describe('a refused password change (U-54)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('a refused password change, with the core’s id (U-59)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says the id after the core’s refusal, in the same node', async () => {
+    stubFetch([principal(true)], {
+      status: 400,
+      body: {
+        error: {
+          code: 'ACCOUNT_PASSWORD_WRONG',
+          message: 'the current password was not accepted',
+          correlationId: 'req-59',
+        },
+      },
+    });
+    mount();
+    await screen.findByRole('heading', { name: 'Change your password' });
+    const region = screen.getByRole('alert');
+    await type('Current password', 'the-generated-one');
+    await type('New password', 'a-password-of-my-own');
+    await type('New password again', 'a-password-of-my-own');
+    submit();
+    expect(await alertSaying('was not accepted')).toBe(region);
+    expect(region.textContent).toBe('the current password was not accepted req-59');
+    expectCorrelation(region, 'req-59');
   });
 });

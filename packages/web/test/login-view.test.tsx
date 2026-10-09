@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SessionProvider } from '../src/auth/SessionProvider';
 import { SAY_AGAIN_MS } from '../src/components/refusal';
-import { alertSaying, expectQuiet } from './support/refusal-region';
+import { alertSaying, expectCorrelation, expectQuiet } from './support/refusal-region';
 
 /**
  * The login form, end to end against a scripted core (`U-17`).
@@ -355,5 +355,60 @@ describe('a refused login (U-54)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * The core's correlation id after a refused login (`U-59`), and nothing else of the answer.
+ *
+ * The id is a random UUID the browser already holds, so it tells the person at the keyboard
+ * nothing new; the reason a login failed stays in the core's log. A refusal the form decides
+ * itself made no request and has no id.
+ */
+describe('a refused login, with the core’s id (U-59)', () => {
+  const REJECTED = 'that login and password were not accepted';
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says the id after the core’s one sentence, and nothing else the answer carried', async () => {
+    stubFetch([
+      {
+        status: 401,
+        body: {
+          error: {
+            code: 'AUTH_REJECTED',
+            message: REJECTED,
+            // Nothing the core sends today; here to show the form says none of it.
+            context: { reason: 'no-such-login' },
+            details: { attempts: 3 },
+            correlationId: '6f1d2c3a-0b4e-4c5d-8e9f-a0b1c2d3e4f5',
+          },
+        },
+      },
+    ]);
+    mount();
+    await type('Login', 'ops');
+    await type('Password', 'wrong');
+    const region = screen.getByRole('alert');
+    submit();
+    expect(await alertSaying(REJECTED)).toBe(region);
+    expect(region.textContent).toBe(`${REJECTED} 6f1d2c3a-0b4e-4c5d-8e9f-a0b1c2d3e4f5`);
+    expectCorrelation(region, '6f1d2c3a-0b4e-4c5d-8e9f-a0b1c2d3e4f5');
+  });
+
+  it('says none for a refusal the form decided itself', async () => {
+    stubFetch([]);
+    mount();
+    await screen.findByLabelText('Login');
+    const region = screen.getByRole('alert');
+
+    submit();
+    expect(await alertSaying('Type a login and a password.')).toBe(region);
+    expectCorrelation(region, undefined);
   });
 });

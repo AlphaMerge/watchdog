@@ -27,6 +27,16 @@ export interface LoginFeedback {
    * form says who can break the loop instead of inviting another attempt.
    */
   readonly stuck: boolean;
+  /**
+   * The core's id for the answer, shown after the message (`U-59`), or `undefined` for one the
+   * form decided itself or a core that never answered.
+   *
+   * **It says nothing new.** It is a random UUID (`newCorrelationId`) that was already in the
+   * response body the browser holds, so showing it tells the person at the keyboard nothing the
+   * page did not already have; it names the core's log line, and the reason a login failed stays
+   * there (`AUTH_REJECTED` below). No other part of the answer — `details`, `context` — is shown.
+   */
+  readonly correlationId: string | undefined;
 }
 
 /**
@@ -56,7 +66,7 @@ export function waitFor(seconds: number): string {
 }
 
 export function feedbackFor(error: ApiError, stage: LoginStage): LoginFeedback {
-  const base = { retryAfterSeconds: 0, stuck: false } as const;
+  const base = { retryAfterSeconds: 0, stuck: false, correlationId: error.correlationId } as const;
 
   switch (error.code) {
     case 'MFA_REQUIRED': {
@@ -107,6 +117,7 @@ export function feedbackFor(error: ApiError, stage: LoginStage): LoginFeedback {
         focus: 'login',
         stuck: false,
         retryAfterSeconds: seconds,
+        correlationId: error.correlationId,
         message: `Too many failed logins from this address. Try again ${waitFor(seconds)}.`,
       };
     }

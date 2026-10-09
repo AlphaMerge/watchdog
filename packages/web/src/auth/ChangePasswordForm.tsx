@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, send } from '../api/client';
+import { CorrelationId } from '../components/Panels';
 import { useRefusal } from '../components/refusal';
 import { useSession } from './session';
 
@@ -7,6 +8,15 @@ const FIELD = 'mt-1 w-full border border-control bg-surface px-2 py-1.5 text-sm 
 
 /** The core's own floor, checked here too so a twelfth character is not a round trip. */
 const MINIMUM = 12;
+
+/** What the form says when a change is refused: the core's id with it, when the core refused. */
+interface Refusal {
+  readonly message: string;
+  readonly correlationId: string | undefined;
+}
+
+/** A refusal the form decides itself, which no request was made for and so has no id. */
+const own = (message: string): Refusal => ({ message, correlationId: undefined });
 
 export interface PasswordChanged {
   readonly endedSessions: number;
@@ -25,7 +35,7 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [message, setMessage, sayAgain] = useRefusal<string>();
+  const [refusal, setRefusal, sayAgain] = useRefusal<Refusal>();
   const [done, setDone] = useState<PasswordChanged | null>(null);
   const [busy, setBusy] = useState(false);
   const first = useRef<HTMLInputElement>(null);
@@ -43,20 +53,20 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
     // decided in this handler, which may have just said the same thing, so it is emptied now and
     // said a moment later (`U-54`).
     if (next.length < MINIMUM) {
-      sayAgain(`A password must be at least ${String(MINIMUM)} characters.`);
+      sayAgain(own(`A password must be at least ${String(MINIMUM)} characters.`));
       return;
     }
     if (next !== confirm) {
-      sayAgain('Those two do not match.');
+      sayAgain(own('Those two do not match.'));
       return;
     }
     if (next === current) {
-      sayAgain('That is the password you are replacing.');
+      sayAgain(own('That is the password you are replacing.'));
       return;
     }
 
     setBusy(true);
-    setMessage(null);
+    setRefusal(null);
     send<PasswordChanged>('POST', '/auth/password', {
       currentPassword: current,
       newPassword: next,
@@ -71,12 +81,10 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
         refresh();
       })
       .catch((error: unknown) => {
-        setMessage(
+        setRefusal(
           error instanceof ApiError
-            ? error.message
-            : error instanceof Error
-              ? error.message
-              : String(error),
+            ? { message: error.message, correlationId: error.correlationId }
+            : own(error instanceof Error ? error.message : String(error)),
         );
       })
       .finally(() => {
@@ -169,9 +177,10 @@ export function ChangePasswordForm({ forced = false }: { forced?: boolean }): Re
             with its text already in it is not reliably announced (`U-41`). The box is inside it,
             and `empty:mt-0` gives back its margin while it says nothing (`U-45`). */}
         <div role="alert" className="mt-3 empty:mt-0">
-          {message !== null && (
+          {refusal !== null && (
             <p className="border border-down-border bg-down-bg px-3 py-2 text-sm text-down-fg">
-              {message}
+              {refusal.message}
+              <CorrelationId id={refusal.correlationId} />
             </p>
           )}
         </div>

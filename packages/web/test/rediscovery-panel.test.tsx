@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectSummary, RediscoveryRule } from '../src/api/types';
 import { RediscoveryPanel } from '../src/routes/RediscoveryPanel';
-import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
+import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The rediscovery rules on the discovery page, rendered (`D-11`).
@@ -284,6 +284,8 @@ describe('a refused rule change (U-54)', () => {
     switchOff();
     expect(await alertSaying('no such rule')).toBe(region);
     expect(region.textContent).toBe('no such rule');
+    // The core sent no id with this one, and none is shown (`U-59`).
+    expectCorrelation(region, undefined);
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
@@ -356,5 +358,47 @@ describe('a refused rule change (U-54)', () => {
       expect(screen.queryByRole('form', { name: 'Edit Nightly' })).toBeNull();
     });
     expect(speaking()).toEqual([]);
+  });
+});
+
+/**
+ * The core's correlation id, said with each refusal (`U-59`), in the `ml-2 font-mono` span
+ * `ParamsForm` uses, so a refusal can be found in the core's log.
+ */
+describe('a refused rule change, with the core’s id (U-59)', () => {
+  const withId = (status: number, code: string, message: string, id: string) => ({
+    status,
+    body: { error: { code, message, correlationId: id } },
+  });
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says the id after a refused switch, in the panel’s region', async () => {
+    await show([RULE], [withId(404, 'NOT_FOUND', 'no such rule', 'req-59')]);
+    const region = screen.getByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Switch off Nightly' }));
+    expect(await alertSaying('no such rule')).toBe(region);
+    expect(region.textContent).toBe('no such rule req-59');
+    expectCorrelation(region, 'req-59');
+  });
+
+  it('says the id after a refused save, in the form’s region', async () => {
+    await show(
+      [RULE],
+      [withId(400, 'DISCOVERY_SCHEDULE_INVALID', 'that range is not valid', 'req-59b')],
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Nightly' }));
+    const form = screen.getByRole('form', { name: 'Edit Nightly' });
+    const region = within(form).getByRole('alert');
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Mine' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+    expect(await alertSaying('that range is not valid')).toBe(region);
+    expect(region.textContent).toBe('that range is not valid req-59b');
+    expectCorrelation(region, 'req-59b');
   });
 });

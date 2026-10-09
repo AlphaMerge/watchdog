@@ -8,7 +8,8 @@ import type {
   DiscoverySummary,
   ObjectPage,
 } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { useRefusal } from '../components/refusal';
 import { PageTitle } from '../components/PageTitle';
 import { Field, INPUT, SELECT, TemplatePicker } from './discovery-fields';
 import { RediscoveryPanel } from './RediscoveryPanel';
@@ -127,7 +128,7 @@ function StartPanel({
   onError: (error: ApiError | null) => void;
 }): React.JSX.Element {
   const [preview, setPreview] = useState<DiscoveryPreview | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewError, setPreviewError, sayAgain] = useRefusal<ApiError>();
   const [starting, setStarting] = useState(false);
 
   // Debounced, because the preview parses a range and an operator types one character at a time
@@ -139,24 +140,41 @@ function StartPanel({
       setPreviewError(null);
       return;
     }
+    // An answer about a range that is no longer in the box is not shown: the newer one is asked.
+    let stale = false;
     const timer = setTimeout(() => {
       send<DiscoveryPreview>('POST', '/discovery/preview', { range })
         .then((next) => {
+          if (stale) return;
           setPreview(next);
           setPreviewError(null);
         })
         .catch((failure: unknown) => {
+          if (stale) return;
           setPreview(null);
           // The parser's own sentence — "that is 16,777,214 addresses and one run may sweep
           // 65,536; the usual cause is a /8 where a /24 was meant" — is the whole reason `D-01`
           // wrote it, and a generic "invalid range" here would throw it away.
-          setPreviewError(failure instanceof ApiError ? failure.message : 'the range is not valid');
+          //
+          // **Emptied now and said a moment later** (`U-57`). Each answer is about a different
+          // range, so a `/7` refused after a `/8` in the same words is a new refusal; but the
+          // region's text would not change, React would not touch it, and a live region that
+          // does not change says nothing. Emptying it as the request goes out is not enough on
+          // its own either: a local core answers in a few milliseconds, and a screen reader can
+          // read the tree after both changes and find it as it was. So `useRefusal` empties it
+          // and fills it `SAY_AGAIN_MS` later, as it does for a refusal the form decides itself.
+          sayAgain(
+            failure instanceof ApiError
+              ? failure
+              : new ApiError(0, 'UNKNOWN', 'the range is not valid'),
+          );
         });
     }, PREVIEW_DEBOUNCE_MS);
     return () => {
+      stale = true;
       clearTimeout(timer);
     };
-  }, [range]);
+  }, [range, setPreviewError, sayAgain]);
 
   const underProbe = useMemo(
     () => (draft.probeId === null ? [] : descendantsOf(groups, draft.probeId)),
@@ -268,10 +286,21 @@ function StartPanel({
         </Field>
         {/* **Always there, empty until the range is refused** (`U-54`): the refusal comes a
             debounce and a round trip after the last keystroke, and a region added with its text
-            already in it is not reliably announced (`U-41`). Named by the box only while it says
-            something (above); `empty:mt-0` gives back its margin while it does not (`U-45`). */}
-        <p id="range-problem" role="alert" className="mt-2 text-sm text-down-fg empty:mt-0">
-          {previewError}
+            already in it is not reliably announced (`U-41`). **Polite, not an alert** (`U-57`):
+            it answers the range as it is typed and changes with it, so it should wait for the
+            screen reader to finish rather than cut into the operator's own typing, as `U-48`
+            kept the settings panel's problems. Said whole (`aria-atomic`), as an alert is, so a
+            new id after the same sentence is not read as the id alone. Named by the box only
+            while it says something (above); `empty:mt-0` gives back its margin while it does not
+            (`U-45`). */}
+        <p
+          id="range-problem"
+          aria-live="polite"
+          aria-atomic="true"
+          className="mt-2 text-sm text-down-fg empty:mt-0"
+        >
+          {previewError?.message}
+          <CorrelationId id={previewError?.correlationId} />
         </p>
         {preview !== null && (
           <p className="mt-2 text-sm text-text-muted">
@@ -356,6 +385,7 @@ function StartPanel({
           already in it is not reliably announced (`U-41`). `start` empties it as it begins. */}
       <p role="alert" className="mt-4 text-sm text-down-fg empty:mt-0">
         {error?.message}
+        <CorrelationId id={error?.correlationId} />
       </p>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -384,7 +414,7 @@ function StartPanel({
 function RunPanel({ runId }: { runId: number }): React.JSX.Element {
   const [run, setRun] = useState<DiscoveryRun | null>(null);
   const [summary, setSummary] = useState<DiscoverySummary | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<ApiError | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const live = useRef(true);
 
@@ -413,7 +443,14 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
         })
         .catch((failure: unknown) => {
           if (stopped) return;
-          setProblem(failure instanceof ApiError ? failure.message : 'the run could not be read');
+          const next =
+            failure instanceof ApiError
+              ? failure
+              : new ApiError(0, 'UNKNOWN', 'the run could not be read');
+          // A poll that fails again in the same words keeps the failure already shown, id and
+          // all: each answer from the core has its own correlation id, and a region whose text
+          // changed every five seconds would say the same failure every five seconds (`U-59`).
+          setProblem((shown) => (shown !== null && shown.message === next.message ? shown : next));
           // Kept asking, because a core that was briefly unreachable is the common case and a
           // page that gave up would need a reload to notice it came back.
           timer = setTimeout(tick, 5_000);
@@ -447,7 +484,9 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
     send('POST', `/discovery/${String(runId)}/cancel`)
       .catch((failure: unknown) => {
         setProblem(
-          failure instanceof ApiError ? failure.message : 'the run could not be cancelled',
+          failure instanceof ApiError
+            ? failure
+            : new ApiError(0, 'UNKNOWN', 'the run could not be cancelled'),
         );
       })
       .finally(() => {
@@ -455,7 +494,25 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
       });
   }, [runId]);
 
-  if (run === null) return <Card title="Run">{problem ?? <Loading what="the run" />}</Card>;
+  if (run === null) {
+    return (
+      <Card title="Run">
+        {problem === null && <Loading what="the run" />}
+        {/* The first read failing. **Always there, empty until it does** (`U-56`): it answers a
+            read that went out as the card was drawn, and a region added with its text already in
+            it is not reliably announced (`U-41`). **Polite, not an alert.** Nothing the operator
+            asked for was refused — the run was started, and *Start discovery* said so — and the
+            card keeps asking every five seconds and replaces this with the run once a read
+            succeeds; what it says is the same kind of news as the *Loading the run…* status it
+            takes the place of, and is said the same way. It takes no margin: one or the other
+            is shown, never both. */}
+        <p role="status" className="text-sm text-down-fg">
+          {problem?.message}
+          <CorrelationId id={problem?.correlationId} />
+        </p>
+      </Card>
+    );
+  }
 
   const percent = Math.round(progressOf(run) * 100);
   const elapsed =
@@ -541,7 +598,8 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
           (`U-41`). A poll that fails again in the same words leaves it alone, so it is said once
           and not every five seconds. */}
       <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
-        {problem}
+        {problem?.message}
+        <CorrelationId id={problem?.correlationId} />
       </p>
     </Card>
   );

@@ -12,7 +12,8 @@ import type {
   TemplateTestResult,
   TemplateView,
 } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { useRefusal } from '../components/refusal';
 import { SchemaForm } from '../forms/SchemaForm';
 import type { JsonSchema } from '../forms/schema';
 import { PageTitle } from '../components/PageTitle';
@@ -387,26 +388,31 @@ function Editor({
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
-            <button
-              type="submit"
-              disabled={saving || draft.name.trim() === ''}
-              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-            >
-              {saving ? 'Saving…' : template === undefined ? 'Create template' : 'Save template'}
-            </button>
-            <button
-              type="button"
-              disabled={saving}
-              onClick={onCancel}
-              className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            {template !== undefined && <Delete template={template} onDeleted={onSaved} />}
-          </div>
+          {/* The buttons and the refused save are one block of the form's `space-y-4` stack, so
+              the region, empty, is not a last child that leaves the stack's margin under the
+              buttons (`U-52`). */}
+          <div>
+            <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+              <button
+                type="submit"
+                disabled={saving || draft.name.trim() === ''}
+                className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+              >
+                {saving ? 'Saving…' : template === undefined ? 'Create template' : 'Save template'}
+              </button>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={onCancel}
+                className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              {template !== undefined && <Delete template={template} onDeleted={onSaved} />}
+            </div>
 
-          {failed !== null && <Failure error={failed} />}
+            <Failure error={failed} className="mt-4 empty:mt-0" />
+          </div>
         </form>
 
         <div className="space-y-4">
@@ -433,7 +439,7 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
   const sensors = useApi<ObjectPage>('/objects?kind=sensor&limit=50');
   const [sensorId, setSensorId] = useState<number | null>(null);
   const [preview, setPreview] = useState<TemplatePreview | null>(null);
-  const [problem, setProblem] = useState<ApiError | null>(null);
+  const [problem, setProblem, sayAgain] = useRefusal<ApiError>();
   const settled = useRef<number | undefined>(undefined);
 
   const chosen =
@@ -446,15 +452,25 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
 
   useEffect(() => {
     if (chosen === null || incomplete) return;
+    // An answer about a draft that has changed since is not shown: the newer one is asked.
+    let stale = false;
     window.clearTimeout(settled.current);
     settled.current = window.setTimeout(() => {
       send<TemplatePreview>('POST', '/templates/preview', { template: draft, sensorId: chosen })
         .then((rendered) => {
+          if (stale) return;
           setPreview(rendered);
           setProblem(null);
         })
         .catch((error: unknown) => {
-          setProblem(
+          if (stale) return;
+          // The rendering it replaces is about a draft that is no longer in the boxes, and is
+          // not what shows for the moment the refusal waits below.
+          setPreview(null);
+          // Emptied now and said a moment later (`U-56`, as `U-57` does for a range): a draft
+          // edited and refused in the same words is a new refusal, and a region whose text did
+          // not change says nothing — a local core can answer before the empty one is seen.
+          sayAgain(
             error instanceof ApiError
               ? error
               : new ApiError(0, 'UNKNOWN', 'could not render this draft'),
@@ -462,9 +478,10 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
         });
     }, PREVIEW_DEBOUNCE_MS);
     return () => {
+      stale = true;
       window.clearTimeout(settled.current);
     };
-  }, [draft, chosen, incomplete]);
+  }, [draft, chosen, incomplete, setProblem, sayAgain]);
 
   return (
     <div className="space-y-2 border border-border p-3">
@@ -493,27 +510,32 @@ function Preview({ draft }: { draft: TemplateInput }): React.JSX.Element {
         )}
       </div>
 
-      {chosen === null ? (
-        <p className="text-xs text-text-muted">
-          There are no sensors to render against yet. A preview needs something real — an invented
-          state would read well and prove nothing.
-        </p>
-      ) : incomplete ? (
-        <p className="text-xs text-text-muted">Give the template a name to preview it.</p>
-      ) : problem !== null ? (
-        // The refusal names the placeholder and lists the real ones — which is the whole use of
-        // it, and a panel that showed only the sentence would throw that away.
-        <Failure error={problem} />
-      ) : preview === null ? (
-        <p className="text-xs text-text-muted">Rendering…</p>
-      ) : (
-        <div className="space-y-2">
-          <p className="text-sm font-medium text-text">{preview.subject}</p>
-          <pre className="whitespace-pre-wrap break-words bg-surface-muted p-2 text-xs text-text">
-            {preview.body}
-          </pre>
-        </div>
-      )}
+      {/* What the preview shows and its refusal are one block of the `space-y-2` stack, so the
+          region, empty, takes no margin. One or the other has something to say, never both. */}
+      <div>
+        {chosen === null ? (
+          <p className="text-xs text-text-muted">
+            There are no sensors to render against yet. A preview needs something real — an invented
+            state would read well and prove nothing.
+          </p>
+        ) : incomplete ? (
+          <p className="text-xs text-text-muted">Give the template a name to preview it.</p>
+        ) : problem !== null ? null : preview === null ? (
+          <p className="text-xs text-text-muted">Rendering…</p>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-text">{preview.subject}</p>
+            <pre className="whitespace-pre-wrap break-words bg-surface-muted p-2 text-xs text-text">
+              {preview.body}
+            </pre>
+          </div>
+        )}
+        {/* The refusal names the placeholder and lists the real ones — which is the whole use of
+            it, and a panel that showed only the sentence would throw that away. **Always there,
+            empty until a refusal, and polite** (`U-56`): it answers the draft as it is typed, so
+            it changes as the operator types and should not interrupt them (`U-48`). */}
+        <Failure error={chosen !== null && !incomplete ? problem : null} polite />
+      </div>
       <p className="text-xs text-text-muted">
         Rendered against that sensor’s actual state, not an invented one.
       </p>
@@ -534,31 +556,35 @@ function TestSend({ template }: { template: TemplateView }): React.JSX.Element {
         This really sends, to the real recipients, through the real transport. Testing an on-call
         template at three in the morning pages whoever is on call — which is why it is audited.
       </p>
-      <button
-        type="button"
-        disabled={sending}
-        onClick={() => {
-          setSending(true);
-          setFailed(null);
-          send<TemplateTestResult>('POST', `/templates/${String(template.id)}/test`, {})
-            .then(setResult)
-            .catch((error: unknown) => {
-              setFailed(
-                error instanceof ApiError
-                  ? error
-                  : new ApiError(0, 'UNKNOWN', error instanceof Error ? error.message : 'failed'),
-              );
-            })
-            .finally(() => {
-              setSending(false);
-            });
-        }}
-        className="border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
-      >
-        {sending ? 'Sending…' : 'Send a test'}
-      </button>
+      {/* The button and its refusal are one block of the `space-y-2` stack, so the region,
+          empty, leaves no margin between the button and a result (`U-52`). */}
+      <div>
+        <button
+          type="button"
+          disabled={sending}
+          onClick={() => {
+            setSending(true);
+            setFailed(null);
+            send<TemplateTestResult>('POST', `/templates/${String(template.id)}/test`, {})
+              .then(setResult)
+              .catch((error: unknown) => {
+                setFailed(
+                  error instanceof ApiError
+                    ? error
+                    : new ApiError(0, 'UNKNOWN', error instanceof Error ? error.message : 'failed'),
+                );
+              })
+              .finally(() => {
+                setSending(false);
+              });
+          }}
+          className="border border-control px-2 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+        >
+          {sending ? 'Sending…' : 'Send a test'}
+        </button>
 
-      {failed !== null && <Failure error={failed} />}
+        <Failure error={failed} className="mt-2 empty:mt-0" />
+      </div>
 
       {result !== null && (
         <div className="space-y-2 text-xs">
@@ -589,28 +615,75 @@ function Delete({
   const [failed, setFailed] = useState<ApiError | null>(null);
   const [confirming, setConfirming] = useState(false);
 
-  if (!confirming) {
-    return (
-      <button
-        type="button"
-        onClick={() => {
-          setConfirming(true);
-        }}
-        className="ml-auto border border-down-fg px-3 py-1 text-sm text-down-fg"
-      >
-        Delete
-      </button>
-    );
-  }
+  // The core refuses a template a trigger still names, and returns the list (`N-05`). That list
+  // is the useful part — a bare "cannot delete" leaves somebody hunting through every object for
+  // the reference — so it is shown, with a link to each trigger's object.
+  const usedBy = failed?.details.usedBy ?? [];
 
-  if (failed !== null) {
-    // The core refuses a template a trigger still names, and returns the list (`N-05`). That
-    // list is the useful part — a bare "cannot delete" leaves somebody hunting through every
-    // object for the reference — so it is shown, with a link to each trigger's object.
-    const usedBy = failed.details.usedBy ?? [];
-    return (
-      <div className="ml-auto max-w-md space-y-1 text-xs text-down-fg">
-        <p>{failed.message}</p>
+  return (
+    <div className="ml-auto max-w-md">
+      {!confirming ? (
+        <button
+          type="button"
+          onClick={() => {
+            setConfirming(true);
+          }}
+          className="border border-down-fg px-3 py-1 text-sm text-down-fg"
+        >
+          Delete
+        </button>
+      ) : failed === null ? (
+        <span className="flex items-center gap-2">
+          <span className="text-xs text-text-muted">Delete it?</span>
+          <button
+            type="button"
+            onClick={() => {
+              // Emptied as the attempt starts (`U-56`); it already is, since the question is
+              // only asked while nothing is refused, but this does not rest on that.
+              setFailed(null);
+              send('DELETE', `/templates/${String(template.id)}`)
+                .then(onDeleted)
+                .catch((error: unknown) => {
+                  setFailed(
+                    error instanceof ApiError
+                      ? error
+                      : new ApiError(
+                          0,
+                          'UNKNOWN',
+                          error instanceof Error ? error.message : 'failed',
+                        ),
+                  );
+                });
+            }}
+            className="border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
+          >
+            Yes, delete
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setConfirming(false);
+              setFailed(null);
+            }}
+            className="border border-control px-2 py-1 text-xs text-text-muted"
+          >
+            Keep it
+          </button>
+        </span>
+      ) : null}
+
+      {/* A refused delete. **Always there, empty until a refusal** (`U-56`, as `U-54`'s are):
+          focus is on *Yes, delete* when the core refuses, and a region added with its text
+          already in it is not reliably announced (`U-41`). An alert, for `U-48`'s reason: the
+          template the operator thinks they removed is still there. It takes the question's place
+          and needs no margin of its own, so an empty one takes no space. */}
+      <div role="alert" className="space-y-1 text-xs text-down-fg">
+        {failed !== null && (
+          <p>
+            {failed.message}
+            <CorrelationId id={failed.correlationId} />
+          </p>
+        )}
         {usedBy.length > 0 && (
           <ul className="space-y-0.5">
             {usedBy.map((use, index) => (
@@ -626,51 +699,21 @@ function Delete({
             ))}
           </ul>
         )}
+      </div>
+
+      {failed !== null && (
         <button
           type="button"
           onClick={() => {
             setConfirming(false);
             setFailed(null);
           }}
-          className="border border-control px-2 py-1 text-text-muted"
+          className="mt-1 border border-control px-2 py-1 text-xs text-text-muted"
         >
           Close
         </button>
-      </div>
-    );
-  }
-
-  return (
-    <span className="ml-auto flex items-center gap-2">
-      <span className="text-xs text-text-muted">Delete it?</span>
-      <button
-        type="button"
-        onClick={() => {
-          send('DELETE', `/templates/${String(template.id)}`)
-            .then(onDeleted)
-            .catch((error: unknown) => {
-              setFailed(
-                error instanceof ApiError
-                  ? error
-                  : new ApiError(0, 'UNKNOWN', error instanceof Error ? error.message : 'failed'),
-              );
-            });
-        }}
-        className="border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
-      >
-        Yes, delete
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          setConfirming(false);
-          setFailed(null);
-        }}
-        className="border border-control px-2 py-1 text-xs text-text-muted"
-      >
-        Keep it
-      </button>
-    </span>
+      )}
+    </div>
   );
 }
 
@@ -692,11 +735,40 @@ function Placeholders({ items }: { items: readonly PlaceholderInfo[] }): React.J
   );
 }
 
-function Failure({ error }: { error: ApiError }): React.JSX.Element {
-  const problems = error.details.problems ?? [];
+/**
+ * A refusal with the problems the core listed, in a region that is always there (`U-56`).
+ *
+ * **Empty until there is one**, as `U-54`'s are: a region added with its text already in it is
+ * not reliably announced (`U-41`). An alert by default, for a refused save or test send — focus
+ * is on the button when the core refuses, and what it says is that what the operator just did
+ * did not happen (`U-48`). `polite` for the preview, which answers the draft as it is typed and
+ * changes with it; it is said whole, as an alert is, so a list that changed under the same
+ * sentence is not read as the list alone. `className` is the margin and its `empty:` twin
+ * (`U-45`), when the caller's block needs one.
+ */
+function Failure({
+  error,
+  className = '',
+  polite = false,
+}: {
+  error: ApiError | null;
+  className?: string;
+  polite?: boolean;
+}): React.JSX.Element {
+  const problems = error?.details.problems ?? [];
   return (
-    <div className="space-y-1 text-xs text-down-fg">
-      <p>{error.message}</p>
+    <div
+      role={polite ? undefined : 'alert'}
+      aria-live={polite ? 'polite' : undefined}
+      aria-atomic={polite ? true : undefined}
+      className={`space-y-1 text-xs text-down-fg ${className}`.trim()}
+    >
+      {error !== null && (
+        <p>
+          {error.message}
+          <CorrelationId id={error.correlationId} />
+        </p>
+      )}
       {problems.length > 0 && (
         <ul className="space-y-0.5">
           {problems.map((problem, index) => (
