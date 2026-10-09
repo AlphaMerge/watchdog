@@ -25970,10 +25970,58 @@ because each is a decision rather than a defect:
         map is replaced by *Loading the map…* for the length of a request; that was so before
         (one render later) and is unchanged.
 
-- [ ] **U-63 — the invalid-parameters list has no way in from the web** · XS · P-375 · Found
+- [x] **U-63 — the invalid-parameters list has no way in from the web** · XS · P-375 · Found
       2026-10-09 in `P-375`. `?invalidParams=true` is reachable only through the API. **Done when**
       Core Health's `sensorsWithInvalidParams` (and the sensor list) link to it, and the list says
       when the check has not finished, with tests.
+
+      **U-63 outcome. The list is the tree filtered: an *Invalid parameters only* box beside the
+      search and tag, held in the URL as `/tree?invalidParams=true`, the API's own parameter.
+      Core Health's channel links there.** Web only. No route, migration or protocol change.
+      - **Where.** The tree's search is the web's only object listing, and it already asks
+        `GET /objects` with `q`, `tag` and `include=path`. The filter is one more parameter on
+        the same request, so it combines with both and each row says where it is. The tree's
+        search and tag are held in component state, not the URL. This filter is in the URL,
+        as the alarm list's filters are (`AlarmsView`), because a link from Core Health has to
+        carry it. The box writes it with `replace`, as the alarm filters do.
+      - **The link.** `channelLinkFor` (`U-21`'s way from a Core Health count to its list) gives
+        `sensorsWithInvalidParams` on `ms.core.health` a **Which sensors →** link beside the
+        channel's name. It goes to `INVALID_PARAMS_PATH` (`tree/invalid-params.ts`).
+      - **What the list says, and where.** A `<p role="status" aria-live="polite"
+        aria-atomic="true">` under the search row, in the page from the first render, empty,
+        `mt-3 empty:mt-0`. It sits in one plain block with the row, not as a child of the page's
+        `space-y-4` (`U-54`). With the filter on it says how many the list holds ("At least 200"
+        when another page follows), or that no sensor you can see fails (or none matching the
+        search), or why there is no list. For `checking` it says still being checked, try again
+        shortly, and the results area offers **Try again**. For `stopped` (and any other `pass`)
+        it says not checked since the core last started, checked again at the next start, and
+        offers nothing to retry. The 503 is not an `ErrorPanel` and not an alert. Any other
+        failure is the error panel it was, with the region empty. An empty set is said in the
+        region only, not also as *Nothing matches.*
+      - **Asked for by the page, not the results.** The listing's `useApi` moved from
+        `SearchResults` up to `TreeView`, so the region above the results can say what came back.
+        An answer is used only when `answered` is the path being asked. Without that check,
+        ticking the box after a search drew the search's empty answer as "No sensor matching…"
+        for a render (`U-62`'s hazard, here in a live region).
+      - **Nothing about a sensor beyond the listing.** The rows are the search's: name, kind,
+        host, tags, path, state badge. A note under the list says what the filter means, and that
+        Core Health counts every sensor so its number can be higher than the list is long.
+      - **Docs.** `web-ui.md`'s Tree section.
+      - **Tests** (`invalid-params.test.tsx`, 11, vitest). The link from Core Health's channel
+        table, clicked through to the tree, which asks with `invalidParams=true`, and no link
+        for another type with the same key. The box ticked from the URL, writing it and taking it
+        out, combined with `q`. The count sentence. The region present, quiet and empty
+        (`expectQuiet`, polite) before a held answer, and the answer landing in that same node.
+        `checking` in words with no alert, and **Try again** asking again. `stopped` in words
+        with no alert and no retry. The empty set said once. A 500 left to the error panel. An
+        earlier search's answer never written to the region, read from the mutation records.
+        `credentials-model.test.ts` covers the new `channelLinkFor` case. Nine mutations, each
+        killed: link removed, filter not sent, not written to the URL, the 503 not recognised,
+        every pass read as `checking`, the region mounted only with text, the empty set said
+        twice, the `answered` check removed, and no **Try again**.
+      - **Not done.** The tree's search and tag are still not in the URL. Nothing retries on
+        its own after `Retry-After`: the web cannot read that header through `request`, and a
+        button was enough for a pass that takes a third of a second.
 
 - [x] **U-64 — a refused template delete drops focus, and the run card shares one region** · XS ·
       U-56 · Found 2026-10-09 in `U-56`. A refused delete removes *Yes, delete*, which had focus,

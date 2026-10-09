@@ -558,8 +558,14 @@ describe('the way from Core Health to the list', () => {
       to: '/credentials/unbounded',
       label: 'Which sets',
     });
+    // And the sensors whose stored parameters their type now refuses (`U-63`).
+    expect(channelLinkFor('ms.core.health', 'sensorsWithInvalidParams')).toEqual({
+      to: '/tree?invalidParams=true',
+      label: 'Which sensors',
+    });
     expect(channelLinkFor('ms.core.health', 'credentialsToReenter')).toBeNull();
     expect(channelLinkFor('script.custom', 'credentialsUnbounded')).toBeNull();
+    expect(channelLinkFor('script.custom', 'sensorsWithInvalidParams')).toBeNull();
     expect(channelLinkFor(undefined, 'credentialsUnbounded')).toBeNull();
   });
 });

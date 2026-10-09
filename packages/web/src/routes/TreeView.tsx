@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { request, useApi, ApiError } from '../api/client';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { request, useApi, ApiError, type Loadable } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
 import type { ObjectPage, ObjectRef, ObjectSummary, SensorState } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
@@ -16,6 +16,12 @@ import {
 } from '../tree/model';
 import { PageTitle } from '../components/PageTitle';
 import { keepActive, treeCommand } from '../tree/keyboard';
+import {
+  INVALID_PARAMS,
+  knownSentence,
+  notChecked,
+  notCheckedSentence,
+} from '../tree/invalid-params';
 
 const KIND_GLYPH: Record<string, string> = {
   root: '⌂',
@@ -45,6 +51,11 @@ const PAGE = 500;
  * comes with the page: `include=path` walks every row's ancestors in one statement (`P-214`),
  * where a breadcrumb request per row would be two hundred of them. Before it did, two sensors
  * both called `Ping` read alike until one was opened.
+ *
+ * **Invalid parameters is a filter held in the URL** (`U-63`), `?invalidParams=true` as on
+ * `GET /objects`, so Core Health's count of those sensors links to their list and the list is a
+ * link somebody can send. Until the core's start-up check has read every sensor there is no list,
+ * and the page says why in words, in a polite status region that is on the page from the start.
  */
 export function TreeView(): React.JSX.Element {
   const tops = useApi<{ items: ObjectSummary[] }>('/objects/tops');
@@ -54,47 +65,101 @@ export function TreeView(): React.JSX.Element {
   const live = useStateStream(start?.streamId ?? null);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState('');
+  const [params, setParams] = useSearchParams();
+  const invalidParams = params.get(INVALID_PARAMS) === 'true';
+  const setInvalidParams = useCallback(
+    (on: boolean) => {
+      const next = new URLSearchParams(params);
+      if (on) next.set(INVALID_PARAMS, 'true');
+      else next.delete(INVALID_PARAMS);
+      setParams(next, { replace: true });
+    },
+    [params, setParams],
+  );
 
-  const searching = query.trim() !== '' || tag.trim() !== '';
+  const narrowed = query.trim() !== '' || tag.trim() !== '';
+  const searching = narrowed || invalidParams;
+  const listed = start !== null && start.kind !== 'nothing';
+
+  // Asked for here rather than by the results, so the status region above them can say what the
+  // answer was: the region is on the page before the answer, and the answer lands in it.
+  const searchPath =
+    searching && listed ? searchPathOf(query.trim(), tag.trim(), invalidParams) : null;
+  const asked = useApi<ObjectPage>(searchPath);
+  // An answer to an earlier search, or to none, is not this one's, for even a render.
+  const found: Loadable<ObjectPage> =
+    asked.status !== 'loading' && asked.answered === searchPath ? asked : { status: 'loading' };
+  const said = invalidParams ? filterStatus(found, narrowed) : '';
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <PageTitle title="Tree" />
-        <StreamIndicator status={live.status} />
-        {/*
+      {/*
+        One block, so the status region is not a child of the `space-y-4` stack: an empty last
+        child there would still leave the stack's margin under it (`U-54`).
+      */}
+      <div>
+        <div className="flex flex-wrap items-center gap-3">
+          <PageTitle title="Tree" />
+          <StreamIndicator status={live.status} />
+          {/*
           Wraps and shrinks. `w-56` + `w-32` + a gap is 376px, which does not fit the 320px
           WCAG 1.4.10 asks for reflow at — and `ml-auto` on a row that cannot wrap pushed the
           pair off the right edge rather than dropping them onto their own line.
         */}
-        <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
-          <label className="sr-only" htmlFor="tree-search">
-            Search objects
-          </label>
-          <input
-            id="tree-search"
-            type="search"
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-            }}
-            placeholder="Search names and hosts"
-            className="min-w-0 flex-1 border border-control sm:w-56 sm:flex-none bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
-          />
-          <label className="sr-only" htmlFor="tree-tag">
-            Filter by tag
-          </label>
-          <input
-            id="tree-tag"
-            type="search"
-            value={tag}
-            onChange={(event) => {
-              setTag(event.target.value);
-            }}
-            placeholder="tag"
-            className="w-24 min-w-0 border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
-          />
+          <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+            <label className="sr-only" htmlFor="tree-search">
+              Search objects
+            </label>
+            <input
+              id="tree-search"
+              type="search"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+              }}
+              placeholder="Search names and hosts"
+              className="min-w-0 flex-1 border border-control sm:w-56 sm:flex-none bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+            />
+            <label className="sr-only" htmlFor="tree-tag">
+              Filter by tag
+            </label>
+            <input
+              id="tree-tag"
+              type="search"
+              value={tag}
+              onChange={(event) => {
+                setTag(event.target.value);
+              }}
+              placeholder="tag"
+              className="w-24 min-w-0 border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
+            />
+            <label className="flex items-center gap-1.5 text-sm text-text">
+              <input
+                type="checkbox"
+                checked={invalidParams}
+                onChange={(event) => {
+                  setInvalidParams(event.target.checked);
+                }}
+              />
+              Invalid parameters only
+            </label>
+          </div>
         </div>
+        {/*
+        Polite, and said whole: it answers a filter, it refuses nothing the operator did, so it
+        waits for the screen reader rather than cutting in (`U-48`). In the tree from the start
+        and empty until the filter has an answer to give (`U-54`), with its margin taken away
+        while it says nothing (`U-45`).
+      */}
+        <p
+          id="tree-filter-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="mt-3 text-sm text-text empty:mt-0"
+        >
+          {said}
+        </p>
       </div>
 
       {tops.status === 'error' && <ErrorPanel error={tops.error} retry={tops.reload} />}
@@ -108,12 +173,42 @@ export function TreeView(): React.JSX.Element {
       {start !== null &&
         start.kind !== 'nothing' &&
         (searching ? (
-          <SearchResults query={query.trim()} tag={tag.trim()} live={live.states} />
+          <SearchResults
+            found={found}
+            reload={asked.reload}
+            invalidParams={invalidParams}
+            live={live.states}
+          />
         ) : (
           <Branches start={start} live={live.states} />
         ))}
     </div>
   );
+}
+
+/** The listing a search asks for: each filter that is on, and every row's path. */
+function searchPathOf(query: string, tag: string, invalidParams: boolean): string {
+  const params = new URLSearchParams({ limit: '200', include: 'path' });
+  if (query !== '') params.set('q', query);
+  if (tag !== '') params.set('tag', tag);
+  if (invalidParams) params.set(INVALID_PARAMS, 'true');
+  return `/objects?${params.toString()}`;
+}
+
+/**
+ * What the status region says while the invalid-parameters filter is on: how many the list holds,
+ * that none fail, or why there is no list yet. Nothing while it is being read, and nothing for a
+ * read that failed for another reason, which the error panel below says.
+ */
+function filterStatus(found: Loadable<ObjectPage>, narrowed: boolean): string {
+  if (found.status === 'ready') {
+    return knownSentence(found.data.items.length, found.data.nextCursor !== null, narrowed);
+  }
+  if (found.status === 'error') {
+    const pass = notChecked(found.error);
+    return pass === null ? '' : notCheckedSentence(pass);
+  }
+  return '';
 }
 
 /**
@@ -429,24 +524,43 @@ function TreeRow({
  * to run there rather than here, because the tree is loaded a level at a time and a client-side
  * filter would only ever search the branches somebody had already opened. `include=path` is what
  * lets a row say where its match is.
+ *
+ * **With the invalid-parameters filter, a list not known yet is not an error** (`U-63`). The
+ * status region above says why in words, and for a check still running this offers to ask again.
+ * An empty list is said there too, so it is not said twice.
  */
 function SearchResults({
-  query,
-  tag,
+  found,
+  reload,
+  invalidParams,
   live,
 }: {
-  query: string;
-  tag: string;
+  found: Loadable<ObjectPage>;
+  reload: () => void;
+  invalidParams: boolean;
   live: ReadonlyMap<number, LiveState>;
-}): React.JSX.Element {
-  const params = new URLSearchParams({ limit: '200', include: 'path' });
-  if (query !== '') params.set('q', query);
-  if (tag !== '') params.set('tag', tag);
-  const found = useApi<ObjectPage>(`/objects?${params.toString()}`);
-
+}): React.JSX.Element | null {
   if (found.status === 'loading') return <Loading what="matching objects" />;
-  if (found.status === 'error') return <ErrorPanel error={found.error} retry={found.reload} />;
+  if (found.status === 'error') {
+    const pass = invalidParams ? notChecked(found.error) : null;
+    if (pass === 'stopped') return null;
+    if (pass === 'checking') {
+      return (
+        <div>
+          <button
+            type="button"
+            onClick={reload}
+            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return <ErrorPanel error={found.error} retry={reload} />;
+  }
   if (found.data.items.length === 0) {
+    if (invalidParams) return null;
     return (
       <Card>
         <Empty>Nothing matches.</Empty>
@@ -499,6 +613,13 @@ function SearchResults({
       {found.data.nextCursor !== null && (
         <p className="mt-3 text-xs text-text-muted">
           Showing the first 200 matches. Narrow the search to see fewer.
+        </p>
+      )}
+      {invalidParams && (
+        <p className="mt-3 text-xs text-text-muted">
+          Each of these sensors still runs with the parameters it has. An edit of one is refused
+          until they are mended, and the refusal names what to change. Core Health counts every
+          sensor in the installation, so its number can be higher than this list is long.
         </p>
       )}
     </Card>
