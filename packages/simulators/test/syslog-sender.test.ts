@@ -2,7 +2,6 @@ import { strict as assert } from 'node:assert';
 import { createServer, type Server, type Socket } from 'node:net';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { describe, it } from 'node:test';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { close, listen } from '../src/net.js';
 import { renderMessage, sendTcp, sendUdp } from '../src/syslog-sender.js';
 import { pollWithin } from './support/within.js';
@@ -103,32 +102,46 @@ describe('the syslog sender', () => {
       pollWithin(5_000, what, met);
 
     /**
-     * How long UDP is watched for a datagram past the expected count (`P-373`). UDP has no end to
-     * wait for, so this is a window, and it is short because it has little to cover: `sendUdp`
-     * returns only once every send's callback has fired, so an excess datagram has left the
-     * sender before the window opens, and on loopback it is already queued for the collector,
-     * which needs only a turn of the event loop to read it. A machine slow enough to outrun the
-     * window lets an excess datagram go unseen — the check weakens, it never fails a correct
-     * sender — and the cases over TCP, which wait for the connection's end, do not depend on it.
+     * A datagram the test sends itself once `sendUdp` has returned (`P-378`), standing in for the
+     * end UDP does not have. `sendUdp` returns only once every send's callback has fired, so all
+     * it sent, an excess datagram included, is on the loopback ahead of this, and loopback
+     * delivers in order: once it arrives, everything the sender sent has been read. `P-373`
+     * waited a fixed 100 ms instead, which a machine slower than that would outrun.
      */
-    const QUIET_MS = 100;
+    const SENTINEL = 'sentinel: the sender is done';
+
+    const sendSentinel = async (port: number): Promise<void> => {
+      const socket = createSocket('udp4');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.send(SENTINEL, port, '127.0.0.1', (error) => {
+            if (error === null) resolve();
+            else reject(error);
+          });
+        });
+      } finally {
+        socket.close();
+      }
+    };
 
     it('sends one datagram per message over UDP', async () => {
       const { port, lines, socket } = await collectUdp();
       try {
         await sendUdp(port, [{ message: 'first' }, { message: 'second' }]);
+        await sendSentinel(port);
         await arrived(
-          () => `2 datagrams; got ${String(lines.length)}`,
-          () => lines.length >= 2,
+          () => `the sentinel after the sender's datagrams; got ${JSON.stringify(lines)}`,
+          () => lines.includes(SENTINEL),
         );
-        await sleep(QUIET_MS);
       } finally {
         socket.close();
       }
 
-      assert.equal(lines.length, 2);
-      assert.match(lines[0] ?? '', /first$/);
-      assert.match(lines[1] ?? '', /second$/);
+      assert.equal(lines.at(-1), SENTINEL, 'the sentinel arrives last');
+      const sent = lines.slice(0, -1);
+      assert.equal(sent.length, 2, `exactly two datagrams: ${JSON.stringify(sent)}`);
+      assert.match(sent[0] ?? '', /first$/);
+      assert.match(sent[1] ?? '', /second$/);
     });
 
     it('frames TCP by octet count, which is RFC 6587 and unambiguous', async () => {

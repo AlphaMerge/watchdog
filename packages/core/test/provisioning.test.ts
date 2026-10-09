@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import type { QueryResultRow } from 'pg';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { Reach, Visibility } from '../src/auth/access.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
@@ -11,6 +12,7 @@ import {
   HIDDEN_DEVICE_BY_NAME,
   HIDDEN_SENSOR_THERE,
   ProvisionService,
+  existingInGroup,
   provisionRun,
   runVoucher,
   type ExistingDevice,
@@ -25,7 +27,7 @@ import {
   type DispatchMessage,
 } from '../src/discovery/service.js';
 import type { Actor } from '../src/objects/audit.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -1365,5 +1367,194 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       assert.equal((await runs.get(runId))?.status, 'done');
       assert.deepEqual(await failures(runId), []);
     });
+  });
+});
+
+/**
+ * What a group already holds, read in one order whatever plan the read gets (`P-381`).
+ *
+ * The pass resolves by position: `DeviceIndex` keeps the last device for an address and
+ * `sensorLike` the first sensor that matches. So the read has to give the same order under any
+ * plan, and this puts it under the plan that gives the other one: no index scans and no merge or
+ * nested-loop joins, so each table is read in the order its rows were last written, and the older
+ * device and the older sensor are rewritten after the newer ones. The read without its `ORDER BY`
+ * is run under the same plan first and must come back newest first, so a planner that changed its
+ * mind fails here rather than letting the test pass without meeting the order it is about.
+ *
+ * Its own database, because a heap that earlier tests deleted from can have line pointers free for
+ * reuse, and a rewritten row can land in one ahead of the row it was meant to follow.
+ */
+describe('what a group already holds, in one order (P-381)', { skip: !available }, () => {
+  let scratch: ScratchDatabase;
+  let db: Database;
+  let harness: Awaited<ReturnType<typeof buildHarness>>;
+
+  before(async () => {
+    scratch = await createScratchDatabase('provision_order');
+    db = scratch.db;
+    harness = await buildHarness(db);
+  });
+
+  after(async () => {
+    await scratch.drop();
+  });
+
+  /** The two reads as they were before `P-381`: under this plan they give the newest first. */
+  const UNORDERED_DEVICES = `SELECT o.id FROM object o
+    JOIN device_config d ON d.object_id = o.id
+    WHERE o.parent_id = $1 AND o.kind = 'device'`;
+  const UNORDERED_SENSORS = `SELECT s.id FROM object s
+    JOIN sensor_config sc ON sc.object_id = s.id
+    JOIN object d ON d.id = s.parent_id
+    WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'`;
+
+  /** One statement at a time: `existingInGroup` asks two at once, and here they share a client. */
+  const serial = (q: Queryable): Queryable => {
+    let last: Promise<unknown> = Promise.resolve();
+    return {
+      query: <T extends QueryResultRow>(text: string, values?: readonly unknown[]) => {
+        const next = last.then(() => q.query<T>(text, values));
+        last = next.catch(() => undefined);
+        return next;
+      },
+    };
+  };
+
+  /** `fn` in a transaction whose plans read each table in the order its rows were last written. */
+  const lastWrittenFirst = <T>(fn: (q: Queryable) => Promise<T>): Promise<T> =>
+    db.tx(async (q) => {
+      for (const setting of [
+        'enable_indexscan',
+        'enable_indexonlyscan',
+        'enable_bitmapscan',
+        'enable_mergejoin',
+        'enable_nestloop',
+      ]) {
+        await q.query(`SET LOCAL ${setting} = off`);
+      }
+      return fn(serial(q));
+    });
+
+  it('matches the newer of two devices at one address, and the older of two alike sensors', async () => {
+    const probe = await harness.service.create(testActor, {
+      kind: 'probe',
+      parentId: harness.rootId,
+      name: 'Order probe',
+    });
+    const group = await harness.service.create(testActor, {
+      kind: 'group',
+      parentId: probe.id,
+      name: 'Order group',
+    });
+    const older = await harness.service.create(testActor, {
+      kind: 'device',
+      parentId: group.id,
+      name: 'older',
+      host: '10.0.0.1',
+    });
+    const newer = await harness.service.create(testActor, {
+      kind: 'device',
+      parentId: group.id,
+      name: 'newer',
+      host: '10.0.0.1',
+    });
+    const first = await harness.service.create(testActor, {
+      kind: 'sensor',
+      parentId: newer.id,
+      name: 'Ping',
+      sensorType: 'icmp.ping',
+    });
+    const second = await harness.service.create(testActor, {
+      kind: 'sensor',
+      parentId: newer.id,
+      name: 'Ping again',
+      sensorType: 'icmp.ping',
+    });
+    // The older of each written again, so a table read in the order its rows were last written
+    // gives the newer first.
+    await db.query('UPDATE object SET name = name WHERE id = ANY($1::bigint[])', [
+      [older.id, first.id],
+    ]);
+    await db.query('UPDATE device_config SET host = host WHERE object_id = $1', [older.id]);
+    await db.query('UPDATE sensor_config SET params = params WHERE object_id = $1', [first.id]);
+
+    const { unordered, held } = await lastWrittenFirst(async (q) => ({
+      unordered: {
+        devices: (await q.query<{ id: string }>(UNORDERED_DEVICES, [group.id])).map((row) =>
+          Number(row.id),
+        ),
+        sensors: (await q.query<{ id: string }>(UNORDERED_SENSORS, [group.id])).map((row) =>
+          Number(row.id),
+        ),
+      },
+      held: await existingInGroup(q, group.id),
+    }));
+    assert.deepEqual(
+      unordered,
+      { devices: [newer.id, older.id], sensors: [second.id, first.id] },
+      'the plan this test needs: without an ORDER BY the newer rows come first',
+    );
+    assert.deepEqual(
+      {
+        devices: held.devices.map((device) => device.id),
+        sensors: held.sensors.map((sensor) => sensor.id),
+      },
+      { devices: [older.id, newer.id], sensors: [first.id, second.id] },
+    );
+
+    // What the order decides. The address goes to the newer device, which has its Ping; and the
+    // Ping is the first one, which its caller can see, so it is skipped rather than reported as
+    // somebody else's. Read the other way round, the older device would be matched and given a
+    // Ping of its own.
+    const discovery = new DiscoveryService({
+      db,
+      audit: new DatabaseAuditSink(),
+      logger: silentLogger,
+      dispatch: () => ({ kind: 'sent' }),
+    });
+    const templates = new DeviceTemplateCatalogue(() => true);
+    for (const template of TEMPLATES) templates.register(template, 'test');
+    const provisioner = new ProvisionService({
+      db,
+      objects: harness.service,
+      templates: templates.seal(),
+      logger: silentLogger,
+      credentialsFor: () => Promise.resolve(new Set<string>()),
+      recordDevice: () => Promise.resolve(),
+    });
+    const record = await discovery.start(
+      { groupId: group.id, probeId: probe.id, range: '10.0.0.0/30' },
+      testActor,
+    );
+    const visibility = Visibility.of(
+      new Map([
+        [older.id, true],
+        [newer.id, true],
+        [first.id, true],
+        [second.id, false],
+      ]),
+      false,
+      null,
+    );
+    const report = await provisioner.provision({
+      run: record,
+      hosts: [
+        {
+          address: '10.0.0.1',
+          rttMs: 1,
+          fingerprint: classify({ address: '10.0.0.1', ports: [] }),
+        },
+      ],
+      existingDevices: held.devices,
+      existingSensors: held.sensors,
+      actor: testActor,
+      credentials: { kind: 'installation' },
+      sight: { visibility, writes: Reach.EVERYTHING },
+    });
+    assert.deepEqual(report.devices, [
+      { address: '10.0.0.1', deviceId: newer.id, created: false, sensors: [] },
+    ]);
+    assert.deepEqual([report.sensorsCreated, report.sensorsSkipped], [0, 1]);
+    assert.deepEqual(report.problems, []);
   });
 });

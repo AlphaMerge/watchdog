@@ -13915,13 +13915,33 @@ because each is a decision rather than a defect:
       - **Not done.** The registries keep `strict: false`. `vault/service.ts` and `stream.ts`
         build Ajvs with no pattern and no sentence, and were not touched.
 
-- [ ] **P-378 — the sizing poll has sixteen checks to spare** · XS · P-373 · Found 2026-10-09 in
+- [x] **P-378 — the sizing poll has sixteen checks to spare** · XS · P-373 · Found 2026-10-09 in
       `P-373`. Of the 1,500 checks `perf/sizing-pass.test.ts` submits, only 1,016 complete; the
       pool's bounded queue defers the rest, so a smaller queue limit or pool would leave the poll
       waiting 30 s for a count it cannot reach. And `syslog-sender`'s UDP case waits a fixed
       100 ms quiet window where a sentinel datagram would show the excess was read. **Done when**
       the sizing test submits until 1,000 complete (or asserts on what the submits answered), and
       the UDP case waits for a sentinel, with a mutation each.
+
+      **P-378 outcome. The sizing test submits until it has its thousand, and the UDP case waits
+      for a datagram of its own.** Test code only.
+      - **`sizing-pass`:** checks go in with fresh sensor ids until 1,000 have been accepted, and
+        each 100 ms poll tops up what the queue has drained, so the count it waits for is always
+        one the checks in flight can reach. The submit's answer decides: `queue-full` ends that
+        round, and anything else (`stopped`, `disabled`) fails at once and names it rather than
+        being waited out. The poll's `what` says how many were accepted and how many completed.
+      - **`syslog-sender` over UDP:** once `sendUdp` returns, the test sends a sentinel datagram
+        from its own socket and waits (5 s) for it. `sendUdp` returns only after every send's
+        callback, so everything it sent, an excess datagram included, is on the loopback ahead
+        of the sentinel, and loopback delivers in order. The case then asserts that the sentinel
+        came last and that exactly two datagrams came before it. The 100 ms window and its
+        `sleep` are gone.
+      - **Mutations** (each restored byte for byte, and dist rebuilt with `tsc -b --force`):
+        - the pool given `queueMaxLength: 50`: the sizing test still passes, in 1.9 s. The old
+          loop would have had 66 checks accepted (16 running, 50 queued) and waited out its
+          30 s. That figure is reasoned from the pool's admission rule, not run;
+        - `sendUdp` sending its last message twice: the UDP case fails with "exactly two
+          datagrams", 3 against 2, and lists all three.
 
 - [x] **P-379 — Ajvs that say nothing of a mistyped keyword** · XS · P-376 · Found 2026-10-09 in
       `P-376`. The protocol Ajv and the setting, trigger-kind and lookup registries run
@@ -13995,12 +14015,90 @@ because each is a decision rather than a defect:
       leaves out sensors refused only on a `writeOnly` path for such readers, or the bit is
       accepted and said in `administration.md`), and done if adopted.
 
-- [ ] **P-381 — two more `UPDATE … RETURNING` whose order was not checked** · XS · N-31 · Found
+- [x] **P-381 — two more `UPDATE … RETURNING` whose order was not checked** · XS · N-31 · Found
       2026-10-09 in `N-31`. `N-31` found the dispatcher sending in whatever order `RETURNING`
       gave; `objects/repository.ts` and `notifications/templates.ts` also use `RETURNING` and were
       not audited. **Done when** every `RETURNING` in `packages/core/src` whose rows are used in
       order is ordered explicitly (or said in the outcome to be read as a set), with a test where
       the order matters.
+
+      **P-381 outcome. No `RETURNING` in `packages/core/src` is read in an order that matters.
+      One `SELECT` was, and it is ordered now.**
+      - **What was audited.** All 119 `RETURNING` clauses, and every statement with no outer
+        `ORDER BY`. A script over the 525 `.query` calls found 259 of those that return rows, and
+        a second pass found the ones ordered only inside a CTE or subquery, which is the shape
+        `N-31` had. An order was taken to matter where the code acts on a row's position, or
+        where one thing has several rows whose sequence means something:
+        - acting on position means sending in that order, paging by it, or taking the first or
+          last row;
+        - the second case is `N-31`'s recovery and the newer alarm of the same trigger.
+      - **The change: `existingInGroup` (`discovery/provision.ts`) reads in id order.** The pass
+        resolves by position in two places:
+        - `DeviceIndex` keeps the last device it is given for an address or a name;
+        - `sensorLike` takes the first sensor that matches a spec.
+
+        So two devices at one address, or two alike sensors on one device, resolved however the
+        plan returned them. A sequential scan returns rows in the order they were last written,
+        so editing the older device moved it last. One run could then match the older device and
+        the next the newer, and each run would add what its own device lacked. With
+        `ORDER BY o.id` and `ORDER BY s.id`, an address resolves to the newer device every time,
+        as it does to a device the pass itself creates, and a spec resolves to the older sensor.
+      - **No M-17 scenario.** No alarm path changed. The duplicate this prevents is a sensor made
+        on a second device, which is a provisioning outcome, and the test asserts that no sensor
+        is made.
+      - **The test.** `provisioning.test.ts`, "matches the newer of two devices at one address,
+        and the older of two alike sensors". It has its own scratch database, because a heap
+        that earlier tests deleted from can reuse a line pointer.
+        - Index, index-only and bitmap scans, merge joins and nested loops are `SET LOCAL off`.
+        - The older device's and the older sensor's rows are written again, so each table holds
+          them last.
+        - Under that plan the two reads without their `ORDER BY` must come back newest first.
+          That is the precondition, so a planner that changed its mind fails the test rather
+          than passing it.
+        - `existingInGroup` must then return id order. A pass fed from it must match the newer
+          device, skip its first Ping and create nothing. The second Ping is hidden from the
+          caller, so a pass that matched it would report it as somebody else's.
+      - **Mutations** (each restored byte for byte, and dist rebuilt with `tsc -b --force`):
+        - the devices' `ORDER BY` removed: the test fails on `{ devices: [5, 4] }` against
+          `[4, 5]`. With that assertion disabled in dist, the pass matched device 4 and gave it a
+          Ping;
+        - the sensors' `ORDER BY` removed: the pass skipped 0 against 1, because it matched the
+          hidden Ping.
+      - **Read as a set or a single row.** None of these needed an order:
+        - **One row or a count.** Most `RETURNING`s are a single row by key, or are used only for
+          `length`, `count(*)` or existence. These include both of `notifications/templates.ts`'s
+          and all 16 of `objects/repository.ts`'s.
+          - `deleteIds` is checked only by length.
+          - `createLevel` already recovers input order by sorting the ids, which the sequence
+            hands out in production order (`P-19`).
+        - **`applyPauses` and `PauseRepository.recompute`.** These are in
+          `dependencies/repository.ts`, `schedules/repository.ts` and `objects/pause-repository.ts`. Their rows are grouped and handed to
+          `reevaluate`, whose `react` queues notifications in that order. There is one row per
+          sensor, so the order only decides which of several sensors' requests is queued first.
+          No order is more right than another for that, including which sensor's Down a
+          summarising window sends at once.
+        - **One audit entry per row.** `TokenService.#revoke` and `moveDeclaredPrimaries`
+          (`ingestion/channels.ts`) write an entry per row, all at one instant and each about a
+          different token or channel.
+        - **Already a set, or not read for order.**
+          - `SummaryRepository.supersede` is a set, as `N-31` said.
+          - `closeDue`'s rows are not read. `owing` orders the windows.
+          - Channel creation is filtered into sets.
+          - `writeStateHistory` matches what landed by the pair.
+          - The discovery host writes are counted.
+        - **`SELECT`s with no outer `ORDER BY`.** These are maps by id, counts and `EXISTS`, or a
+          single row behind a unique index: the root, `lower(login)`, the primary group, the
+          default group, and a probe's live registration. `loadRuntimes` iterates in row order to
+          build transitions, but that is one transition per sensor, and `react` takes its
+          caller's order. `enumerateSubtree`'s `destroyed` names every object, and nothing reads
+          its order.
+      - **Not done.**
+        - `main.ts`'s `localProbeLog` takes `rows[0]` of `probe_config WHERE is_local`. Approval
+          never clears `is_local`, so two rows are possible. An `ORDER BY` would not pick the
+          right one, which is the probe whose link is connected.
+        - An `ORDER BY` on a key that is not unique, ahead of a `LIMIT`, still leaves ties to the
+          plan. Two examples are a schedule's users by name and `delaysElapsed`. These were not
+          part of this audit.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

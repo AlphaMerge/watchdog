@@ -226,6 +226,15 @@ export interface ExistingSensor {
  * an in-memory index would be a page size somebody has to tune. **Every one, seen or not**: a
  * device the caller cannot see still stops a second one being made at its address, and what the
  * caller is told about it is decided by the pass (`A-77`).
+ *
+ * **In id order, and the pass depends on it** (`P-381`). `DeviceIndex` keeps the last device it is
+ * given for an address or a name, and `sensorLike` takes the first sensor that matches a spec. So
+ * two devices at one address, or two alike sensors on one device, resolve by position. Without an
+ * `ORDER BY` PostgreSQL promises no position, and the plan picks one: a sequential scan returns the
+ * rows in the order they were last written, so an edit to the older device moved it last. One run
+ * could match the older device and the next the newer, and each add what its device lacked. Read
+ * in id order, an address resolves to the newer device every time, as it does to a device the
+ * pass itself creates, and a spec to the older sensor.
  */
 export async function existingInGroup(
   q: Queryable,
@@ -236,7 +245,8 @@ export async function existingInGroup(
       `SELECT o.id, o.name, d.host
        FROM object o
        JOIN device_config d ON d.object_id = o.id
-       WHERE o.parent_id = $1 AND o.kind = 'device'`,
+       WHERE o.parent_id = $1 AND o.kind = 'device'
+       ORDER BY o.id`,
       [groupId],
     ),
     q.query<{ id: string; parent_id: string; type: string; params: Record<string, unknown> }>(
@@ -244,7 +254,8 @@ export async function existingInGroup(
        FROM object s
        JOIN sensor_config sc ON sc.object_id = s.id
        JOIN object d ON d.id = s.parent_id
-       WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'`,
+       WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'
+       ORDER BY s.id`,
       [groupId],
     ),
   ]);

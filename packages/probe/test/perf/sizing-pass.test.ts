@@ -33,6 +33,8 @@ const FIXTURES = join(import.meta.dirname, '..', 'support', 'check-fixtures.js')
 /** A pass must stay far below the one-second tick it shares a thread with. */
 const BUDGET_MS = 50;
 const PASSES = 20;
+/** Completed checks to measure: about the 1,024 samples the duration window holds. */
+const WINDOW = 1_000;
 
 const pools: CheckPool[] = [];
 after(async () => {
@@ -54,20 +56,38 @@ describe('one sizing pass at the v1 target (P-48)', () => {
     // Real measured durations rather than an empty window, because an empty one is the cheap case:
     // `typicalDurationMs` returns immediately when it has nothing, so a pass over a fresh probe
     // would measure the arithmetic and miss the sort entirely.
-    for (let i = 0; i < 1_500; i += 1) {
-      pool.submit({
-        sensorId: i + 1,
-        sensorType: 'test.slow',
-        target: { host: '192.0.2.1', ipVersion: 'auto' },
-        params: { delayMs: 1 },
-        timeoutMs: 5_000,
-      });
-    }
+    //
+    // **Submitted until enough are accepted, topped up as the queue drains** (`P-378`). Fifteen
+    // hundred submitted at once left the pool's bounded queue to refuse all but 1,016, sixteen to
+    // spare: a smaller queue or pool would have left the poll waiting 30 s for a count no check
+    // still in flight could reach. A refusal is `queue-full`, and anything else is the pool
+    // giving up, which is said at once rather than waited out.
+    let submitted = 0;
+    let accepted = 0;
+    const topUp = (): void => {
+      while (accepted < WINDOW) {
+        submitted += 1;
+        const outcome = pool.submit({
+          sensorId: submitted,
+          sensorType: 'test.slow',
+          target: { host: '192.0.2.1', ipVersion: 'auto' },
+          params: { delayMs: 1 },
+          timeoutMs: 5_000,
+        });
+        if (outcome === 'queue-full') return;
+        assert.equal(outcome, 'accepted', `check ${String(submitted)} was not run: ${outcome}`);
+        accepted += 1;
+      }
+    };
     await pollWithin(
       30_000,
       () =>
-        `enough completed checks to fill the window, 1,000; ${String(pool.stats().completed)} completed`,
-      () => pool.stats().completed >= 1_000,
+        `enough completed checks to fill the window, ${String(WINDOW)}; ` +
+        `${String(accepted)} accepted, ${String(pool.stats().completed)} completed`,
+      () => {
+        topUp();
+        return pool.stats().completed >= WINDOW;
+      },
       100,
     );
 
