@@ -26965,11 +26965,57 @@ because each is a decision rather than a defect:
       `aria-disabled` on *Yes, delete* for this. **Done when** *Save* and *Create* do the same,
       with a focus test.
 
-- [ ] **U-74 — the shared map after a 404, and its age** · S · U-66 · Found 2026-10-09 in
+- [x] **U-74 — the shared map after a 404, and its age** · S · U-66 · Found 2026-10-09 in
       `U-66`. Once a link has 404'd, the page still asks every minute though the answer cannot
       change, which costs the public route's rate limit. A map that has failed to refresh for an
       hour looks the same as one that failed a minute ago. **Done when** polling stops for a gone
       token, and the page says when the map was last read, with tests.
+
+      **U-74 outcome. A link that has 404'd is not asked for again, and *Last read 14:05* beside
+      the map's name says when the map on screen was read.** Web only (`SharedMapView`).
+      - **No reads after a 404.** `U-66`'s review already kept the first 404 per token in state,
+        set during render. The path is now null for that token, so `useApi` asks nothing and keeps
+        the 404 it holds. The clock still ticks and the page re-renders each minute, but nothing
+        is sent. Another token is asked for as any link is, and going back to the gone one asks
+        nothing.
+      - **The time, and whose clock.** The browser's, read when the good answer arrives. The
+        payload carries no time and `request` does not expose the `Date` header. What a viewer
+        needs to know is when this page last got a picture, measured against the clock in the
+        room, which is the device's. The held map moved from a ref filled in an effect to state
+        set during render, `{ token, map, at }`, so the time is never a render behind the map it
+        dates.
+      - **A clock time, not *3 minutes ago*.** It changes only when a read succeeds. Nothing has
+        to step each minute to keep it true, and a display failing for an hour shows an hour-old
+        time without the page doing anything. Once the read is not from today it gives the day
+        (*8 Oct, 23:58*), so an outage across midnight does not look a few minutes stale. A
+        `<time dateTime>` holds the full instant.
+      - **Not announced.** It is plain muted text in the name's row, in no live region and
+        outside the polite failure region. While reads succeed it changes once a minute, and
+        saying that would be chatter for a wall display left for hours. The failure is still said
+        once by `U-66`'s region. That region's words are unchanged: putting the time in it would
+        change its text at midnight and say it again.
+      - **Docs.** `web-ui.md`'s Maps section.
+      - **Tests** (`map-share.test.tsx`, faked `setInterval`, `Date.now` stubbed).
+        - The 404 test now advances five minutes after the 404 and expects no read (`reads` stays
+          2, none waiting), with the alert untouched and nothing added. It then goes to `def`,
+          which is read (`?t=6`, then `?t=7` a minute later), and back to `abc`. Two more minutes
+          there read nothing, and `abc` was only ever asked at `t=0` and `t=1`.
+        - In the last-read test, the line reads *Last read* 14:05 with a matching `dateTime`, and
+          no ancestor has `aria-live` or a live role (status, alert, log, timer, marquee). A good
+          read at 14:06 moves it. Failures at 14:07 and 14:08 leave it at 14:06, with the failure
+          said in the region (` req-1`). A good read at 14:09 moves it and empties the region.
+        - A read from yesterday says the day.
+      - **Mutations**, each failing one test, restored byte for byte (the web package has no
+        `dist`):
+        - still asking after a 404;
+        - not asking for any other token once one has gone;
+        - the time not moved by a good read;
+        - the line in a polite region;
+        - the time taken at render instead of at the read;
+        - no day.
+      - **Not done.** The page still shows a time and leaves the viewer to compare it with a clock.
+        It gives no warning when the time is old, beyond the failure the region says. The
+        device's clock is trusted: a display whose clock is wrong shows a wrong time.
 
 - [ ] **U-75 — the tree's address is written on every key** · XS · U-70 · Found 2026-10-09 in
       `U-70`. One `replace` per key can reach Safari's and Firefox's history-write limits when a

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { type ApiError, useApi } from '../api/client';
 import type { SharedMap } from '../api/types';
@@ -39,6 +39,22 @@ import { sharedBackgroundUrl, sharedMapPath } from '../maps/shareUrl';
  * is not a failed refresh: the link was revoked or has expired, so the map goes and the page says
  * the link does not work, as it does when such a link is opened. That holds for the link from
  * then on: no later minute, whatever it answers, brings the map back or says the 404 again.
+ *
+ * **A link that has 404'd is not asked for again** (`U-74`). The answer cannot change — a revoked
+ * or expired link stays that way, and one that never existed will not start — and every minute's
+ * read would be spent from the core's per-address budget, which an unauthenticated caller shares
+ * with everything else it asks from that address. The path is null for that token from the 404 on; another token is
+ * asked for as any link is.
+ *
+ * **When the map was read is said beside its name** (`U-74`): *Last read 14:05*, from this
+ * browser's clock at the moment the good answer arrived. The answer carries no time of its own,
+ * and the moment that matters to whoever is looking at a wall display is when this page last got
+ * a picture, against the clock in the room — which is the device's. A clock time and not
+ * *3 minutes ago*: it changes only when a read succeeds, so nothing on the page has to step every
+ * minute to keep it true, and a display that has been failing for an hour shows an hour-old time
+ * without the page doing anything. It is plain text, in no live region: while reads succeed it
+ * changes once a minute, and a screen reader saying so each time would be chatter. A failure is
+ * said, once, by the region under it; the time is there to be read.
  */
 
 /** The same minute the signed-in board uses. A wall display does not need faster. */
@@ -47,29 +63,38 @@ const REFRESH_MS = 60_000;
 export function SharedMapView(): React.JSX.Element {
   const { token } = useParams();
   const tick = useClock(REFRESH_MS);
-  // The tick is in the path so the poll is a refetch of a new URL rather than a cache decision;
-  // `useApi` aborts the one in flight when it changes.
-  const view = useApi<SharedMap>(
-    token === undefined ? null : `${sharedMapPath(token)}?t=${String(tick)}`,
-  );
-
-  const held = useRef<{ token: string; map: SharedMap } | null>(null);
-  useEffect(() => {
-    if (view.status === 'ready' && token !== undefined) held.current = { token, map: view.data };
-  }, [view, token]);
-  const last = held.current !== null && held.current.token === token ? held.current.map : null;
 
   // **A 404 sticks for the link** (`U-66` review). Read from the answer in hand alone, it lasted a
   // minute: the next minute's path is `loading` (`U-62`), so the revoked map was drawn again, and
   // stayed through any failure that was not another 404. Set during render, so never a render
-  // late; its error is the one the page goes on showing, so its alert is said once.
+  // late; its error is the one the page goes on showing, so its alert is said once. And from then
+  // on the link is not asked for at all (`U-74`): with the path null, `useApi` reads nothing and
+  // keeps the 404 it last answered.
   const [gone, setGone] = useState<{ token: string; error: ApiError } | null>(null);
+  const asking = token !== undefined && gone?.token !== token;
+
+  // The tick is in the path so the poll is a refetch of a new URL rather than a cache decision;
+  // `useApi` aborts the one in flight when it changes.
+  const view = useApi<SharedMap>(asking ? `${sharedMapPath(token)}?t=${String(tick)}` : null);
+
+  // The last map read for this link, and when (`U-74`). Set during render from the answer in
+  // hand, so the time is never a render behind the map it dates.
+  const [held, setHeld] = useState<{ token: string; map: SharedMap; at: number } | null>(null);
+  if (
+    view.status === 'ready' &&
+    token !== undefined &&
+    (held === null || held.token !== token || held.map !== view.data)
+  ) {
+    setHeld({ token, map: view.data, at: Date.now() });
+  }
+  const last = held !== null && held.token === token ? held : null;
+
   const goneNow = view.status === 'error' && view.error.status === 404 ? view.error : null;
   if (goneNow !== null && token !== undefined && gone?.token !== token) {
     setGone({ token, error: goneNow });
   }
   const goneError = gone !== null && gone.token === token ? gone.error : goneNow;
-  const map = goneError !== null ? null : view.status === 'ready' ? view.data : last;
+  const map = goneError !== null ? null : view.status === 'ready' ? view.data : (last?.map ?? null);
   /** What the page says instead of a map: the link's 404, or a first read that failed. */
   const broken = goneError ?? (map === null && view.status === 'error' ? view.error : null);
   const failed = view.status === 'error' && map !== null ? view.error : null;
@@ -110,6 +135,13 @@ export function SharedMapView(): React.JSX.Element {
                 <h1 className="text-xl tracking-[-0.02em] text-text">{map.name}</h1>
                 {map.description !== undefined && map.description !== '' && (
                   <p className="text-sm text-text-muted">{map.description}</p>
+                )}
+                {/* Plain text, in no live region: it changes with every good read. */}
+                {last !== null && (
+                  <p className="text-sm text-text-muted">
+                    Last read{' '}
+                    <time dateTime={new Date(last.at).toISOString()}>{readAt(last.at)}</time>
+                  </p>
                 )}
               </div>
               <p
@@ -153,6 +185,17 @@ export function SharedMapView(): React.JSX.Element {
       </main>
     </div>
   );
+}
+
+/**
+ * A read's time, to the minute, as this browser writes one. The day too once it is not today, so a
+ * display that has been failing since before midnight does not look a few minutes stale.
+ */
+function readAt(at: number): string {
+  const when = new Date(at);
+  const time = when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  if (when.toDateString() === new Date().toDateString()) return time;
+  return `${when.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}, ${time}`;
 }
 
 /** The same failure, by what it says: a new correlation id is not news. */

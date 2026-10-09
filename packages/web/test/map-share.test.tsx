@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MapShare } from '../src/api/types';
 import { MapSharePanel } from '../src/maps/MapSharePanel';
@@ -153,9 +153,20 @@ describe('the page a stranger opens', () => {
     hasBackground: false,
   };
 
+  /** Moves the page to another link without remounting it, as following one in the tab would. */
+  let steer: ((to: string) => void) | null = null;
+  function Steer(): null {
+    const navigate = useNavigate();
+    steer = (to) => {
+      void navigate(to);
+    };
+    return null;
+  }
+
   const openAt = (token: string): void => {
     render(
       <MemoryRouter initialEntries={[`/shared/${token}`]}>
+        <Steer />
         <Routes>
           <Route path="/shared/:token" element={<SharedMapView />} />
         </Routes>
@@ -239,14 +250,17 @@ describe('the page a stranger opens', () => {
     let replies: Reply[] = [];
     let waiting: ((answer: Answer) => void)[] = [];
     let reads = 0;
+    let asked: string[] = [];
 
     beforeEach(() => {
       vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
       replies = [];
       waiting = [];
       reads = 0;
-      vi.stubGlobal('fetch', () => {
+      asked = [];
+      vi.stubGlobal('fetch', (url: string) => {
         reads += 1;
+        asked.push(url);
         const reply = replies.shift() ?? 'hold';
         if (reply !== 'hold') return Promise.resolve(json(reply.body, reply.status));
         return new Promise<Response>((resolve, reject) => {
@@ -259,6 +273,7 @@ describe('the page a stranger opens', () => {
     });
     afterEach(() => {
       vi.useRealTimers();
+      vi.restoreAllMocks();
     });
 
     const failure = (id: string, status = 500): { body: unknown; status: number } => ({
@@ -388,35 +403,21 @@ describe('the page a stranger opens', () => {
       const alert = await alertSaying('this link is not valid');
       const records = watch();
 
-      // Later minutes, each held and then answered some other way (`U-66` review): the map does
-      // not come back, nothing is loading, and the alert is the same node, never touched.
-      const later = async (answer: Answer): Promise<void> => {
-        const before = reads;
+      // Later minutes (`U-66` review, `U-74`): the link is not asked for again, the map does not
+      // come back, nothing is loading, and the alert is the same node, never touched.
+      for (let later = 0; later < 5; later += 1) {
         act(() => {
           vi.advanceTimersByTime(60_000);
         });
-        await waitFor(() => {
-          expect(reads).toBe(before + 1);
-          expect(waiting).toHaveLength(1);
-        });
+        await settle();
         expect(screen.getByRole('heading', { name: 'This link does not work' })).toBeDefined();
         expect(screen.queryByText('Loading the map…')).toBeNull();
-        expect(screen.queryByText('Router')).toBeNull();
-        act(() => {
-          waiting.shift()?.(answer);
-        });
-        // Only the interval is faked: a real task lets the answer through `useApi`.
-        await act(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        });
         expect(screen.queryByRole('heading', { name: 'Floor 1' })).toBeNull();
         expect(screen.queryByText('Router')).toBeNull();
-      };
-      await later(failure('req-5'));
-      await later('unreachable');
-      await later(notFound);
+      }
 
-      expect(reads).toBe(5);
+      expect(reads).toBe(2);
+      expect(waiting).toEqual([]);
       expect(alert.isConnected).toBe(true);
       expect(alert.textContent).toContain('this link is not valid');
       expect(records.filter((record) => alert.contains(record.target))).toEqual([]);
@@ -428,9 +429,136 @@ describe('the page a stranger opens', () => {
           ),
         ),
       ).toBe(false);
+
+      // Another link is asked for as any link is, and again each minute.
+      replies = [
+        { body: { ...shared, name: 'Floor 2' } },
+        { body: { ...shared, name: 'Floor 2' } },
+      ];
+      act(() => {
+        steer?.('/shared/def');
+      });
+      await screen.findByRole('heading', { name: 'Floor 2' });
+      expect(asked.slice(2)).toEqual(['/api/v1/public/maps/def?t=6']);
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => {
+        expect(reads).toBe(4);
+      });
+      expect(asked[3]).toBe('/api/v1/public/maps/def?t=7');
+
+      // And the one that 404'd is still not asked for when the page goes back to it.
+      act(() => {
+        steer?.('/shared/abc');
+      });
+      await screen.findByRole('heading', { name: 'This link does not work' });
+      act(() => {
+        vi.advanceTimersByTime(120_000);
+      });
+      await settle();
+      expect(reads).toBe(4);
+      expect(asked.filter((url) => url.startsWith('/api/v1/public/maps/abc?'))).toEqual([
+        '/api/v1/public/maps/abc?t=0',
+        '/api/v1/public/maps/abc?t=1',
+      ]);
+    });
+
+    /** Today at `hours:minutes`, local time, as the page's clock will read it. */
+    const todayAt = (hours: number, minutes: number): number => {
+      const at = new Date();
+      at.setHours(hours, minutes, 0, 0);
+      return at.getTime();
+    };
+    const asTime = (at: number): string =>
+      new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    /** The nearest node, from `node` up, whose changes a screen reader says on its own. */
+    const liveAncestor = (node: Element): Element | null => {
+      for (let at: Element | null = node; at !== null; at = at.parentElement) {
+        const live = at.getAttribute('aria-live');
+        const role = at.getAttribute('role') ?? '';
+        if ((live !== null && live !== 'off') || LIVE_ROLES.includes(role)) return at;
+      }
+      return null;
+    };
+
+    it('says when the map was last read, beside it and not aloud, until a read succeeds', async () => {
+      let now = todayAt(14, 5);
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      const line = screen.getByText(/^Last read/u);
+      const time = (): HTMLTimeElement => line.querySelector('time') as HTMLTimeElement;
+      const readAt = (at: number): void => {
+        expect(time().dateTime).toBe(new Date(at).toISOString());
+        expect(line.textContent).toBe(`Last read ${asTime(at)}`);
+      };
+      readAt(todayAt(14, 5));
+      // It changes once a minute while reads succeed: in no live region, so it is not said.
+      expect(liveAncestor(line)).toBeNull();
+      const said = region();
+      expect(said.contains(line)).toBe(false);
+
+      // A good read moves it.
+      now = todayAt(14, 6);
+      await minute({ body: shared });
+      await waitFor(() => {
+        readAt(todayAt(14, 6));
+      });
+      expect(said.textContent).toBe('');
+
+      // Failed ones leave it where it was, with the failure said under it.
+      now = todayAt(14, 7);
+      await minute(failure('req-1'));
+      await waitFor(() => {
+        expect(said.textContent).toContain('could not be read again');
+      });
+      now = todayAt(14, 8);
+      await minute(failure('req-2'));
+      await settle();
+      expect(reads).toBe(4);
+      expect(line.isConnected).toBe(true);
+      readAt(todayAt(14, 6));
+      expect(said.textContent).toContain(' req-1');
+      expect(liveAncestor(line)).toBeNull();
+
+      // The next good read moves it again and empties the region.
+      now = todayAt(14, 9);
+      await minute({ body: shared });
+      await waitFor(() => {
+        readAt(todayAt(14, 9));
+      });
+      expect(said.textContent).toBe('');
+      expect(line.isConnected).toBe(true);
+    });
+
+    it('gives the day of a read that was not today', async () => {
+      const yesterday = todayAt(23, 58) - 86_400_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => yesterday);
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      const day = new Date(yesterday).toLocaleDateString(undefined, {
+        day: 'numeric',
+        month: 'short',
+      });
+      expect(screen.getByText(/^Last read/u).textContent).toBe(
+        `Last read ${day}, ${asTime(yesterday)}`,
+      );
     });
   });
 });
+
+/** The roles whose changes a screen reader says without being asked. */
+const LIVE_ROLES = ['status', 'alert', 'log', 'timer', 'marquee'];
+
+/** Only the interval is faked: a real task lets anything a tick started get under way. */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
 
 /**
  * A refused link, announced (`U-54`): said through an `ErrorPanel` in a region that is in the tree
