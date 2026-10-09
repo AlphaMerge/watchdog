@@ -1,5 +1,5 @@
 import type { FastifySchemaValidationError, FastifyServerOptions } from 'fastify';
-import { PATTERN_MESSAGE, patternMessageOf } from '@ms/sensors';
+import { patternMessageKeyword, patternMessageOf } from '@ms/shared';
 
 /**
  * What Fastify's validator compiler builds its Ajv with, for every route's body, querystring,
@@ -30,7 +30,7 @@ export const API_VALIDATOR_OPTIONS = {
   // Declared as the sensor catalogue declares it (`U-53`): strict mode then admits the keyword
   // and refuses one that is not a non-empty string, where an unknown keyword would refuse the
   // route's schema outright.
-  keywords: [{ keyword: PATTERN_MESSAGE, metaSchema: { type: 'string', minLength: 1 } }],
+  keywords: [patternMessageKeyword()],
 };
 
 /**

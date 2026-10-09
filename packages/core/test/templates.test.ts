@@ -816,6 +816,23 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
       { writeOnly?: boolean }
     >;
     assert.equal(properties['webhookUrl']?.writeOnly, true);
+
+    // The webhook's header sentences reach the form (`P-372`, `P-377`): the closed response
+    // schema (`ms:notificationMethod`) keeps them, so the form says them as `validate` does.
+    const webhook = body.items.find((method) => method.id === 'webhook');
+    assert.ok(webhook !== undefined);
+    const sentences = (schema: Record<string, unknown>): unknown[] => {
+      const properties = schema['properties'] as Record<string, Record<string, unknown>>;
+      const headers = properties['secretHeaders'] as Record<string, Record<string, unknown>>;
+      return [
+        headers['propertyNames']?.['x-patternMessage'],
+        headers['additionalProperties']?.['x-patternMessage'],
+      ];
+    };
+    const served = sentences(webhook.settingsSchema);
+    assert.deepEqual(served, sentences(notificationMethods.get('webhook').settingsSchema));
+    assert.match(String(served[0]), /is not a header name/u);
+    assert.match(String(served[1]), /cannot be sent as a header value/u);
   });
 
   it('answers an unsendable secret header with a 400 that names it and not its value (N-19)', async () => {

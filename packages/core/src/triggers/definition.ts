@@ -1,5 +1,10 @@
 import { Ajv, type ValidateFunction } from 'ajv';
-import { AppError } from '@ms/shared';
+import {
+  AppError,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatternProblem,
+} from '@ms/shared';
 import { MAX_RECOVERY_HOLD_SECONDS } from '@ms/sensors';
 import type { SensorState } from '../state/tables.js';
 
@@ -186,15 +191,24 @@ export const THRESHOLD_TRIGGER: TriggerKind = {
 
 const KINDS: readonly TriggerKind[] = [STATE_TRIGGER, THRESHOLD_TRIGGER];
 
-const ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true });
+// `verbose` puts a failed pattern's schema on its error, which is where its `x-patternMessage` is
+// read (`P-377`); it puts the value there too, and `validate` reads only the path and the message.
+const ajv = new Ajv({
+  allErrors: true,
+  strict: false,
+  useDefaults: true,
+  verbose: true,
+  keywords: [patternMessageKeyword()],
+});
 
 /**
  * The kinds this build knows, and the one place a trigger's settings are checked.
  *
  * Sealed at module load rather than registered at runtime: a kind appearing later would mean two
- * halves of the system disagreeing about what a stored trigger means.
+ * halves of the system disagreeing about what a stored trigger means. Exported for the test that a
+ * kind is refused at load (`P-377`); use `triggerKinds`.
  */
-class Registry {
+export class TriggerKindRegistry {
   /**
    * Kind and validator in one entry, deliberately.
    *
@@ -206,6 +220,15 @@ class Registry {
   constructor(kinds: readonly TriggerKind[]) {
     for (const kind of kinds) {
       if (this.#entries.has(kind.id)) throw new Error(`duplicate trigger kind ${kind.id}`);
+      // A pattern that would be refused in its own expression, and a sentence nothing would say,
+      // as the sensor catalogue and the method registry refuse them (`U-53`, `P-372`). The web
+      // draws a kind's settings as a form, which says the sentence too (`P-377`).
+      const unsaid = unsaidPatternProblem(
+        kind.settingsSchema,
+        `trigger kind ${kind.id}`,
+        'its settings',
+      );
+      if (unsaid !== undefined) throw new Error(unsaid);
       this.#entries.set(kind.id, { kind, validate: ajv.compile(kind.settingsSchema) });
     }
   }
@@ -259,8 +282,9 @@ class Registry {
     if (!validate(copy)) {
       const problems = (validate.errors ?? []).map(
         (error) =>
+          // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
           `${error.instancePath === '' ? 'settings' : error.instancePath} ${
-            error.message ?? 'is invalid'
+            patternMessageOf(error) ?? error.message ?? 'is invalid'
           }`,
       );
       throw new TriggerError(`this ${kindId} trigger cannot be saved`, { kind: kindId }, problems);
@@ -280,4 +304,4 @@ class Registry {
   }
 }
 
-export const triggerKinds = new Registry(KINDS);
+export const triggerKinds = new TriggerKindRegistry(KINDS);

@@ -13,6 +13,7 @@ import {
   TRIGGERABLE_STATES,
   triggerKinds,
   TriggerError,
+  TriggerKindRegistry,
 } from '../src/triggers/definition.js';
 import { TriggerRepository } from '../src/triggers/repository.js';
 import { TriggerService } from '../src/triggers/service.js';
@@ -32,6 +33,55 @@ const available = await databaseAvailable();
 // -------------------------------------------------------------------------------------------
 
 describe('trigger kinds', () => {
+  it('refuses a pattern with no sentence, and a sentence with no pattern, at load (P-377)', () => {
+    // As the sensor catalogue (`U-53`) and the method registry (`P-372`) refuse one: `validate`
+    // and the trigger form say the sentence beside a pattern, so a pattern without one would
+    // answer an operator with the expression.
+    const withSettings = (properties: Record<string, unknown>): TriggerKindRegistry =>
+      new TriggerKindRegistry([
+        {
+          id: 'patterned',
+          name: 'Patterned',
+          description: '',
+          settingsSchema: { type: 'object', properties },
+          templateFields: [],
+          describe: () => '',
+        },
+      ]);
+    assert.throws(
+      () => withSettings({ channelKey: { type: 'string', pattern: '^[a-z]+$' } }),
+      /trigger kind patterned gives "channelKey" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () =>
+        withSettings({
+          when: { type: 'array', items: { type: 'string', pattern: '^[a-z]+$' } },
+        }),
+      /trigger kind patterned gives "when\.\*" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () => withSettings({ channelKey: { type: 'string', 'x-patternMessage': 'must be a word' } }),
+      /trigger kind patterned gives "channelKey" x-patternMessage without a pattern/,
+    );
+    // And one that says it is taken, and says it, without the value.
+    const said = withSettings({
+      channelKey: { type: 'string', pattern: '^[a-z]+$', 'x-patternMessage': 'must be a word' },
+    });
+    assert.throws(
+      () => said.validate('patterned', { channelKey: 'CANARY-1' }),
+      (error: unknown) => {
+        assert.ok(error instanceof TriggerError);
+        assert.deepEqual(error.details.problems, ['/channelKey must be a word']);
+        return true;
+      },
+    );
+    // The shipped kinds pass the same check, or this module would not have loaded.
+    assert.deepEqual(new TriggerKindRegistry([STATE_TRIGGER, THRESHOLD_TRIGGER]).ids, [
+      'state',
+      'threshold',
+    ]);
+  });
+
   it('knows the two v1 kinds and nothing else', () => {
     assert.deepEqual(triggerKinds.ids.sort(), ['state', 'threshold']);
   });

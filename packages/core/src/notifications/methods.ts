@@ -1,6 +1,10 @@
 import { Ajv, type ValidateFunction } from 'ajv';
-import { AppError } from '@ms/shared';
-import { PATTERN_MESSAGE, patternMessageOf, unsaidPatterns } from '@ms/sensors';
+import {
+  AppError,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatternProblem,
+} from '@ms/shared';
 
 /**
  * How many arguments a program template may carry, split the way the form shows them.
@@ -341,7 +345,7 @@ const ajv = new Ajv({
   strict: false,
   useDefaults: true,
   verbose: true,
-  keywords: [{ keyword: PATTERN_MESSAGE, metaSchema: { type: 'string', minLength: 1 } }],
+  keywords: [patternMessageKeyword()],
 });
 
 /**
@@ -367,15 +371,12 @@ export class MethodRegistry {
       checkDestinations(method, writeOnly);
       // A pattern that would be refused in its own expression, as the sensor catalogue refuses
       // one (`U-53`, `P-372`): `validate` and the template form say the sentence instead.
-      const [unsaid] = unsaidPatterns(method.settingsSchema);
-      if (unsaid !== undefined) {
-        const where = unsaid.path === '' ? 'its settings' : `"${unsaid.path}"`;
-        throw new Error(
-          unsaid.fault === 'unsaid'
-            ? `method ${method.id} gives ${where} a pattern without ${PATTERN_MESSAGE}`
-            : `method ${method.id} gives ${where} ${PATTERN_MESSAGE} without a pattern`,
-        );
-      }
+      const unsaid = unsaidPatternProblem(
+        method.settingsSchema,
+        `method ${method.id}`,
+        'its settings',
+      );
+      if (unsaid !== undefined) throw new Error(unsaid);
       this.#entries.set(method.id, {
         method,
         validate: ajv.compile(method.settingsSchema),

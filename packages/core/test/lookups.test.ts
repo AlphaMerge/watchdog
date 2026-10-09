@@ -6,7 +6,12 @@ import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
 import { LookupCatalogue } from '../src/lookups/catalogue.js';
-import { applyLookup, validateLookup, type LookupDefinition } from '../src/lookups/definition.js';
+import {
+  applyLookup,
+  lookupDefinitionSchema,
+  validateLookup,
+  type LookupDefinition,
+} from '../src/lookups/definition.js';
 import { loadLookups } from '../src/lookups/loader.js';
 import { rollUp, type ChannelReadingFacts } from '../src/state/limits.js';
 import { NO_LIMITS } from '../src/state/limits.js';
@@ -277,6 +282,35 @@ describe('the lookup catalogue', () => {
   it('refuses to register once sealed', () => {
     const catalogue = new LookupCatalogue().seal();
     assert.throws(() => catalogue.register(status, 'late'), /sealed/);
+  });
+
+  it('refuses a schema with a pattern and no sentence, or a sentence and no pattern (P-377)', () => {
+    // As the sensor catalogue (`U-53`) and the method registry (`P-372`) refuse one: a file a
+    // pattern refuses is told its sentence in `problems()`, so a pattern without one would show
+    // the operator the expression.
+    const withId = (id: Record<string, unknown>): LookupCatalogue =>
+      new LookupCatalogue({
+        ...lookupDefinitionSchema,
+        properties: { ...lookupDefinitionSchema.properties, id },
+      });
+    assert.throws(
+      () => withId({ type: 'string', pattern: '^[a-z.]+$' }),
+      /the lookup schema gives "id" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () => withId({ type: 'string', 'x-patternMessage': 'must be dotted lowercase words' }),
+      /the lookup schema gives "id" x-patternMessage without a pattern/,
+    );
+    // And one that says it is taken, and says it in `problems()`, without the value.
+    const said = withId({
+      type: 'string',
+      pattern: '^[a-z.]+$',
+      'x-patternMessage': 'must be dotted lowercase words',
+    });
+    assert.equal(said.register({ ...status, id: 'test.canary-1' }, 'bad.json'), false);
+    assert.deepEqual(said.problems()[0]?.problems, ['/id must be dotted lowercase words']);
+    // The shipped schema passes the same check: the default catalogue is built from it.
+    assert.equal(new LookupCatalogue().register(status, 'test'), true);
   });
 });
 

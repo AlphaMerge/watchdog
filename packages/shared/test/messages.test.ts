@@ -11,6 +11,7 @@ import {
   MIN_PROTOCOL_VERSION,
   parseCoreToProbe,
   parseProbeToCore,
+  PROTOCOL_SCHEMAS,
   PROTOCOL_VERSION,
   ProtocolError,
   rejectionStopsMonitoring,
@@ -22,6 +23,10 @@ import {
   type WithdrawnCode,
 } from '../src/protocol/messages.js';
 import { RESULT_LIMITS } from '../src/protocol/result-fit.js';
+import { PATTERN_MESSAGE, unsaidPatterns } from '../src/schema/pattern-message.js';
+
+/** What a counter the pattern refuses is told (`P-376`). */
+const COUNTER_SAID = 'must be an unsigned integer written in 1 to 20 decimal digits';
 
 const hello = {
   type: 'hello',
@@ -576,7 +581,10 @@ describe('the wire carries every field the types declare', () => {
     for (const counter of ['-1', '1.5', '123456789012345678901']) {
       const { kept, unfit } = withCounter({ counter });
       assert.deepEqual(kept[0]?.channels, [{ key: 'in', value: 1 }], counter);
-      assert.match(unfit?.fitted[0]?.reason ?? '', /\/channels\/0\/counter: must match pattern/);
+      // The pattern's sentence (`P-376`), not its expression, and never the value sent.
+      const reason = unfit?.fitted[0]?.reason ?? '';
+      assert.equal(reason, `/channels/0/counter: ${COUNTER_SAID}`, counter);
+      assert.ok(!reason.includes(counter), counter);
       assert.deepEqual(unfit?.fitted[0]?.problems, [
         `channel "in"'s counter is not decimal text and was left off`,
       ]);
@@ -1265,5 +1273,170 @@ describe('a results batch holding a result that does not fit (`P-281`)', () => {
       const failure = { type: 'query-result', queryId: 'q1', failure: 'busy', message: 'later' };
       assert.deepEqual(parseProbeToCore(failure), failure);
     });
+  });
+});
+
+/**
+ * **A pattern on the wire says a sentence, never its expression (`P-376`).** What the protocol
+ * refuses is read in a log: the reason a connection closed, a health field dropped, a result
+ * fitted or refused. `U-53` and `P-372` hold the catalogue, the API and the method registry to
+ * the same rule.
+ */
+describe('a pattern on the wire says what it wants (P-376)', () => {
+  /** A copy of the schema with every `x-patternMessage` taken out, for the controls. */
+  function unsaid(node: unknown): unknown {
+    if (Array.isArray(node)) return node.map(unsaid);
+    if (typeof node !== 'object' || node === null) return node;
+    return Object.fromEntries(
+      Object.entries(node)
+        .filter(([key]) => key !== PATTERN_MESSAGE)
+        .map(([key, value]) => [key, unsaid(value)]),
+    );
+  }
+
+  /** The field each unsaid pattern sits on: the last segment of its path that is a name. */
+  function fieldsOf(schema: unknown): string[] {
+    return unsaidPatterns(schema).map(({ path, fault }) => {
+      assert.equal(fault, 'unsaid', path);
+      const names = path
+        .split('.')
+        .filter((segment) => !/^(?:\*|oneOf|properties)$/u.test(segment));
+      return names.at(-1) ?? '';
+    });
+  }
+
+  it('gives every pattern in every protocol schema a sentence, and no sentence without one', () => {
+    assert.deepEqual(Object.keys(PROTOCOL_SCHEMAS).sort(), [
+      'checkResult',
+      'coreToProbe',
+      'probeToCore',
+    ]);
+    for (const [name, schema] of Object.entries(PROTOCOL_SCHEMAS)) {
+      assert.deepEqual(unsaidPatterns(schema), [], name);
+    }
+    // The control: with the sentences gone, the walk finds every pattern this protocol has, so
+    // the empty lists above are the sentences' doing. The counter is in `results` and in
+    // `query-result`, which share the check result's schema.
+    assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['probeToCore'])).sort(), [
+      'address',
+      'counter',
+      'counter',
+      'instanceId',
+    ]);
+    assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['coreToProbe'])), ['addresses']);
+    assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['checkResult'])), ['counter']);
+  });
+
+  /** Asserts a reason says the sentence, and neither the expression nor the value refused. */
+  function saysTheSentence(text: string, at: string, said: RegExp, value: string): void {
+    assert.match(text, new RegExp(`${at.replaceAll('/', '\\/')}: ${said.source}`, 'u'), text);
+    assert.doesNotMatch(text, /must match pattern|\^|\$/u, text);
+    assert.ok(!text.includes(value), `the value came back: ${text}`);
+  }
+
+  it('says it for a health field dropped from a heartbeat (P-224)', () => {
+    const told: UnusableHealthField[][] = [];
+    const sent = 'CANARY-not-a-uuid';
+    const message = parseProbeToCore(
+      { type: 'heartbeat', seq: 1, sentAt: 'now', health: { scheduled: 3, instanceId: sent } },
+      {
+        onUnusableHealth: (fields) => {
+          told.push([...fields]);
+        },
+      },
+    );
+    assert.deepEqual(message, {
+      type: 'heartbeat',
+      seq: 1,
+      sentAt: 'now',
+      health: { scheduled: 3 },
+    });
+    assert.equal(told.length, 1);
+    const [dropped] = told[0] ?? [];
+    assert.ok(dropped !== undefined);
+    assert.equal(dropped.value, 'string', 'a peer string is named by its type');
+    saysTheSentence(dropped.reason, '/health/instanceId', /must be a UUID in lowercase/u, sent);
+  });
+
+  it('says it in the protocol error a sweep-progress is refused with', () => {
+    const sent = '10.0.0.256';
+    assert.throws(
+      () =>
+        parseProbeToCore({
+          type: 'sweep-progress',
+          runId: 7,
+          cursor: 1,
+          found: [{ address: sent, rttMs: 1 }],
+          failed: 0,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProtocolError);
+        saysTheSentence(
+          error.message,
+          '/found/0/address',
+          /must be a dotted-quad IPv4 address/u,
+          sent,
+        );
+        return true;
+      },
+    );
+  });
+
+  it('says it in the protocol error an identify-start is refused with, at the probe', () => {
+    const sent = '10.0.0.256';
+    assert.throws(
+      () =>
+        parseCoreToProbe({
+          type: 'identify-start',
+          job: {
+            runId: 7,
+            addresses: ['10.0.0.5', sent],
+            cursor: 0,
+            timeoutMs: 1_000,
+            concurrency: 8,
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProtocolError);
+        saysTheSentence(
+          error.message,
+          '/job/addresses/1',
+          /must be a dotted-quad IPv4 address/u,
+          sent,
+        );
+        return true;
+      },
+    );
+  });
+
+  it('says it for a query-result whose counter is fitted (P-289)', () => {
+    const told: { unfit?: UnfitResults } = {};
+    const sent = '12345678901234567890123';
+    const message = parseProbeToCore(
+      {
+        type: 'query-result',
+        queryId: 'q1',
+        result: {
+          sensorId: 1,
+          at: '2026-10-09T10:00:00.000Z',
+          outcome: 'ok',
+          message: '',
+          durationMs: 1,
+          channels: [{ key: 'in', value: 1, counter: sent }],
+        },
+      },
+      {
+        onUnfitResults: (unfit) => {
+          told.unfit = unfit;
+        },
+      },
+    );
+    assert.equal(message.type, 'query-result');
+    saysTheSentence(
+      told.unfit?.fitted[0]?.reason ?? '',
+      '/channels/0/counter',
+      new RegExp(COUNTER_SAID, 'u'),
+      sent,
+    );
   });
 });

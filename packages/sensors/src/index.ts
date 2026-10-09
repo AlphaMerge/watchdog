@@ -106,15 +106,11 @@ export {
 
 export {
   MAX_RECOVERY_HOLD_SECONDS,
-  PATTERN_MESSAGE,
-  patternMessageOf,
   SENSOR_TYPE_ID,
   SENSOR_TYPE_ID_MESSAGE,
   SensorCatalogue,
   SensorTypeError,
-  unsaidPatterns,
   type ParamProblem,
-  type UnsaidPattern,
   type ParamValidation,
   type SensorTypeSummary,
 } from './catalogue.js';

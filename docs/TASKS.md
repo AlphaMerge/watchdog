@@ -13650,18 +13650,101 @@ because each is a decision rather than a defect:
       the object listing, or a route) by anyone who can see those sensors, with a test, and the
       hand-edit case is a line in `P-333`'s policy when that lands.
 
-- [ ] **P-376 — the probe protocol's patterns answer with the expression** · XS · P-372 · Found
+- [x] **P-376 — the probe protocol's patterns answer with the expression** · XS · P-372 · Found
       2026-10-09 in `P-372`. `@ms/shared`'s protocol schemas still say "must match pattern …",
       and `messages.test.ts` asserts it in a fitted result's reason. **Done when** decided: the
       same `x-patternMessage` (the probe's own Ajv knows the keyword) or the expression kept on
       purpose for a machine reader, said in the outcome.
 
-- [ ] **P-377 — three registries take a pattern without a sentence** · XS · P-372 · Found
+      **P-376 outcome. Sentences, not the expression: every protocol pattern carries an
+      `x-patternMessage`, and the reasons say it.** Decided by who reads them. No program parses
+      a protocol reason: they reach a person, in a log line. That is the `ProtocolError` a
+      connection closes on (logged by whichever side refused the frame, core or probe), a
+      heartbeat's unusable health field (`P-224`), or a result fitted or refused (`P-281`, logged
+      by ingestion with up to five reasons). `IPV4_ADDRESS_PATTERN` printed in a log tells its
+      reader as little as it told a form's user in `U-53`.
+      - **The four patterns.** A health report's `instanceId`: *must be a UUID in lowercase
+        hexadecimal, such as …*. A reading's `counter`: *must be an unsigned integer written in 1
+        to 20 decimal digits*. `sweep-progress`'s `address` and `identify-start`'s `addresses[]`
+        share `IPV4_ADDRESS_MESSAGE`, which sits beside the pattern: *must be a dotted-quad IPv4
+        address, such as 192.0.2.10: …*.
+      - **One Ajv.** `messages.ts`'s module Ajv compiles every protocol schema, for the core and
+        the probe alike. Both parse through `parseProbeToCore`/`parseCoreToProbe`, and nothing
+        else in `core`, `probe` or `sensors` compiles them (checked: no other import of the
+        schemas, and no other `compile` of them). It declares the keyword and runs `verbose`. All
+        three messages it builds (`describeErrors`, `withoutUnusableHealth`,
+        `describeResultErrors`) now go through `saidOf`, which reads the path and
+        `patternMessageOf` or Ajv's message. No error object leaves the module, so `verbose`'s
+        `data` reaches no reason. Each new test asserts this with a canary value.
+      - **The walker moved down to `@ms/shared`** (`schema/pattern-message.ts`): `PATTERN_MESSAGE`,
+        `patternMessageOf`, `unsaidPatterns`, `UnsaidPattern`, plus two new helpers.
+        `patternMessageKeyword()` returns a fresh definition for each Ajv, because `addKeyword`
+        writes `validateSchema` back onto the object it is given. `unsaidPatternProblem` gives
+        the load-time refusal in `MethodRegistry`'s words. The move was needed because `@ms/sensors`
+        depends on `@ms/shared`, not the other way round. `@ms/sensors` no longer exports them.
+        The catalogue, `api/validation.ts`, `MethodRegistry` and the tests import them from
+        `@ms/shared`. The catalogue's walk and refusal wording are unchanged, and its own lists
+        (`COMBINATORS` and the rest) stay for the redactor and `x-createOnly` checks.
+      - **On the wire: nothing.** The annotation constrains no value, so every frame either side
+        accepted or refused is accepted or refused the same. The reasons are local: a protocol
+        violation destroys the socket with no frame sent, and the fitted/refused reasons go only
+        to the core's log. **`PROTOCOL_VERSION` stays 32**, and a peer of either version agrees
+        with this one on every message.
+      - **Tests** (`shared/test/messages.test.ts`). `PROTOCOL_SCHEMAS` (exported for this) is
+        walked with `unsaidPatterns` and comes back empty. A control strips every sentence and
+        finds exactly `instanceId`, `counter` twice (`results` and `query-result`) and `address`
+        in probe→core, `addresses` in core→probe, and `counter` in the check result. The
+        sentence, with no expression, no `^`/`$` and no canary value, is asserted in a dropped
+        health field's reason, a `sweep-progress` and an `identify-start` `ProtocolError`
+        (the probe side), a fitted `query-result`'s reason, and the existing counter case, which
+        asserted *must match pattern* and now asserts the sentence for all three counters.
+      - **Mutations** (each restored byte for byte, and dist rebuilt from it). `saidOf` saying
+        Ajv's words: 5 failed. The `instanceId` sentence removed: 2 failed. `unsaidPatterns` blind
+        to an unsaid pattern: 8 failed, across shared, sensors (catalogue) and core (the three
+        registries, `MethodRegistry`, the API walk).
+      - **Not done.** The protocol Ajv still runs `strict: false`. A schema typo there is as
+        silent as before; only the keyword's own type is now checked.
+
+- [x] **P-377 — three registries take a pattern without a sentence** · XS · P-372 · Found
       2026-10-09 in `P-372`. The settings, trigger-kind and lookup registries build their own Ajv
       with `strict: false` and no `unsaidPatterns` check at load; none has a pattern today, but
       trigger settings are drawn by the web form. **Done when** each refuses an unsaid pattern at
       load as `MethodRegistry` now does, and a test asserts `GET /notification-methods` serves
       the webhook's `x-patternMessage`.
+
+      **P-377 outcome. Each of the three refuses at load a pattern without a sentence, and a
+      sentence without a pattern, and says the sentence when it refuses a value.** No shipped
+      setting, trigger kind or lookup schema has a pattern, so nothing an operator sees changes
+      today.
+      - **At load.** `SettingRegistry` (`settings/registry.ts`) throws `SettingError` with
+        `setting <key> gives its value a pattern without x-patternMessage`.
+        `TriggerKindRegistry` (`triggers/definition.ts`) throws `trigger kind <id> gives
+        "<path>" …`. `LookupCatalogue` (`lookups/catalogue.ts`) throws `LookupError` with `the
+        lookup schema gives …`. All three use `unsaidPatternProblem` from `@ms/shared` (`P-376`),
+        which `MethodRegistry` now uses too, word for word as before. The settings and trigger
+        classes were module-private and are now exported for their tests; the module
+        instances (`settingRegistry`, `triggerKinds`) are unchanged. The lookup catalogue's
+        definition schema is fixed, so its constructor takes the schema as a parameter
+        (default `lookupDefinitionSchema`) for the test. Unlike a bad definition file, a bad
+        schema throws, because it is this build's mistake and not an operator's.
+      - **Said.** Each Ajv declares the keyword (`patternMessageKeyword()`), runs `verbose` and
+        says `patternMessageOf(error)` before Ajv's message. Each consumer already copied only
+        the path and the message (settings' `SettingError` text, a trigger's `problems`, a
+        lookup's `problems()`), so `verbose`'s `data` reaches none of them. Each test asserts
+        that with a canary.
+      - **Tests.** `inheritance.test.ts`, in a new block that needs no database: a pattern
+        without a sentence on the value and on a nested property, a sentence without a pattern,
+        the sentence in a refusal, and the shipped definitions passing. `triggers.test.ts`: the same for a property and an
+        array's entries (`"when.*"`), and the shipped kinds. `lookups.test.ts`: the same through
+        a schema whose `id` carries the pattern; the refusal lands in `problems()` as
+        `/id must be …`. `templates.test.ts`: `GET /notification-methods` serves the webhook's
+        two header sentences, equal to the method's own, so the closed response schema keeps
+        them.
+      - **Mutations** (each restored byte for byte, and dist rebuilt from it). The load check
+        removed: 1 failed per registry. Each registry's `validate` saying Ajv's words: 1 failed
+        per registry. The route serving the schema with the keyword renamed: 1 failed.
+      - **Not done.** The registries keep `strict: false`. `vault/service.ts` and `stream.ts`
+        build Ajvs with no pattern and no sentence, and were not touched.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

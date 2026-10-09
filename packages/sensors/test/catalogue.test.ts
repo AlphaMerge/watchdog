@@ -1,12 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import {
-  CREATE_ONLY,
-  ENTRY_KEY,
-  PATTERN_MESSAGE,
-  SensorCatalogue,
-  SensorTypeError,
-} from '../src/catalogue.js';
+import { PATTERN_MESSAGE } from '@ms/shared';
+import { CREATE_ONLY, ENTRY_KEY, SensorCatalogue, SensorTypeError } from '../src/catalogue.js';
 import type { ChannelDef, SensorType } from '../src/contract.js';
 import {
   sensorTypesFor,

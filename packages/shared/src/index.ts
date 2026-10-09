@@ -111,6 +111,14 @@ export {
   ProtocolError,
   rejectionStopsMonitoring,
 } from './protocol/messages.js';
+export {
+  PATTERN_MESSAGE,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatternProblem,
+  unsaidPatterns,
+} from './schema/pattern-message.js';
+export type { UnsaidPattern } from './schema/pattern-message.js';
 export { clip as clipText, fitResult, RESULT_LIMITS } from './protocol/result-fit.js';
 export type { FittedResult } from './protocol/result-fit.js';
 export type {

@@ -12,7 +12,13 @@ import type {
   SensorType,
   SensorTypeDeclaration,
 } from './contract.js';
-import type { TargetPolicy } from '@ms/shared';
+import {
+  PATTERN_MESSAGE,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatterns,
+  type TargetPolicy,
+} from '@ms/shared';
 import { scrubSecrets, secretsOfCheck } from './support/secrets.js';
 import { targetPolicyFrom } from './support/checked-target.js';
 import {
@@ -68,18 +74,6 @@ export const CREATE_ONLY = 'x-createOnly';
  * form that locked "entry 2's mode" would lock the wrong column after the first move.
  */
 export const ENTRY_KEY = 'x-entryKey';
-
-/**
- * What a value refused by its `pattern` is told (`U-53`): `'x-patternMessage'` beside the
- * `pattern`, saying in words what the value must be — *must be a numeric OID, such as
- * 1.3.6.1.2.1.1.3.0*. Written to follow the parameter's name, as the other messages are.
- *
- * **The expression is not a message.** Shown as one, `^(?!(?:value|rows)$)[A-Za-z0-9_.-]+$`
- * tells an operator nothing they can act on. So the core's 400 (`validate` below) and the form
- * (`web/src/forms/validate.ts`) both say this sentence in its place, and registration refuses a
- * `pattern` anywhere in a `paramsSchema` without one, and one of these without a `pattern`.
- */
-export const PATTERN_MESSAGE = 'x-patternMessage';
 
 /**
  * Subschema keywords holding a map of schemas the edit form does not draw as fields (`U-34`):
@@ -213,10 +207,7 @@ export class SensorCatalogue {
     // mode admits them, and refuses one given a value of the wrong type (`U-34`).
     this.#ajv.addKeyword({ keyword: CREATE_ONLY, metaSchema: { type: 'boolean' } });
     this.#ajv.addKeyword({ keyword: ENTRY_KEY, metaSchema: { type: 'string', minLength: 1 } });
-    this.#ajv.addKeyword({
-      keyword: PATTERN_MESSAGE,
-      metaSchema: { type: 'string', minLength: 1 },
-    });
+    this.#ajv.addKeyword(patternMessageKeyword());
   }
 
   register(type: SensorType): this {
@@ -1154,33 +1145,6 @@ function messageOf(error: ErrorObject): string {
 }
 
 /**
- * The `x-patternMessage` a failed `pattern` says, or undefined for any other error or a schema
- * without one (`U-53`).
- *
- * Read from the error's `parentSchema`, which Ajv puts there only with `verbose: true`, and
- * **only from the schema**: `verbose` also puts the refused value on the error as `data`, and
- * nothing here reads it. Exported for the core's own API (`P-372`), whose 400 says the same.
- */
-export function patternMessageOf(error: {
-  readonly keyword: string;
-  readonly parentSchema?: unknown;
-}): string | undefined {
-  if (error.keyword !== 'pattern') return undefined;
-  const parent = error.parentSchema;
-  if (typeof parent !== 'object' || parent === null) return undefined;
-  const said: unknown = (parent as Record<string, unknown>)[PATTERN_MESSAGE];
-  return typeof said === 'string' && said.trim() !== '' ? said : undefined;
-}
-
-/** A `pattern` that would say its expression, or an `x-patternMessage` nothing would say. */
-export interface UnsaidPattern {
-  /** Dotted, `''` for the schema itself, `*` for an array's entries, and a keyword by name. */
-  readonly path: string;
-  /** `unsaid`: a pattern with no (or a blank) message. `orphan`: a message with no pattern. */
-  readonly fault: 'unsaid' | 'orphan';
-}
-
-/**
  * Refuses a `pattern` that does not say in words what it wants (`U-53`), and an
  * `x-patternMessage` with no `pattern` beside it to explain: the first `unsaidPatterns` finds.
  */
@@ -1196,56 +1160,6 @@ function assertPatternsSayWhatTheyMean(schema: JsonSchema, typeId: string): void
       : `sensor type "${typeId}" gives ${where} ${PATTERN_MESSAGE} without a pattern, so ` +
           'nothing would ever say it: put it beside the pattern it explains',
   );
-}
-
-/**
- * Every `pattern` that does not say in words what it wants (`U-53`), and every `x-patternMessage`
- * with no `pattern` beside it to explain, in the order a depth-first walk meets them.
- *
- * **Everywhere a schema can sit**, not only where the form draws a field: the core's 400 says a
- * refusal from any of them, so a pattern under `additionalProperties` or a `oneOf` branch would
- * show its expression there just the same. A `$ref` is not followed; a caller walks the schema it
- * names as a schema of its own. Exported for the core's test of its API schemas (`P-372`).
- */
-export function unsaidPatterns(schema: unknown): UnsaidPattern[] {
-  const found: UnsaidPattern[] = [];
-  walk(schema, '');
-  return found;
-
-  function walk(node: unknown, path: string): void {
-    if (typeof node !== 'object' || node === null || Array.isArray(node)) return;
-    const record = node as Record<string, unknown>;
-    const said = record[PATTERN_MESSAGE];
-    if (record['pattern'] !== undefined && (typeof said !== 'string' || said.trim() === '')) {
-      found.push({ path, fault: 'unsaid' });
-    }
-    if (said !== undefined && record['pattern'] === undefined) {
-      found.push({ path, fault: 'orphan' });
-    }
-
-    const properties = record['properties'];
-    if (typeof properties === 'object' && properties !== null) {
-      for (const [key, child] of Object.entries(properties as Record<string, unknown>)) {
-        walk(child, path === '' ? key : `${path}.${key}`);
-      }
-    }
-    const items = record['items'];
-    for (const child of Array.isArray(items) ? items : [items]) walk(child, `${path}.*`);
-    for (const keyword of [...COMBINATORS, ...UNRENDERED_SCHEMAS]) {
-      if (keyword === 'items') continue;
-      const branch = record[keyword];
-      for (const child of Array.isArray(branch) ? branch : [branch]) {
-        walk(child, `${path}.${keyword}`);
-      }
-    }
-    for (const keyword of UNRENDERED_MAPS) {
-      const map = record[keyword];
-      if (typeof map !== 'object' || map === null || Array.isArray(map)) continue;
-      for (const [key, child] of Object.entries(map as Record<string, unknown>)) {
-        walk(child, `${path}.${keyword}.${key}`);
-      }
-    }
-  }
 }
 
 /** Deletes a dotted path. Returns whether anything was actually there. */

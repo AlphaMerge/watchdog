@@ -1,5 +1,10 @@
 import { Ajv, type ValidateFunction } from 'ajv';
-import { AppError } from '@ms/shared';
+import {
+  AppError,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatternProblem,
+} from '@ms/shared';
 import { lookupDefinitionSchema, validateLookup, type LookupDefinition } from './definition.js';
 
 export class LookupError extends AppError {
@@ -38,7 +43,14 @@ interface Held {
   readonly builtIn: boolean;
 }
 
-const ajv = new Ajv({ allErrors: true, strict: false });
+// `verbose` puts a failed pattern's schema on its error, which is where its `x-patternMessage` is
+// read (`P-377`); it puts the value there too, and `register` reads only the path and the message.
+const ajv = new Ajv({
+  allErrors: true,
+  strict: false,
+  verbose: true,
+  keywords: [patternMessageKeyword()],
+});
 
 /**
  * Every lookup this installation can use (`M-06`).
@@ -56,8 +68,21 @@ export class LookupCatalogue {
   readonly #held = new Map<string, Held>();
   readonly #problems: LookupProblem[] = [];
   readonly #builtInIds = new Set<string>();
-  readonly #validate: ValidateFunction = ajv.compile(lookupDefinitionSchema);
+  readonly #validate: ValidateFunction;
   #sealed = false;
+
+  /**
+   * `definitionSchema` is what a definition is held to: `lookupDefinitionSchema`, always, outside
+   * the test that a schema with a pattern and no sentence is refused here (`P-377`). Refused by
+   * throwing, unlike a bad definition: that is this build's own mistake, not an operator's file.
+   */
+  constructor(definitionSchema: object = lookupDefinitionSchema) {
+    // As the sensor catalogue and the method registry refuse one (`U-53`, `P-372`): a lookup
+    // file refused by a pattern would be told the expression in `problems()`.
+    const unsaid = unsaidPatternProblem(definitionSchema, 'the lookup schema', 'a definition');
+    if (unsaid !== undefined) throw new LookupError(unsaid, {});
+    this.#validate = ajv.compile(definitionSchema);
+  }
 
   /**
    * Adds a definition, or records why it could not be added.
@@ -75,7 +100,10 @@ export class LookupCatalogue {
       problems.push(
         ...(this.#validate.errors ?? []).map(
           (error) =>
-            `${error.instancePath === '' ? 'the definition' : error.instancePath} ${error.message ?? 'is invalid'}`,
+            // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
+            `${error.instancePath === '' ? 'the definition' : error.instancePath} ${
+              patternMessageOf(error) ?? error.message ?? 'is invalid'
+            }`,
         ),
       );
     }

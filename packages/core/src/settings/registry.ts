@@ -1,5 +1,10 @@
 import { Ajv, type ValidateFunction } from 'ajv';
-import { AppError } from '@ms/shared';
+import {
+  AppError,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatternProblem,
+} from '@ms/shared';
 
 /**
  * The registry of inheritable settings.
@@ -149,9 +154,17 @@ const DEFINITIONS: readonly SettingDefinition<unknown>[] = [
   OBJECT_LOCATION,
 ];
 
-const ajv = new Ajv({ allErrors: true, strict: false });
+// `verbose` puts a failed pattern's schema on its error, which is where its `x-patternMessage` is
+// read (`P-377`); it puts the value there too, and `validate` reads only the path and the message.
+const ajv = new Ajv({
+  allErrors: true,
+  strict: false,
+  verbose: true,
+  keywords: [patternMessageKeyword()],
+});
 
-class Registry {
+/** Exported for the test that a definition is refused at load (`P-377`); use `settingRegistry`. */
+export class SettingRegistry {
   readonly #byKey = new Map<string, SettingDefinition<unknown>>();
   readonly #validators = new Map<string, ValidateFunction>();
 
@@ -165,6 +178,14 @@ class Registry {
           key: definition.key,
         });
       }
+      // A pattern that would be refused in its own expression, and a sentence nothing would say,
+      // as the sensor catalogue and the method registry refuse them (`U-53`, `P-372`, `P-377`).
+      const unsaid = unsaidPatternProblem(
+        definition.schema,
+        `setting ${definition.key}`,
+        'its value',
+      );
+      if (unsaid !== undefined) throw new SettingError(unsaid, { key: definition.key });
       this.#byKey.set(definition.key, definition);
       this.#validators.set(definition.key, ajv.compile(definition.schema));
     }
@@ -204,7 +225,11 @@ class Registry {
     if (!validate(value)) {
       const problems = (validate.errors ?? [])
         .map(
-          (e) => `${e.instancePath === '' ? 'value' : e.instancePath} ${e.message ?? 'is invalid'}`,
+          // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
+          (e) =>
+            `${e.instancePath === '' ? 'value' : e.instancePath} ${
+              patternMessageOf(e) ?? e.message ?? 'is invalid'
+            }`,
         )
         .join('; ');
       throw new SettingError(`invalid value for ${key}: ${problems}`, { key });
@@ -212,4 +237,4 @@ class Registry {
   }
 }
 
-export const settingRegistry = new Registry(DEFINITIONS);
+export const settingRegistry = new SettingRegistry(DEFINITIONS);

@@ -2,6 +2,11 @@ import { Ajv, type ErrorObject } from 'ajv';
 import { AppError } from '../errors/app-error.js';
 import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
 import { fitResult, RESULT_LIMITS } from './result-fit.js';
+import {
+  PATTERN_MESSAGE,
+  patternMessageKeyword,
+  patternMessageOf,
+} from '../schema/pattern-message.js';
 import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-versions.js';
 
 /**
@@ -1145,6 +1150,8 @@ const PROBE_HEALTH_SCHEMA = {
     instanceId: {
       type: 'string',
       pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+      [PATTERN_MESSAGE]:
+        'must be a UUID in lowercase hexadecimal, such as 0f8fad5b-d9cb-469f-a165-70867728950e',
     },
     cpuPercent: { type: 'number', minimum: 0 },
     memoryMb: { type: 'number', minimum: 0 },
@@ -1195,7 +1202,11 @@ const CHECK_RESULT_SCHEMA = {
           value: { type: 'number' },
           // The exact counter and the width it was read at (`T-02`). Text because an unsigned
           // 64-bit counter does not survive a double, and 20 digits is the most one can have.
-          counter: { type: 'string', pattern: '^[0-9]{1,20}$' },
+          counter: {
+            type: 'string',
+            pattern: '^[0-9]{1,20}$',
+            [PATTERN_MESSAGE]: 'must be an unsigned integer written in 1 to 20 decimal digits',
+          },
           counterBits: { type: 'integer', enum: [32, 64] },
           name: { type: 'string', minLength: 1, maxLength: RESULT_LIMITS.name },
           unit: { type: 'string', maxLength: RESULT_LIMITS.unit },
@@ -1227,6 +1238,11 @@ const QUERY_FAILURES = ['offline', 'too-old', 'busy', 'timeout', 'unsupported', 
  */
 export const IPV4_ADDRESS_PATTERN =
   '^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$';
+
+/** What a value `IPV4_ADDRESS_PATTERN` refuses is told, in a log line's reason (`P-376`). */
+const IPV4_ADDRESS_MESSAGE =
+  'must be a dotted-quad IPv4 address, such as 192.0.2.10: four numbers from 0 to 255, ' +
+  'with no leading zero, mask or space';
 
 const probeToCoreSchema = {
   type: 'object',
@@ -1315,6 +1331,7 @@ const probeToCoreSchema = {
                 minLength: 7,
                 maxLength: 15,
                 pattern: IPV4_ADDRESS_PATTERN,
+                [PATTERN_MESSAGE]: IPV4_ADDRESS_MESSAGE,
               },
               rttMs: { type: 'number', minimum: 0 },
             },
@@ -1585,7 +1602,13 @@ const coreToProbeSchema = {
             addresses: {
               type: 'array',
               maxItems: 65536,
-              items: { type: 'string', minLength: 7, maxLength: 15, pattern: IPV4_ADDRESS_PATTERN },
+              items: {
+                type: 'string',
+                minLength: 7,
+                maxLength: 15,
+                pattern: IPV4_ADDRESS_PATTERN,
+                [PATTERN_MESSAGE]: IPV4_ADDRESS_MESSAGE,
+              },
             },
             cursor: { type: 'integer', minimum: 0 },
             timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
@@ -1659,14 +1682,47 @@ const coreToProbeSchema = {
   ],
 } as const;
 
-const ajv = new Ajv({ allErrors: true, discriminator: true, strict: false });
+/**
+ * The one Ajv every protocol schema is compiled by, the core's and the probe's alike: both parse
+ * through the functions below, and neither compiles these schemas anywhere else.
+ *
+ * **A pattern says a sentence, never its expression (`P-376`).** What this Ajv refuses is said in
+ * a log line: the `ProtocolError` a connection closes on, a heartbeat's unusable health field, a
+ * result fitted or refused. `verbose` puts the failing keyword's schema on each error as
+ * `parentSchema`, where `x-patternMessage` is read from (`saidOf`). It puts the refused value there
+ * too, as `data`: nothing here reads it, because every message below is built from the error's
+ * path and `saidOf` alone, and no error object leaves this module.
+ */
+const ajv = new Ajv({
+  allErrors: true,
+  discriminator: true,
+  strict: false,
+  verbose: true,
+  keywords: [patternMessageKeyword()],
+});
 
 const validateProbeToCore = ajv.compile<ProbeToCoreMessage>(probeToCoreSchema);
 const validateCoreToProbe = ajv.compile<CoreToProbeMessage>(coreToProbeSchema);
 
+/**
+ * The schemas the protocol's Ajv compiles, for the test that holds every pattern in them to a
+ * sentence (`P-376`). The check result is inside both `results` and `query-result`; it is listed
+ * on its own because it is compiled on its own as well.
+ */
+export const PROTOCOL_SCHEMAS: Readonly<Record<string, unknown>> = {
+  probeToCore: probeToCoreSchema,
+  coreToProbe: coreToProbeSchema,
+  checkResult: CHECK_RESULT_SCHEMA,
+};
+
+/** What one error says: a pattern's sentence (`P-376`), or Ajv's words for any other keyword. */
+function saidOf(error: ErrorObject): string {
+  return patternMessageOf(error) ?? error.message ?? 'invalid';
+}
+
 function describeErrors(errors: readonly ErrorObject[] | null | undefined): string {
   return (errors ?? [])
-    .map((e) => `${e.instancePath === '' ? '(root)' : e.instancePath}: ${e.message ?? 'invalid'}`)
+    .map((e) => `${e.instancePath === '' ? '(root)' : e.instancePath}: ${saidOf(e)}`)
     .join('; ');
 }
 
@@ -1788,7 +1844,7 @@ function withoutUnusableHealth(
     const field = HEALTH_VALUE.exec(error.instancePath)?.[1];
     if (field === undefined) return null;
     if (!reasons.has(field)) {
-      reasons.set(field, `${error.instancePath}: ${error.message ?? 'invalid'}`);
+      reasons.set(field, `${error.instancePath}: ${saidOf(error)}`);
     }
   }
   const kept = Object.fromEntries(Object.entries(health).filter(([key]) => !reasons.has(key)));
@@ -1840,10 +1896,7 @@ function fittable(error: ErrorObject, within: string): boolean {
 function describeResultErrors(errors: readonly ResultError[]): string {
   const shown = errors
     .slice(0, 5)
-    .map(
-      ({ error, within }) =>
-        `${within === '' ? '(result)' : within}: ${error.message ?? 'invalid'}`,
-    );
+    .map(({ error, within }) => `${within === '' ? '(result)' : within}: ${saidOf(error)}`);
   const more = errors.length - shown.length;
   return shown.join('; ') + (more > 0 ? `; and ${String(more)} more` : '');
 }

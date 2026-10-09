@@ -3,7 +3,12 @@ import { after, before, describe, it } from 'node:test';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import { InheritanceError, InheritanceResolver } from '../src/settings/inheritance.js';
-import { SettingError, settingRegistry } from '../src/settings/registry.js';
+import {
+  SettingError,
+  SettingRegistry,
+  settingRegistry,
+  type SettingDefinition,
+} from '../src/settings/registry.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -16,6 +21,63 @@ const available = await databaseAvailable();
 const INTERVAL = 'scan.intervalSeconds';
 const TIMEOUT = 'scan.timeoutMs';
 const RETRIES = 'scan.retryWarnings';
+
+describe('the setting registry', () => {
+  it('refuses a pattern with no sentence, and a sentence with no pattern, at load (P-377)', () => {
+    // As the sensor catalogue (`U-53`) and the method registry (`P-372`) refuse one: a value a
+    // pattern refuses is told its sentence, so a pattern without one would answer with the
+    // expression.
+    const withSchema = (schema: Record<string, unknown>): SettingRegistry =>
+      new SettingRegistry([
+        {
+          key: 'test.patterned',
+          schema,
+          default: '',
+          description: '',
+        } satisfies SettingDefinition<string>,
+      ]);
+    const refused = (schema: Record<string, unknown>, said: RegExp): void => {
+      assert.throws(
+        () => withSchema(schema),
+        (error: unknown) => {
+          assert.ok(error instanceof SettingError);
+          assert.match(error.message, said);
+          return true;
+        },
+      );
+    };
+    refused(
+      { type: 'string', pattern: '^[a-z]+$' },
+      /setting test\.patterned gives its value a pattern without x-patternMessage/,
+    );
+    refused(
+      { type: 'object', properties: { site: { type: 'string', pattern: '^[a-z]+$' } } },
+      /setting test\.patterned gives "site" a pattern without x-patternMessage/,
+    );
+    refused(
+      { type: 'string', 'x-patternMessage': 'must be a word' },
+      /setting test\.patterned gives its value x-patternMessage without a pattern/,
+    );
+    // And one that says it is taken, and says it, without the value.
+    const said = withSchema({
+      type: 'string',
+      pattern: '^[a-z]+$',
+      'x-patternMessage': 'must be a word',
+    });
+    assert.throws(
+      () => {
+        said.validate('test.patterned', 'CANARY-1');
+      },
+      (error: unknown) => {
+        assert.ok(error instanceof SettingError);
+        assert.equal(error.message, 'invalid value for test.patterned: value must be a word');
+        return true;
+      },
+    );
+    // The shipped settings pass the same check, or this module would not have loaded.
+    assert.deepEqual(new SettingRegistry(settingRegistry.definitions()).keys, settingRegistry.keys);
+  });
+});
 
 describe(
   'InheritanceResolver',

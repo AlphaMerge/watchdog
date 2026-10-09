@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { LightMyRequestResponse } from 'fastify';
-import { PATTERN_MESSAGE, SENSOR_TYPE_ID_MESSAGE, unsaidPatterns } from '@ms/sensors';
-import type { BuildStamp } from '@ms/shared';
+import { SENSOR_TYPE_ID_MESSAGE } from '@ms/sensors';
+import { PATTERN_MESSAGE, unsaidPatterns, type BuildStamp } from '@ms/shared';
 import { NODE_ID_MESSAGE } from '../src/libraries/nodes.js';
 import { surfaceServer, type SurfaceRoute, type SurfaceServer } from './support/surface.js';
 
