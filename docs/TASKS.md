@@ -12203,10 +12203,58 @@ because each is a decision rather than a defect:
       `#/properties/effective`. **Done when** constraints are rendered and the warnings are gone or
       explained.
 
-- [ ] **P-338 — the Probe Health sensor's message does not say a probe was refused** · S · P-317 ·
+- [x] **P-338 — the Probe Health sensor's message does not say a probe was refused** · S · P-317 ·
       Found 2026-10-09 in `P-317`. The sweep says only "not connected to the core" for a probe
       refused over its version; naming the refusal needs the registration row per disconnected
       probe per sweep. **Done when** it names it without a query per probe per sweep, with a test.
+
+      **P-338 outcome. The sweep's message is the health answer's, refusal included, with no new
+      query.**
+      - **Where the refusal comes from.** The sweep already read `probe_config` once a sweep for
+        the local flag (`M-21`). That read, now `readProbes`, also left-joins the probe's live
+        registration and returns every probe that is local or has `protocol_refused_at` set, so
+        the sweep's query count is unchanged whatever the number of probes.
+        - **Not the registry's memory.** The registry holds no rows. A refusal kept beside
+          `#speaks` would be forgotten at each core restart until the probe's next hello, while
+          `GET /probes/{id}/health` still named it from the row.
+        - **The live identity only**, as `lastProtocol` reads it: a revoked one's refusal is not
+          the probe's. Only what `#speaks` recorded is read, which since `P-319` is a refusal of
+          a hello that proved it is this probe.
+      - **One phrasing.** The sweep appends `withLastRefusal` to `read()`'s sentence, as the route
+        does. Both turn the row into a `LastProtocol` through one function, `lastProtocolOf`, so
+        a 0 with no refusal beside it is nothing recorded in both (`P-316`). Like the API, it
+        names the refusal beside a live link too.
+      - **Text only.** Same channels and readings, no new limit or lookup. The state machine
+        moves on state and cause, never on the message, so alarm volume cannot change and no
+        `M-17` scenario test is needed.
+      - **Not done: a lost probe's stored message still does not name the refusal.** Run end to
+        end, a disconnected probe's Probe Health sensor is Down with the `ms.probe.link`
+        lookup's sentence, *Link to the core is 0 (not connected)*. For a `lookup` or `limit`
+        cause the state service stores the channel's message, not the check's, so the sweep's
+        sentence reaches the result and not `sensor_runtime`, the transition or a notification.
+        It reaches the stored message only where the state is the check's own: Up, beside a
+        live link. Making a Down sensor carry the check's sentence beside the channel's is a
+        state-service rule for every sensor type, and was not this ticket.
+      - **Tests** (`probe-health.test.ts`):
+        - refused at 0 and never accepted: both sensors on the probe say *not connected to the
+          core; the last hello refused over its version, at <ISO>, spoke protocol 0; this core
+          accepts protocol 1 or newer*, word for word the route's sentence built from
+          `read()` + `lastProtocol()`, with no "its last hello" and the one `connected` 0
+          reading;
+        - accepted after a refusal: no mention;
+        - no refusal (12 at no known time, a 0 with none), beside a revoked identity that has
+          one: *not connected to the core*, unchanged;
+        - beside a live link: after what the link says, and equal to the route's sentence;
+        - queries per sweep, counted through a wrapping `Database`: one refused probe and four
+          (three added, each with its own sensor, each named with its own version) cost the
+          same;
+        - end to end through ingestion and the state machine: Up beside a live link, the
+          stored message ends with the refusal.
+      - **Mutations** (each restored byte for byte, core `dist` rebuilt):
+        - the sweep not appending the refusal failed 4;
+        - the join reading revoked identities too failed 5;
+        - reading `lastProtocol` per probe in the sweep failed 1 (the query count);
+        - the query not returning refused probes failed 4.
 
 - [ ] **P-339 — a key first reported in the minute after an edit is never counted** · XS · P-321 ·
       Found 2026-10-09 in `P-321`. The count runs only when a channel is created, and the 60 s

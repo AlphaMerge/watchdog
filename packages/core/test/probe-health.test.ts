@@ -13,6 +13,7 @@ import {
   ProbeHealthService,
   ProbeHealthTargets,
   readingsFrom,
+  withLastRefusal,
   type ProbeHealthServiceOptions,
   type ProbeHealthSources,
 } from '../src/health/probe-health.js';
@@ -2442,6 +2443,37 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       offsetMs = null;
       assert.equal((await sweep()).state, 'up', 'a gap is not a reading, and clears nothing');
     });
+
+    it('names a refusal in the sensor’s stored message where the sweep’s sentence is the state’s (`P-338`)', async () => {
+      // The whole path: the sweep, ingestion, the state machine, `sensor_runtime`. Up, the
+      // sensor's message is the sweep's, so a refusal beside a live link reaches it. (Down, a
+      // lost probe's stored message is the link lookup's own, "Link to the core is 0 (not
+      // connected)", and the sweep's sentence does not reach the stored state.)
+      await db.query(
+        `INSERT INTO probe_registration
+           (gid, status, protocol_version, object_id, protocol_refused_at)
+         VALUES ('p338-e2e', 'approved', 0, $1, '2026-10-07T06:00:00Z')`,
+        [probeId],
+      );
+      try {
+        const sweep = await sweeper((at) => ({
+          link: () => connected({ lastHeartbeatAt: at, health: quiet }),
+          timeRefusals: () => ({ past: 0, future: 0 }),
+        }));
+        const stored = await sweep();
+        assert.equal(stored.state, 'up', stored.message);
+        assert.ok(stored.message.startsWith('connected'), stored.message);
+        assert.ok(
+          stored.message.endsWith(
+            '; the last hello refused over its version, at 2026-10-07T06:00:00.000Z, spoke ' +
+              `protocol 0; this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} or newer`,
+          ),
+          stored.message,
+        );
+      } finally {
+        await db.query("DELETE FROM probe_registration WHERE gid = 'p338-e2e'");
+      }
+    });
   });
 
   describe('the sweep', () => {
@@ -2744,6 +2776,190 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       });
       assert.equal(await service.sweep(), 0);
       assert.equal(ingested, 0);
+    });
+  });
+
+  describe('the refusal a sweep names (P-338)', () => {
+    // The sensor said only "not connected to the core" of a probe refused at every hello, while
+    // `GET /probes/{id}/health` named the refusal (`P-317`). The sweep now says the health
+    // answer's sentence, from the refusals it reads for every probe in the query it already made.
+    const REFUSED = '2026-10-07T06:00:00.000Z';
+    const said = (version: number, at: string): string =>
+      `the last hello refused over its version, at ${at}, spoke protocol ` +
+      `${String(version)}; this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} ` +
+      'or newer';
+    /** What `ProbeRegistry.#speaks` writes: a version, and when it was accepted or refused. */
+    const speaks = (
+      gid: string,
+      version: number,
+      times: { accepted?: string; refused?: string },
+    ): Promise<unknown> =>
+      db.query(
+        `UPDATE probe_registration
+         SET protocol_version = $2, protocol_accepted_at = $3, protocol_refused_at = $4
+         WHERE gid = $1`,
+        [gid, version, times.accepted ?? null, times.refused ?? null],
+      );
+    const register = (
+      gid: string,
+      objectId: number,
+      status: 'approved' | 'revoked',
+    ): Promise<unknown> =>
+      db.query(
+        `INSERT INTO probe_registration (gid, status, protocol_version, object_id)
+         VALUES ($1, $2, 12, $3)`,
+        [gid, status, objectId],
+      );
+    /** Objects the query-count test adds, deleted leaf first. */
+    const added: number[] = [];
+
+    before(async () => {
+      await register('p338-live', probeId, 'approved');
+      // A revoked identity no longer holds the probe, so its refusal is not the probe's.
+      await register('p338-revoked', probeId, 'revoked');
+      await speaks('p338-revoked', 3, { refused: REFUSED });
+    });
+    after(async () => {
+      await db.query("DELETE FROM probe_registration WHERE gid LIKE 'p338-%'");
+      for (const id of [...added].reverse()) {
+        await harness.service.delete(testActor, id, { kind: 'leafOnly' }, { kind: 'none' });
+      }
+    });
+
+    /** One sweep's results by sensor, and the service that made them. */
+    const sweep = async (
+      link: (probeObjectId: number) => ProbeLink,
+      database: Database = db,
+    ): Promise<{ results: Map<number, CheckResult>; service: ProbeHealthService }> => {
+      const results = new Map<number, CheckResult>();
+      const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db: database,
+        logger: silent,
+        sources: { link },
+        ingest: (batch) => {
+          for (const result of batch) results.set(result.sensorId, result);
+          return Promise.resolve();
+        },
+        now: () => new Date('2026-08-28T00:00:25Z'),
+      });
+      await service.sweep();
+      return { results, service };
+    };
+    /** The health answer's message for the same probe, built as the route builds it. */
+    const answered = async (service: ProbeHealthService, id: number): Promise<string> =>
+      withLastRefusal(service.read(id).message, await service.lastProtocol(id));
+
+    it('names a version refused at a probe’s every hello, in the health answer’s words', async () => {
+      await speaks('p338-live', 0, { refused: REFUSED });
+      const { results, service } = await sweep(() => ({ connected: false }));
+      const expected = `not connected to the core; ${said(0, REFUSED)}`;
+      for (const id of [sensorId, orphanId]) {
+        const result = results.get(id);
+        assert.ok(result !== undefined, `sensor ${String(id)} was not swept`);
+        assert.equal(result.message, expected);
+        assert.doesNotMatch(result.message, /its last hello/i);
+        // Only the text: the same one channel, the same reading.
+        assert.deepEqual(
+          result.channels.map((channel) => [channel.key, channel.value]),
+          [['connected', 0]],
+        );
+      }
+      assert.equal(await answered(service, probeId), expected, 'the same sentence as the API');
+    });
+
+    it('says nothing of a refusal once a handshake is accepted again', async () => {
+      await speaks('p338-live', 0, { refused: REFUSED });
+      await speaks('p338-live', PROTOCOL_VERSION, { accepted: '2026-10-08T09:00:00.000Z' });
+      const { results, service } = await sweep(() => ({ connected: false }));
+      assert.equal(results.get(sensorId)?.message, 'not connected to the core');
+      assert.equal(results.get(orphanId)?.message, 'not connected to the core');
+      assert.equal(await answered(service, probeId), 'not connected to the core');
+    });
+
+    it('leaves a probe with no refusal as it was, and a revoked identity’s refusal unsaid', async () => {
+      // The revoked identity beside it carries a refusal throughout; the live one has none.
+      for (const version of [12, 0]) {
+        // 12 recorded at no known time, and a 0 with no refusal: nothing recorded (`P-316`).
+        await speaks('p338-live', version, {});
+        const { results } = await sweep(() => ({ connected: false }));
+        assert.equal(results.get(sensorId)?.message, 'not connected to the core', String(version));
+        assert.equal(results.get(orphanId)?.message, 'not connected to the core', String(version));
+      }
+    });
+
+    it('names it beside a live link too, after what the link says, as the API does', async () => {
+      await speaks('p338-live', 12, { refused: REFUSED });
+      const { results, service } = await sweep(() => connected());
+      const message = results.get(sensorId)?.message ?? '';
+      assert.ok(message.startsWith('connected'), message);
+      assert.ok(message.endsWith(`; ${said(12, REFUSED)}`), message);
+      assert.equal(message, await answered(service, probeId));
+    });
+
+    it('reads every probe’s refusal in the queries it made anyway, however many probes', async () => {
+      // A query per probe per sweep is what kept the refusal out of the sensor. Counted through
+      // the sweep's own database handle, before and after the probes refused triple.
+      const counted = (): { database: Database; queries: () => number } => {
+        let queries = 0;
+        const database = {
+          query: (...args: Parameters<Database['query']>) => {
+            queries += 1;
+            return db.query(...args);
+          },
+          tx: (...args: Parameters<Database['tx']>) => db.tx(...args),
+        } as unknown as Database;
+        return { database, queries: () => queries };
+      };
+      await speaks('p338-live', 0, { refused: REFUSED });
+
+      const one = counted();
+      const first = await sweep(() => ({ connected: false }), one.database);
+      assert.equal(
+        first.results.get(sensorId)?.message,
+        `not connected to the core; ${said(0, REFUSED)}`,
+      );
+
+      const more: number[] = [];
+      for (let n = 0; n < 3; n += 1) {
+        const probe = await harness.service.create(testActor, {
+          kind: 'probe',
+          parentId: harness.rootId,
+          name: `p338-probe-${String(n)}`,
+        });
+        added.push(probe.id);
+        const device = await harness.service.create(testActor, {
+          kind: 'device',
+          parentId: probe.id,
+          name: `p338-box-${String(n)}`,
+          host: '127.0.0.1',
+        });
+        added.push(device.id);
+        const sensor = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device.id,
+          name: 'Probe Health',
+          sensorType: 'ms.probe.health',
+          params: {},
+        });
+        added.push(sensor.id);
+        more.push(sensor.id);
+        await register(`p338-extra-${String(n)}`, probe.id, 'approved');
+        await speaks(`p338-extra-${String(n)}`, n + 1, { refused: REFUSED });
+      }
+
+      const four = counted();
+      const grown = await sweep(() => ({ connected: false }), four.database);
+      // Presence first: each new probe's sensor was swept and named its own refusal.
+      more.forEach((id, n) => {
+        assert.equal(
+          grown.results.get(id)?.message,
+          `not connected to the core; ${said(n + 1, REFUSED)}`,
+          `sensor ${String(id)}`,
+        );
+      });
+      assert.ok(one.queries() > 0, 'the sweep went through the counted handle');
+      assert.equal(four.queries(), one.queries(), 'four refused probes cost what one did');
     });
   });
 });

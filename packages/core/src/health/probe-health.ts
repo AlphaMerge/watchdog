@@ -191,6 +191,32 @@ export interface LastProtocol {
 const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null, refusedAt: null };
 
 /**
+ * The three columns of a probe's live registration that `LastProtocol` is made from. The version
+ * is `null` only through a join that found no live registration.
+ */
+interface ProtocolColumns {
+  protocol_version: number | null;
+  protocol_accepted_at: Date | string | null;
+  protocol_refused_at: Date | string | null;
+}
+
+/**
+ * One reading of those columns, for the health answer and the sweep alike (`P-338`), so the two
+ * cannot disagree about what is recorded. Zero with no refusal beside it is the `R-01` upgrade's
+ * "nothing recorded" (`U-35`, `P-316`).
+ */
+function lastProtocolOf(row: ProtocolColumns | undefined): LastProtocol {
+  if (row === undefined || row.protocol_version === null) return NO_LAST_PROTOCOL;
+  if (row.protocol_version === 0 && row.protocol_refused_at === null) return NO_LAST_PROTOCOL;
+  return {
+    version: row.protocol_version,
+    at: row.protocol_accepted_at === null ? null : new Date(row.protocol_accepted_at).toISOString(),
+    refusedAt:
+      row.protocol_refused_at === null ? null : new Date(row.protocol_refused_at).toISOString(),
+  };
+}
+
+/**
  * A probe's health sentence, with the last refusal over its version named when the registry
  * recorded one (`P-317`). `GET /probes/{id}/health` served `lastProtocolRefusedAt` beside a
  * message that said only "not connected to the core", so a reader of the sentence alone was not
@@ -211,6 +237,10 @@ const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null, refusedAt: nul
  *
  * Said whether or not the probe is connected. An accepted handshake clears the refusal, so one
  * beside a live link is a hello refused after it: another process speaking for this probe.
+ *
+ * **The one phrasing, for the API and the sensor alike** (`P-338`). The sweep appends it to each
+ * Probe Health result from the row `readProbes` read, so the sensor and `GET /probes/{id}/health`
+ * say the same sentence of the same probe.
  */
 export function withLastRefusal(message: string, last: LastProtocol): string {
   if (last.refusedAt === null || last.version === null) return message;
@@ -290,6 +320,44 @@ async function readHealthSensors(q: Queryable): Promise<SensorRow[]> {
      WHERE sc.type = $1`,
     [HEALTH_TYPE],
   );
+}
+
+/**
+ * What a sweep reads of the probes themselves, in one query for all of them: the probe beside the
+ * core (`M-21`), and every probe with a refusal over its version recorded (`P-338`).
+ *
+ * **One query a sweep, however many probes.** The refusal used to be read only by the health
+ * answer, one probe at a time, so the sensor said "not connected to the core" of a probe refused
+ * at every hello. Read per probe here, it would be a query per probe every thirty seconds. Folded
+ * into the read the sweep already made for the local flag, it costs no query at all.
+ *
+ * **From the database, not kept in the registry's memory.** The registry holds no rows, and a
+ * refusal kept beside `#speaks` would be forgotten at every core restart, until the probe's next
+ * hello, while `GET /probes/{id}/health` still named it. The row is the one place both read.
+ *
+ * The live identity only, as `lastProtocol` reads it: a revoked one no longer holds the probe.
+ * And only what `#speaks` recorded, which since `P-319` is a refusal of a hello that proved it is
+ * this probe.
+ */
+async function readProbes(
+  q: Queryable,
+): Promise<{ local: Set<number>; refusals: Map<number, LastProtocol> }> {
+  const rows = await q.query<ProtocolColumns & { object_id: string; is_local: boolean }>(
+    `SELECT pc.object_id::text AS object_id, pc.is_local,
+            pr.protocol_version, pr.protocol_accepted_at, pr.protocol_refused_at
+     FROM probe_config pc
+     LEFT JOIN probe_registration pr
+       ON pr.object_id = pc.object_id AND pr.status <> 'revoked'
+     WHERE pc.is_local OR pr.protocol_refused_at IS NOT NULL`,
+  );
+  const local = new Set<number>();
+  const refusals = new Map<number, LastProtocol>();
+  for (const row of rows) {
+    const probeId = Number(row.object_id);
+    if (row.is_local) local.add(probeId);
+    if (row.protocol_refused_at != null) refusals.set(probeId, lastProtocolOf(row));
+  }
+  return { local, refusals };
 }
 
 /** The probe a Probe Health sensor reports on: the one it names, or the one above it. */
@@ -699,28 +767,13 @@ export class ProbeHealthService {
    */
   async lastProtocol(probeObjectId: number): Promise<LastProtocol> {
     try {
-      const rows = await this.#db.query<{
-        protocol_version: number;
-        protocol_accepted_at: Date | string | null;
-        protocol_refused_at: Date | string | null;
-      }>(
+      const rows = await this.#db.query<ProtocolColumns>(
         `SELECT protocol_version, protocol_accepted_at, protocol_refused_at
          FROM probe_registration
          WHERE object_id = $1 AND status <> 'revoked'`,
         [probeObjectId],
       );
-      const row = rows[0];
-      if (row === undefined) return NO_LAST_PROTOCOL;
-      if (row.protocol_version === 0 && row.protocol_refused_at === null) return NO_LAST_PROTOCOL;
-      return {
-        version: row.protocol_version,
-        at:
-          row.protocol_accepted_at === null
-            ? null
-            : new Date(row.protocol_accepted_at).toISOString(),
-        refusedAt:
-          row.protocol_refused_at === null ? null : new Date(row.protocol_refused_at).toISOString(),
-      };
+      return lastProtocolOf(rows[0]);
     } catch (error: unknown) {
       this.#logger.warn(
         { ...describeError(error), probeId: probeObjectId },
@@ -774,15 +827,10 @@ export class ProbeHealthService {
       return 0;
     }
 
-    // The probe beside the core, whose machine Core Health owns (`M-21`). Read per sweep, not
-    // per sensor: at most one, and a flag an approval can raise at any time.
-    const local = new Set(
-      (
-        await this.#db.query<{ object_id: string }>(
-          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
-        )
-      ).map((row) => Number(row.object_id)),
-    );
+    // The probe beside the core, whose machine Core Health owns (`M-21`), and every refusal over
+    // a probe's version (`P-338`). Read per sweep, not per sensor or per probe: the flag an
+    // approval can raise at any time, and a refusal any hello can record or clear.
+    const { local, refusals } = await readProbes(this.#db);
 
     // Whether the core's own clock is behind every remote probe, judged once for all of them
     // from the same live links Core Health reads (`P-247`).
@@ -842,7 +890,9 @@ export class ProbeHealthService {
           channels: readingsFrom(
             this.#recorded(probeId, link, reading, { folds, logs }, local.has(probeId)),
           ),
-          message,
+          // The health answer's sentence, word for word (`P-317`, `P-338`): a refusal is named
+          // beside a live link too, where it is another process speaking for this probe.
+          message: withLastRefusal(message, refusals.get(probeId) ?? NO_LAST_PROTOCOL),
         });
         this.#evaluated += 1;
       } catch (error: unknown) {
