@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ApiError } from '../api/client';
 import { CorrelationId } from './Panels';
 
@@ -22,11 +22,14 @@ import { CorrelationId } from './Panels';
  *   a press then does nothing. It also stays through a read the page starts on its own while it
  *   is offered (the channel list's once-a-minute re-read), so that read cannot take it from under
  *   a focused finger either.
- * - **When a good read takes it away, focus goes to `focusAfter`**, only if it fell to the page
- *   (as `U-63` and `U-64` move it): an operator who went elsewhere while the read was out keeps
- *   their place.
+ * - **When a good read takes it away, focus goes to `focusAfter`**, only if *Try again* itself
+ *   held focus as it went and focus then fell to the page (as `U-63` and `U-64` move it): an
+ *   operator who went elsewhere while the read was out keeps their place, and a page whose focus
+ *   was never on the button (opened by its address, read in browse mode) is not given focus by a
+ *   re-read it made on its own (`U-67` review).
  *
- * `what` is the list, as it starts a sentence ("The channel list").
+ * `what` is the list, as it starts a sentence ("The channel list"). The History tab's series uses
+ * it too, for a re-read the page asked for (`U-61`).
  */
 export function HeldListFailure({
   what,
@@ -52,10 +55,16 @@ export function HeldListFailure({
   useEffect(() => {
     after.current = focusAfter;
   });
+  // Whether *Try again* held focus as it was taken off the page (`RetryButton` says so before its
+  // node goes). Not "focus is on the page now": it is there all along on a page opened by its
+  // address and in a screen reader's browse mode, and a re-read the page made on its own would
+  // then take focus nobody gave it.
+  const hadFocus = useRef(false);
   useEffect(() => {
     if (offered && !showing) {
       const at = document.activeElement;
-      if (at === null || at === document.body) after.current();
+      if (hadFocus.current && (at === null || at === document.body)) after.current();
+      hadFocus.current = false;
     }
     setOffered(showing);
   }, [offered, showing]);
@@ -72,17 +81,57 @@ export function HeldListFailure({
         )}
       </p>
       {showing && (
-        <button
-          type="button"
-          aria-disabled={error === null}
-          onClick={() => {
-            if (error !== null) onRetry();
+        <RetryButton
+          busy={error === null}
+          onRetry={onRetry}
+          onGone={(focused) => {
+            hadFocus.current = focused;
           }}
-          className="ms-label mb-3 border border-control px-2 py-1 text-text-muted hover:text-text aria-disabled:opacity-50"
-        >
-          Try again
-        </button>
+        />
       )}
     </div>
+  );
+}
+
+/**
+ * *Try again*, which says as it goes whether it held focus.
+ *
+ * Its own component so that its layout effect's cleanup runs before its node is taken out of the
+ * document (React runs a deleted component's layout cleanups, then removes its host nodes): at
+ * that moment `document.activeElement` is still the button if it had focus. Blur is no help — a
+ * browser may or may not fire it for a node removed while focused.
+ */
+function RetryButton({
+  busy,
+  onRetry,
+  onGone,
+}: {
+  busy: boolean;
+  onRetry: () => void;
+  onGone: (focused: boolean) => void;
+}): React.JSX.Element {
+  const button = useRef<HTMLButtonElement>(null);
+  const gone = useRef(onGone);
+  useLayoutEffect(() => {
+    gone.current = onGone;
+  });
+  useLayoutEffect(() => {
+    const node = button.current;
+    return () => {
+      gone.current(node !== null && document.activeElement === node);
+    };
+  }, []);
+  return (
+    <button
+      ref={button}
+      type="button"
+      aria-disabled={busy}
+      onClick={() => {
+        if (!busy) onRetry();
+      }}
+      className="ms-label mb-3 border border-control px-2 py-1 text-text-muted hover:text-text aria-disabled:opacity-50"
+    >
+      Try again
+    </button>
   );
 }

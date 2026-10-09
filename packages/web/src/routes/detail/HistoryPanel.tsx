@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/client';
 import type { ChannelRecord, HistoryChannel, HistorySeries } from '../../api/types';
+import { HeldListFailure } from '../../components/HeldListFailure';
 import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '@ms/shared/charts';
 import { SeriesLegend } from '../../charts/SeriesLegend';
@@ -84,11 +85,25 @@ export function HistoryPanel({
   // chart that vanishes and comes back moves everything below it twice, and the reader loses
   // their place in a page they were reading. Dimming says "this is the old slice" without
   // taking it away.
-  const held = useRef<HistorySeries | null>(null);
+  //
+  // **Held against what it is a series of** — this sensor, this range — **and kept when a read of
+  // the same one fails** (`U-61` review, as `U-67` keeps a held list). The page reads the series
+  // again on its own when it re-reads its channel list, and that read can fail with nobody having
+  // done anything: an error panel in its place took away a correct chart somebody was reading. So
+  // the chart stays and the failure is said beside it, with *Try again*. A read for another range
+  // that fails is still the error panel: the series in hand is not the one the pressed range
+  // button names, and showing it as if it were would be wrong.
+  const slice = `${String(sensorId)}:${String(days)}`;
+  const held = useRef<{ slice: string; series: HistorySeries } | null>(null);
   useEffect(() => {
-    if (history.status === 'ready') held.current = history.data;
-  }, [history]);
-  const showing = history.status === 'ready' ? history.data : held.current;
+    if (history.status === 'ready') held.current = { slice, series: history.data };
+  }, [history, slice]);
+  const showing = history.status === 'ready' ? history.data : (held.current?.series ?? null);
+  const kept = history.status === 'error' && held.current?.slice === slice;
+  const rangeButtons = useRef<HTMLDivElement>(null);
+  const focusRange = useCallback(() => {
+    rangeButtons.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
+  }, []);
   const retired = useMemo(
     () =>
       new Set((channels ?? []).filter((channel) => channel.retired).map((channel) => channel.id)),
@@ -104,7 +119,7 @@ export function HistoryPanel({
           <span id="range-label" className="text-sm text-text-muted">
             Range
           </span>
-          <div role="group" aria-labelledby="range-label" className="flex gap-1">
+          <div ref={rangeButtons} role="group" aria-labelledby="range-label" className="flex gap-1">
             {RANGES.map((entry) => (
               <button
                 key={entry.id}
@@ -144,13 +159,24 @@ export function HistoryPanel({
         )}
       </div>
 
-      {history.status === 'error' && <ErrorPanel error={history.error} retry={history.reload} />}
+      {history.status === 'error' && !kept && (
+        <ErrorPanel error={history.error} retry={history.reload} />
+      )}
       {history.status === 'loading' && showing === null && <Loading what="history" />}
-      {showing !== null && history.status !== 'error' && (
+      {showing !== null && (history.status !== 'error' || kept) && (
         <div
           className={history.status === 'loading' ? 'opacity-50 transition-opacity' : undefined}
           aria-busy={history.status === 'loading'}
         >
+          {/* There, empty, whenever a series is shown, so a failure lands in a node that was. When
+              a good read takes *Try again* from under focus, focus goes to the pressed range. */}
+          <HeldListFailure
+            what="The history"
+            error={kept ? history.error : null}
+            reading={history.status === 'loading'}
+            onRetry={history.reload}
+            focusAfter={focusRange}
+          />
           <Series series={showing} asTable={asTable} retired={retired} hideRetired={hideRetired} />
         </div>
       )}

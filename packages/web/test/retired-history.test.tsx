@@ -188,7 +188,7 @@ describe('hiding retired channels in the History tab', () => {
     expect(lastCharted()).toEqual(['Column a', 'Column b (retired)', 'Column c', 'Column d']);
     const box = screen.getByRole('checkbox', { name: 'Hide retired channels' });
     expect((box as HTMLInputElement).checked).toBe(false);
-    expect(screen.getByRole('status').textContent).toBe('');
+    expect(box.closest('label')?.nextElementSibling?.textContent).toBe('');
 
     fireEvent.click(box);
     // Neither the legend nor the tooltip's series (what the chart is handed) marks Column c,
@@ -196,7 +196,7 @@ describe('hiding retired channels in the History tab', () => {
     expect(legend()).toEqual(['Column a', 'Column c', 'Column d']);
     expect(lastCharted()).toEqual(['Column a', 'Column c', 'Column d']);
     expect(screen.queryByText(/retired\)/)).toBeNull();
-    expect(screen.getByRole('status').textContent).toBe('1 retired channel hidden.');
+    expect(box.closest('label')?.nextElementSibling?.textContent).toBe('1 retired channel hidden.');
     // Colour follows the channel: Column c keeps its third slot with Column b gone.
     expect((charted.at(-1) ?? []).map((entry) => entry.slot)).toEqual([0, 2, 3]);
     // The note on what retired means explains a mark no longer on the page.

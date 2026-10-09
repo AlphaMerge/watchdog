@@ -105,6 +105,8 @@ let added = false;
 /** How the nth read of the list is answered: at once, refused, or held until `release`. */
 let listReply: (read: number) => 'answer' | 'fail' | 'hold' = () => 'answer';
 let release: (answer: 'list' | 'fail') => void = () => undefined;
+/** How the nth read of the series is answered. */
+let historyReply: (read: number) => 'answer' | 'fail' = () => 'answer';
 let listReads = 0;
 let polls = 0;
 let historyEnds: string[] = [];
@@ -204,6 +206,7 @@ beforeEach(() => {
   valuesSayRetired = true;
   added = false;
   listReply = () => 'answer';
+  historyReply = () => 'answer';
   release = () => undefined;
   listReads = 0;
   polls = 0;
@@ -238,7 +241,9 @@ beforeEach(() => {
     if (path === '/api/v1/sensors/9/history') {
       const to = new URLSearchParams(query).get('to') ?? '';
       historyEnds.push(to);
-      return Promise.resolve(json(historyAnswer(to)));
+      return Promise.resolve(
+        historyReply(historyEnds.length) === 'fail' ? unavailable() : json(historyAnswer(to)),
+      );
     }
     // Answered, so that no other card's error panel is an alert speaking on the page.
     if (path === '/api/v1/sensor-types' || path === '/api/v1/lookups') {
@@ -468,5 +473,100 @@ describe('a failed re-read of the channel list (U-67)', () => {
     });
     expect(legend()).toEqual(['Column a', 'Column b (retired)', 'Column c']);
     expect(speaking()).toEqual([]);
+  });
+
+  // `U-67` review: focus on the page all along (opened by its address, browse mode) is not the
+  // same as focus that fell there when Try again went.
+  it('leaves focus where it was when Try again never had it', async () => {
+    listReply = (read) => (read === 2 ? 'fail' : 'answer');
+    valuesSayRetired = false;
+    mount('/objects/9');
+    expect(await screen.findByText('Column c')).toBeDefined();
+    const region = failureRegion(channelsCard());
+    await waitFor(() => {
+      expect(region.textContent).toBe(SAID);
+    });
+    expect(within(channelsCard()).getByRole('button', { name: 'Try again' })).toBeDefined();
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    expect(document.activeElement).toBe(document.body);
+
+    // The page's own re-read, a minute on, answers.
+    for (let index = 0; index < RELIST_MIN_MS / POLL_MS; index += 1) await onePoll();
+    await waitFor(() => {
+      expect(listReads).toBe(3);
+    });
+    await waitFor(() => {
+      expect(within(channelsCard()).queryByRole('button', { name: 'Try again' })).toBeNull();
+    });
+    expect(region.matches(':empty')).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+  });
+});
+
+const HISTORY_SAID =
+  'The history could not be read again, so this is the one read before and may be out of ' +
+  'date: restarting req-67';
+
+/** The region beside the chart: first in the block that holds it. */
+function historyRegion(): HTMLElement {
+  const region = document.querySelector('[aria-busy]')?.firstElementChild?.firstElementChild;
+  if (!(region instanceof HTMLElement)) throw new Error('no region beside the chart');
+  return region;
+}
+
+describe('a failed re-read of the History tab’s series (U-61 review)', () => {
+  it('keeps the chart and says so beside it, and a good read empties it', async () => {
+    // The series read on arriving answers; the one a re-read of the list asks for is refused.
+    historyReply = (read) => (read === 2 ? 'fail' : 'answer');
+    mount('/objects/9?tab=history');
+    expect(await screen.findByText('Column b (retired)')).toBeDefined();
+    const region = historyRegion();
+    expectQuiet(region, ['mb-2', 'empty:mb-0'], 'polite');
+    const chart = screen.getAllByRole('listitem')[0]?.parentElement;
+    if (!(chart instanceof HTMLElement)) throw new Error('no legend');
+
+    const removed: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) removed.push(...record.removedNodes);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      listSaysRetired = false;
+      valuesSayRetired = false;
+      await onePoll();
+      await waitFor(() => {
+        expect(historyEnds).toHaveLength(2);
+      });
+      await waitFor(() => {
+        expect(region.textContent).toBe(HISTORY_SAID);
+      });
+      expectCorrelation(region, 'req-67');
+      removed.push(...observer.takeRecords().flatMap((record) => [...record.removedNodes]));
+      // The chart was never taken off the page, not for one commit, and no error panel speaks.
+      expect(chart.isConnected).toBe(true);
+      expect(removed.some((node) => node.contains(chart))).toBe(false);
+      expect(speaking()).toEqual([]);
+      expect(historyRegion()).toBe(region);
+
+      // Try again: answered, the region empties, and focus goes to the pressed range.
+      const retry = within(document.getElementById('panel-history') ?? document.body)
+        .getAllByRole('button', { name: 'Try again' })
+        .find((one) => region.parentElement?.contains(one));
+      if (retry === undefined) throw new Error('no Try again beside the chart');
+      retry.focus();
+      fireEvent.click(retry);
+      expect(region.matches(':empty')).toBe(true);
+      await waitFor(() => {
+        expect(historyEnds).toHaveLength(3);
+      });
+      await waitFor(() => {
+        expect(retry.isConnected).toBe(false);
+      });
+      expect(region.matches(':empty')).toBe(true);
+      expect(chart.isConnected).toBe(true);
+      expect(document.activeElement?.getAttribute('aria-pressed')).toBe('true');
+    } finally {
+      observer.disconnect();
+    }
   });
 });

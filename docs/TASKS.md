@@ -26410,6 +26410,20 @@ because each is a decision rather than a defect:
         new end without `reload` 1; no once-a-minute bound 3 (one new, two `U-55`'s).
       - **Not done.** The poll's answer still drops for the length of each request (the table is
         handed `null` values while it is `loading`), as before.
+      - **Amended on review** (a second commit). **A re-read the page made on its own could take
+        the chart away.** A failed series read put the error panel in the chart's place, so a
+        refresh this ticket added, failing with nobody having done anything, took a correct chart
+        from someone reading it. The held series is now filed with its sensor and range, and a
+        failed read of that same slice keeps it and says *The history could not be read again…*
+        beside it through `HeldListFailure` (U-67's region and *Try again*; when a good read takes
+        the button from under focus, focus goes to the pressed range button). A failed read of
+        another range is still the error panel, since the series in hand is not the one the pressed
+        button names. Test (`retired-history-poll.test.tsx`): a held chart, the refresh's read
+        refused: the region, quiet and polite before, says it with the id; a `MutationObserver`
+        over the page records no removal of the legend, which stays connected; no alert speaks;
+        *Try again* answered empties the region, and focus is on the pressed range.
+        **Mutations** (restored byte for byte): the series never kept fails 1; kept for any range
+        fails 1 (`retired-history-page`'s range-change failure, which must stay an error panel).
 
 - [x] **U-62 — moving between sensors shows the previous one for a render** · XS · U-55 · Found
       2026-10-09 in `U-55`'s review. Every `useApi` keeps its old answer until its effect runs,
@@ -26678,6 +26692,17 @@ because each is a decision rather than a defect:
         reading 2; focus not moved after 2; focus taken whatever had it 1; a press while busy
         reading again 2; the channel failure not passed 2; the templates error panel back 2.
       - **Not done.** `ErrorPanel`'s own retries are still `U-68`'s.
+      - **Amended on review** (a second commit). **Focus was moved whenever it was on the page**,
+        which cannot tell focus that fell there when *Try again* went from focus that was there all
+        along (a page opened by its address, a screen reader in browse mode): the minute's own
+        re-read, answering, then put focus on the tab panel uninvited. *Try again* is now its own
+        `RetryButton`, whose layout-effect cleanup runs before its node is removed and says
+        whether `document.activeElement` was the button; focus is moved only then, and only if it
+        is on the page after. Blur was not used: a browser may or may not fire it for a node
+        removed while focused. Test: *Try again* offered, focus on the page, the page's re-read a
+        minute on answers: the button goes and focus stays on the page; the cases where it had
+        focus still move it. **Mutations** (restored byte for byte): the old rule (moved when on
+        the page) fails 1; the button's focus never recorded fails 3.
 
 - [ ] **U-68 — "Try again" in an error panel removes itself and drops focus** · S · U-60 ·
       Found 2026-10-09 in `U-60`. Every `ErrorPanel` retry is replaced by a loading line, so
