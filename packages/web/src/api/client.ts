@@ -230,9 +230,15 @@ export type Loadable<T> =
  * unpick then.
  *
  * **`answered` is the path the answer in hand was read from** (`U-55` review), null while one is
- * loading. On the render after `path` changes the hook still holds the previous path's answer
- * (its effect has not run yet), and a path set to null keeps it indefinitely; a caller that
- * must never show one object's answer under another's name compares the two.
+ * loading. **An answer read from another path is never returned as this one's** (`U-62`): on the
+ * render after `path` changes the hook still holds the previous path's answer, because its effect
+ * has not run yet, and returning it drew the whole previous object for one frame — sensor 9's
+ * header, channels and parameters under the address of sensor 12. So whenever `answered` is not
+ * `path`, the hook says `loading`, from that very render. A caller that keeps its last answer in
+ * sight while the next is read (the alarm list's filters, the History tab's range, a map tile's
+ * refresh) holds it itself, in a ref filled only from `ready`, which this does not change; none
+ * relied on the one stale render. A path set to null asks nothing, and keeps whatever it last had,
+ * with the path it was read from: nothing on screen should be drawn from it.
  */
 export function useApi<T>(
   path: string | null,
@@ -281,5 +287,7 @@ export function useApi<T>(
     };
   }, [path, nonce]);
 
+  // From the render the path changes on, not from the one after the effect (`U-62`).
+  if (path !== null && answered !== path) return { status: 'loading', reload, answered: null };
   return { ...state, reload, answered };
 }

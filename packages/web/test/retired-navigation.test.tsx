@@ -1,9 +1,10 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Stream from '../src/api/stream';
 import type { ChannelRecord, ObjectDetail, SensorValues } from '../src/api/types';
 import { ObjectDetailView } from '../src/routes/ObjectDetailView';
+import { expectQuiet } from './support/refusal-region';
 
 // The page opens a socket for its live state, and none of that is what this file is about.
 vi.mock('../src/api/stream', async (importOriginal) => ({
@@ -78,12 +79,16 @@ const json = (body: unknown, status = 200): Response =>
     headers: { 'content-type': 'application/json' },
   });
 
+const refused = (): Response =>
+  json({ error: { code: 'UNAVAILABLE', message: 'restarting', context: {}, details: {} } }, 503);
+
 /** How each sensor's list read answers: at once, held until released, or refused. */
 let listMode: Record<number, 'answer' | 'hold' | 'fail'> = {};
 /** Channels `/values` says are retired, by sensor; where it disagrees, the page re-reads. */
 let valuesRetired: Record<number, number[]> = {};
 let listReads: Record<number, number> = {};
-let release: () => void = () => undefined;
+/** Answers the read held last: with the list, or refused as a restarting core refuses it. */
+let release: (answer?: 'list' | 'fail') => void = () => undefined;
 
 function valuesFor(id: number): SensorValues {
   const now = new Date().toISOString();
@@ -145,18 +150,11 @@ beforeEach(() => {
     if (match[1] === 'objects' && match[3] === '/channels') {
       listReads[id] = (listReads[id] ?? 0) + 1;
       const mode = listMode[id];
-      if (mode === 'fail') {
-        return Promise.resolve(
-          json(
-            { error: { code: 'UNAVAILABLE', message: 'restarting', context: {}, details: {} } },
-            503,
-          ),
-        );
-      }
+      if (mode === 'fail') return Promise.resolve(refused());
       if (mode === 'hold') {
         return new Promise<Response>((resolve) => {
-          release = () => {
-            resolve(json({ items: LISTS[id] }));
+          release = (answer = 'list') => {
+            resolve(answer === 'fail' ? refused() : json({ items: LISTS[id] }));
           };
         });
       }
@@ -204,8 +202,7 @@ async function fromNineToTwelve(): Promise<void> {
     go('/objects/12');
   });
   expect(await screen.findByRole('heading', { name: 'Uplink ports' })).toBeDefined();
-  // Asked for (the first ask may be aborted while sensor 12's detail is read: the path goes
-  // null in between), and whatever it sets off allowed to settle before anything is looked at.
+  // Asked for, and whatever it sets off allowed to settle before anything is looked at.
   await waitFor(() => {
     expect(listReads[12]).toBeGreaterThanOrEqual(1);
   });
@@ -253,10 +250,116 @@ describe('going from one sensor to another', () => {
       go('/objects/12');
     });
     expect(await screen.findByText('Port x')).toBeDefined();
-    // One read when the page arrives (asked twice: the first is aborted while sensor 12's detail
-    // is read, as the path goes null in between), then the re-read the poll asks for.
+    // One read when the page arrives, then the re-read the poll asks for. (Two reads when the
+    // page arrived, before `U-62`: the first went out under sensor 9's detail, still in hand on
+    // the render the id changed on, and was aborted as that detail went.)
     await waitFor(() => {
-      expect(listReads[12]).toBe(3);
+      expect(listReads[12]).toBe(2);
     });
+  });
+
+  it('draws nothing of the first sensor after leaving it, not for one frame (U-62)', async () => {
+    listMode[12] = 'hold';
+    mount('/objects/9');
+    expect(await screen.findByText('Column b')).toBeDefined();
+    const heading = screen.getByRole('heading', { name: 'Storage table' });
+
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => {
+      records.push(...batch);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      act(() => {
+        go('/objects/12');
+      });
+      records.push(...observer.takeRecords());
+      // Every change made to the page while sensor 9's header was still on it is a frame of
+      // sensor 9 drawn after leaving it: the header has to go in the first change, before
+      // anything is added or rewritten. Presence first: a header never removed would leave
+      // nothing before it to find.
+      const gone = records.findIndex((record) =>
+        [...record.removedNodes].some((node) => node.contains(heading)),
+      );
+      expect(gone).toBeGreaterThanOrEqual(0);
+      const drawnUnderNine = records
+        .slice(0, gone)
+        .filter((record) => record.addedNodes.length > 0 || record.type === 'characterData');
+      expect(drawnUnderNine).toEqual([]);
+    } finally {
+      observer.disconnect();
+    }
+    expect(await screen.findByRole('heading', { name: 'Uplink ports' })).toBeDefined();
+    expect(screen.queryByRole('heading', { name: 'Storage table' })).toBeNull();
+  });
+});
+
+/** The empty region beside *Loading channels…* that a failed read lands in. */
+function listRegion(): HTMLElement {
+  const loading = screen.getByText('Loading channels…');
+  const region = loading.nextElementSibling;
+  if (!(region instanceof HTMLElement)) throw new Error('no region beside the loading line');
+  return region;
+}
+
+describe('a channel list that cannot be read (U-60)', () => {
+  it('says so, with a retry, in the region present before, on opening the page', async () => {
+    listMode[9] = 'hold';
+    mount('/objects/9');
+    expect(await screen.findByText('Loading channels…')).toBeDefined();
+    const region = listRegion();
+    expectQuiet(region, [], 'polite');
+
+    act(() => {
+      release('fail');
+    });
+    await waitFor(() => {
+      expect(region.textContent).toContain('restarting');
+    });
+    expect(region.isConnected).toBe(true);
+    expect(region.textContent).toContain('Request failed — UNAVAILABLE');
+    expect(screen.queryByText('Loading channels…')).toBeNull();
+    // Inside the region, so not an alert of its own.
+    expect(within(region).queryByRole('alert')).toBeNull();
+
+    // A retry empties the same node as it starts, so the same failure would be said again.
+    fireEvent.click(within(region).getByRole('button', { name: 'Try again' }));
+    expect(screen.getByText('Loading channels…')).toBeDefined();
+    expect(listRegion()).toBe(region);
+    expect(region.textContent).toBe('');
+    await waitFor(() => {
+      expect(listReads[9]).toBe(2);
+    });
+
+    act(() => {
+      release('list');
+    });
+    expect(await screen.findByText('Column a')).toBeDefined();
+    expect(region.isConnected).toBe(false);
+  });
+
+  it('says so after moving from another sensor, with none of that sensor on the page', async () => {
+    listMode[12] = 'hold';
+    await fromNineToTwelve();
+    expect(screen.getByText('Loading channels…')).toBeDefined();
+    const region = listRegion();
+    expectQuiet(region, [], 'polite');
+
+    act(() => {
+      release('fail');
+    });
+    await waitFor(() => {
+      expect(region.textContent).toContain('restarting');
+    });
+    expect(region.isConnected).toBe(true);
+    expect(screen.queryByText('Loading channels…')).toBeNull();
+    expect(screen.queryByText(SENSOR_9_NAMES)).toBeNull();
+    expect(hideBox()).toBeNull();
+
+    listMode[12] = 'answer';
+    fireEvent.click(within(region).getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Port x')).toBeDefined();
+    expect(screen.queryByText(SENSOR_9_NAMES)).toBeNull();
+    neverShown();
   });
 });

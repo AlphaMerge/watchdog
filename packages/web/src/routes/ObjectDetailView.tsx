@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { useApi } from '../api/client';
+import { useApi, type ApiError } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
 import type {
   AncestorsView,
@@ -167,6 +167,10 @@ export function ObjectDetailView(): React.JSX.Element {
                   sensorId={detail.id}
                   sensorType={detail.sensorType}
                   channels={channelList}
+                  listError={
+                    channelList === null && channels.status === 'error' ? channels.error : null
+                  }
+                  onRetryList={channels.reload}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                   hideRetired={hideRetired}
                   onHideRetiredChange={setHideRetired}
@@ -396,6 +400,8 @@ function LiveChannels({
   sensorId,
   sensorType,
   channels,
+  listError,
+  onRetryList,
   lookups,
   hideRetired,
   onHideRetiredChange,
@@ -404,6 +410,10 @@ function LiveChannels({
   sensorId: number;
   sensorType: string | undefined;
   channels: readonly ChannelRecord[] | null;
+  /** Why there is no list, when its read failed and none is held for this sensor (`U-60`). */
+  listError: ApiError | null;
+  /** Reads the list again: not `onListStale`, whose once-a-minute cap would hold a retry back. */
+  onRetryList: () => void;
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
@@ -443,7 +453,24 @@ function LiveChannels({
     };
   }, [reload]);
 
-  if (channels === null) return <Loading what="channels" />;
+  if (channels === null) {
+    return (
+      <>
+        {listError === null && <Loading what="channels" />}
+        {/* The list's read failing (`U-60`), which used to leave *Loading channels…* up for good.
+            **Always there while there is no list, empty until the read fails**: a region added
+            with its text already in it is not reliably announced (`U-41`), so this is the node the
+            failure lands in, on opening the page and after moving from another sensor alike, and
+            a retry empties it as it starts, so the same failure is said again. **Polite, as
+            `RunPanel`'s first read is** (`U-56`): nothing the operator asked for was refused; it
+            is the same kind of news as the loading line it takes the place of. No margin: one or
+            the other is shown, never both. */}
+        <div role="status">
+          {listError !== null && <ErrorPanel error={listError} retry={onRetryList} inRegion />}
+        </div>
+      </>
+    );
+  }
   if (values.status === 'error') return <ErrorPanel error={values.error} retry={values.reload} />;
 
   return (

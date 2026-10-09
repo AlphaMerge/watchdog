@@ -25895,11 +25895,34 @@ because each is a decision rather than a defect:
       **Done when** decided (load failures announced through an always-present region, or left
       as they are because the page has nothing else to say), and done if adopted.
 
-- [ ] **U-60 — a failed channel-list read says "Loading channels…" for good** · XS · U-55 ·
+- [x] **U-60 — a failed channel-list read says "Loading channels…" for good** · XS · U-55 ·
       Found 2026-10-09 in `U-55`. If the first read of a sensor's channel list fails — on opening
       the page or after moving from another sensor — `LiveChannels` shows its loading line forever
       with no error panel. **Done when** a failed read shows the error with a retry, in an
       always-present region as `U-54`'s are, with a test.
+
+      **U-60 outcome. A list that cannot be read says so, with *Try again*, in a region that was
+      on the page empty while the list was loading.** Web only; no route, no migration.
+      - **Where.** While `LiveChannels` has no list for this sensor it draws the loading line and,
+        beside it, an empty `role="status"` region. The page passes the list's error
+        (`listError`, only when no list is held for the sensor: a re-read that fails while the last
+        list is held still shows that list) and `channels.reload` as `onRetryList`. On failure the
+        loading line goes and an `ErrorPanel` (`inRegion`, so not an alert of its own) lands in that
+        node; *Try again* empties it as the read starts and the loading line comes back, so the same
+        failure is said again. The retry is the hook's own `reload`, not `relist`, whose
+        once-a-minute cap would hold it back. No margin: one or the other is shown, never both.
+      - **Polite, not an alert,** as `RunPanel`'s first read (`U-56`): nothing the operator asked
+        for was refused, and it is the same kind of news as the loading line it replaces. Whether a
+        failed read is announced at all elsewhere is still `U-58`'s question.
+      - **Tests** (`retired-navigation.test.tsx`): opening a sensor with its list read held, the
+        region is there, empty and polite (`expectQuiet`); the refusal lands in that same node with
+        the loading line gone and no alert inside; *Try again* empties the same node and asks again;
+        the list then replaces it. After moving from sensor 9 to 12 with 12's list held then
+        refused: the same, with none of sensor 9's channels or hide box on the page, and the retry
+        shows 12's own. **Mutations** (restored byte for byte): the failure not shown (the loading
+        line kept) fails 2; the region rendered only once the read failed fails 2.
+      - **Not done.** *Try again* takes itself away, and focus with it, as every `ErrorPanel` retry
+        in the app does (the panel is replaced by a loading line).
 
 - [ ] **U-61 — the History tab learns of a revived channel late, and of a new one never** · S ·
       U-55 · Found 2026-10-09 in `U-55`. The History tab does not poll, so a channel a reading makes
@@ -25908,11 +25931,44 @@ because each is a decision rather than a defect:
       stays out of the table until a reload. **Done when** both are noticed while the page is
       open, within the same once-a-minute bound, with tests.
 
-- [ ] **U-62 — moving between sensors shows the previous one for a render** · XS · U-55 · Found
+- [x] **U-62 — moving between sensors shows the previous one for a render** · XS · U-55 · Found
       2026-10-09 in `U-55`'s review. Every `useApi` keeps its old answer until its effect runs,
       so the first render after a sensor-to-sensor move shows the whole previous page, header
       included. **Done when** `useApi` answers `loading` whenever `answered` is not the path asked
       for, with a test that no frame of the previous sensor is drawn.
+
+      **U-62 outcome. `useApi` says `loading` from the render its path changes on.** One line in
+      `api/client.ts`: whenever the path is not null and `answered` is not that path, the hook
+      returns `{ status: 'loading', answered: null }` with its `reload`. A path set to null asks
+      nothing and keeps what it had, with the path it was read from, as before.
+      - **The callers, all of them read.** None relied on the stale render: the effect already set
+        `loading` one render later, so an old answer was never visible across a path change for
+        longer than that frame. The ones that keep their last answer in sight while the next is
+        read hold it themselves, in a ref filled only from `ready`, which this leaves alone:
+        `AlarmsView` (a filter change dims the old list), `HistoryPanel` (a range change),
+        `MapBoard`'s graph tile (each refresh), `ObjectDetailView`'s held channel list (a re-read,
+        same path, filed under `answered`), and `AddSensor`'s probe health (held per probe). So no
+        opt-in was needed. The search boxes (`TreeView`'s results, `ObjectPicker`) and paged lists
+        (`usePaged`, `StateLogPanel`, the audit tab) already went to `loading` on each new path.
+        `AddSensor` had the `U-55` bug in small: on the render the probe changed, the previous
+        probe's health answer was filed under the new probe's id; that render is now `loading`.
+      - **What it changes on the page.** A move from sensor 9 to 12 goes straight to *Loading the
+        object…*: the header, channels and parameters of sensor 9 are no longer drawn under 12's
+        address. The channel list is now asked for once on arrival, not twice (the first ask used
+        to go out under sensor 9's detail and be aborted).
+      - **Tests.** `use-api-path.test.tsx`: the very render that asks for `/b` is `loading` with
+        `answered` null, no render returns `/a`'s data as `/b`'s, and a path set to null keeps
+        `/b`'s; a reload of the same path is `loading`. The alarm list, its sort changed with the
+        new answer held: the old row is still there, under `aria-busy`, never removed (a
+        `MutationObserver`), and no loading line; then the new row. `retired-navigation.test.tsx`:
+        with a `MutationObserver` over the move from 9 to 12, sensor 9's heading goes in the first
+        change made to the page, before anything is added or rewritten; and the re-read test now
+        counts one read on arrival. **Mutations** (restored byte for byte): the guard removed fails
+        2 (the first-frame test and the hook's); the alarm list's held ref removed fails the
+        keeps-its-answer test.
+      - **Not done.** `SharedMapView` puts the clock tick in its path, so every minute the shared
+        map is replaced by *Loading the map…* for the length of a request; that was so before
+        (one render later) and is unchanged.
 
 - [ ] **U-63 — the invalid-parameters list has no way in from the web** · XS · P-375 · Found
       2026-10-09 in `P-375`. `?invalidParams=true` is reachable only through the API. **Done when**
