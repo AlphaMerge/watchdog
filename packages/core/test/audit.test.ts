@@ -852,6 +852,35 @@ describe(
         }
       });
 
+      it('takes a repeated category or actorKind, and answers as it does to one (P-365)', async () => {
+        // Repeats are taken on purpose: both filters are `= ANY(…)`, so a repeat cannot change
+        // the answer, and the log view forwards its page's own parameters, which a person can
+        // edit or bookmark with a repeat in them.
+        const cy: Actor = { kind: 'user', userId: 6, login: 'cy' };
+        await service.update(
+          asInstallation(cy),
+          probeId,
+          { kind: 'probe', name: 'by-cy' },
+          { kind: 'none' },
+        );
+        const get = async (query: Record<string, string | string[]>): Promise<unknown> => {
+          const res = await app.inject({ method: 'GET', url: '/api/v1/audit', query });
+          assert.equal(res.statusCode, 200, res.body);
+          return res.json();
+        };
+        const once = (await get({ actorKind: 'user', category: 'object' })) as {
+          items: unknown[];
+        };
+        assert.ok(once.items.length > 0, 'something to compare');
+        for (const query of [
+          { actorKind: ['user', 'user'], category: 'object' },
+          { actorKind: 'user', category: ['object', 'object'] },
+          { actorKind: ['user', 'user'], category: ['object', 'object'] },
+        ]) {
+          assert.deepEqual(await get(query), once, JSON.stringify(query));
+        }
+      });
+
       it('refuses a category that is not one', async () => {
         const response = await app.inject({
           method: 'GET',

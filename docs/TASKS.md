@@ -13360,11 +13360,46 @@ because each is a decision rather than a defect:
         pattern, so their answers are the same either way. The probe-registry and hardening
         suites pass with the options.
 
-- [ ] **P-365 — a repeatable filter takes the same value twice** · XS · P-362 · Found 2026-10-09
+- [x] **P-365 — a repeatable filter takes the same value twice** · XS · P-362 · Found 2026-10-09
       in `P-362`. `category`, `actorKind`, `kind`, `tag` and `effective` bound their count with
       `maxItems` but accept repeats (`actorKind=user&actorKind=user`). **Done when** decided:
       `uniqueItems` on each (a validation change, said in the outcome) or repeats left harmless on
       purpose with a comment, with a route test either way.
+
+      **P-365 outcome. Repeats are taken on purpose, and no `uniqueItems` was added. This is not a
+      validation change.** The comment is at `KIND_FILTER` in `routes/objects.ts`, and each other
+      repeatable filter points to it.
+      - **What decided it.** Every repeatable filter is a set. The listing's `kind`, the audit
+        log's `category` and `actorKind`, the alarms' and the state log's `state`, the state log's
+        `cause` and the notification log's `status` are all `= ANY(…)`. `tag` is intersected and
+        `effective` is resolved per key. So a repeat cannot change an answer. `P-353` and `P-362`
+        refused values because they answered *wrongly*, with an empty page. A repeat answers
+        rightly, so a 400 would refuse a correct request. `tag` is matched case-folded, so
+        `uniqueItems` could not catch the repeat that matters there: `?tag=a&tag=A` is two
+        distinct strings for one tag.
+      - **Who could send one.** No script sends these filters. The web client's chips toggle a
+        value in or out and never append one twice. But `AlarmsView`, `LogsView` and
+        `auditQueryFor` forward the page's own URL parameters (`getAll`) to the API. A person can
+        edit or bookmark that URL with a repeat in it, and `uniqueItems` would turn that link into
+        an error page.
+      - **A repeat costs nothing either.** The listing and the tree take `kind` and `effective`
+        once each (`distinct`). Before, each repeated key was one more `resolveForObjects` query.
+        The repository walks each case-folded tag once. Before, each repeat was one more recursive
+        walk. The `= ANY` filters need nothing.
+      - **The bound is unchanged.** `maxItems` is still the number of values there are, and a
+        repeat counts toward it. So all of `OBJECT_KINDS` plus one more is still a 400.
+      - **Tests.** `api-routes.test.ts`: on the listing, `kind` (one value and two) repeated,
+        `tag` repeated and as `alpha`/`ALPHA`, and `effective`; on the tree, `kind` and
+        `effective`. Each answers with exactly the body the single value gets, and the tag case
+        found its group. Every kind plus one is refused. `audit.test.ts`: `actorKind`, `category`
+        and both repeated answer exactly what one does, over a user entry the test writes.
+      - **Mutations.** The decision reversed: `uniqueItems` on the objects' `kind`, `tag` and
+        `effective` and the audit log's `category` and `actorKind`. Both new tests failed, and so
+        did `P-347`'s effective-count test, which got the uniqueness error before the count. The
+        sources were restored byte for byte and `dist` rebuilt. The de-duplication itself is not
+        observable in an answer, only in the queries it saves, so there was no mutation for it.
+      - **Not done.** The web client does not de-duplicate the page parameters it forwards. It
+        no longer needs to.
 
 - [x] **P-366 — the hand-rolled waits `P-355` listed and left** · S · P-355 · Found 2026-10-09 in
       `P-355`'s review. core `state-stream.test.ts` (the 30 s `severed` poll, and `swept` under
@@ -13643,12 +13678,67 @@ because each is a decision rather than a defect:
       in `docs/findings/`, and, if it matters, a path that reads only `sensor_type` and `params`
       instead of the whole object.
 
-- [ ] **P-375 — the sensors past the cap are named nowhere** · XS · P-368 · Found 2026-10-09 in
+- [x] **P-375 — the sensors past the cap are named nowhere** · XS · P-368 · Found 2026-10-09 in
       `P-368`. The set of sensors whose parameters their type now refuses is held in memory, but
       only ten per type are logged, and a sensor changed outside the object service (a hand
       edit) is judged only at the next start. **Done when** the set can be listed (a filter on
       the object listing, or a route) by anyone who can see those sensors, with a test, and the
       hand-edit case is a line in `P-333`'s policy when that lands.
+
+      **P-375 outcome. `GET /objects?invalidParams=true` lists the set: the object listing, with
+      the ids as one more condition inside its query. Before the pass has read every sensor it
+      answers 503 `OBJECT_PARAMS_NOT_CHECKED`, not a partial list.** No new route, migration or
+      protocol change. The listing's only new parameter is `invalidParams`, enum `true`. It does
+      not repeat, since it is a switch.
+      - **The set.** `StoredParamsCheck.failing()` returns `{ kind: 'known', ids }` (ascending)
+        once the pass is complete, `checking` before that, and `stopped` once shutdown or a failed
+        read ended it short. It is the same set Core Health counts, kept current by `P-367`'s
+        sink, so an edit that mends a sensor takes it off the list at once. `main.ts` hands the
+        check to `ApiServer` (`invalidParams`), which passes it to the object routes.
+      - **Visibility and paging are the listing's.** `ObjectFilter.ids` puts
+        `o.id = ANY($n::bigint[])` beside the caller's visibility condition, the cursor and the
+        limit. So the caller sees only the sensors they can already read, in pages, combined
+        with any other filter (`q`, `kind`, `parentId`, `tag`, …). An empty set gives an empty
+        page. The answer is the listing's own `objectSummary`, which carries no parameter, path,
+        keyword or problem message. The paths stay in the log and in an edit's 400. Membership
+        alone says one thing: this sensor's stored parameters fail. Where a tightened path is
+        `writeOnly`, that is one bit about a secret for someone with read and not write. The
+        ticket asked for "anyone who can see", and the bit says nothing of the value.
+      - **Before the pass: a 503, and why.** A partial set is a lower bound, and a list of it
+        reads as the answer ("these are the ones to mend") to any client with no reason to look
+        for a flag beside it. An empty list with a flag reads as "none". The Core Health channel
+        gaps for the same reason, so the two agree: the count is a number exactly when this is a
+        list. While the pass runs, the 503 carries `Retry-After: 5`; the pass read 20,000 sensors
+        in a third of a second (`P-358`). `details.pass` is `checking`. Once the pass has stopped
+        short, there is no `Retry-After` and `details.pass` is `stopped`, and the message says the
+        next start checks again. A core with no check wired answers the same way, with its own
+        sentence. `ObjectError` gained an optional `retryAfterSeconds`, which `toHttpError` sends.
+      - **Docs.** The parameter's description in `api-reference.md` (regenerated, `--check`
+        current). `administration.md`'s `sensorsWithInvalidParams` row says how to list the
+        sensors, and that a hand edit is judged at the next start.
+      - **Tests.** `stored-params-check.test.ts`, without a database: `failing()` is `checking`
+        before the pass and on every page while it runs; after it, the list holds every failing
+        id, ascending, including the one past `WARNINGS_PER_TYPE`; a later mend takes its id
+        off; a stopped pass, by shutdown or by an unreadable page, is `stopped`. Against a
+        database, through `ApiServer`: a 503 with `Retry-After: 5` and `pass: checking` before
+        the pass. After it, paged one at a time, the listing is exactly the check's set: this
+        test's own failing sensor and `test.quoting`, not the valid one, not the unregistered
+        type. No item carries `params`, `redactedParams` or `problems`, and no body carries the
+        secret. The listing combines with `q` and `kind`. A PATCH through the API that mends the
+        sensor takes it off, and nothing else moves. A stopped check is a 503 with no
+        `Retry-After`. `invalidParams=false` and a repeat are 400s. `object-visibility.test.ts`:
+        two visible and four hidden failing sensors. The branch account gets exactly its two, and
+        an administrator gets all six. `invalidParams` joins the A-23 sweep beside `q` and `tag`,
+        so no route answers the branch with the marker.
+      - **Mutations.** Each restored byte for byte, with `dist` rebuilt. The listing ignoring the ids
+        failed the route test and the visibility test (2). `failing()` listing the part read while
+        the pass runs failed the no-database test and the route test (2). The 503 without
+        `Retry-After` failed the route test (1). A mutation letting the ids bypass the caller's
+        visibility was not run: the session's permission check refused it as weakening security.
+        The visibility test's exact two-of-six assertion is what would catch it.
+      - **Not done.** The web client has no view of the list yet. A sensor changed outside the
+        object service (a hand edit of `sensor_config`) is judged only at the next start, as
+        before. That is the line for `P-333`'s policy, and `P-333`'s text was not edited here.
 
 - [x] **P-376 — the probe protocol's patterns answer with the expression** · XS · P-372 · Found
       2026-10-09 in `P-372`. `@ms/shared`'s protocol schemas still say "must match pattern …",

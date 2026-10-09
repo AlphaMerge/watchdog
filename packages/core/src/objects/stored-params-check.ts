@@ -75,6 +75,12 @@ import type { ObjectId } from './types.js';
  * both find failing — a clone made while the pass runs — is one. The count is published only
  * once the pass has gone over every sensor; until then, and for good if shutdown or a failed
  * read stopped it, the channel gaps rather than read a lower bound as the number.
+ *
+ * **The set is listable, not only counted** (`P-375`). The log names ten of each type; the rest
+ * are found by `GET /objects?invalidParams=true`, the object listing filtered to these ids, so
+ * its caller is shown only the sensors it can already see, in the listing's own summary — no
+ * parameter, path or problem. It answers on the channel's terms: the set once the pass has gone
+ * over every sensor, and a 503 before, not the part read so far (`failing`).
  */
 
 /** Sensors per page: one plain indexed read of their type and parameters. */
@@ -121,6 +127,18 @@ export interface StoredParamsReport {
   readonly complete: boolean;
 }
 
+/**
+ * The failing sensors as the listing's `invalidParams` filter asks for them (`P-375`).
+ *
+ * Only `known` is a set: `checking` while the start-up pass has not gone over every sensor, and
+ * `stopped` when shutdown or a failed read ended it before it had. Neither is a partial set, for
+ * the channel's reason: what the pass has not read yet is not "none of them".
+ */
+export type FailingSensors =
+  | { readonly kind: 'known'; readonly ids: readonly ObjectId[] }
+  | { readonly kind: 'checking' }
+  | { readonly kind: 'stopped' };
+
 interface SensorRow {
   readonly id: string;
   readonly type: string;
@@ -141,6 +159,8 @@ export class StoredParamsCheck implements AuditSink {
    */
   #written: Set<ObjectId> | null = new Set<ObjectId>();
   #complete = false;
+  /** The pass has ended, whether or not it went over every sensor. */
+  #ended = false;
 
   constructor(options: StoredParamsCheckOptions) {
     this.#db = options.db;
@@ -156,6 +176,18 @@ export class StoredParamsCheck implements AuditSink {
    */
   get invalid(): number | null {
     return this.#complete ? this.#failing.size : null;
+  }
+
+  /**
+   * The listing's `GET /objects?invalidParams=true` (`P-375`): the ids themselves, ascending,
+   * once the count above would be published, and why not otherwise. The route intersects them
+   * with what its caller can see; nothing here knows who is asking.
+   */
+  failing(): FailingSensors {
+    if (this.#complete) {
+      return { kind: 'known', ids: [...this.#failing].sort((a, b) => a - b) };
+    }
+    return this.#ended ? { kind: 'stopped' } : { kind: 'checking' };
   }
 
   /**
@@ -372,6 +404,7 @@ export class StoredParamsCheck implements AuditSink {
       complete,
     };
     if (complete) this.#complete = true;
+    this.#ended = true;
     // Ended either way: a later write's verdict is simply the set's from here on.
     this.#written = null;
     if (invalid > 0 || unregistered > 0 || failedSensors > 0 || !complete) {

@@ -21,6 +21,7 @@ export type ObjectErrorCode =
   | 'OBJECT_CREDENTIALS_WITHHELD'
   | 'OBJECT_CHANNEL_MODE_FIXED'
   | 'OBJECT_TREE_BUSY'
+  | 'OBJECT_PARAMS_NOT_CHECKED'
   | 'CREDENTIAL_VAULT_UNAVAILABLE';
 
 export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
@@ -53,6 +54,10 @@ export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
   // Another change held the tree for longer than this one would wait (`P-229`). 503 with
   // `Retry-After`: nothing about the request was wrong, and the same one can succeed.
   OBJECT_TREE_BUSY: 503,
+  // `GET /objects?invalidParams=true` before the start-up pass has judged every sensor, or after
+  // it stopped short (`P-375`). 503: the request is fine and the answer is not known yet; a
+  // partial list would read as the answer.
+  OBJECT_PARAMS_NOT_CHECKED: 503,
   // 503 rather than 500: the request is fine and the core is running, it simply has no vault
   // configured — an operator fixes it in the configuration file, not by retrying.
   CREDENTIAL_VAULT_UNAVAILABLE: 503,
@@ -69,11 +74,18 @@ export class ObjectError extends AppError {
   override readonly code: ObjectErrorCode;
   readonly status: number;
   readonly details: Readonly<Record<string, unknown>>;
+  /** Sent as `Retry-After` when the same request can succeed later by itself. */
+  readonly retryAfterSeconds: number | undefined;
 
   constructor(
     code: ObjectErrorCode,
     message: string,
-    options: { context: ErrorContext; details?: Record<string, unknown>; cause?: unknown },
+    options: {
+      context: ErrorContext;
+      details?: Record<string, unknown>;
+      cause?: unknown;
+      retryAfterSeconds?: number;
+    },
   ) {
     super(code, message, {
       context: options.context,
@@ -83,6 +95,7 @@ export class ObjectError extends AppError {
     this.code = code;
     this.status = OBJECT_ERROR_STATUS[code];
     this.details = options.details ?? {};
+    this.retryAfterSeconds = options.retryAfterSeconds;
   }
 }
 

@@ -61,7 +61,7 @@ import type { LoginThrottle } from '../auth/throttle.js';
 import { auditRoutes } from './routes/audit.js';
 import { historyRoutes } from './routes/history.js';
 import { queryRoutes } from './routes/queries.js';
-import { objectRoutes } from './routes/objects.js';
+import { objectRoutes, type ObjectRoutesOptions } from './routes/objects.js';
 import { probeRoutes } from './routes/probes.js';
 import { BulkService } from '../objects/bulk.js';
 import type { ProbeRegistry } from '../probes/registry.js';
@@ -293,6 +293,11 @@ export interface ApiServerOptions {
   /** What "send test notification" actually sends through (`N-14`). */
   tester?: NotificationTester;
   /**
+   * The sensors whose stored parameters their type now refuses (`StoredParamsCheck`), for the
+   * listing's `invalidParams` filter (`P-375`). Absent, the filter answers that it is not known.
+   */
+  invalidParams?: ObjectRoutesOptions['invalidParams'];
+  /**
    * Live state changes (`U-02`).
    *
    * Optional like the rest: absent, `/stream` is not registered and a client falls back to
@@ -354,6 +359,7 @@ export class ApiServer {
   readonly #probeHealth: (() => ProbeHealthService | undefined) | undefined;
   readonly #metrics: (() => MetricsExporter | undefined) | undefined;
   readonly #tester: NotificationTester | undefined;
+  readonly #invalidParams: ObjectRoutesOptions['invalidParams'];
   readonly #stream: StateBroadcaster | undefined;
   readonly #streamLimits: Partial<StreamLimits>;
   /** What the rate limit has refused, once it is registered (`A-39`). */
@@ -445,6 +451,7 @@ export class ApiServer {
     this.#probeHealth = options.probeHealth;
     this.#metrics = options.metrics;
     this.#tester = options.tester;
+    this.#invalidParams = options.invalidParams;
     this.#stream = options.stream;
     this.#streamLimits = options.streamLimits ?? {};
 
@@ -771,6 +778,7 @@ export class ApiServer {
           ...(this.#auth === undefined
             ? {}
             : { access: this.#auth.access, authorizing: this.#auth.required }),
+          ...(this.#invalidParams === undefined ? {} : { invalidParams: this.#invalidParams }),
         });
         await scope.register(historyRoutes, { history: this.#history, objects: service });
         if (this.#queries !== undefined && this.#probeConfig !== undefined) {

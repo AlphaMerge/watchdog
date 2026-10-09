@@ -53,6 +53,7 @@ const logQuery = {
   additionalProperties: false,
   properties: {
     objectId: { type: 'integer', minimum: 1 },
+    // One category or several; a repeat is taken, being `= ANY(…)` (`P-365`).
     category: {
       oneOf: [
         { enum: [...AUDIT_CATEGORIES] },
@@ -64,7 +65,9 @@ const logQuery = {
       ],
     },
     // One of `ACTOR_KINDS`, which is `audit_log_actor_kind_check`, so a kind outside it can match
-    // no entry (`P-362`). As `category` is: one value or several, at most one of each.
+    // no entry (`P-362`). As `category` is: one value or several, at most as many as there are
+    // kinds. A repeat is taken, as in every such filter (`P-365`): it is `= ANY(…)`, so
+    // `?actorKind=user&actorKind=user` answers what one does (`KIND_FILTER` in `objects.ts`).
     actorKind: {
       oneOf: [
         { enum: [...ACTOR_KINDS] },

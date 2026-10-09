@@ -499,6 +499,11 @@ export interface ObjectFilter {
   /** A device's host exactly, case-folded — the lookup, where `q` is the search. */
   readonly host?: string;
   readonly priorityMin?: Priority;
+  /**
+   * Only these objects (`P-375`: the sensors whose stored parameters their type now refuses). An
+   * empty list matches nothing, not everything.
+   */
+  readonly ids?: readonly ObjectId[];
 }
 
 /**

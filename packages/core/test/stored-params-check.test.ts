@@ -1,9 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
+import type { LightMyRequestResponse } from 'fastify';
 import type { QueryResultRow } from 'pg';
 import { pino, type Logger } from 'pino';
 import { BUILT_IN_SENSOR_TYPES, standardCatalogue, type SensorType } from '@ms/sensors';
+import { ApiServer } from '../src/api/server.js';
+import { AuditRepository } from '../src/audit/store.js';
 import { Visibility } from '../src/auth/access.js';
+import { HistoryService } from '../src/timeseries/history.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import type { Actor, Mutation } from '../src/objects/audit.js';
 import {
@@ -14,6 +18,7 @@ import {
 import {
   StoredParamsCheck,
   WARNINGS_PER_TYPE,
+  type FailingSensors,
   type StoredParamsReport,
 } from '../src/objects/stored-params-check.js';
 import type { ObjectKind } from '../src/objects/types.js';
@@ -257,6 +262,7 @@ describe('the stored-parameters check at start-up (P-358)', () => {
       assert.deepEqual(asked, [], 'nothing read');
       assert.equal(report.complete, false);
       assert.equal(check.invalid, null, 'a gap, not a lower bound');
+      assert.deepEqual(check.failing(), { kind: 'stopped' }, 'and no list (P-375)');
     });
 
     it('stops at a page it cannot read, says so, and does not reject', async () => {
@@ -271,6 +277,8 @@ describe('the stored-parameters check at start-up (P-358)', () => {
       assert.equal(report.complete, false);
       assert.equal(report.sensors, 2);
       assert.equal(check.invalid, null);
+      // Sensor 1 was read failing, and is still not a list: the rest were never read (P-375).
+      assert.deepEqual(check.failing(), { kind: 'stopped' });
       const stopped = parsed().filter((line) => line['phase'] === 'read-page');
       assert.equal(stopped.length, 1);
       assert.equal(stopped[0]?.['afterSensorId'], '2');
@@ -319,6 +327,43 @@ describe('the stored-parameters check at start-up (P-358)', () => {
       });
       assert.match(String(summary['msg']), /notNamedByType counts the rest/);
       for (const line of lines) assert.equal(line.includes('S3cr3t-x'), false, line);
+    });
+
+    it('lists every failing sensor, past the log’s cap, only once the pass has read them all (P-375)', async () => {
+      const types = [
+        ...Array.from({ length: WARNINGS_PER_TYPE + 1 }, () => 'bad'),
+        'ok',
+        'bad.other',
+      ];
+      const during: FailingSensors[] = [];
+      const check: StoredParamsCheck = new StoredParamsCheck({
+        db: fakeDb(sensors(types), [], undefined, () => {
+          // While each page is in flight; after the first, sensors 1–4 are already in the set.
+          during.push(check.failing());
+          return Promise.resolve();
+        }),
+        logger: silent,
+        sensorTypes: fakeGate([]),
+        batchSize: 4,
+      });
+      assert.deepEqual(check.failing(), { kind: 'checking' }, 'before the pass');
+      await check.run();
+      assert.equal(during.length, 4, 'four pages asked for');
+      for (const answer of during) assert.deepEqual(answer, { kind: 'checking' }, 'not a part');
+
+      const past = WARNINGS_PER_TYPE + 1;
+      assert.deepEqual(check.failing(), {
+        kind: 'known',
+        // Ascending, the one past the cap among them, the valid one (12) not.
+        ids: [...Array.from({ length: past }, (_, at) => at + 1), past + 2],
+      });
+
+      // A write after it moves the list as it moves the count.
+      await write(check, edited(past), [written(past, 'ok')]);
+      const answer = check.failing();
+      assert.ok(answer.kind === 'known');
+      assert.equal(answer.ids.includes(past), false, 'mended, off the list');
+      assert.equal(answer.ids.length, check.invalid);
     });
 
     it('keeps the count current after the pass: a mend, a delete, a clone; not a rename or a rollback (P-367)', async () => {
@@ -695,6 +740,169 @@ describe('the stored-parameters check at start-up (P-358)', () => {
           assert.equal(check.invalid, 2, 'deleted');
         } finally {
           harness.audit.also = undefined;
+        }
+      });
+
+      it('lists them through the object listing: 503 before the pass, the set after, not one an edit mends (P-375)', async () => {
+        const sensorTypes = catalogueSensorTypeGate(
+          standardCatalogue([shipped('db.postgresql'), shipped('exe.script.advanced'), quoting]),
+          { logger: silent },
+        );
+        // A failing sensor of this test's own, so what it mends is not another test's.
+        const mine = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: 'listed-p375',
+          sensorType: 'db.postgresql',
+          params: { query: 'SELECT 1' },
+        });
+        await db.query('UPDATE sensor_config SET params = $2 WHERE object_id = $1', [
+          mine.id,
+          JSON.stringify({ query: 'SELECT 1', extract: [{ key: 'queryTime', column: 'n' }] }),
+        ]);
+
+        const check = new StoredParamsCheck({ db, logger: silent, sensorTypes, batchSize: 2 });
+        harness.audit.also = check;
+        let source: { failing(): FailingSensors } = check;
+        const server = new ApiServer({
+          config: {
+            host: '127.0.0.1',
+            port: 0,
+            webRoot: '',
+            allowedOrigins: [],
+            requireAuthentication: true,
+          },
+          logger: silent,
+          version: '9.9.9',
+          service: harness.service,
+          history: new HistoryService({ db, logger: silent }),
+          db,
+          audit: new AuditRepository(),
+          catalogue: standardCatalogue([
+            shipped('db.postgresql'),
+            shipped('exe.script.advanced'),
+            quoting,
+          ]),
+          invalidParams: { failing: () => source.failing() },
+        });
+        await server.build('9.9.9', harness.service);
+        const app = server.app;
+
+        /** Every id the filter lists, a page of one at a time, by id. */
+        const listed = async (filters = ''): Promise<number[]> => {
+          const found: number[] = [];
+          let cursor: string | null = null;
+          for (let page = 0; page < 100; page += 1) {
+            const res: LightMyRequestResponse = await app.inject({
+              method: 'GET',
+              url:
+                `/api/v1/objects?invalidParams=true&sort=id&limit=1${filters}` +
+                (cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`),
+            });
+            assert.equal(res.statusCode, 200, res.body);
+            // The listing's own summary: no parameter, no path, no problem, no secret.
+            assert.equal(res.body.includes(QUOTED_SECRET), false);
+            const body = res.json<{
+              items: Record<string, unknown>[];
+              nextCursor: string | null;
+            }>();
+            for (const item of body.items) {
+              for (const field of ['params', 'redactedParams', 'problems']) {
+                assert.equal(field in item, false, field);
+              }
+              found.push(item['id'] as number);
+            }
+            cursor = body.nextCursor;
+            if (cursor === null) return found;
+          }
+          assert.fail('more than 100 pages');
+        };
+
+        try {
+          const early = await app.inject({
+            method: 'GET',
+            url: '/api/v1/objects?invalidParams=true',
+          });
+          assert.equal(early.statusCode, 503, early.body);
+          assert.equal(early.headers['retry-after'], '5');
+          const refused = early.json<{
+            error: { code: string; details: Record<string, unknown> };
+          }>();
+          assert.equal(refused.error.code, 'OBJECT_PARAMS_NOT_CHECKED');
+          assert.deepEqual(refused.error.details, { pass: 'checking' });
+
+          await within(30_000, 'the check', check.run());
+          const known = check.failing();
+          assert.ok(known.kind === 'known');
+          const all = await listed();
+          assert.deepEqual(all, known.ids, 'the whole set, paged a sensor at a time');
+          assert.equal(all.includes(mine.id), true);
+          assert.equal(all.includes(ids.quoting), true);
+          assert.equal(all.includes(ids.valid), false, 'a valid sensor is not listed');
+          assert.equal(all.includes(ids.dropped), false, 'nor one this build cannot judge');
+
+          // Beside the listing's other filters.
+          assert.deepEqual(await listed('&q=listed-p375'), [mine.id]);
+          assert.deepEqual(await listed('&kind=device'), []);
+
+          // Mended through the API: off the list at once.
+          const read = await app.inject({
+            method: 'GET',
+            url: `/api/v1/objects/${String(mine.id)}`,
+          });
+          const etag = read.headers['etag'];
+          assert.equal(typeof etag, 'string');
+          const mended = await app.inject({
+            method: 'PATCH',
+            url: `/api/v1/objects/${String(mine.id)}`,
+            headers: { 'if-match': String(etag) },
+            payload: { kind: 'sensor', params: { query: 'SELECT 1' } },
+          });
+          assert.equal(mended.statusCode, 200, mended.body);
+          const after = await listed();
+          assert.equal(after.includes(mine.id), false, 'mended');
+          assert.deepEqual(
+            after,
+            all.filter((id) => id !== mine.id),
+            'and nothing else moved',
+          );
+
+          // A pass that stopped short: no list, and nothing to wait for.
+          const controller = new AbortController();
+          controller.abort();
+          const stopped = new StoredParamsCheck({
+            db,
+            logger: silent,
+            sensorTypes,
+            signal: controller.signal,
+          });
+          await stopped.run();
+          source = stopped;
+          const late = await app.inject({
+            method: 'GET',
+            url: '/api/v1/objects?invalidParams=true',
+          });
+          assert.equal(late.statusCode, 503, late.body);
+          assert.equal(late.headers['retry-after'], undefined);
+          assert.deepEqual(
+            late.json<{ error: { details: Record<string, unknown> } }>().error.details,
+            { pass: 'stopped' },
+          );
+
+          // Not repeatable: it is a switch, not a list.
+          const twice = await app.inject({
+            method: 'GET',
+            url: '/api/v1/objects?invalidParams=true&invalidParams=true',
+          });
+          assert.equal(twice.statusCode, 400, twice.body);
+          const no = await app.inject({
+            method: 'GET',
+            url: '/api/v1/objects?invalidParams=false',
+          });
+          assert.equal(no.statusCode, 400, no.body);
+        } finally {
+          harness.audit.also = undefined;
+          await server.stop();
         }
       });
     },

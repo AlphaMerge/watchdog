@@ -35,6 +35,10 @@ const logQuery = {
   },
 } as const;
 
+/**
+ * One value or several. A repeat is taken on purpose (`P-365`): the filter is `= ANY(…)`, so it
+ * answers what one does — see `KIND_FILTER` in `objects.ts`.
+ */
 function repeatable(values: readonly string[]): Record<string, unknown> {
   return {
     oneOf: [

@@ -1297,6 +1297,8 @@ async function serve(): Promise<void> {
     probeHealth: () => probeHealthRef,
     metrics: () => metricsRef,
     tester,
+    // The listing's `invalidParams` filter names what the log names ten of (`P-375`).
+    invalidParams: storedParams,
     stream,
   });
   await api.build(VERSION, service);

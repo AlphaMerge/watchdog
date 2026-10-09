@@ -11,6 +11,7 @@ import type { TreePlanInput } from '../../objects/tree-plan.js';
 import { MAX_BULK } from '../../objects/bulk.js';
 import { MAX_SETTING_KEY, settingRegistry } from '../../settings/registry.js';
 import { MAX_TAG, MAX_TAGS } from '../../libraries/nodes.js';
+import type { FailingSensors } from '../../objects/stored-params-check.js';
 import type {
   CreateObjectInput,
   DeleteExpectation,
@@ -166,7 +167,19 @@ export interface ObjectRoutesOptions {
    * a bulk selection while the single-object route beside it succeeded for the same object.
    */
   authorizing?: boolean;
+  /**
+   * The sensors whose stored parameters their type now refuses (`StoredParamsCheck`, `P-375`),
+   * which the listing's `invalidParams` filter narrows to. Absent where nothing checks them — the
+   * route tests — and then the filter answers that it is not known.
+   */
+  invalidParams?: { failing(): FailingSensors };
 }
+
+/**
+ * How soon to ask again while the start-up pass is still reading (`P-375`). It went over 20,000
+ * sensors in a third of a second when measured (`P-358`), so a few seconds is generous.
+ */
+const PARAMS_CHECK_RETRY_SECONDS = 5;
 
 interface ListQuery {
   parentId?: number;
@@ -177,6 +190,7 @@ interface ListQuery {
   priorityMin?: number;
   sort?: ListSort;
   effective?: string | string[];
+  invalidParams?: 'true';
   include?: string;
   cursor?: string;
   limit?: number;
@@ -185,7 +199,26 @@ interface ListQuery {
 const asArray = (value: string | string[] | undefined): string[] =>
   value === undefined ? [] : Array.isArray(value) ? value : [value];
 
-/** One kind or several, both validated against the same list. */
+/**
+ * Each value once, in the order first given (`P-365`). A repeated filter value is taken, not
+ * refused: see `KIND_FILTER`.
+ */
+const distinct = (value: string | string[] | undefined): string[] => [...new Set(asArray(value))];
+
+/**
+ * One kind or several, both validated against the same list.
+ *
+ * **A repeat is taken, on purpose** (`P-365`), here and in every filter that takes one value or
+ * several (`tag`, `effective`; the audit log's `category` and `actorKind`, the alarms' and the
+ * state log's `state`, its `cause`, the notification log's `status`). No `uniqueItems`. Each is a
+ * set — `= ANY(…)`, tags intersected, settings resolved per key — so `?kind=device&kind=device`
+ * answers exactly what `?kind=device` does, and the listing takes each value once (`distinct`, and
+ * tags case-folded in the repository), so a repeat costs nothing either. Refusing it would turn a
+ * right answer into a 400, and the web client forwards its own page's parameters, which a person
+ * can edit or bookmark with a repeat in them. Contrast `P-353`'s empty tag and `P-362`'s unknown
+ * actor kind, refused because they answered *wrongly*, with an empty page. `maxItems` still bounds
+ * the list at the number of values there are, so a repeat counts toward it.
+ */
 const KIND_FILTER = {
   oneOf: [
     { enum: [...OBJECT_KINDS] },
@@ -204,7 +237,8 @@ const KIND_FILTER = {
  *
  * A tag is held to what an object's own tags are (`objectFields`: 100 characters, 50 of them),
  * as a library rule's effective-tag filter is. The filter is all-of over own and inherited tags,
- * and 50 is the most one object can carry itself: a search box sends one or two.
+ * and 50 is the most one object can carry itself: a search box sends one or two. A repeated tag,
+ * in any case, is taken and walked once (`P-365`, at `KIND_FILTER`).
  */
 const TAG_FILTER = {
   type: ['string', 'array'],
@@ -216,7 +250,8 @@ const TAG_FILTER = {
 
 /**
  * A setting key is held to the length the settings routes take one in a path, and the list to
- * the number of keys there are: any more is a repeat. A key that fits and is unknown is still the
+ * the number of keys there are: any more has a repeat in it. A repeat within that is taken and
+ * resolved once (`P-365`, at `KIND_FILTER`). A key that fits and is unknown is still the
  * handler's refusal, which lists the known ones.
  */
 const EFFECTIVE_FILTER = {
@@ -226,6 +261,45 @@ const EFFECTIVE_FILTER = {
   maxLength: MAX_SETTING_KEY,
   maxItems: settingRegistry.keys.length,
 } as const;
+
+/**
+ * The ids `?invalidParams=true` narrows to, or the 503 that says they are not known yet (`P-375`).
+ *
+ * **Not the part read so far.** Before the start-up pass has gone over every sensor the set is a
+ * lower bound, and a listing of it would read as the answer — "these are the sensors to mend" —
+ * to a client that had no reason to look for a flag beside it, as an empty list with a flag would
+ * read as "none". Core Health's channel gaps for the same reason, and the two agree: the count is
+ * a number exactly when this is a list. Waiting is short (the pass reads 20,000 sensors in a third
+ * of a second), so it says when to ask again; after a pass that stopped short, it says the next
+ * start checks again, and has no `Retry-After`, since asking again will not change it.
+ */
+function failingSensors(source: { failing(): FailingSensors } | undefined): readonly number[] {
+  const answer: FailingSensors = source?.failing() ?? { kind: 'stopped' };
+  switch (answer.kind) {
+    case 'known':
+      return answer.ids;
+    case 'checking':
+      throw new ObjectError(
+        'OBJECT_PARAMS_NOT_CHECKED',
+        'the start-up check of stored sensor parameters has not read every sensor yet; ask again ' +
+          'in a few seconds',
+        {
+          context: { phase: 'stored-params-check' },
+          details: { pass: 'checking' },
+          retryAfterSeconds: PARAMS_CHECK_RETRY_SECONDS,
+        },
+      );
+    case 'stopped':
+      throw new ObjectError(
+        'OBJECT_PARAMS_NOT_CHECKED',
+        source === undefined
+          ? 'this core does not check stored sensor parameters'
+          : 'the start-up check of stored sensor parameters stopped before it had read every ' +
+              'sensor (the core log says why); the next start checks again',
+        { context: { phase: 'stored-params-check' }, details: { pass: 'stopped' } },
+      );
+  }
+}
 
 function assertKnownSettingKeys(keys: readonly string[]): void {
   for (const key of keys) {
@@ -316,6 +390,18 @@ const listQuery = {
     priorityMin: { type: 'integer', minimum: 1, maximum: 5 },
     sort: { enum: ['name', 'id', 'manual'], default: 'name' },
     effective: EFFECTIVE_FILTER,
+    invalidParams: {
+      type: 'string',
+      enum: ['true'],
+      description:
+        'Only the sensors whose stored parameters their type now refuses — what Core Health ' +
+        'counts as `sensorsWithInvalidParams` — among what the caller can see, beside any other ' +
+        'filter. Each is a sensor still running as stored; an edit sending its parameters is ' +
+        'refused until they are mended, and the 400 names the paths. 503 ' +
+        '`OBJECT_PARAMS_NOT_CHECKED` until the start-up check has read every sensor, with ' +
+        '`Retry-After` while it is reading, and without when it stopped short: the next start ' +
+        'checks again.',
+    },
     include: {
       type: 'string',
       maxLength: 200,
@@ -585,22 +671,26 @@ export async function objectRoutes(
         );
       }
       const limit = query.limit ?? 100;
-      const effective = asArray(query.effective);
+      const effective = distinct(query.effective);
       assertKnownSettingKeys(effective);
       const include = parseTokens(query.include, LIST_INCLUDE_TOKENS);
+      const kinds = distinct(query.kind) as ObjectKind[];
+      const failing =
+        query.invalidParams === 'true' ? failingSensors(options.invalidParams) : undefined;
 
       const page = await service.list(
         {
           ...(query.parentId === undefined ? {} : { parentId: query.parentId }),
-          ...(asArray(query.kind).length === 0
-            ? {}
-            : { kinds: asArray(query.kind) as ObjectKind[] }),
+          ...(kinds.length === 0 ? {} : { kinds }),
           ...(asArray(query.tag).length === 0 ? {} : { tags: asArray(query.tag) }),
           ...(query.q === undefined ? {} : { q: query.q }),
           ...(query.host === undefined ? {} : { host: query.host }),
           ...(query.priorityMin === undefined
             ? {}
             : { priorityMin: query.priorityMin as 1 | 2 | 3 | 4 | 5 }),
+          // The ids, as a filter inside the listing's own query: the caller's visibility, the
+          // limit and the cursor apply to them as to any other (`P-375`).
+          ...(failing === undefined ? {} : { ids: failing }),
         },
         {
           limit,
@@ -1243,16 +1333,15 @@ export async function objectRoutes(
       },
     },
     async (request, reply) => {
-      const effective = asArray(request.query.effective);
+      const effective = distinct(request.query.effective);
       assertKnownSettingKeys(effective);
+      const kinds = distinct(request.query.kind) as ObjectKind[];
       const result = await service.subtree(
         request.params.id,
         {
           maxDepth: request.query.maxDepth ?? 3,
           limit: request.query.limit ?? 1000,
-          ...(asArray(request.query.kind).length === 0
-            ? {}
-            : { kinds: asArray(request.query.kind) as ObjectKind[] }),
+          ...(kinds.length === 0 ? {} : { kinds }),
         },
         await visibilityOf(request),
         effective,

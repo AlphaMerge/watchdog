@@ -134,8 +134,10 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
       {
         ...error.details,
       },
-      // Another change has held the tree for as long as this one waited (`P-229`).
-      error.code === 'OBJECT_TREE_BUSY' ? RETRY_AFTER_SECONDS.tree : undefined,
+      // Another change has held the tree for as long as this one waited (`P-229`); or the error
+      // says itself when to ask again (`P-375`).
+      error.retryAfterSeconds ??
+        (error.code === 'OBJECT_TREE_BUSY' ? RETRY_AFTER_SECONDS.tree : undefined),
     );
   }
 

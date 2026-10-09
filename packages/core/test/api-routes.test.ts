@@ -8,6 +8,7 @@ import { Visibility } from '../src/auth/access.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { SHARED_SCHEMAS } from '../src/api/schemas/objects.js';
 import { settingRegistry } from '../src/settings/registry.js';
+import { OBJECT_KINDS } from '../src/objects/types.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -1048,6 +1049,62 @@ describe(
           );
         }
       });
+    });
+
+    it('takes a repeated kind, tag or effective key, and answers as it does to one (P-365)', async () => {
+      // Repeats are taken on purpose, not refused: each filter is a set, so a repeat cannot
+      // change the answer, and the web client forwards its page's own parameters, which a person
+      // can edit or bookmark with a repeat in them.
+      const g = await createGroup(probeId, 'Repeats');
+      const tagged = await post('/api/v1/objects', {
+        kind: 'group',
+        parentId: g,
+        name: 'Tagged once',
+        tags: ['alpha'],
+      });
+      assert.equal(tagged.statusCode, 201, tagged.body);
+      await createDevice(g, 'repeat-device');
+      const key = settingRegistry.keys[0] ?? '';
+
+      /** The body, with the status asserted; compared whole, so a repeat changes nothing in it. */
+      const answer = async (url: string): Promise<unknown> => {
+        const res = await get(url);
+        assert.equal(res.statusCode, 200, `${url}: ${res.body.slice(0, 300)}`);
+        return res.json();
+      };
+      const tree = `/api/v1/objects/${String(g)}/tree`;
+      for (const [once, repeated] of [
+        ['/api/v1/objects?kind=device', '/api/v1/objects?kind=device&kind=device'],
+        [
+          '/api/v1/objects?kind=device&kind=group',
+          '/api/v1/objects?kind=group&kind=device&kind=group',
+        ],
+        ['/api/v1/objects?tag=alpha', '/api/v1/objects?tag=alpha&tag=alpha'],
+        // Matched case-folded, so a different spelling is the same tag again.
+        ['/api/v1/objects?tag=alpha', '/api/v1/objects?tag=alpha&tag=ALPHA'],
+        [
+          `/api/v1/objects?parentId=${String(g)}&effective=${key}`,
+          `/api/v1/objects?parentId=${String(g)}&effective=${key}&effective=${key}`,
+        ],
+        [`${tree}?kind=device`, `${tree}?kind=device&kind=device`],
+        [`${tree}?effective=${key}`, `${tree}?effective=${key}&effective=${key}`],
+      ] as const) {
+        assert.deepEqual(await answer(repeated), await answer(once), repeated);
+      }
+      // And it found something, so equal is not two empty pages.
+      const found = (await answer('/api/v1/objects?tag=alpha&tag=alpha')) as {
+        items: { name: string }[];
+      };
+      assert.deepEqual(
+        found.items.map((item) => item.name),
+        ['Tagged once'],
+      );
+
+      // The count still bounds the list, and a repeat counts toward it.
+      const tooMany = await get(
+        `/api/v1/objects?${[...OBJECT_KINDS, 'device'].map((kind) => `kind=${kind}`).join('&')}`,
+      );
+      assert.equal(tooMany.statusCode, 400, tooMany.body);
     });
 
     it('finds a device by a fragment of its host through ?q=, as the tree search asks', async () => {

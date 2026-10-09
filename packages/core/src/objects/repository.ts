@@ -453,10 +453,14 @@ export class ObjectRepository {
       // carries it, so "carries all of them" is the intersection of those subtrees. That keeps
       // the cheap shape — each walk still starts from the few rows the GIN index finds — rather
       // than accumulating tags down a walk of the whole tree on every filtered list.
-      for (const tag of filter.tags) {
+      //
+      // **A repeat is one walk** (`P-365`). `?tag=berlin&tag=Berlin` asks for the same thing as
+      // `?tag=berlin`, matched case-folded, so the folded tags are taken once each: a repeat
+      // answers what one does and costs nothing more.
+      for (const tag of new Set(filter.tags.map((one) => one.toLowerCase()))) {
         where.push(`o.id IN (
         WITH RECURSIVE tagged AS (
-          SELECT id, 0 AS depth FROM object WHERE tags_folded(tags) @> ${add([tag.toLowerCase()])}::text[]
+          SELECT id, 0 AS depth FROM object WHERE tags_folded(tags) @> ${add([tag])}::text[]
           UNION ALL
           SELECT c.id, tagged.depth + 1
           FROM object c JOIN tagged ON c.parent_id = tagged.id
@@ -483,6 +487,9 @@ export class ObjectRepository {
       where.push(`lower(dc.host) = ${add(filter.host.toLowerCase())}`);
     }
     if (filter.priorityMin !== undefined) where.push(`o.priority >= ${add(filter.priorityMin)}`);
+    // A set held in memory (`P-375`), so a condition here like the others: the visibility above,
+    // the limit and the cursor all count over it, and an empty set is an empty page.
+    if (filter.ids !== undefined) where.push(`o.id = ANY(${add(filter.ids)}::bigint[])`);
 
     const cursor = page.cursor;
     if (cursor !== null) {

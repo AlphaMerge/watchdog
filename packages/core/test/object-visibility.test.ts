@@ -136,6 +136,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
 
   const cookies = new Map<string, string>();
 
+  /** Two visible, four hidden: what `?invalidParams=true` narrows to (`P-375`). */
+  const failingParams = (): number[] =>
+    [pingId, regrantedId, carvedSensorId, underCarveId, lonelySensorId, otherSensorId].sort(
+      (a, b) => a - b,
+    );
+
   before(async () => {
     scratch = await createScratchDatabase('visibility');
     db = scratch.db;
@@ -298,6 +304,11 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       coreHealth: () => coreHealth,
       probeHealth: () => probeHealth,
       metrics: () => metrics,
+      // Sensors whose stored parameters fail, on both sides of the branch (`P-375`): the filter
+      // selects by something a hidden sensor has, so it is swept like `q` and `tag`.
+      invalidParams: {
+        failing: () => ({ kind: 'known', ids: failingParams() }),
+      },
       auth: {
         accounts,
         sessions: new SessionService({ db, logger: silent }),
@@ -776,6 +787,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           return [`${MARK}-tag`];
         case 'host':
           return ['10.0.0.2', '10.9.0.1'];
+        // The sensors whose stored parameters fail, four of them hidden (`P-375`).
+        case 'invalidParams':
+          return ['true'];
         default:
           return [];
       }
@@ -1500,6 +1514,25 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         seen.sort((a, b) => a - b),
         [branchId, deviceId, pingId, heldId, regrantedId, lonelyDeviceId].sort((a, b) => a - b),
       );
+    });
+
+    it('lists only the sensors it can see among those whose parameters fail (P-375)', async () => {
+      const listed = async (login: string): Promise<number[]> => {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/v1/objects?invalidParams=true&sort=id',
+          headers: as(login),
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.body.includes(MARK), login === 'overseer');
+        return response.json<{ items: { id: number }[] }>().items.map((item) => item.id);
+      };
+      assert.deepEqual(
+        await listed('watcher'),
+        [pingId, regrantedId].sort((a, b) => a - b),
+        'the carved, the hidden and the other branch’s are not the branch account’s',
+      );
+      assert.deepEqual(await listed('overseer'), failingParams(), 'an administrator sees all six');
     });
 
     it('counts a subtree without its holes', async () => {

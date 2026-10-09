@@ -19,6 +19,8 @@ const alarmQuery = {
   additionalProperties: false,
   properties: {
     objectId: { type: 'integer', minimum: 1 },
+    // One kind or several; a repeat is taken, being `= ANY(…)` (`P-365`, `KIND_FILTER` in
+    // `objects.ts`).
     state: {
       oneOf: [
         { enum: [...ALARM_KINDS] },
