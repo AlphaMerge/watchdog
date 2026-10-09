@@ -12933,6 +12933,76 @@ because each is a decision rather than a defect:
       open by design with a description), and the `status` type derived from
       `NOTIFICATION_STATUSES`.
 
+- [ ] **P-353 — an empty `tag` or `effective` filter is not refused** · XS · P-347 · Found
+      2026-10-09 in `P-347`. Neither filter has a `minLength`: `?tag=` matches nothing and
+      `?effective=` reaches the handler as an unknown setting key. `objectFields` in
+      `schemas/objects.ts` still writes the literals 100 and 50 where `MAX_TAG` and `MAX_TAGS`
+      exist. **Done when** an empty value is refused at `validate-request` in both forms (a
+      validation change, said in the outcome) and `objectFields` reads the constants, with route
+      tests.
+
+- [ ] **P-354 — the simulators package keeps its own `within`** · XS · P-346 · Found 2026-10-09
+      in `P-346`. `simulators/test/ssh-server.test.ts` has a local `within(promise, ms, what)`,
+      the shape `P-346` removed from `ssh-session`, and the package has no
+      `test/support/within.ts`. **Done when** the package has the shared helper and the file uses
+      it, with rule 22 naming it.
+
+- [ ] **P-355 — the testing rule names one package's helper** · XS · P-346 · Found 2026-10-09 in
+      `P-346`. CLAUDE.md's testing rule points at core's `test/support/within.ts` and says a poll
+      goes through `pollWithin`; the sensors package calls its poller `until`. **Done when** one
+      name is used in every package (renaming sensors' `until` to `pollWithin`, or the rule naming
+      both), and CLAUDE.md and rule 22 agree.
+
+- [ ] **P-356 — three waits cannot say what they saw** · XS · P-346 · Found 2026-10-09 in `P-346`.
+      `count` in `state-stream.test.ts` (it reports how many frames came) and `waitFor` in
+      `object-visibility.test.ts` still hand-roll a deadline, and `migrator.test.ts`'s failure lost
+      "got N" when it moved to `pollWithin`. **Done when** `pollWithin` takes an optional message
+      callback evaluated at the bound, and the three use it.
+
+- [ ] **P-357 — prettier gives two verdicts on `docs/TASKS.md`** · XS · U-50 · Found 2026-10-09
+      in `U-50`. Run from the repo root it passes the file; run from `packages/web` it flags it,
+      and `--write` from the root changes nothing. **Done when** the config that applies to `docs/`
+      is the same from either directory, or the web package's scripts never reach `docs/`, with
+      the cause said in the outcome.
+
+- [ ] **P-358 — a stored sensor whose parameters no longer validate is not named** · S · P-348 ·
+      Found 2026-10-09 in `P-348`. Tightening a type's `paramsSchema` (`P-348`, `P-349`) leaves
+      existing sensors running with parameters their type would now refuse; nothing re-validates
+      on read, clone or start, and the operator finds out only when an edit is refused.
+      **Done when** a core start-up pass checks each stored sensor against its type's current
+      schema, logs those that fail with the sensor id and the failing path (never the value), and
+      counts them on Core Health, with a database test.
+
+- [ ] **P-359 — `exe.script.advanced` drops a script's own `runtime` reading silently** · XS ·
+      P-349 · Found 2026-10-09 in `P-349`. A script that prints a non-primary `runtime` channel
+      loses that reading to the type's own `runtime`, and nothing says so. **Done when** the
+      result message (or a counted warning) names the dropped key, with a test.
+
+- [ ] **P-360 — a per-sensor declaration with two primaries is refused only at registration** ·
+      XS · P-348 · Found 2026-10-09 in `P-348`'s review. `SensorCatalogue.channelsFor` now refuses
+      a key named twice for given parameters, but two channels marked primary are checked only on
+      `channels({})` at registration. **Done when** `channelsFor` refuses that too, with the
+      catalogue and gate tests `P-348` added extended to it.
+
+- [ ] **P-361 — the closed sets `P-351` left as strings** · XS · P-351 · Found 2026-10-09 in
+      `P-351`. `source` on history and the reports' `resolved` is a `SeriesSource`; `runAs.role`
+      on `GET /reports/{id}/subjects` is an `AccountRole`; `skew.missing[]` lists capability names;
+      lookups' and device templates' `source` and maps' `mediaType` were not checked. **Done
+      when** each is an enum of one constant or described as open on purpose, with
+      `fixed-value-fields.test.ts` covering the enums.
+
+- [ ] **P-362 — the audit `actorKind` filter takes any string** · XS · P-351 · Found 2026-10-09
+      in `P-351`. `GET /audit?actorKind=` accepts up to 40 characters of anything, where
+      `ACTOR_KINDS` is now one constant. **Done when** the filter is that enum (a validation
+      change, said in the outcome), with a route test.
+
+- [ ] **P-363 — building the object routes prints Ajv strict-mode warnings** · XS · P-347 · Found
+      2026-10-09 in `P-351`. The `tag` and `effective` querystrings (`type: ['string', 'array']`)
+      make Fastify's validator print "use allowUnionTypes" whenever the routes are built, in
+      tests and at start-up; `P-337` set the option on the route Ajv only. **Done when** the
+      querystring compiler has the same option and a test asserts no strict-mode warning is
+      printed when the object routes are built.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -24451,6 +24521,19 @@ because each is a decision rather than a defect:
         puts the message alone, with no span. Mutation: the span removed fails 1.
       - **Not done.** `AddSensor`'s refusal line shows the id but is not `role="alert"` and is
         rendered only on failure.
+
+- [ ] **U-52 — AddSensor's refusal line is not announced** · XS · U-51 · Found 2026-10-09 in
+      `U-50`. The line around `routes/AddSensor.tsx:293` shows the message and correlation id but
+      is not `role="alert"` and is only rendered after a failure, which `U-48` fixed for
+      SettingsPanel. **Done when** it is always in the tree, empty until a refusal, with
+      `role="alert"` and a test that the refusal is announced.
+
+- [ ] **U-53 — a pattern refusal shows the regex** · S · P-348 · Found 2026-10-09 in `P-348`. The
+      form's message for a failed `pattern` is the expression itself ("does not match
+      ^(?!…"), which `P-348` and `P-349` worked around by naming the reserved keys in the
+      description. **Done when** a schema annotation (an `x-patternMessage`) gives a sentence the
+      form and the API both show, the patterns in shipped types carry one, and the registration
+      check refuses a pattern without one.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
