@@ -27417,6 +27417,16 @@ because each is a decision rather than a defect:
       first** on the stale cue's wording and whether it is announced; then do all three, with
       tests.
 
+- [ ] **U-81 — the template-delete focus tests fail about one run in eight** · S · U-64, U-68 ·
+      Found 2026-10-09 in round 21's suite. In `templates-refused.test.tsx`, "puts it on Keep
+      it when the question is asked" and "never leaves it on the page while a delete is out"
+      each fail now and then with focus on `<body>`. On a quiet VM, running the file alone, it
+      failed 1 in 8 on `main` at eb66f933 and 1 in 5 with round 21, so it predates round 21.
+      Suspects: `U-68`'s owed focus in `keep-focus.ts` (a microtask that clears it) racing
+      `Delete`'s `focusNext` effect, or a test that reads `document.activeElement` before the
+      effect has run. **Done when** the cause is found and fixed in the code or the test, and the
+      file passes 50 runs in a row.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
