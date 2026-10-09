@@ -457,8 +457,8 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
   renaming itself underneath the state it is reporting.
 - **Try again keeps focus.** A failed read's **Try again** stays where it is while it asks again,
   saying *Trying again…*; a second failure is said again in the same alert, and a read that
-  succeeds puts focus on the page's heading rather than dropping it to the page. Not yet on the
-  object page or the Templates page, which follow in a later change.
+  succeeds puts focus on the page's heading rather than dropping it to the page. A list kept on
+  screen whose re-read failed has its own **Try again** beside it, which keeps the list in place.
 
 ## What is not here
 

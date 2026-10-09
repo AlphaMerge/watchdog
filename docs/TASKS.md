@@ -26802,13 +26802,34 @@ because each is a decision rather than a defect:
         asking again 6; no focus move on removal 7; `PageTitle` not taking owed focus 1;
         `retry` not holding 4; *Sensor types* back on `reload` 1; the tree dropping its failure
         at once 1; `usePaged`'s `retry` being `reload` 1.
-      - **Not done.** `TemplatesView` (2 panels) and `ObjectDetailView` (5, plus the held channel
-        list's own `inRegion` retry) were being changed by another ticket and were left on
-        `reload`, so *Try again* there still drops focus. The object page's first read and the
-        Templates page's are replaced by a loading line with no heading on the page, the owed
-        focus lapses after that commit, and focus stays on the body after the page arrives. They
-        are converted in a follow-up commit on this round's integration branch, once the other
-        ticket's changes to those two files have landed.
+      - **The object page and Templates, converted on the round's integration branch** (a third
+        commit, after `U-61`, `U-67` and `U-69` landed in both files). They had been left on
+        `reload` while another ticket changed them. Their first reads gave way to a loading line
+        with no heading on the page, so the owed focus lapsed and stayed on the body once the
+        page came. `ObjectDetailView`'s five panels (the object, the sensor types, the settings,
+        the channel values, the audit log) and `TemplatesView`'s two (the templates with none
+        held, the notification methods) now take `retry`. The History tab's panel, which `U-61`
+        and `U-67` now show only when no series is held, takes `history.retry` too.
+        - ***Try again* in `HeldListFailure` stays on `reload`.** A held list's failure is not an
+          error panel. That component empties its region as each read starts and is busy while
+          the caller's `error` is null. Both rest on the hook going to `loading`. With `retry` the
+          failure would stay in hand: the button would never be busy and could ask again, and a
+          second failure in the same words would land on unchanged text and not be said. The held
+          list is what keeps the page in place there, and `focusAfter` already moves focus when a
+          good read takes the button away.
+        - **Left as it was.** The channel list's own `inRegion` retry (`U-60`) empties its region
+          as it starts, so the same failure is said again. When the panel goes, focus goes to the
+          page's heading, which is on the page.
+        - **Tests** (`try-again-pages.test.tsx`, 3). The object page's first read, the Templates
+          page's, and the History tab's with no series held each fail, and go through the round
+          the other callers go through (`test/support/try-again.ts`, shared with
+          `try-again-focus.test.tsx`). *Try again* keeps focus on the same button,
+          `aria-disabled`, with no loading line. A second failure is added back to the same alert.
+          A read that succeeds leaves `document.activeElement` on the `h1` (the object's name,
+          *Notification templates*, the object page's heading above the tab). Focus is never on
+          the body after any change from the first press. **Mutations**, each failing, restored
+          byte for byte: the object's panel back on `reload` 1; the templates' 1; the History
+          tab's 1.
 
 - [x] **U-69 — an accepted *Save template* drops focus** · XS · U-64 · Found 2026-10-09 in
       `U-64` review. Saving closes the editor and focus on *Save template* falls to the page with

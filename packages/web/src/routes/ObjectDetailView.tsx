@@ -167,7 +167,7 @@ export function ObjectDetailView(): React.JSX.Element {
   const live = useStateStream(Number.isFinite(numericId) ? numericId : null);
 
   if (object.status === 'loading') return <Loading what="the object" />;
-  if (object.status === 'error') return <ErrorPanel error={object.error} retry={object.reload} />;
+  if (object.status === 'error') return <ErrorPanel error={object.error} retry={object.retry} />;
 
   const detail = object.data;
   // In the URL, as the alarm list's filters are (`U-38` review): the channel table is swapped for
@@ -252,9 +252,7 @@ export function ObjectDetailView(): React.JSX.Element {
             {detail.kind === 'sensor' && (
               <Card title="Parameters">
                 {types.status === 'loading' && <Loading what="the sensor type" />}
-                {types.status === 'error' && (
-                  <ErrorPanel error={types.error} retry={types.reload} />
-                )}
+                {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}
                 {types.status === 'ready' && (
                   <ParamsForm
                     detail={detail}
@@ -295,7 +293,7 @@ export function ObjectDetailView(): React.JSX.Element {
           <Card title="Settings">
             {settings.status === 'loading' && <Loading what="settings" />}
             {settings.status === 'error' && (
-              <ErrorPanel error={settings.error} retry={settings.reload} />
+              <ErrorPanel error={settings.error} retry={settings.retry} />
             )}
             {settings.status === 'ready' && (
               <SettingsPanel
@@ -480,7 +478,7 @@ function LiveChannels({
   /** Reads the list again: not the page's `relist`, whose once-a-minute cap would hold it back. */
   onRetryList: () => void;
   /** The page's poll of the readings. */
-  values: Loadable<SensorValues> & { reload: () => void };
+  values: Loadable<SensorValues> & { retry: () => void };
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
@@ -503,7 +501,7 @@ function LiveChannels({
       </>
     );
   }
-  if (values.status === 'error') return <ErrorPanel error={values.error} retry={values.reload} />;
+  if (values.status === 'error') return <ErrorPanel error={values.error} retry={values.retry} />;
 
   return (
     <ChannelTable
@@ -536,7 +534,7 @@ function AuditPanel({ objectId }: { objectId: number }): React.JSX.Element {
 
   if (audit.status === 'loading') return <Loading what="the audit log" />;
   if (audit.status === 'error' && audit.error !== null) {
-    return <ErrorPanel error={audit.error} retry={audit.reload} />;
+    return <ErrorPanel error={audit.error} retry={audit.retry} />;
   }
   if (audit.items.length === 0) {
     return <Empty>Nothing has changed this object.</Empty>;

@@ -87,10 +87,9 @@ export function TemplatesView(): React.JSX.Element {
     return <Loading what="templates" />;
   }
   if (templates.status === 'error' && items === null) {
-    return <ErrorPanel error={templates.error} retry={templates.reload} />;
+    return <ErrorPanel error={templates.error} retry={templates.retry} />;
   }
-  if (methods.status === 'error')
-    return <ErrorPanel error={methods.error} retry={methods.reload} />;
+  if (methods.status === 'error') return <ErrorPanel error={methods.error} retry={methods.retry} />;
   if (items === null) return <Loading what="templates" />;
 
   const chosen = editing === null ? undefined : items.find((t) => String(t.id) === editing);
