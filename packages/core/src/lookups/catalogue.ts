@@ -1,4 +1,4 @@
-import { Ajv, type ValidateFunction } from 'ajv';
+import { Ajv, type ErrorObject, type ValidateFunction } from 'ajv';
 import {
   AppError,
   patternMessageKeyword,
@@ -98,38 +98,22 @@ export class LookupCatalogue {
     }
 
     const problems: string[] = [];
-    if (!this.#validate(definition)) {
-      problems.push(
-        ...(this.#validate.errors ?? [])
-          // **Each problem once, and only the problem** (`P-384`). An `if` that held and a `then`
-          // that failed are reported as the `then`'s own errors and an `if` error over them,
-          // "must match \"then\" schema", which says nothing the lines it wraps do not.
-          .filter((error) => error.keyword !== 'if')
-          .map(
-            (error) =>
-              // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
-              `${error.instancePath === '' ? 'the definition' : error.instancePath} ${
-                patternMessageOf(error) ?? error.message ?? 'is invalid'
-              }`,
-          ),
-      );
-    }
-    // **Only over entries the schema could read** (`P-384`). `validateLookup`'s type promises an
-    // array of objects, and a file is where that promise is not kept: `"entries": 5` threw out of
-    // here and out of the loader, which is one bad file stopping the core, and a string or an
-    // array of numbers was told "value undefined is listed more than once". The schema has
-    // already said what is wrong with those.
+    const errors = this.#validate(definition) ? [] : (this.#validate.errors ?? []);
+    problems.push(...describeErrors(errors));
+    // **The entry rules only over entries the schema could read** (`P-384`). `validateLookup`'s
+    // type promises entries the schema accepted, and a file is where that promise is not kept:
+    // `"entries": 5` threw out of here and out of the loader, which is one bad file stopping the
+    // core; and a string, an array of numbers or of arrays, or two entries with no `value` were
+    // told "value undefined is listed more than once". The schema has already said what is
+    // wrong with those, and the id is still checked beside it.
     const entries: unknown = definition.entries;
-    if (
+    const entriesRead =
       Array.isArray(entries) &&
-      entries.every((entry: unknown) => typeof entry === 'object' && entry !== null)
-    ) {
-      problems.push(...validateLookup(definition));
-    }
+      !errors.some((error) => error.instancePath.split('/')[1] === 'entries');
+    problems.push(...validateLookup(definition, { entries: entriesRead }));
 
     if (problems.length > 0) {
-      // And a `then` that repeats a type or a requirement `properties` already holds (`P-379`)
-      // fails with the same sentence at the same path, which is one problem said twice.
+      // Once more across the two lists, for a rule both the schema and `validateLookup` state.
       this.#problems.push({ id: definition.id, source, problems: [...new Set(problems)] });
       return false;
     }
@@ -214,4 +198,51 @@ export class LookupCatalogue {
       }))
       .sort((a, b) => a.id.localeCompare(b.id));
   }
+}
+
+/**
+ * Ajv's errors as an operator reads them, each problem once (`P-384`).
+ *
+ * - **No `if` line.** An `if` that held and a `then` that failed are reported as the `then`'s
+ *   own errors and an `if` error over them, "must match \"then\" schema", which says nothing the
+ *   lines it wraps do not.
+ * - **An `anyOf` of requirements is one line.** A range entry with neither bound failed both
+ *   branches, `required` `from` and `required` `to`, under "must match a schema in anyOf": three
+ *   lines that read as though both were needed. Said as the choice it is. An `anyOf` whose
+ *   branches failed for anything else keeps their lines and drops its own.
+ * - **Each line once.** A `then` that repeats a type or a requirement `properties` already
+ *   holds (`P-379`) fails with the same sentence at the same path.
+ */
+function describeErrors(errors: readonly ErrorObject[]): string[] {
+  const where = (error: ErrorObject): string =>
+    error.instancePath === '' ? 'the definition' : error.instancePath;
+  const lines: string[] = [];
+  const merged = new Set<ErrorObject>();
+  for (const error of errors) {
+    if (error.keyword !== 'anyOf') continue;
+    const branches = errors.filter(
+      (each) =>
+        each.instancePath === error.instancePath &&
+        each.schemaPath.startsWith(`${error.schemaPath}/`),
+    );
+    const required = branches.map((each) =>
+      each.keyword === 'required'
+        ? (each.params as { missingProperty?: unknown }).missingProperty
+        : undefined,
+    );
+    if (branches.length > 0 && required.every((name) => typeof name === 'string')) {
+      for (const each of branches) merged.add(each);
+      lines.push(
+        `${where(error)} must have one of the properties ${required
+          .map((name) => `'${name}'`)
+          .join(' or ')}`,
+      );
+    }
+  }
+  for (const error of errors) {
+    if (error.keyword === 'if' || error.keyword === 'anyOf' || merged.has(error)) continue;
+    // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
+    lines.push(`${where(error)} ${patternMessageOf(error) ?? error.message ?? 'is invalid'}`);
+  }
+  return [...new Set(lines)];
 }

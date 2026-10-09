@@ -109,7 +109,16 @@ export function applyLookup(definition: LookupDefinition, value: number): Lookup
  * before anything is registered, because a lookup that is wrong is worse than one that is
  * missing: a missing lookup is reported, and a wrong one quietly gives a device the wrong state.
  */
-export function validateLookup(definition: LookupDefinition): string[] {
+export function validateLookup(
+  definition: LookupDefinition,
+  options: {
+    /**
+     * False when the schema refused the entries (`P-384`): they are not the shape this
+     * function's type promises, and the schema has said why. The id is still checked.
+     */
+    entries?: boolean;
+  } = {},
+): string[] {
   const problems: string[] = [];
 
   if (!LOOKUP_ID.test(definition.id)) {
@@ -117,6 +126,7 @@ export function validateLookup(definition: LookupDefinition): string[] {
       `"${definition.id}" is not a usable lookup id; expected something like "ms.snmp.if-oper-status"`,
     );
   }
+  if (options.entries === false) return problems;
   if (definition.entries.length === 0) {
     problems.push('a lookup with no entries maps everything to its undefined state');
   }

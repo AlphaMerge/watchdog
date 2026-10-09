@@ -260,8 +260,10 @@ async function moveLocked(
 ): Promise<{ moved: number; skipped: number }> {
   // Object, then `sensor_config`, then `channel`: an edit's order, and ingestion's (`P-314`).
   const held = await q.query<{ id: string }>(
+    // Locked in id order, the number's and not this SELECT's text column (P-385 review).
+    // Harmless either way under SKIP LOCKED, which never waits, but an order is what it says.
     `SELECT id::text AS id FROM object WHERE id = ANY($1::bigint[])
-     ORDER BY id FOR NO KEY UPDATE SKIP LOCKED`,
+     ORDER BY object.id FOR NO KEY UPDATE SKIP LOCKED`,
     [ids],
   );
   const skipped = ids.length - held.length;

@@ -1842,7 +1842,8 @@ describe(
         const local = async (): Promise<string[]> =>
           (
             await q.query<{ object_id: string }>(
-              'SELECT object_id::text AS object_id FROM probe_config WHERE is_local ORDER BY 1',
+              `SELECT object_id::text AS object_id FROM probe_config
+               WHERE is_local ORDER BY probe_config.object_id`,
             )
           ).map((row) => probes.get(row.object_id) ?? row.object_id);
 

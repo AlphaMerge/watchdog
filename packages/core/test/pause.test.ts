@@ -23,6 +23,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { straddleAPowerOfTen } from './support/ids.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { Visibility } from '../src/auth/access.js';
 
@@ -920,6 +921,71 @@ describe(
           await h.service.resume(testActor, deviceId, Visibility.EVERYTHING);
         }
       });
+
+      /**
+       * **Every window of a bulk pause across a power of ten** (`P-385` review). `startedIn`
+       * ordered by its own `object_id::text` output column while its keyset compared the bigint,
+       * so a page over 995..1004 ended at `'1002'`, the next resumed past 1002, and 995..999
+       * were never reconciled: those sensors kept scanning through the window and alarmed. Each
+       * row: how many windows share one `starts_at`, and the batch size, smaller than that.
+       */
+      const BULK: { count: number; batchSize: number }[] = [
+        { count: 10, batchSize: 3 },
+        { count: 7, batchSize: 2 },
+        { count: 12, batchSize: 5 },
+      ];
+      for (const row of BULK) {
+        it(`reconciles all ${String(row.count)} windows of a bulk pause across a power of ten, ${String(row.batchSize)} a page`, async () => {
+          const expected = await straddleAPowerOfTen(db, 'object', row.count);
+          const ids: number[] = [];
+          for (let index = 0; index < row.count; index += 1) {
+            const created = await h.service.create(testActor, {
+              kind: 'sensor',
+              parentId: deviceId,
+              name: `bulk-${String(index)}`,
+              sensorType: 'icmp.ping',
+            });
+            ids.push(created.id);
+          }
+          assert.deepEqual(ids, expected);
+          const { from, until } = nextWeek();
+          for (const id of ids) {
+            await makeUp(id);
+            await h.service.pause(
+              testActor,
+              id,
+              { kind: 'window', from: new Date(from), until: new Date(until) },
+              'bulk patching',
+            );
+          }
+          // One instant for all of them, as one bulk request writes, and already past: the
+          // windows opened while the core was down.
+          await db.query(
+            `UPDATE object_pause SET starts_at = date_trunc('second', now()) - interval '1 minute',
+                                     paused_until = now() + interval '1 hour'
+             WHERE object_id = ANY($1::bigint[])`,
+            [ids],
+          );
+
+          try {
+            const restarted = new PauseSweep({
+              service: h.service,
+              logger: silent,
+              batchSize: row.batchSize,
+            });
+            // Enough passes to walk every pause in force, however many this file has left.
+            for (let pass = 0; pass < 60; pass += 1) await restarted.sweep();
+            const states = await Promise.all(ids.map(async (id) => (await runtimeOf(id)).state));
+            assert.deepEqual(
+              ids.filter((_, index) => states[index] !== 'paused'),
+              [],
+              'every sensor under the window is paused',
+            );
+          } finally {
+            for (const id of ids) await h.service.resume(testActor, id, Visibility.EVERYTHING);
+          }
+        });
+      }
 
       it('is cancelled by resuming it, before it has started', async () => {
         const { from, until } = nextWeek();

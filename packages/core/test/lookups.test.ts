@@ -358,7 +358,7 @@ describe('the lookup catalogue', () => {
     const refused: [LookupDefinition, string][] = [
       [
         range('test.range.open', [{ state: 'up', text: 'any' }]),
-        "must have required property 'from'",
+        "must have one of the properties 'from' or 'to'",
       ],
       [
         single('test.single.none', [{ state: 'up', text: 'none' }]),
@@ -386,7 +386,13 @@ describe('what a refused lookup is told (P-384)', () => {
    * repeats what `properties` holds fails with the same sentence at the same path, so these were
    * each said twice and wrapped once besides.
    */
-  const ROWS: { name: string; type: 'singleInt' | 'range'; entries: unknown; said: string[] }[] = [
+  const ROWS: {
+    name: string;
+    type: 'singleInt' | 'range';
+    id?: string;
+    entries: unknown;
+    said: string[];
+  }[] = [
     {
       name: 'an entry with no state',
       type: 'singleInt',
@@ -429,18 +435,74 @@ describe('what a refused lookup is told (P-384)', () => {
       entries: [null],
       said: ['/entries/0 must be object'],
     },
+    {
+      // Arrays are not objects to the schema, and were to the guard before it (`P-384` review).
+      name: 'entries that are arrays',
+      type: 'singleInt',
+      entries: [
+        [1, 'up', 'one'],
+        [2, 'down', 'two'],
+      ],
+      said: ['/entries/0 must be object', '/entries/1 must be object'],
+    },
+    {
+      // Not "value undefined is listed more than once" besides.
+      name: 'two entries with no value',
+      type: 'singleInt',
+      entries: [
+        { state: 'up', text: 'one' },
+        { state: 'down', text: 'two' },
+      ],
+      said: [
+        "/entries/0 must have required property 'value'",
+        "/entries/1 must have required property 'value'",
+      ],
+    },
+    {
+      // One line for the choice, not two requirements and an `anyOf` over them.
+      name: 'a range entry with neither bound',
+      type: 'range',
+      entries: [{ state: 'down', text: 'anything' }],
+      said: ["/entries/0 must have one of the properties 'from' or 'to'"],
+    },
+    {
+      // The schema's sentence, not the schema's and `validateLookup`'s for one problem.
+      name: 'no entries at all',
+      type: 'singleInt',
+      entries: [],
+      said: ['/entries must NOT have fewer than 1 items'],
+    },
+    {
+      // A bound that is there satisfies the `anyOf`; its type is the one problem.
+      name: 'a range entry whose bound is not a number',
+      type: 'range',
+      entries: [{ from: 'ten', state: 'down', text: 'hot' }],
+      said: ['/entries/0/from must be number'],
+    },
+    {
+      // And the id is still read when the entries are not.
+      name: 'an unusable id beside unreadable entries',
+      type: 'singleInt',
+      id: 'Not An Id',
+      entries: 5,
+      said: [
+        '/entries must be array',
+        '"Not An Id" is not a usable lookup id; expected something like "ms.snmp.if-oper-status"',
+      ],
+    },
   ];
   for (const row of ROWS) {
     it(`says ${row.name} once`, () => {
       const catalogue = new LookupCatalogue();
       const definition = {
         ...status,
+        ...(row.id === undefined ? {} : { id: row.id }),
         type: row.type,
         entries: row.entries,
       } as unknown as LookupDefinition;
       assert.equal(catalogue.register(definition, 'refused.json'), false);
       assert.deepEqual(catalogue.problems(), [
-        { id: 'test.status', source: 'refused.json', problems: row.said },
+        { id: row.id ?? 'test.status', source: 'refused.json', problems: row.said },
       ]);
     });
   }

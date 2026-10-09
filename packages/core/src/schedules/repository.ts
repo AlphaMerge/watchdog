@@ -265,8 +265,9 @@ export class ScheduleRepository {
     const values: unknown[] = [id, limit];
     const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ id: string; name: string }>(
+      // The table's id, not this SELECT's text one, which sorts 1000 before 999 (P-385 review).
       `SELECT id::text AS id, name FROM discovery_schedule
-       WHERE schedule_id = $1 AND ${visible} ORDER BY name, id LIMIT $2`,
+       WHERE schedule_id = $1 AND ${visible} ORDER BY name, discovery_schedule.id LIMIT $2`,
       values,
     );
     return rows.map((row) => ({ ruleId: Number(row.id), name: row.name }));

@@ -692,7 +692,8 @@ export class ProbeRegistry {
       throw new ProbeRegistryError(
         'PROBE_CONFLICT',
         `probe object ${holder.object_id} is already this installation's local probe, held by ` +
-          `${holder.gid}; revoke that probe first, or approve this one onto that object`,
+          `${holder.gid}; revoke that probe first, then approve this one onto that object or ` +
+          'any other',
       );
     }
     await q.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [

@@ -36,6 +36,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { straddleAPowerOfTen } from './support/ids.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { Visibility } from '../src/auth/access.js';
 
@@ -1216,6 +1217,36 @@ describe(
           assert.equal(err.details?.usedByRediscovery?.[0]?.name, 'nightly');
           return true;
         },
+      );
+    });
+
+    it('names rules that share a name in id order, across a power of ten (P-385 review)', async () => {
+      // `rediscoveryUsing` ordered by `name, id` with `id` the query's own `id::text` column, so
+      // two rules called "nightly" listed 1000 before 999, and the page of fifty kept whichever
+      // fifty sorted first as text.
+      const id = (
+        await schedules.create(testActor, {
+          name: 'Shared window',
+          periods: 'mo:09:00-mo:17:00',
+        })
+      ).id;
+      const expected = await straddleAPowerOfTen(db, 'discovery_schedule', 4);
+      for (let index = 0; index < expected.length; index += 1) {
+        await db.query(
+          `INSERT INTO discovery_schedule
+             (name, group_id, probe_id, range_text, cadence, schedule_id)
+           VALUES ('nightly', $1, $2, '192.0.2.0/24', 'daily', $3)`,
+          [groupId, probeId, id],
+        );
+      }
+      assert.deepEqual(
+        (await repo.rediscoveryUsing(db, id, Visibility.EVERYTHING)).map((rule) => rule.ruleId),
+        expected,
+      );
+      assert.deepEqual(
+        (await repo.rediscoveryUsing(db, id, Visibility.EVERYTHING, 2)).map((rule) => rule.ruleId),
+        expected.slice(0, 2),
+        'and a page keeps the lowest ids',
       );
     });
 

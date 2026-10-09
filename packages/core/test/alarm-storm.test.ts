@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { Database } from '../src/db/pool.js';
+import { PauseSweep } from '../src/objects/pause-sweep.js';
 import { ProbeConfigService } from '../src/probes/config.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
@@ -10,7 +11,8 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, testActor, type Harness } from './support/tree.js';
+import { straddleAPowerOfTen } from './support/ids.js';
+import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
 const available = await databaseAvailable();
 const T0 = new Date('2026-08-25T12:00:00.000Z');
@@ -120,10 +122,14 @@ describe(
      * The order matters and is production's: decide the batch, write the history and the
      * runtimes, then react to the state changes — all inside one transaction (`M-11`).
      */
-    async function scan(minute: number, ok: boolean): Promise<void> {
+    async function scan(
+      minute: number,
+      ok: boolean,
+      ids: readonly number[] = [switchPingId, ...downstreamIds],
+    ): Promise<void> {
       const states = h.states;
       assert.ok(states !== undefined);
-      const results: SensorResult[] = [switchPingId, ...downstreamIds].map((sensorId) => ({
+      const results: SensorResult[] = ids.map((sensorId) => ({
         sensorId,
         at: at(minute),
         outcome: ok ? 'ok' : 'error',
@@ -142,9 +148,9 @@ describe(
       });
     }
 
-    async function statesNow(): Promise<
-      Map<number, { state: SensorState; cause: SensorStateCause }>
-    > {
+    async function statesNow(
+      ids: readonly number[] = [switchPingId, ...downstreamIds],
+    ): Promise<Map<number, { state: SensorState; cause: SensorStateCause }>> {
       const rows = await db.query<{
         object_id: string;
         state: SensorState;
@@ -152,7 +158,7 @@ describe(
       }>(
         `SELECT object_id::text AS object_id, state, cause FROM sensor_runtime
          WHERE object_id = ANY($1::bigint[])`,
-        [[switchPingId, ...downstreamIds]],
+        [ids],
       );
       return new Map(
         rows.map((row) => [Number(row.object_id), { state: row.state, cause: row.cause }]),
@@ -262,6 +268,76 @@ describe(
         downstream.filter((entry) => entry?.state === 'unknown').length,
         DOWNSTREAM,
         '§3: a released sensor awaits its next scan rather than claiming a state nobody checked',
+      );
+    });
+
+    it('raises no alarm from a maintenance window across a power of ten, swept a page at a time', async () => {
+      // **The `P-385` review's case.** A bulk maintenance window writes one `starts_at` for
+      // every object it covers, and the sweep that opens it pages by `(starts_at, object_id)`.
+      // `startedIn` ordered its page by its `object_id::text` output column while the keyset
+      // compared the bigint, so with ids either side of a power of ten the page ended at
+      // `'1002'`, the next started past 1002, and 995..999 were never paused: they went on being
+      // scanned through the window, and each one alarmed. Twelve sensors, five a page.
+      const box = await h.service.create(testActor, {
+        kind: 'device',
+        parentId: probeId,
+        name: 'patched-box',
+        host: '192.0.2.200',
+      });
+      const expected = await straddleAPowerOfTen(db, 'object', 12);
+      const patched: number[] = [];
+      for (const id of expected) {
+        const created = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: box.id,
+          name: `service-${String(id)}`,
+          sensorType: 'icmp.ping',
+        });
+        patched.push(created.id);
+      }
+      assert.deepEqual(patched, expected);
+      await scan(0, true, patched);
+
+      const from = new Date(Date.now() + 24 * 60 * 60_000);
+      for (const id of patched) {
+        await h.service.pause(
+          testActor,
+          id,
+          { kind: 'window', from, until: new Date(from.getTime() + 2 * 60 * 60_000) },
+          'quarterly patching',
+        );
+      }
+      // Opened while the core was down, at one instant, as one bulk request writes it.
+      await db.query(
+        `UPDATE object_pause SET starts_at = date_trunc('second', now()) - interval '1 minute',
+                                 paused_until = now() + interval '1 hour'
+         WHERE object_id = ANY($1::bigint[])`,
+        [patched],
+      );
+      const sweep = new PauseSweep({ service: h.service, logger: silent, batchSize: 5 });
+      for (let pass = 0; pass < 10; pass += 1) await sweep.sweep();
+
+      // The patching: every one of them stops answering. After the sweep, which paused them at
+      // the wall clock, so these results are newer than that.
+      const later = Math.ceil((Date.now() - T0.getTime()) / 60_000) + 1;
+      await scan(later, false, patched);
+      await scan(later + 1, false, patched);
+
+      const current = await statesNow(patched);
+      assert.deepEqual(
+        patched.filter((id) => current.get(id)?.state !== 'paused'),
+        [],
+        'every sensor in the window is paused',
+      );
+      const downs = await db.query<{ sensor_id: string }>(
+        `SELECT DISTINCT sensor_state.sensor_id::text AS sensor_id FROM sensor_state
+         WHERE sensor_state.sensor_id = ANY($1::bigint[]) AND state = 'down'`,
+        [patched],
+      );
+      assert.deepEqual(
+        downs.map((row) => Number(row.sensor_id)),
+        [],
+        'and not one of them alarmed, even for a moment',
       );
     });
 

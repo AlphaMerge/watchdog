@@ -370,7 +370,10 @@ export class PauseRepository {
        WHERE (starts_at, object_id) > ($1::timestamptz, $2::bigint)
          AND starts_at <= $3
          AND (paused_until IS NULL OR paused_until > $3)
-       ORDER BY starts_at, object_id
+       -- Qualified, as the keyset above is (P-385 review): a bare object_id here names the text
+       -- column this SELECT returns, which sorts 1000 before 999. A page over 995..1004 then
+       -- ended at 1002, the next resumed past it, and 995..999 were never paused.
+       ORDER BY object_pause.starts_at, object_pause.object_id
        LIMIT $4`,
       [since.startsAt, since.objectId, now, limit],
     );

@@ -779,8 +779,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
               error.code === 'PROBE_CONFLICT' &&
               error.message ===
                 `probe object ${String(probeId)} is already this installation's local probe, ` +
-                  `held by ${first.gid}; revoke that probe first, or approve this one onto ` +
-                  'that object',
+                  `held by ${first.gid}; revoke that probe first, then approve this one onto ` +
+                  'that object or any other',
           );
           assert.equal((await registry.get(second.gid))?.status, 'pending', 'and decided nothing');
         } else {
@@ -792,7 +792,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
           [secondObject, 'second'],
         ]);
         const local = await db.query<{ object_id: string }>(
-          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local ORDER BY object_id',
+          `SELECT object_id::text AS object_id FROM probe_config
+           WHERE is_local ORDER BY probe_config.object_id`,
         );
         assert.deepEqual(
           local.map((one) => nameOf.get(Number(one.object_id)) ?? one.object_id),

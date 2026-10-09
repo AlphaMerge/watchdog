@@ -14174,8 +14174,10 @@ because each is a decision rather than a defect:
         link would have fixed one reader of four.
       - **The registry (`#takeLocal`).** An approval with `local: true`:
         - is refused `409 PROBE_CONFLICT` when another object holds the flag with a probe still
-          bound to it, naming that object and gid. Moving the flag then would make a live
-          branch deletable;
+          bound to it, naming that object and gid and saying to revoke that probe first, then
+          approve onto that object or any other. Moving the flag then would make a live
+          branch deletable. (It first offered approving onto that object instead, which
+          `approve`'s one-probe-per-branch check always refuses; corrected in review.);
         - moves the flag when the holder's probe was revoked or deleted. The approval's audit
           summary names it as `localTakenFrom`, because that object is deletable from then on.
 
@@ -14293,10 +14295,23 @@ because each is a decision rather than a defect:
         - The `if` filter off: 7 fail.
         - The `Set` off: 7 fail.
         - `validateLookup` unguarded: 6 fail, four of them with the `TypeError`.
-      - **Not done.** A range entry with neither bound still gets an `anyOf` wrapper line beside
-        the two `required` lines. Two singleInt entries with no `value` still get "value
-        undefined is listed more than once" beside the schema's lines. Both are listed as
-        follow-ups.
+      - **Review round, three more.**
+        - **Arrays of arrays.** The first guard asked for objects, and an array is one, so
+          `[[1, "up", "one"]]` was still told "value undefined is listed more than once".
+          `validateLookup` now takes `{ entries: false }` and skips its entry rules whenever
+          the schema reported anything under `/entries`. That also covers two singleInt
+          entries with no `value`, and an empty `entries`, which was said twice in two
+          wordings. The id is still checked beside unreadable entries.
+        - **An `anyOf` of requirements is one line.** A range entry with neither bound was
+          "must have required property 'from'", the same for `'to'`, and "must match a schema
+          in anyOf". It is now "must have one of the properties 'from' or 'to'". An `anyOf`
+          whose branches failed for anything else would keep their lines and drop its own;
+          this schema has none. `P-379`'s test expected the old `from` line and now expects
+          this one.
+        - **Tests.** Six more rows: arrays, two entries with no value, neither bound, no
+          entries, a bound that is not a number, and an unusable id beside unreadable entries.
+        - **Mutations.** The `/entries` check made `||`: 5 fail, one with the `TypeError`. The
+          `anyOf` merge off: 2 fail.
 
 - [x] **P-385 — `AccessService`'s `sourceGroupId` tiebreak has no test** · XS · P-381 · Found
       2026-10-09 in `P-381` review. Two groups granting the same right at the same depth now pick
@@ -14323,6 +14338,54 @@ because each is a decision rather than a defect:
 
         Each asserts the right, `sourceObjectId`, and the lower id as `sourceGroupId`. All five
         failed before the fix (`100 !== 99`), and fail again with the bare `group_id` restored.
+      - **Review round: the same bug in the pause sweep, and a sweep of the source for it.**
+        - **`PauseRepository.startedIn`, which changed alarm volume.** It selected
+          `object_id::text AS object_id` and ordered by `starts_at, object_id`, while its keyset
+          compared the bigint. A bulk maintenance window writes one `starts_at` for every
+          object, so with ids either side of a power of ten and a page smaller than the window,
+          the page over 995..1004 ended at `'1002'` and the next resumed past 1002. 995..999
+          were never paused: they kept scanning through the window and alarmed. Now
+          `ORDER BY object_pause.starts_at, object_pause.object_id`.
+        - **`ScheduleRepository.rediscoveryUsing`** ordered rules of one name by text id, and its
+          page of fifty kept whichever sorted first as text. Now `discovery_schedule.id`.
+        - **`moveLocked` (`state/declared-primary.ts`)** locked `ORDER BY id`, the text column.
+          It was harmless because `SKIP LOCKED` never waits, so lock order cannot deadlock it.
+          It is qualified so it says the order it means; there is no test.
+        - **How the source was swept.** Two scripts over `packages/core/src`. One read every SQL
+          literal for an alias of anything but the bare column, named bare in that literal's
+          `ORDER BY` or `DISTINCT ON`, or an ordinal `ORDER BY`. The other took every
+          `::type AS name`, 243 `::text` among them in 56 files, and any `ORDER BY` or
+          `DISTINCT ON` within forty lines naming it. Window `ORDER BY`s and `GROUP BY` resolve
+          input columns first, so they are not this shape. Keysets compare input columns in
+          `WHERE`.
+        - **What the sweep found besides the three:**
+          - already qualified: `AuditRepository`'s list, `sensorsUnder`
+            (`notifications/repository.ts`), and `resolve` here;
+          - left, order only: the exporter's probe list (`metrics/exporter.ts`) is export
+            order, and the map resolver's `ORDER BY root, rn` only groups rows by root;
+          - left, `DISTINCT ON` with a text key: `stateAtHorizon` (`timeseries/store.ts`) and
+            `orderedAfterLast` (`state/runtime.ts`) name the text column in both
+            `DISTINCT ON` and `ORDER BY`. Text and number are one to one, so each sensor still
+            gets its newest row, and the rows are read into a map;
+          - left, not ids: Delivery Health's `ORDER BY 1` is the method, and discovery's
+            breakdowns order by an `int` count and text;
+          - false positives: CTE columns such as `0 AS depth`.
+
+          Two test queries of `P-382`'s own had the shape and are qualified.
+        - **Tests.**
+          - `pause.test.ts` 3, a table: 10, 7 and 12 windows sharing one `starts_at` across
+            1000, 10000 and 100000, swept 3, 2 and 5 a page. Each asserts every sensor paused.
+          - `alarm-storm.test.ts` 1, the `M-17`-style scenario: twelve sensors across 1000 under
+            a window that opened while the core was down, swept five a page, then two failing
+            scans. Every one is Paused, and none has a Down anywhere in its history.
+          - `schedules.test.ts` 1: four rules named "nightly" across a power of ten list in id
+            order, and a page of two keeps the lowest.
+          - The ids come from `test/support/ids.ts`, which moves a scratch database's sequence
+            up to straddle the next power of ten.
+        - **Mutations.**
+          - The bare `ORDER BY` restored in `startedIn`: all 3 pause rows fail (995..999,
+            9996..9999, 99994.. unpaused) and the scenario fails (994..999).
+          - The bare `id` restored in `rediscoveryUsing`: `[10, 11, 8, 9]`.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
