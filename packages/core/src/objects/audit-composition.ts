@@ -22,7 +22,8 @@ import type { AuditSink } from './audit.js';
  * - The **schedule library** gets no cache invalidator and no trigger sync: a schedule edit moves
  *   pause flags, and neither the result cache nor an alarm chain reads a schedule.
  * - Only the **object service** gets `reachabilitySync` and `clockFreezeSync`, because only
- *   object mutations move sensors between probes.
+ *   object mutations move sensors between probes; and `storedParams`, because only an object
+ *   mutation writes a sensor's parameters.
  */
 export interface AuditSinkSet {
   readonly database: AuditSink;
@@ -34,6 +35,8 @@ export interface AuditSinkSet {
   readonly reachabilitySync: AuditSink;
   readonly clockFreezeSync: AuditSink;
   readonly triggerSync: AuditSink;
+  /** `StoredParamsCheck`: Core Health's count of sensors with invalid parameters (`P-367`). */
+  readonly storedParams: AuditSink;
 }
 
 /** Every mutation of the tree: probes, groups, devices, sensors, settings, pauses. */
@@ -52,6 +55,10 @@ export function objectAuditSinks(all: AuditSinkSet): AuditSink[] {
     // has gone away is never swept by it again (`P-239`).
     all.clockFreezeSync,
     all.triggerSync,
+    // Only here: an edit, a clone, a secret cleared and a delete are what change whether a
+    // sensor's stored parameters pass its type's schema, and the count would otherwise hold until
+    // the next start (`P-367`).
+    all.storedParams,
   ];
 }
 

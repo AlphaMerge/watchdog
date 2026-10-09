@@ -50,12 +50,13 @@ function sinks(): AuditSinkSet & { named: (sink: AuditSink) => string } {
     reachabilitySync: make('reachabilitySync'),
     clockFreezeSync: make('clockFreezeSync'),
     triggerSync: make('triggerSync'),
+    storedParams: make('storedParams'),
     named: (sink) => made.get(sink) ?? 'unknown',
   };
 }
 
 describe('what each audited service tells', () => {
-  it('gives every tree mutation to all nine sinks', () => {
+  it('gives every tree mutation to all ten sinks', () => {
     // A create, a move, a clone or a delete can change what a probe scans, who a sensor depends
     // on, which schedule holds it, which probe carries it and which alarms stand — so this is the
     // one list with nothing left out.
@@ -70,6 +71,7 @@ describe('what each audited service tells', () => {
       'reachabilitySync',
       'clockFreezeSync',
       'triggerSync',
+      'storedParams',
     ]);
   });
 
@@ -79,7 +81,9 @@ describe('what each audited service tells', () => {
     // that needs them — and being the only one is exactly why nothing else would have noticed
     // either's absence.
     const all = sinks();
-    for (const sink of [all.reachabilitySync, all.clockFreezeSync]) {
+    // And the count of sensors with invalid parameters (`P-367`): only an object mutation writes
+    // a sensor's parameters.
+    for (const sink of [all.reachabilitySync, all.clockFreezeSync, all.storedParams]) {
       const name = all.named(sink);
       assert.ok(objectAuditSinks(all).includes(sink), name);
       for (const others of [

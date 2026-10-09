@@ -1,6 +1,14 @@
+import { RESULT_LIMITS } from '@ms/shared';
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
 import { scrubberOf } from '../support/secrets.js';
 import { SCRIPT_SCHEMA, SCRIPT_SECRET_DESTINATIONS, runScript } from './exe-script-shared.js';
+
+/** This type's own channel: how long the program took. */
+const RUNTIME = 'runtime';
+
+/** What `withRuntimeNotKept` appends. The key only, which is ours: never the program's value. */
+export const RUNTIME_NOT_KEPT =
+  ' (the program’s own “runtime” channel was not kept: runtime is how long the program took)';
 
 /**
  * Many numbers from a program this probe was told it may run (`T-19`).
@@ -75,7 +83,7 @@ export const exeScriptAdvanced: SensorType = {
     const unit = typeof params['primaryUnit'] === 'string' ? params['primaryUnit'] : '';
     return [
       { key, name: name === '' ? key : name, unit, isPrimary: true },
-      { key: 'runtime', name: 'Run time', unit: 'ms' },
+      { key: RUNTIME, name: 'Run time', unit: 'ms' },
     ];
   },
 
@@ -87,11 +95,14 @@ export const exeScriptAdvanced: SensorType = {
         : 'value';
 
     const run = await runScript(context);
-    const output = parseAdvanced(run.stdout, primary, scrubberOf(context));
+    const scrub = scrubberOf(context);
+    const output = parseAdvanced(run.stdout, primary, scrub);
 
+    // `runtime` is this sensor's own, so a script cannot overwrite it with something else — and
+    // the message says so when it tried (`P-359`), since the reading is otherwise simply absent.
+    const theirs = output.channels.some((channel) => channel.key === RUNTIME);
     const readings = output.channels
-      // `runtime` is this sensor's own, so a script cannot overwrite it with something else.
-      .filter((channel) => channel.key !== 'runtime')
+      .filter((channel) => channel.key !== RUNTIME)
       .map((channel) => ({
         key: channel.key,
         value: channel.value,
@@ -99,13 +110,35 @@ export const exeScriptAdvanced: SensorType = {
         ...(channel.unit === undefined ? {} : { unit: channel.unit }),
       }));
 
+    const message =
+      output.message === ''
+        ? `${String(readings.length)} channel${readings.length === 1 ? '' : 's'} in ` +
+          `${String(run.durationMs)} ms`
+        : output.message;
     return {
-      channels: [...readings, { key: 'runtime', value: run.durationMs }],
-      message:
-        output.message === ''
-          ? `${String(readings.length)} channel${readings.length === 1 ? '' : 's'} in ` +
-            `${String(run.durationMs)} ms`
-          : output.message,
+      channels: [...readings, { key: RUNTIME, value: run.durationMs }],
+      message: theirs ? withRuntimeNotKept(message, scrub) : message,
     };
   },
 };
+
+/**
+ * The message, saying that the program's own `runtime` reading was not kept (`P-359`).
+ *
+ * **In the message, as `P-292` says a channel the wire could not carry**: the person looking at
+ * the sensor wonders why the program's number is not on it, and the sensor's page is where they
+ * look. **Not the state**: the reading has been dropped since `T-19`, and a Warning for it would
+ * change alarm volume for a script that otherwise works; renaming the channel is the fix, and a
+ * state change does not make it. Named by key, which is this type's constant, never with the
+ * value the program printed.
+ *
+ * **The note survives the wire's clip** (`RESULT_LIMITS.message`), as `withDropped`'s does: the
+ * program's words end in the ellipsis instead. A clip of the program's words is scrubbed first
+ * (`CheckContext.scrub`): a cut can leave half a secret the catalogue's scrub no longer finds.
+ */
+function withRuntimeNotKept(message: string, scrub: (text: string) => string): string {
+  const room = RESULT_LIMITS.message - RUNTIME_NOT_KEPT.length;
+  const said = scrub(message);
+  if (said.length <= room) return said + RUNTIME_NOT_KEPT;
+  return said.slice(0, room - 1) + '…' + RUNTIME_NOT_KEPT;
+}

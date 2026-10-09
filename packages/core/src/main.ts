@@ -573,6 +573,19 @@ async function serve(): Promise<void> {
   // The clock-freeze overlay has the same defect for the same reason (`P-239`).
   const clockFreezeSync = new ClockFreezeSync({ clockFreeze: () => clockFreezeRef });
 
+  // One gate, so the write that records a voucher and the sweep that re-checks it ask each type
+  // the same question about what it reads (`A-29`).
+  const sensorTypeGate = catalogueSensorTypeGate(catalogue, { logger });
+  // **Stored parameters a later build's schema refuses** (`P-358`): counted on Core Health by a
+  // pass every start (run below), and kept current by every object write after it, as one of the
+  // object service's audit sinks (`P-367`). Built here, before the sinks, for that.
+  const storedParams = new StoredParamsCheck({
+    db,
+    logger,
+    sensorTypes: sensorTypeGate,
+    signal: lifecycle.signal,
+  });
+
   const auditSinks: AuditSinkSet = {
     database: new DatabaseAuditSink(),
     logging: new LoggingAuditSink(logger),
@@ -583,6 +596,7 @@ async function serve(): Promise<void> {
     reachabilitySync,
     clockFreezeSync,
     triggerSync,
+    storedParams,
   };
   const ingestionAudit = new CompositeAuditSink(ingestionAuditSinks(auditSinks));
   channelAudit = ingestionAudit;
@@ -596,9 +610,6 @@ async function serve(): Promise<void> {
     audit: new CompositeAuditSink(grantAuditSinks(auditSinks)),
     logger,
   });
-  // One gate, so the write that records a voucher and the sweep that re-checks it ask each type
-  // the same question about what it reads (`A-29`).
-  const sensorTypeGate = catalogueSensorTypeGate(catalogue, { logger });
   const vouching = new SensorVouching({
     db,
     logger,
@@ -729,17 +740,11 @@ async function serve(): Promise<void> {
   });
 
   // **Stored parameters a later build's schema refuses are named at every start** (`P-358`):
-  // one warning per sensor with its paths and keywords, never a value, and the count on Core
-  // Health. The object service's own gate, so "invalid" is what an edit would refuse. Not awaited,
-  // as the repair above: it reads every sensor's parameters in pages, takes no lock and writes
-  // nothing, so nothing waits for it. Shutdown stops it between pages; it never rejects, and the
-  // channel gaps until it has gone over every sensor.
-  const storedParams = new StoredParamsCheck({
-    db,
-    logger,
-    sensorTypes: sensorTypeGate,
-    signal: lifecycle.signal,
-  });
+  // a warning per sensor with its paths and keywords, never a value, up to ten of each type
+  // (`P-368`), and the count on Core Health. The object service's own gate, so "invalid" is what
+  // an edit would refuse. Not awaited, as the repair above: it reads every sensor's parameters in
+  // pages, takes no lock and writes nothing, so nothing waits for it. Shutdown stops it between
+  // pages; it never rejects, and the channel gaps until it has gone over every sensor.
   const storedParamsRun = storedParams.run().then(
     () => undefined,
     (error: unknown) => {

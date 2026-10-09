@@ -16,12 +16,13 @@ import { join } from 'node:path';
 import { SensorCatalogue } from '../src/catalogue.js';
 import { SCRUBBED } from '../src/support/secrets.js';
 import { exeScript } from '../src/types/exe-script.js';
-import { exeScriptAdvanced } from '../src/types/exe-script-advanced.js';
+import { exeScriptAdvanced, RUNTIME_NOT_KEPT } from '../src/types/exe-script-advanced.js';
 import { keyOf, parseAdvanced, parseSimple } from '../src/support/script/parse.js';
 import { resolveProgram, SCRIPT_DIR_ENV } from '../src/support/script/resolve.js';
 import { abortReason, endedHow } from '../src/support/program-ended.js';
 import { SCRIPT_GRACE_MS } from '../src/types/exe-script-shared.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
+import { RESULT_LIMITS } from '@ms/shared';
 import { pollWithin } from './support/within.js';
 
 /**
@@ -84,6 +85,21 @@ before(() => {
   script(
     'prtg-advanced.sh',
     'echo \'{"prtg":{"result":[{"channel":"Free Space","value":"91.5","unit":"%"},{"channel":"Inodes","value":4000}],"text":"looks fine"}}\'',
+  );
+  // `P-359`: a script that prints a `runtime` of its own, in this system's shape and in PRTG's
+  // (whose "Runtime" is keyed `runtime`), and one whose message is past the wire's limit.
+  script(
+    'own-runtime.sh',
+    'echo \'{"channels":[{"key":"value","value":3},{"key":"runtime","value":987654}],"message":"busy"}\'',
+  );
+  script(
+    'own-runtime-prtg.sh',
+    'echo \'{"prtg":{"result":[{"channel":"Free Space","value":"91.5"},{"channel":"Runtime","value":987654}]}}\'',
+  );
+  script(
+    'own-runtime-long.sh',
+    'pad=$(printf "%2100s" "" | tr " " m)\n' +
+      'printf \'{"channels":[{"key":"value","value":3},{"key":"runtime","value":987654}],"message":"%s"}\\n\' "$pad"',
   );
   script('prtg-error.sh', 'echo \'{"prtg":{"error":1,"text":"the API said no"}}\'');
   script('noisy.sh', 'head -c 1000000 /dev/zero | tr "\\0" "x"');
@@ -939,6 +955,38 @@ describe('exe.script.advanced', () => {
       () => run(exeScriptAdvanced, { program: 'advanced.sh', primaryChannel: 'missing' }),
       /no channel called "missing"/,
     );
+  });
+
+  it('says when it drops the program’s own `runtime`, by key and never its value (P-359)', async () => {
+    const own = await run(exeScriptAdvanced, { program: 'own-runtime.sh' });
+    assert.equal(valueOf(own, 'value'), 3);
+    const runtimes = own.channels.filter((channel) => channel.key === 'runtime');
+    assert.equal(runtimes.length, 1, 'one runtime, the type’s');
+    assert.notEqual(runtimes[0]?.value, 987654, 'not the program’s');
+    const ownMessage = own.message ?? '';
+    assert.equal(ownMessage, `busy${RUNTIME_NOT_KEPT}`);
+    assert.equal(ownMessage.includes('987654'), false, 'no value in the message');
+
+    // PRTG's "Runtime" is keyed `runtime`, and the type's own message carries the note too.
+    const prtg = await run(exeScriptAdvanced, {
+      program: 'own-runtime-prtg.sh',
+      primaryChannel: 'free_space',
+    });
+    assert.equal(valueOf(prtg, 'free_space'), 91.5);
+    const prtgMessage = prtg.message ?? '';
+    assert.match(prtgMessage, /^1 channel in \d+ ms \(/);
+    assert.equal(prtgMessage.endsWith(RUNTIME_NOT_KEPT), true, prtgMessage);
+    assert.equal(prtgMessage.includes('987654'), false);
+
+    // A message past the wire's limit keeps the note: the program's words end in the ellipsis.
+    const long = await run(exeScriptAdvanced, { program: 'own-runtime-long.sh' });
+    const longMessage = long.message ?? '';
+    assert.equal(longMessage.length, RESULT_LIMITS.message);
+    assert.equal(longMessage.endsWith(`m…${RUNTIME_NOT_KEPT}`), true);
+
+    // And a program that printed no `runtime` is told nothing.
+    const plain = await run(exeScriptAdvanced, { program: 'advanced.sh' });
+    assert.equal(plain.message, 'two channels');
   });
 
   it('declares the primary the operator named', () => {

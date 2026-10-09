@@ -3,13 +3,20 @@ import { after, before, describe, it } from 'node:test';
 import type { QueryResultRow } from 'pg';
 import { pino, type Logger } from 'pino';
 import { BUILT_IN_SENSOR_TYPES, standardCatalogue, type SensorType } from '@ms/sensors';
+import { Visibility } from '../src/auth/access.js';
 import type { Database, Queryable } from '../src/db/pool.js';
+import type { Actor, Mutation } from '../src/objects/audit.js';
 import {
   catalogueSensorTypeGate,
   type SensorTypeGate,
   type StoredParamProblem,
 } from '../src/objects/sensor-type-gate.js';
-import { StoredParamsCheck, type StoredParamsReport } from '../src/objects/stored-params-check.js';
+import {
+  StoredParamsCheck,
+  WARNINGS_PER_TYPE,
+  type StoredParamsReport,
+} from '../src/objects/stored-params-check.js';
+import type { ObjectKind } from '../src/objects/types.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -63,20 +70,30 @@ describe('the stored-parameters check at start-up (P-358)', () => {
       params: Record<string, unknown>;
     }
 
-    /** The keyset read over an array, recording the `after` each page asked from. */
-    const fakeDb = (rows: readonly Row[], asked: string[], failAfter?: string): Queryable => ({
-      query: <T extends QueryResultRow>(text: string, values?: readonly unknown[]) => {
+    /**
+     * The keyset read over an array, recording the `after` each page asked from. `during` runs
+     * while a page is in flight, before it is answered from `rows` — what the pass's snapshot
+     * holds, whatever a write committed meanwhile.
+     */
+    const fakeDb = (
+      rows: readonly Row[],
+      asked: string[],
+      failAfter?: string,
+      during?: (from: string) => Promise<void>,
+    ): Queryable => ({
+      query: async <T extends QueryResultRow>(text: string, values?: readonly unknown[]) => {
         assert.match(text, /FROM sensor_config/);
         assert.match(text, /ORDER BY object_id LIMIT/);
         const [from, limit] = values as [string, number];
         asked.push(from);
-        if (from === failAfter) return Promise.reject(new Error('connection reset'));
+        await during?.(from);
+        if (from === failAfter) throw new Error('connection reset');
         const page = rows
           .filter((row) => row.id > Number(from))
           .sort((a, b) => a.id - b.id)
           .slice(0, limit)
           .map((row) => ({ id: String(row.id), type: row.type, params: row.params }));
-        return Promise.resolve(page as unknown as T[]);
+        return page as unknown as T[];
       },
     });
 
@@ -86,12 +103,91 @@ describe('the stored-parameters check at start-up (P-358)', () => {
         seen.push(String(params['n']));
         if (type === 'gone') return null;
         if (type === 'boom') throw new TypeError(`cannot read ${String(params['secret'])}`);
-        return type === 'bad' ? [{ path: '/n', keyword: 'maximum', message: 'must be <= 3' }] : [];
+        return type.startsWith('bad')
+          ? [{ path: '/n', keyword: 'maximum', message: 'must be <= 3' }]
+          : [];
       },
     });
 
     const sensors = (types: readonly string[]): Row[] =>
       types.map((type, at) => ({ id: at + 1, type, params: { n: at + 1, secret: 'S3cr3t-x' } }));
+
+    /** One sensor as a write left it. */
+    const written = (id: number, type: string): Row => ({
+      id,
+      type,
+      params: { n: id, secret: 'S3cr3t-x' },
+    });
+
+    /**
+     * One write's transaction, as the sink is handed it: its reads answered from `rows` (by id,
+     * or all of them for a clone's subtree), its `afterCommit` hooks held until `commit`.
+     */
+    const fakeTx = (
+      rows: readonly Row[],
+    ): { q: Queryable; reads: string[]; commit: () => void } => {
+      const hooks: (() => void)[] = [];
+      const reads: string[] = [];
+      return {
+        q: {
+          query: <T extends QueryResultRow>(text: string, values?: readonly unknown[]) => {
+            reads.push(text);
+            const [ids] = values as [readonly number[]];
+            const wanted = new Set(ids.map(Number));
+            const found = text.includes('RECURSIVE')
+              ? rows
+              : rows.filter((one) => wanted.has(one.id));
+            return Promise.resolve(
+              found.map((one) => ({
+                id: String(one.id),
+                type: one.type,
+                params: one.params,
+              })) as unknown as T[],
+            );
+          },
+          afterCommit: (fn: () => void) => {
+            hooks.push(fn);
+          },
+        },
+        reads,
+        commit: () => {
+          for (const hook of hooks) hook();
+        },
+      };
+    };
+
+    const system: Actor = { kind: 'system', component: 'test' };
+
+    // Only the fields the sink reads: a test of what it does with them, not of the entries.
+    const edited = (id: number, changedParams: readonly string[] = ['n']): Mutation =>
+      ({
+        action: 'object.updated',
+        objectId: id,
+        kind: 'sensor',
+        changedParams,
+      }) as unknown as Mutation;
+    const deleted = (destroyed: readonly [number, ObjectKind][]): Mutation =>
+      ({
+        action: 'object.deleted',
+        objectId: destroyed[0]?.[0],
+        kind: destroyed[0]?.[1],
+        destroyed: destroyed.map(([id, kind]) => ({ id, kind, name: `#${String(id)}` })),
+      }) as unknown as Mutation;
+    const cloned = (rootId: number): Mutation =>
+      ({ action: 'object.cloned', objectId: rootId, kind: 'device' }) as unknown as Mutation;
+
+    /** A write recorded through the sink, and committed unless told otherwise. */
+    const write = async (
+      check: StoredParamsCheck,
+      mutation: Mutation,
+      rows: readonly Row[],
+      commit = true,
+    ): Promise<{ reads: string[] }> => {
+      const tx = fakeTx(rows);
+      await check.record(tx.q, system, [mutation], new Date());
+      if (commit) tx.commit();
+      return tx;
+    };
 
     it('reads every sensor once, in pages, past the page boundary', async () => {
       for (const [count, pages] of [
@@ -178,6 +274,135 @@ describe('the stored-parameters check at start-up (P-358)', () => {
       const stopped = parsed().filter((line) => line['phase'] === 'read-page');
       assert.equal(stopped.length, 1);
       assert.equal(stopped[0]?.['afterSensorId'], '2');
+    });
+
+    it(`names at most ${String(WARNINGS_PER_TYPE)} sensors of a type and counts the rest by type (P-368)`, async () => {
+      const { logger, lines, parsed } = capturing();
+      // One past the cap of one type, two of another, and a valid one between.
+      const types = [
+        ...Array.from({ length: WARNINGS_PER_TYPE + 1 }, () => 'bad'),
+        'ok',
+        'bad.other',
+        'bad.other',
+      ];
+      const check = new StoredParamsCheck({
+        db: fakeDb(sensors(types), []),
+        logger,
+        sensorTypes: fakeGate([]),
+        batchSize: 4,
+      });
+      const report = await check.run();
+      const all = parsed();
+      const warned = (type: string): unknown[] =>
+        all
+          .filter((line) => line['level'] === 40 && line['sensorType'] === type)
+          .map((line) => line['sensorId']);
+      assert.deepEqual(
+        warned('bad'),
+        Array.from({ length: WARNINGS_PER_TYPE }, (_, at) => at + 1),
+        'the first of the type, in the pass’s order, and no more',
+      );
+      assert.deepEqual(warned('bad.other'), [WARNINGS_PER_TYPE + 3, WARNINGS_PER_TYPE + 4]);
+
+      assert.equal(report.invalid, WARNINGS_PER_TYPE + 3, 'every one counted, named or not');
+      assert.equal(check.invalid, WARNINGS_PER_TYPE + 3, 'and on Core Health');
+      assert.deepEqual(report.invalidByType, { bad: WARNINGS_PER_TYPE + 1, 'bad.other': 2 });
+      assert.deepEqual(report.notNamedByType, { bad: 1 });
+      const summaries = all.filter((line) => line['level'] === 30);
+      assert.equal(summaries.length, 1, 'one line for the pass');
+      const [summary] = summaries;
+      assert.ok(summary !== undefined);
+      assert.deepEqual(summary['notNamedByType'], { bad: 1 });
+      assert.deepEqual(summary['invalidByType'], {
+        bad: WARNINGS_PER_TYPE + 1,
+        'bad.other': 2,
+      });
+      assert.match(String(summary['msg']), /notNamedByType counts the rest/);
+      for (const line of lines) assert.equal(line.includes('S3cr3t-x'), false, line);
+    });
+
+    it('keeps the count current after the pass: a mend, a delete, a clone; not a rename or a rollback (P-367)', async () => {
+      const check = new StoredParamsCheck({
+        db: fakeDb(sensors(['bad', 'bad', 'bad', 'ok']), []),
+        logger: silent,
+        sensorTypes: fakeGate([]),
+        batchSize: 2,
+      });
+      // Before the pass a write moves the set, and the count is still a gap.
+      await write(check, edited(4), [written(4, 'ok')]);
+      assert.equal(check.invalid, null);
+      await check.run();
+      assert.equal(check.invalid, 3);
+
+      await write(check, edited(1), [written(1, 'ok')]);
+      assert.equal(check.invalid, 2, 'an edit that mends it takes it off');
+
+      await write(check, edited(2), [written(2, 'ok')], false);
+      assert.equal(check.invalid, 2, 'a write that did not commit moves nothing');
+
+      const rename = await write(check, edited(2, []), [written(2, 'ok')]);
+      assert.deepEqual(rename.reads, [], 'a write that changed no parameter reads nothing');
+      assert.equal(check.invalid, 2);
+
+      await write(check, edited(2), [written(2, 'bad')]);
+      assert.equal(check.invalid, 2, 'one still failing is counted once');
+
+      await write(check, edited(2), [written(2, 'boom')]);
+      assert.equal(check.invalid, 2, 'one whose check throws is left as it was');
+
+      await write(
+        check,
+        deleted([
+          [90, 'device'],
+          [2, 'sensor'],
+          [3, 'sensor'],
+        ]),
+        [],
+      );
+      assert.equal(check.invalid, 0, 'a delete takes its sensors off');
+
+      // A clone copies its source's parameters without the gate.
+      const clone = await write(check, cloned(6), [written(7, 'bad'), written(8, 'ok')]);
+      assert.match(clone.reads[0] ?? '', /RECURSIVE/, 'the clone’s whole subtree');
+      assert.equal(check.invalid, 1, 'a clone of a failing sensor is counted');
+    });
+
+    it('lets a write during the pass stand over a page read before it, and counts nothing twice (P-367)', async () => {
+      const { logger, parsed } = capturing();
+      // The pass's snapshot: five failing sensors. Sensor 5 is a clone made while page one was
+      // in flight, so the pass reads it too.
+      const rows = sensors(['bad', 'bad', 'bad', 'bad', 'bad']);
+      const during = async (from: string): Promise<void> => {
+        if (from === '0') {
+          // Committed while page one is in flight; the page still holds what they were.
+          await write(check, edited(1), [written(1, 'ok')]);
+          await write(check, deleted([[2, 'sensor']]), []);
+          await write(check, cloned(5), [written(5, 'bad')]);
+        }
+        // While page two is in flight, sensor 3 is mended: the page holds it failing.
+        if (from === '2') await write(check, edited(3), [written(3, 'ok')]);
+        // And sensor 4, read failing on page two, is mended after it.
+        if (from === '4') await write(check, edited(4), [written(4, 'ok')]);
+      };
+      const check: StoredParamsCheck = new StoredParamsCheck({
+        db: fakeDb(rows, [], undefined, during),
+        logger,
+        sensorTypes: fakeGate([]),
+        batchSize: 2,
+      });
+      const report = await check.run();
+      assert.equal(report.complete, true);
+      assert.equal(check.invalid, 1, 'the clone, once; not the mended, not the deleted');
+      // The pass names only what no write had judged when it read it.
+      assert.equal(report.invalid, 1);
+      const named = parsed()
+        .filter((line) => line['level'] === 40)
+        .map((line) => line['sensorId']);
+      assert.deepEqual(named, [4]);
+
+      // After the pass, a write is simply the set's.
+      await write(check, edited(5), [written(5, 'ok')]);
+      assert.equal(check.invalid, 0);
     });
   });
 
@@ -424,6 +649,53 @@ describe('the stored-parameters check at start-up (P-358)', () => {
         assert.deepEqual(summary['unregisteredTypes'], ['test.dropped']);
 
         assert.deepEqual(await snapshot(), before, 'nothing written: not a row, not a version');
+      });
+
+      it('takes a mended sensor and a deleted one off the count, and counts a clone of a failing one (P-367)', async () => {
+        const sensorTypes = catalogueSensorTypeGate(
+          standardCatalogue([shipped('db.postgresql'), shipped('exe.script.advanced'), quoting]),
+          { logger: silent },
+        );
+        const check = new StoredParamsCheck({ db, logger: silent, sensorTypes, batchSize: 2 });
+        // Where `main.ts` puts it: one of the object service's audit sinks.
+        harness.audit.also = check;
+        try {
+          await within(30_000, 'the check', check.run());
+          assert.equal(check.invalid, 3);
+
+          await harness.service.update(
+            testActor,
+            ids.reserved,
+            { kind: 'sensor', name: 'renamed, still failing' },
+            { kind: 'none' },
+          );
+          assert.equal(check.invalid, 3, 'a rename mends nothing');
+
+          await harness.service.update(
+            testActor,
+            ids.reserved,
+            {
+              kind: 'sensor',
+              params: { query: 'SELECT count(*) FROM t', extract: [{ key: 'total', column: 'n' }] },
+            },
+            { kind: 'none' },
+          );
+          assert.equal(check.invalid, 2, 'mended by an edit');
+
+          // A clone copies its source's parameters, past the gate.
+          await harness.service.clone(testActor, ids.quoting, {}, Visibility.EVERYTHING);
+          assert.equal(check.invalid, 3, 'a clone of a failing sensor counted');
+
+          await harness.service.delete(
+            testActor,
+            ids.secret,
+            { kind: 'exact', descendants: 0 },
+            { kind: 'none' },
+          );
+          assert.equal(check.invalid, 2, 'deleted');
+        } finally {
+          harness.audit.also = undefined;
+        }
       });
     },
   );

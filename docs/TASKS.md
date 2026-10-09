@@ -13155,10 +13155,29 @@ because each is a decision rather than a defect:
       - **Not done.** The count does not fall when an operator mends a sensor; it falls at the
         next start. `main.ts`'s wiring is typechecked, not booted (`P-331`).
 
-- [ ] **P-359 — `exe.script.advanced` drops a script's own `runtime` reading silently** · XS ·
+- [x] **P-359 — `exe.script.advanced` drops a script's own `runtime` reading silently** · XS ·
       P-349 · Found 2026-10-09 in `P-349`. A script that prints a non-primary `runtime` channel
       loses that reading to the type's own `runtime`, and nothing says so. **Done when** the
       result message (or a counted warning) names the dropped key, with a test.
+
+      **P-359 outcome. The message says it, by key: when the program printed a `runtime` of its
+      own, the check's message (the program's, or the type's "N channels in X ms") ends in
+      `RUNTIME_NOT_KEPT`, " (the program’s own “runtime” channel was not kept: runtime is how
+      long the program took)".** The reading is still dropped and the type's still sent, as since
+      `T-19`. Chosen to match `P-292`'s `withDropped`, the one other place a dropped reading is
+      said: in the sensor's message, where the person looking at the sensor looks, and never the
+      state. **No M-17 scenario**: no state, reading or alarm changes, only the message text; a
+      Warning was rejected because it would change alarm volume for scripts that otherwise work.
+      The key is the type's constant and no value is in the note. Like `withDropped`'s, the note
+      survives the wire's clip (`RESULT_LIMITS.message`): the program's words are scrubbed first
+      (`CheckContext.scrub`, `S-21`) and end in the ellipsis. Not a Probe Health count: the drop
+      is the type's rule, not a loss, and `CheckExecution` has no field for one.
+      **Test** (`exe-script.test.ts`, scripts in the harness's script directory): this system's
+      shape with a `runtime` (one `runtime`, the type's; the note; the program's number in no
+      message), PRTG's "Runtime" (keyed `runtime`) with the type's default message, a 2,100-character
+      message (2,000 exactly, ending `m…` and the note), and a script without one (no note).
+      **Mutations** (restored byte for byte, `dist` rebuilt): no note fails it; the note not kept
+      clear of the clip fails it (2,189 characters).
 
 - [x] **P-360 — a per-sensor declaration with two primaries is refused only at registration** ·
       XS · P-348 · Found 2026-10-09 in `P-348`'s review. `SensorCatalogue.channelsFor` now refuses
@@ -13371,15 +13390,72 @@ because each is a decision rather than a defect:
         memory back, down to 3; it has 3"; sensors' `settle` failed its five callers at 3,000 ms
         and the file still ended; simulators' UDP case "…5000 ms waiting for 2 datagrams; got 2".
 
-- [ ] **P-367 — a mended sensor stays counted until the next start** · XS · P-358 · Found
+- [x] **P-367 — a mended sensor stays counted until the next start** · XS · P-358 · Found
       2026-10-09 in `P-358`. `sensorsWithInvalidParams` is computed once per start, so an operator
       who fixes the parameters sees the count unchanged. **Done when** an accepted edit of a
       counted sensor takes it off the count (or the count says when it was taken), with a test.
 
-- [ ] **P-368 — the stored-params pass logs one line per sensor on every start** · XS · P-358 ·
+      **P-367 outcome. The pass leaves the set of failing sensor ids, and `StoredParamsCheck` is
+      now also an audit sink on the object service (`storedParams` in `AuditSinkSet`, object list
+      only), so every committed write keeps the set current; Core Health reads its size.** No
+      migration, no protocol change, no second validator: a written sensor is judged by the same
+      `storedParamProblems` the pass uses.
+      - **Why the audit sink and not a call beside `normalise`.** "Accepted by the gate, so valid"
+        holds for `update` with `params`, but two writes put parameters in place without the gate:
+        a clone copies its source's (a clone of a failing sensor is a new failing sensor), and
+        `#clearSecretsSentElsewhere` (`A-41`) strips secrets. Every one of them, and a delete, is
+        recorded through the one audit sink, and `audit-composition.test.ts` guards its membership,
+        so a write path added later is covered without anyone remembering this.
+      - **What it reads.** `object.updated` of a sensor with `changedParams` (a rename, a pause or
+        a setting reads nothing): its row, by id. `object.cloned`: the sensors at or under the
+        clone's root (one bounded recursive walk). `object.deleted`: the `destroyed` sensors leave,
+        no read. `object.created` is not judged: `create` and `createTree` normalise through the
+        gate. Read inside the write's transaction (the entries are redacted, and a `writeOnly`
+        value is what the sensor runs with), applied in `afterCommit`, so a rolled-back write or
+        savepoint moves nothing. A type whose check throws on a written sensor leaves it as it was,
+        logged by id and error kind.
+      - **Concurrency.** The pass reads without a lock, so a page can hold what a sensor was
+        before an edit that commits while the page is in flight. Every id a committed write has
+        judged before the pass ends is the write's: the pass leaves its membership alone and does
+        not name it, so a stale page cannot put back a mended or deleted sensor; a write after the
+        pass read a row overrides it in the set. A set, so a sensor both find failing (a clone
+        made mid-pass, read by a later page) is one. Still a gap until the pass has gone over
+        every sensor, and for good if it stopped.
+      - **Docs.** `administration.md`'s row; the channel's comment in `sensors`' `core-health.ts`.
+      - **Tests** (`stored-params-check.test.ts`). Without a database, through the sink with a fake
+        transaction: a write before the pass leaves the gap; after it, an edit that mends falls,
+        an uncommitted one moves nothing, a rename reads nothing, one still failing counts once,
+        one whose check throws stays, a delete of a device's two sensors falls, a clone's subtree
+        read and its failing sensor counted. Mid-pass: a mend, a delete and a clone committed while
+        page one is in flight, a mend while page two is, and a mend after page two was read —
+        count 1 (the clone, once), only sensor 4 named. Against a database, the sink where
+        `main.ts` puts it: 3 after the pass, 3 after a rename, 2 after an edit mends the `P-348`
+        sensor, 3 after cloning the failing `test.quoting` one, 2 after deleting the `P-349` one.
+        `audit-composition.test.ts`: the object list has ten sinks, `storedParams` only there.
+      - **Mutations** (restored byte for byte, `dist` rebuilt): the sink applying nothing fails 3;
+        the pass not deferring to writes fails the mid-pass test (4, not 1); applying before the
+        commit fails the rollback case.
+      - **Not done.** A sensor changed outside the object service (a hand edit of `sensor_config`)
+        is seen at the next start, as before.
+
+- [x] **P-368 — the stored-params pass logs one line per sensor on every start** · XS · P-358 ·
       Found 2026-10-09 in `P-358`. At 20,000 sensors with one in ten refused that is 2,000 warning
       lines per start. **Done when** the lines are capped per type with the rest summarised by
       count, with a test at the cap.
+
+      **P-368 outcome. At most `WARNINGS_PER_TYPE` = 10 `warn` lines per type per pass, the
+      lowest ids first (the pass's order); the pass's `info` line gains `invalidByType` (every
+      failing type's count) and `notNamedByType` (how many of each were past the cap), and says
+      so when any were.** Ten because a type's failures come from one tightening of its schema, so
+      its lines repeat one or two paths: ten show what to mend on sensors an operator can open,
+      and a start where several types were tightened at once is a few dozen lines rather than
+      thousands. Every failing sensor is still counted (report and Core Health); the cap is on
+      naming only. The lines' shape and `P-358`'s never-a-value rules are unchanged (its tests
+      green). **Test**: eleven failing sensors of one type and two of another, a valid one
+      between, in pages of four — ten lines for the first (ids 1–10), two for the second, both
+      counted in full, `notNamedByType` `{ bad: 1 }` in the summary, no secret in any line.
+      **Mutation**: no cap fails it. **Not done**: the sensors past the cap are named nowhere; an
+      operator finds them by editing (the 400 names the path) until something lists the set.
 
 - [ ] **P-369 — the stored-params pass is outside the start-up tests and policy** · XS · P-358 ·
       Found 2026-10-09 in `P-358`. Its `main.ts` wiring is typechecked but nothing boots it

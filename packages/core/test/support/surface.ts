@@ -79,6 +79,7 @@ const noAudit: AuditSinkSet = {
   reachabilitySync: nothing,
   clockFreezeSync: nothing,
   triggerSync: nothing,
+  storedParams: nothing,
 };
 
 /**

@@ -518,14 +518,15 @@ const CHANNELS: readonly ChannelDef[] = [
   // a pass over every sensor at start-up with the validation a create or an edit meets. A build
   // that tightened a schema (`P-348`, `P-349`) leaves such a sensor running as stored; what it
   // costs is that an edit sending `params` is refused until the paths are mended, and the core log
-  // names each sensor, its type, the paths and the keywords, never a value. A sensor of a type this
-  // build does not register is not counted: there is no schema to judge it by.
+  // names the sensors (ten of each type, the rest counted, `P-368`), their types, the paths and the
+  // keywords, never a value. A sensor of a type this build does not register is not counted: there
+  // is no schema to judge it by.
   //
-  // **A gauge as of this start**, a gap until the pass has gone over every sensor: it falls at the
-  // next start after the sensors are mended. **No limit**, as `channelsCreatedOutsideDeclaration`
-  // has none: every core upgraded to a tightening build would turn Warning on its own sensor for
-  // sensors that keep working, and stay so until a restart after the last edit. A number to read
-  // after an upgrade, with the log saying which.
+  // **A gauge**, a gap until the pass has gone over every sensor, and kept current by every write
+  // after it: an edit that mends a sensor or a delete takes it off at once (`P-367`). **No limit**,
+  // as `channelsCreatedOutsideDeclaration` has none: every core upgraded to a tightening build would
+  // turn Warning on its own sensor for sensors that keep working, and stay so until the last one is
+  // mended. A number to read after an upgrade, with the log saying which.
   {
     key: 'sensorsWithInvalidParams',
     name: 'Sensors with invalid parameters',

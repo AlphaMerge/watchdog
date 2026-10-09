@@ -212,8 +212,9 @@ export interface CoreHealthSources {
   unboundedCredentials?: (q: Queryable) => Promise<number>;
   /**
    * `StoredParamsCheck.invalid` — sensors whose stored parameters their type's current schema
-   * refuses, as the start-up pass found them (`P-358`): null until it has gone over every sensor.
-   * Absent where no pass runs, and the channel gaps.
+   * refuses, as the start-up pass found them (`P-358`) and every write since has left them
+   * (`P-367`): null until the pass has gone over every sensor. Absent where no pass runs, and the
+   * channel gaps.
    */
   sensorsWithInvalidParams?: () => number | null;
   /**
