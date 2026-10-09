@@ -26457,9 +26457,11 @@ because each is a decision rather than a defect:
         1; a box's write dropping the others 4; the identity check removed 3 (with `useApi`'s
         path check also removed, 5: either alone stops the typed-over case); a blank search
         written 1; the invalid-parameters link dropped from `channelLinkFor` 2.
-      - **Not done.** The `REPLACE` guard (the page's own late write not read back) is not killed
-        by any test: jsdom's `act` commits each transition before the next key, so the lag it
-        guards against cannot be produced there.
+      - **Not done.** The `REPLACE` guard is killed by the blank-box test (on review, run: without
+        it the page reads its own write of `/tree` back and empties a box holding spaces, 1
+        failing). What no test produces is the case it exists for, the page's own late write
+        read back after a later key: jsdom's `act` commits each transition before the next key,
+        so that lag needs a browser.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
