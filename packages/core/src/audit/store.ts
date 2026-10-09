@@ -670,7 +670,13 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       return {
         ...base,
         objectKind: null,
-        summary: { ...probeSummary(mutation.probe), local: mutation.local },
+        summary: {
+          ...probeSummary(mutation.probe),
+          local: mutation.local,
+          ...(mutation.localTakenFrom === undefined
+            ? {}
+            : { localTakenFrom: mutation.localTakenFrom }),
+        },
         diff: changed(PROBE_FIELDS, mutation.before, mutation.after, 'probe'),
       };
 

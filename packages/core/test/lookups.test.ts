@@ -380,6 +380,85 @@ describe('the lookup catalogue', () => {
   });
 });
 
+describe('what a refused lookup is told (P-384)', () => {
+  /**
+   * Each problem once, and no "must match \"then\" schema" over the lines it wraps. A `then` that
+   * repeats what `properties` holds fails with the same sentence at the same path, so these were
+   * each said twice and wrapped once besides.
+   */
+  const ROWS: { name: string; type: 'singleInt' | 'range'; entries: unknown; said: string[] }[] = [
+    {
+      name: 'an entry with no state',
+      type: 'singleInt',
+      entries: [{ value: 1, text: 'one' }],
+      said: ["/entries/0 must have required property 'state'"],
+    },
+    {
+      name: 'a range entry with no state',
+      type: 'range',
+      entries: [{ from: 1, text: 'one' }],
+      said: ["/entries/0 must have required property 'state'"],
+    },
+    {
+      name: 'entries that are a number',
+      type: 'singleInt',
+      entries: 5,
+      said: ['/entries must be array'],
+    },
+    {
+      name: 'entries that are a string',
+      type: 'singleInt',
+      entries: 'none',
+      said: ['/entries must be array'],
+    },
+    {
+      name: 'range entries that are an object',
+      type: 'range',
+      entries: { from: 1, state: 'up', text: 'one' },
+      said: ['/entries must be array'],
+    },
+    {
+      name: 'an entry that is a number',
+      type: 'singleInt',
+      entries: [5, 6],
+      said: ['/entries/0 must be object', '/entries/1 must be object'],
+    },
+    {
+      name: 'a range entry that is null',
+      type: 'range',
+      entries: [null],
+      said: ['/entries/0 must be object'],
+    },
+  ];
+  for (const row of ROWS) {
+    it(`says ${row.name} once`, () => {
+      const catalogue = new LookupCatalogue();
+      const definition = {
+        ...status,
+        type: row.type,
+        entries: row.entries,
+      } as unknown as LookupDefinition;
+      assert.equal(catalogue.register(definition, 'refused.json'), false);
+      assert.deepEqual(catalogue.problems(), [
+        { id: 'test.status', source: 'refused.json', problems: row.said },
+      ]);
+    });
+  }
+
+  it('loads the files beside one whose entries are not an array', async () => {
+    const directory = await withFiles({
+      'a-broken.json': JSON.stringify({ ...status, id: 'test.broken', entries: 5 }),
+      'b-status.json': JSON.stringify(status),
+    });
+    const catalogue = await loadLookups({ directory, logger: silent });
+    assert.equal(catalogue.has('test.status'), true);
+    assert.deepEqual(
+      catalogue.problems().map((one) => [one.id, one.problems]),
+      [['test.broken', ['/entries must be array']]],
+    );
+  });
+});
+
 // -------------------------------------------------------------------------------------------
 // Loading from disk.
 // -------------------------------------------------------------------------------------------

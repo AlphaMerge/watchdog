@@ -329,6 +329,82 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       assert.equal(resolved.inherited, true);
     });
 
+    /**
+     * **Two groups granting the same right at the same depth name the lower group id**
+     * (`P-385`). Ids either side of a power of ten, so that the lower one is the later one as
+     * text: `99` and `100` sort `'100'` first, which is the order an `ORDER BY` reads when it
+     * names the query's own `group_id::text` column rather than the number.
+     */
+    const TIED: {
+      name: string;
+      on: 'probe' | 'device' | 'sensor';
+      right: AccessRight;
+      ids: [number, number];
+      grantFirst: 'lower' | 'higher';
+    }[] = [
+      {
+        name: 'on the object itself',
+        on: 'sensor',
+        right: 'read',
+        ids: [99, 100],
+        grantFirst: 'lower',
+      },
+      {
+        name: 'granted the other way round',
+        on: 'sensor',
+        right: 'read',
+        ids: [999, 1000],
+        grantFirst: 'higher',
+      },
+      {
+        name: 'inherited from the device',
+        on: 'device',
+        right: 'write',
+        ids: [9_999, 10_000],
+        grantFirst: 'higher',
+      },
+      {
+        name: 'inherited from the probe',
+        on: 'probe',
+        right: 'full',
+        ids: [99_999, 100_000],
+        grantFirst: 'lower',
+      },
+      {
+        name: 'both granting none',
+        on: 'device',
+        right: 'none',
+        ids: [999_999, 1_000_000],
+        grantFirst: 'higher',
+      },
+    ];
+    for (const row of TIED) {
+      it(`names the lower of two tied groups, ${row.name} (P-385)`, async () => {
+        const [lowerId, higherId] = row.ids;
+        // In a scratch database, so the sequence is this file's to move. Upwards only: every id
+        // here is above anything the fixture made, and below anything made after.
+        await db.query(`SELECT setval(pg_get_serial_sequence('user_group', 'id'), $1)`, [
+          lowerId - 1,
+        ]);
+        const lower = await groups.create({ name: `Lower ${row.name}` }, testActor);
+        await db.query(`SELECT setval(pg_get_serial_sequence('user_group', 'id'), $1)`, [
+          higherId - 1,
+        ]);
+        const higher = await groups.create({ name: `Higher ${row.name}` }, testActor);
+        assert.deepEqual([lower.id, higher.id], [lowerId, higherId]);
+        for (const id of [lower.id, higher.id]) await groups.addMember(id, userId, testActor);
+
+        const on = { probe: probeId, device: deviceId, sensor: sensorId }[row.on];
+        const order = row.grantFirst === 'lower' ? [lower.id, higher.id] : [higher.id, lower.id];
+        for (const id of order) await access.grant(on, id, row.right, actorNamed('test'));
+
+        const resolved = await access.resolve(userId, sensorId);
+        assert.equal(resolved.right, row.right);
+        assert.equal(resolved.sourceObjectId, on);
+        assert.equal(resolved.sourceGroupId, lower.id);
+      });
+    }
+
     it('says a right was explicit when it sits on the object itself', async () => {
       await access.grant(sensorId, alphaId, 'read', actorNamed('test'));
       const resolved = await access.resolve(userId, sensorId);

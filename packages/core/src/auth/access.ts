@@ -635,9 +635,12 @@ export class AccessService {
       )
       -- **Rule 3, across groups**, and only now: each group has already had its own nearest
       -- ancestor found, so a grant added for one group cannot displace another's.
+      --
+      -- The tie goes to the lowest group id, and qualified (P-385): a bare group_id here names
+      -- the text column this SELECT returns, which sorts 100 before 99.
       SELECT right_, object_id::text AS object_id, group_id::text AS group_id, depth
       FROM nearest
-      ORDER BY access_rank(right_) DESC, depth ASC, group_id
+      ORDER BY access_rank(right_) DESC, depth ASC, nearest.group_id
       LIMIT 1
       `,
       [userId, objectId],

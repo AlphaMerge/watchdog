@@ -100,19 +100,37 @@ export class LookupCatalogue {
     const problems: string[] = [];
     if (!this.#validate(definition)) {
       problems.push(
-        ...(this.#validate.errors ?? []).map(
-          (error) =>
-            // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
-            `${error.instancePath === '' ? 'the definition' : error.instancePath} ${
-              patternMessageOf(error) ?? error.message ?? 'is invalid'
-            }`,
-        ),
+        ...(this.#validate.errors ?? [])
+          // **Each problem once, and only the problem** (`P-384`). An `if` that held and a `then`
+          // that failed are reported as the `then`'s own errors and an `if` error over them,
+          // "must match \"then\" schema", which says nothing the lines it wraps do not.
+          .filter((error) => error.keyword !== 'if')
+          .map(
+            (error) =>
+              // A pattern's own sentence (`P-377`), read from the schema and never from `data`.
+              `${error.instancePath === '' ? 'the definition' : error.instancePath} ${
+                patternMessageOf(error) ?? error.message ?? 'is invalid'
+              }`,
+          ),
       );
     }
-    problems.push(...validateLookup(definition));
+    // **Only over entries the schema could read** (`P-384`). `validateLookup`'s type promises an
+    // array of objects, and a file is where that promise is not kept: `"entries": 5` threw out of
+    // here and out of the loader, which is one bad file stopping the core, and a string or an
+    // array of numbers was told "value undefined is listed more than once". The schema has
+    // already said what is wrong with those.
+    const entries: unknown = definition.entries;
+    if (
+      Array.isArray(entries) &&
+      entries.every((entry: unknown) => typeof entry === 'object' && entry !== null)
+    ) {
+      problems.push(...validateLookup(definition));
+    }
 
     if (problems.length > 0) {
-      this.#problems.push({ id: definition.id, source, problems });
+      // And a `then` that repeats a type or a requirement `properties` already holds (`P-379`)
+      // fails with the same sentence at the same path, which is one problem said twice.
+      this.#problems.push({ id: definition.id, source, problems: [...new Set(problems)] });
       return false;
     }
 

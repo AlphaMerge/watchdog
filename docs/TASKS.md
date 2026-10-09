@@ -14147,13 +14147,65 @@ because each is a decision rather than a defect:
         possible. An `ORDER BY` would not pick the right one, which is the probe whose link is
         connected.
 
-- [ ] **P-382 — the local probe's log row is whichever `is_local` row the plan gives** · S · P-381 ·
+- [x] **P-382 — the local probe's log row is whichever `is_local` row the plan gives** · S · P-381 ·
       Found 2026-10-09 in `P-381`. `localProbeLog` in `packages/core/src/main.ts` takes `rows[0]`
       of `SELECT … FROM probe_config WHERE is_local`, and approving a probe never clears
       `is_local` (`probes/registry.ts`), so two rows are possible and the pick is arbitrary. An
       `ORDER BY` cannot choose the right one: it is the probe whose link is connected. **Done
       when** at most one row can be local (or the choice is made by the live link), with a test
       of two candidate rows.
+
+      **P-382 outcome. One probe object is local, held by the database (migration 075) and kept
+      by the registry, so `localProbeLog`'s `rows[0]` is the only row.**
+      - **How two arose.** Nothing guesses the flag: the person approving says `"local": true`
+        (`installation.md` §5, `smoke-install.sh`, the sizing scripts), and `approve` only ever
+        raised it. Approving a second probe as local was taken, and so was approving the machine
+        that replaced the core's own onto a new probe object after revoking the old one. The old
+        object then kept the flag, with no machine behind it, and could never be deleted. The
+        dev database had one local row; nothing in the code made two.
+      - **What reads it.** Four places, and only one assumed a single row:
+        - Core Health's local-probe log line took `rows[0]`;
+        - Probe Health's machine-memory rule (`M-21`) takes a set;
+        - the clock comparison (`P-247`) takes a set;
+        - the delete guard (`R-01`) asks one object.
+
+        With two, a wrongly flagged remote probe also lost its clock check and its memory
+        reading. So the choice is made at the source rather than by the live link: choosing by
+        link would have fixed one reader of four.
+      - **The registry (`#takeLocal`).** An approval with `local: true`:
+        - is refused `409 PROBE_CONFLICT` when another object holds the flag with a probe still
+          bound to it, naming that object and gid. Moving the flag then would make a live
+          branch deletable;
+        - moves the flag when the holder's probe was revoked or deleted. The approval's audit
+          summary names it as `localTakenFrom`, because that object is deletable from then on.
+
+        Serialised by a transaction-scoped advisory lock, so two approvals at once cannot both
+        find nothing to move. `local: false` still never clears the flag, so the replacement
+        path in `installation.md` (approve onto the same object) is unchanged.
+      - **Migration 075** adds a unique partial index, `probe_config_one_local`. **An existing
+        install with two local rows keeps one**, in this order:
+        - the row with an approved probe bound to it;
+        - then the row seen most recently;
+        - then the lowest id.
+
+        The others become not local, and so deletable. The rollback drops the index, and the
+        cleared flags stay cleared.
+      - **Docs.** The approve route's `local` description, `api-reference.md` regenerated, and
+        `installation.md` §5.
+      - **Tests.**
+        - `probe-registry.test.ts` 6. Five table rows with two candidate objects: refused while
+          the first probe is approved; moved after it is revoked; moved after it is forgotten;
+          a remote approval beside a live local one; a remote approval after a revocation.
+          Each asserts the exact local set, `localTakenFrom` in the audit entry, and that a
+          moved-from object can be deleted. One more asserts the index refuses a second row
+          directly.
+        - `migrator.test.ts` 1 (075). Three local rows and one remote: the approved one is
+          kept, and a second row is refused. After a rollback, with none approved, the one seen
+          last is kept; with nothing to tell them apart, the lowest id. Up again applies 75.
+      - **Mutations.** `#takeLocal` returning at once fails 3 of the registry rows: 23505, not
+        409. The migration's `UPDATE` disabled fails the 075 test: the index cannot be created.
+      - **Not done.** No test runs `localProbeLog` itself: it is inline in `main.ts`, and the
+        row it reads is now unique by schema.
 
 - [x] **P-383 — Fastify's request validator still runs Ajv's lax default** · M · P-379 · Found
       2026-10-09 in `P-379`. `API_VALIDATOR_OPTIONS` (`core/src/api/validation.ts`) sets no
@@ -14211,17 +14263,66 @@ because each is a decision rather than a defect:
       - **Not done.** `fast-json-stringify`'s own Ajv stays lax (not configurable); the walk
         above covers it in tests only.
 
-- [ ] **P-384 — the lookup catalogue's problem list repeats a line** · XS · P-379 · Found
+- [x] **P-384 — the lookup catalogue's problem list repeats a line** · XS · P-379 · Found
       2026-10-09 in `P-379`. A missing `state` is said twice, and since `P-379` a non-array
       `entries` (or an entry that is not an object) is too, with a "must match \"then\" schema"
       line besides. **Done when** `problems()` says each problem once and drops Ajv's `if/then`
       wrapper lines, with a test.
 
-- [ ] **P-385 — `AccessService`'s `sourceGroupId` tiebreak has no test** · XS · P-381 · Found
+      **P-384 outcome. `register` drops Ajv's `if` errors and says each line once. It also no
+      longer runs `validateLookup` over entries the schema could not read, because that threw.**
+      - **The duplicates.** Each `then` repeats `entries`' type and its entries' type and
+        `required`, so a failure there is reported twice at the same path, with an `if` error
+        over it. Errors with `keyword: 'if'` are filtered out, and the list is de-duplicated in
+        order (a `Set`), which also covers a line `validateLookup` repeats.
+      - **Found on the way: a lookup file with `"entries": 5` stopped the core.**
+        `validateLookup` iterated it, threw `definition.entries is not iterable` out of
+        `register`, and `loadLookups` does not catch. A null entry threw the same way. A string,
+        or an array of numbers, was told "value undefined is listed more than once".
+        `validateLookup` now runs only when `entries` is an array of objects; the schema has
+        already said what is wrong otherwise. The comment in `definition.ts` that said the
+        repeat was told "once more" is corrected.
+      - **Tests: `lookups.test.ts` 8.** Seven rows assert the exact `problems()`:
+        - a singleInt and a range entry with no `state`;
+        - `entries` that are a number, a string, and an object;
+        - entries that are numbers, and an entry that is `null`.
+
+        One more loads a directory with a non-array file beside a good one: the good one loads,
+        and the bad one is one line.
+      - **Mutations.**
+        - The `if` filter off: 7 fail.
+        - The `Set` off: 7 fail.
+        - `validateLookup` unguarded: 6 fail, four of them with the `TypeError`.
+      - **Not done.** A range entry with neither bound still gets an `anyOf` wrapper line beside
+        the two `required` lines. Two singleInt entries with no `value` still get "value
+        undefined is listed more than once" beside the schema's lines. Both are listed as
+        follow-ups.
+
+- [x] **P-385 — `AccessService`'s `sourceGroupId` tiebreak has no test** · XS · P-381 · Found
       2026-10-09 in `P-381` review. Two groups granting the same right at the same depth now pick
       the lowest `group_id`, but no test pins it: a flipped plan for a top-1 sort over a
       `DISTINCT ON` is not reliably reproducible. **Done when** a table-driven test of tied grants
       asserts the lowest group id, or the outcome says why one cannot be written.
+
+      **P-385 outcome. The test was written, and it found the tiebreak sorting text: `100` came
+      before `99`. Fixed.**
+      - **The bug.** A bare name in `ORDER BY` resolves to an output column before an input one.
+        The final `SELECT` returns `group_id::text AS group_id`, so `ORDER BY …, group_id`
+        compared strings, and two tied groups with ids 99 and 100 named 100. It is now
+        `nearest.group_id`, the bigint. `depth` and `right_` resolve to output columns too, but
+        those are the same values.
+      - **The plan question does not arise.** Every tie is broken explicitly, so the result does
+        not depend on the plan. The test only needs ids whose text and number orders disagree.
+        It moves `user_group`'s sequence in the file's scratch database, upwards only, to get
+        them.
+      - **Tests: `access-rights.test.ts` 5, a table.** Two groups, same right, same depth, ids
+        either side of a power of ten (99/100 up to 999999/1000000), granted in both orders:
+        - on the sensor itself;
+        - inherited from the device and from the probe;
+        - `read`, `write`, `full`, and `none`.
+
+        Each asserts the right, `sourceObjectId`, and the lower id as `sourceGroupId`. All five
+        failed before the fix (`100 !== 99`), and fail again with the bare `group_id` restored.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

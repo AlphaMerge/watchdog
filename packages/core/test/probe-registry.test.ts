@@ -4,7 +4,7 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { createLogger, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, withCorrelation } from '@ms/shared';
 import { ProbeHealthService, withLastRefusal } from '../src/health/probe-health.js';
-import { ProbeRegistry } from '../src/probes/registry.js';
+import { ProbeRegistry, ProbeRegistryError } from '../src/probes/registry.js';
 import { probeRoutes } from '../src/api/routes/probes.js';
 import { API_VALIDATOR_OPTIONS } from '../src/api/server.js';
 import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
@@ -697,6 +697,142 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         [probeId],
       );
       assert.equal(rows[0]?.is_local, true);
+    });
+
+    /**
+     * **One object is local** (`P-382`). Core Health's local-probe log line read whichever
+     * `is_local` row came first, and an approval only ever raised the flag, so approving a second
+     * probe as local left two. Each row: what became of the probe on the object that was local,
+     * how the second probe is approved, and which objects are local afterwards.
+     */
+    const SECOND_LOCAL: {
+      name: string;
+      first: 'approved' | 'revoked' | 'removed';
+      secondLocal: boolean;
+      refused: boolean;
+      local: ('first' | 'second')[];
+    }[] = [
+      {
+        name: 'refuses a second local probe while the first is approved',
+        first: 'approved',
+        secondLocal: true,
+        refused: true,
+        local: ['first'],
+      },
+      {
+        name: 'moves the flag from an object whose probe was revoked',
+        first: 'revoked',
+        secondLocal: true,
+        refused: false,
+        local: ['second'],
+      },
+      {
+        name: 'moves the flag from an object whose probe was forgotten',
+        first: 'removed',
+        secondLocal: true,
+        refused: false,
+        local: ['second'],
+      },
+      {
+        name: 'approves a remote probe beside an approved local one',
+        first: 'approved',
+        secondLocal: false,
+        refused: false,
+        local: ['first'],
+      },
+      {
+        name: 'leaves the flag where it is for a remote probe after the local one was revoked',
+        first: 'revoked',
+        secondLocal: false,
+        refused: false,
+        local: ['first'],
+      },
+    ];
+    for (const row of SECOND_LOCAL) {
+      it(`${row.name} (P-382)`, async () => {
+        const secondObject = (
+          await harness.service.create(testActor, {
+            kind: 'probe',
+            parentId: harness.rootId,
+            name: `second-${String(process.hrtime.bigint())}`,
+          })
+        ).id;
+        const first = await registry.admit(hello());
+        assert.ok(first.kind === 'pending');
+        await registry.approve(first.gid, probeId, testActor, { local: true });
+        if (row.first === 'revoked') await registry.revoke(first.gid, 'replaced', testActor);
+        if (row.first === 'removed') await registry.remove(first.gid, testActor);
+
+        // Its own gid each time: the audit log is not cleared between tests.
+        const second = await registry.admit(
+          hello({ gid: `second-${String(process.hrtime.bigint())}` }),
+        );
+        assert.ok(second.kind === 'pending');
+        const approving = registry.approve(second.gid, secondObject, testActor, {
+          local: row.secondLocal,
+        });
+        if (row.refused) {
+          await assert.rejects(
+            approving,
+            (error: unknown) =>
+              error instanceof ProbeRegistryError &&
+              error.code === 'PROBE_CONFLICT' &&
+              error.message ===
+                `probe object ${String(probeId)} is already this installation's local probe, ` +
+                  `held by ${first.gid}; revoke that probe first, or approve this one onto ` +
+                  'that object',
+          );
+          assert.equal((await registry.get(second.gid))?.status, 'pending', 'and decided nothing');
+        } else {
+          await approving;
+        }
+
+        const nameOf = new Map([
+          [probeId, 'first'],
+          [secondObject, 'second'],
+        ]);
+        const local = await db.query<{ object_id: string }>(
+          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local ORDER BY object_id',
+        );
+        assert.deepEqual(
+          local.map((one) => nameOf.get(Number(one.object_id)) ?? one.object_id),
+          row.local,
+        );
+
+        // The approval says where the flag came from, because that object is deletable now.
+        const [entry] = await db.query<{ summary: Record<string, unknown> }>(
+          `SELECT summary FROM audit_log
+           WHERE action = 'probe.approved' AND summary->>'gid' = $1`,
+          [second.gid],
+        );
+        const moved = row.local.includes('second');
+        if (row.refused) assert.equal(entry, undefined);
+        else assert.equal(entry?.summary['localTakenFrom'], moved ? probeId : undefined);
+        if (moved) {
+          const report = await harness.service.delete(
+            testActor,
+            probeId,
+            { kind: 'leafOnly' },
+            { kind: 'none' },
+          );
+          assert.equal(report.id, probeId);
+        }
+      });
+    }
+
+    it('is held to one object by the database too (P-382)', async () => {
+      const secondObject = (
+        await harness.service.create(testActor, {
+          kind: 'probe',
+          parentId: harness.rootId,
+          name: `second-${String(process.hrtime.bigint())}`,
+        })
+      ).id;
+      await db.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [probeId]);
+      await assert.rejects(
+        db.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [secondObject]),
+        /probe_config_one_local/,
+      );
     });
   });
 

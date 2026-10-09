@@ -1799,6 +1799,101 @@ describe(
       }
     });
 
+    it('keeps one local probe of two, the approved one, and rolls back to the index gone (075)', async () => {
+      // `P-382`: an approval only ever raised `is_local`, so an installation can hold two, and
+      // Core Health's local-probe log read whichever came first.
+      const fresh = await createScratchDatabase('one_local_probe');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 75),
+        );
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 74),
+        ).up();
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const probes = new Map<string, string>();
+        for (const name of ['seen', 'live', 'never', 'remote']) {
+          const [probe] = await q.query<{ id: string }>(
+            `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'probe', $2) RETURNING id::text`,
+            [root?.id, name],
+          );
+          probes.set(probe?.id ?? assert.fail('no probe'), name);
+        }
+        const idOf = (name: string): string =>
+          [...probes].find(([, each]) => each === name)?.[0] ?? assert.fail(name);
+        /** Each probe: its gid, whether it is local, and when it was last seen. */
+        const lay = async (
+          rows: [string, string | null, boolean, string | null][],
+        ): Promise<void> => {
+          for (const [name, gid, local, seen] of rows) {
+            await q.query(
+              `INSERT INTO probe_config (object_id, gid, is_local, last_seen_at)
+               VALUES ($1, $2, $3, $4::timestamptz)
+               ON CONFLICT (object_id) DO UPDATE
+                 SET gid = EXCLUDED.gid, is_local = EXCLUDED.is_local,
+                     last_seen_at = EXCLUDED.last_seen_at`,
+              [idOf(name), gid, local, seen],
+            );
+          }
+        };
+        const local = async (): Promise<string[]> =>
+          (
+            await q.query<{ object_id: string }>(
+              'SELECT object_id::text AS object_id FROM probe_config WHERE is_local ORDER BY 1',
+            )
+          ).map((row) => probes.get(row.object_id) ?? row.object_id);
+
+        // Three local: one seen last with nothing approved onto it, one approved and seen
+        // earlier, one never seen. The approved one is the probe the core is talking to.
+        await q.query(
+          `INSERT INTO probe_registration (gid, status, object_id) VALUES ('live-gid', 'approved', $1)`,
+          [idOf('live')],
+        );
+        await lay([
+          ['seen', null, true, '2026-10-09T08:00:00Z'],
+          ['live', 'live-gid', true, '2026-10-09T07:00:00Z'],
+          ['never', null, true, null],
+          ['remote', null, false, '2026-10-09T09:00:00Z'],
+        ]);
+        await all.up();
+        assert.deepEqual(await local(), ['live']);
+        await assert.rejects(
+          q.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [idOf('seen')]),
+          /probe_config_one_local/,
+        );
+
+        await all.down(1);
+        assert.deepEqual(await local(), ['live'], 'what was cleared stays cleared');
+        // Two again, and none approved now: the one seen last, then the lowest id.
+        await q.query(`UPDATE probe_registration SET status = 'revoked'`);
+        await lay([
+          ['seen', null, true, '2026-10-09T08:00:00Z'],
+          ['live', null, true, '2026-10-09T07:00:00Z'],
+          ['never', null, true, null],
+        ]);
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [75],
+        );
+        assert.deepEqual(await local(), ['seen']);
+
+        await all.down(1);
+        await lay([
+          ['seen', null, true, null],
+          ['live', null, true, null],
+          ['never', null, false, null],
+        ]);
+        await all.up();
+        assert.deepEqual(await local(), ['seen'], 'the lowest id, when nothing tells them apart');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

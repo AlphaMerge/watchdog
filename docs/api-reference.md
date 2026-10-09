@@ -2542,7 +2542,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `objectId` | integer, at least 1 | **required** | The probe object this identity owns from now on. |
-| `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. |
+| `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. One probe object is local (`P-382`): another one holding it with a probe still approved onto it refuses this with 409, and one whose probe was revoked or deleted gives it up, as the approval's audit entry records. `false` never clears it. |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 

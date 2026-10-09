@@ -1518,6 +1518,7 @@ async function serve(): Promise<void> {
       // What the log dropped and holds while the journal was not reading (`P-216` part 3), and the
       // local probe's drops beside it: one journal, one alarm, and Core Health owns it (`M-21`).
       ...(logOutput === undefined ? {} : { log: () => logOutput.stats() }),
+      // The one row there is: migration 075 holds the flag to one object (`P-382`).
       localProbeLog: async (q) => {
         const rows = await q.query<{ object_id: string }>(
           'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',

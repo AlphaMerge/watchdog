@@ -609,6 +609,12 @@ export type Mutation =
       objectId: ObjectId;
       probe: ProbeIdentity;
       local: boolean;
+      /**
+       * The probe object that was the local probe until this approval made `objectId` it
+       * (`P-382`): one object is local, and the one that was had no probe bound any more. It is
+       * deletable from here on, which is why it is said.
+       */
+      localTakenFrom?: ObjectId;
       before: ProbeTrustAudit;
       after: ProbeTrustAudit;
     }

@@ -284,6 +284,11 @@ this is the probe running beside the core — it cannot be deleted, matching PRT
 one that runs checks which have to execute on the core's own host. It is said explicitly rather
 than guessed, because an address proves nothing on a host with several interfaces.
 
+One probe object is local. Replacing the machine beside the core is approving the new one onto
+the same probe object. Approving it onto a new object as local is refused `409` while the old
+object's probe is still approved; once that probe is revoked, the new object takes the flag and
+the old one can be deleted (the approval's audit entry names it as `localTakenFrom`).
+
 ---
 
 ## Remote probes

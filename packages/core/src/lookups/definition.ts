@@ -213,8 +213,8 @@ export const lookupDefinitionSchema = {
   // **Each `then` repeats the types and names the properties it requires** (`P-379`), which
   // strict mode asks of a subschema at a level of its own: `entries` is an array and each entry
   // an object, as `properties` above already holds them, and `true` constrains nothing. So these
-  // accept and refuse exactly what they did. A definition already refused for an `entries` that
-  // is not an array, or an entry that is not an object, is now told so once more from here.
+  // accept and refuse exactly what they did. What one of them repeats fails twice in Ajv, with
+  // an `if` error over it; `LookupCatalogue.register` says it once and drops the `if` (`P-384`).
   allOf: [
     {
       if: { properties: { type: { const: 'singleInt' } }, required: ['type'] },

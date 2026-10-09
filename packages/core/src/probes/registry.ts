@@ -490,6 +490,7 @@ export class ProbeRegistry {
          RETURNING *`,
         [gid, objectId, decidedBy(actor)],
       );
+      const localTakenFrom = local ? await this.#takeLocal(q, objectId) : undefined;
       // The tree's own side of the binding, so `R-04`'s config push finds this probe's subtree.
       // `is_local` is only ever raised, never cleared by an approval: re-approving the core's own
       // probe after replacing the machine must not quietly make it deletable.
@@ -505,6 +506,7 @@ export class ProbeRegistry {
         objectId,
         probe: identityOf(after),
         local,
+        ...(localTakenFrom === undefined ? {} : { localTakenFrom }),
         before: trustOf(existing),
         after: trustOf(after),
       });
@@ -661,6 +663,42 @@ export class ProbeRegistry {
       [gid],
     );
     return readOne(rows, gid);
+  }
+
+  /**
+   * Makes room for `objectId` to be the local probe, and says which object it was taken from.
+   *
+   * **One probe runs beside the core, so one object is local** (`P-382`, and migration 075's
+   * index holds it). Another object holding the flag with a probe still bound to it is refused:
+   * that is the core's own probe, or a decision somebody has to undo by revoking it first, and
+   * quietly moving the flag would make the branch it guards deletable while its machine still
+   * reports. One with no probe bound — revoked, or deleted from the registry — has no machine
+   * beside the core any more, and the flag moves, recorded in the approval's audit entry.
+   *
+   * Serialised by a transaction lock, so two approvals each made local at once do not both find
+   * nothing to move and leave the second to fail on the index.
+   */
+  async #takeLocal(q: Queryable, objectId: number): Promise<number | undefined> {
+    await q.query(`SELECT pg_advisory_xact_lock(hashtext('probe_config'), hashtext('is_local'))`);
+    const held = await q.query<{ object_id: string; gid: string | null }>(
+      `SELECT object_id::text AS object_id, gid FROM probe_config
+       WHERE is_local AND object_id <> $1
+       FOR UPDATE`,
+      [objectId],
+    );
+    const holder = held[0];
+    if (holder === undefined) return undefined;
+    if (holder.gid !== null) {
+      throw new ProbeRegistryError(
+        'PROBE_CONFLICT',
+        `probe object ${holder.object_id} is already this installation's local probe, held by ` +
+          `${holder.gid}; revoke that probe first, or approve this one onto that object`,
+      );
+    }
+    await q.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [
+      holder.object_id,
+    ]);
+    return Number(holder.object_id);
   }
 
   async #record(q: Queryable, actor: Actor, mutation: Mutation): Promise<void> {
