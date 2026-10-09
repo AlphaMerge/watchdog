@@ -1,5 +1,4 @@
 import { strict as assert } from 'node:assert';
-import { Ajv } from 'ajv';
 import Fastify from 'fastify';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
@@ -18,6 +17,7 @@ import {
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
 import { everyVoucherHolds } from './support/vouching.js';
+import { responseSchemaAjv } from './support/response-schema-ajv.js';
 
 /**
  * Which probes an installation trusts (`R-01`).
@@ -838,7 +838,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
 
         const schema = (declared as Record<string, object> | undefined)?.['200'];
         assert.ok(schema !== undefined, 'the route declares its 200');
-        const validate = new Ajv({ strict: false, validateFormats: false }).compile(schema);
+        // Strict, as the server reads a schema (`P-383`), so a mistyped keyword here fails.
+        const validate = responseSchemaAjv().compile(schema);
         assert.ok(validate(body), JSON.stringify(validate.errors));
       } finally {
         await app.close();

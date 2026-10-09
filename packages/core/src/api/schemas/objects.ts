@@ -534,33 +534,43 @@ export const createObjectSchema = {
         'an enrolment flow; until then it is how a probe is told which subtree it owns.',
     },
   },
+  // Each name a `then` or a `not` requires is declared there as `true`, which constrains nothing:
+  // strict mode refuses a `required` its own schema does not declare (`P-383`), and the root's
+  // `properties` is not that schema. The same in the tree node's and the update's below.
   allOf: [
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { required: ['host'] },
+      then: { properties: { host: true }, required: ['host'] },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { required: ['sensorType'] },
+      then: { properties: { sensorType: true }, required: ['sensorType'] },
     },
     // A group has no host and a device has no sensor type. Rejecting the mismatch here means
     // no handler has to hand-check it.
     {
       if: { properties: { kind: { enum: ['probe', 'group'] } }, required: ['kind'] },
-      then: { not: { anyOf: [{ required: ['host'] }, { required: ['sensorType'] }] } },
+      then: {
+        not: {
+          anyOf: [
+            { properties: { host: true }, required: ['host'] },
+            { properties: { sensorType: true }, required: ['sensorType'] },
+          ],
+        },
+      },
     },
     // Only a probe branch can be claimed by a probe. Rejecting it here means no handler has to.
     {
       if: { properties: { kind: { enum: ['group', 'device', 'sensor'] } }, required: ['kind'] },
-      then: { not: { required: ['gid'] } },
+      then: { not: { properties: { gid: true }, required: ['gid'] } },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { not: { required: ['sensorType'] } },
+      then: { not: { properties: { sensorType: true }, required: ['sensorType'] } },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { not: { required: ['host'] } },
+      then: { not: { properties: { host: true }, required: ['host'] } },
     },
   ],
 } as const;
@@ -601,27 +611,34 @@ export const treeNodeSchema = {
   allOf: [
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { required: ['host'] },
+      then: { properties: { host: true }, required: ['host'] },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { required: ['sensorType'] },
+      then: { properties: { sensorType: true }, required: ['sensorType'] },
     },
     {
       if: { properties: { kind: { enum: ['probe', 'group'] } }, required: ['kind'] },
-      then: { not: { anyOf: [{ required: ['host'] }, { required: ['sensorType'] }] } },
+      then: {
+        not: {
+          anyOf: [
+            { properties: { host: true }, required: ['host'] },
+            { properties: { sensorType: true }, required: ['sensorType'] },
+          ],
+        },
+      },
     },
     {
       if: { properties: { kind: { enum: ['group', 'device', 'sensor'] } }, required: ['kind'] },
-      then: { not: { required: ['gid'] } },
+      then: { not: { properties: { gid: true }, required: ['gid'] } },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { not: { required: ['sensorType'] } },
+      then: { not: { properties: { sensorType: true }, required: ['sensorType'] } },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { not: { required: ['host'] } },
+      then: { not: { properties: { host: true }, required: ['host'] } },
     },
   ],
 } as const;
@@ -701,22 +718,36 @@ export const updateObjectSchema = {
   allOf: [
     {
       if: { properties: { kind: { enum: ['root', 'probe', 'group'] } }, required: ['kind'] },
-      then: { not: { anyOf: [{ required: ['host'] }, { required: ['params'] }] } },
+      then: {
+        not: {
+          anyOf: [
+            { properties: { host: true }, required: ['host'] },
+            { properties: { params: true }, required: ['params'] },
+          ],
+        },
+      },
     },
     {
       if: {
         properties: { kind: { enum: ['root', 'group', 'device', 'sensor'] } },
         required: ['kind'],
       },
-      then: { not: { required: ['gid'] } },
+      then: { not: { properties: { gid: true }, required: ['gid'] } },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { not: { required: ['params'] } },
+      then: { not: { properties: { params: true }, required: ['params'] } },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { not: { anyOf: [{ required: ['host'] }, { required: ['ipVersion'] }] } },
+      then: {
+        not: {
+          anyOf: [
+            { properties: { host: true }, required: ['host'] },
+            { properties: { ipVersion: true }, required: ['ipVersion'] },
+          ],
+        },
+      },
     },
   ],
 } as const;

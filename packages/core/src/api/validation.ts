@@ -11,6 +11,13 @@ import { patternMessageKeyword, patternMessageOf } from '@ms/shared';
  * a schema carrying `x-patternMessage` at all.
  */
 export const API_VALIDATOR_OPTIONS = {
+  // **A route schema Ajv cannot read whole stops the build (`P-383`)**, as every other Ajv in the
+  // source does since `P-379`. Ajv's default already refuses an unknown keyword, so a mistyped
+  // one never compiled, but it only logs a keyword with no type to apply to and says nothing of a
+  // `required` naming a property its schema does not declare. Strict refuses both, so
+  // `fastify.ready()` rejects and the server never listens with such a schema. What a route
+  // schema may carry beyond Ajv's own keywords is `apiSchemaKeywords()`, below.
+  strict: true,
   coerceTypes: true,
   allErrors: true,
   removeAdditional: false,
@@ -27,11 +34,27 @@ export const API_VALIDATOR_OPTIONS = {
   // leaves this process, because `requestProblem` copies out only the fields Ajv gives without
   // `verbose`, and a 400 is never logged (`logIfUnexpected` starts at 500).
   verbose: true,
-  // Declared as the sensor catalogue declares it (`U-53`): strict mode then admits the keyword
-  // and refuses one that is not a non-empty string, where an unknown keyword would refuse the
-  // route's schema outright.
-  keywords: [patternMessageKeyword()],
+  keywords: apiSchemaKeywords(),
 };
+
+/**
+ * The keywords the API's schemas carry that are not Ajv's own (`P-383`): `x-patternMessage`,
+ * declared as the sensor catalogue declares it (`U-53`), so strict mode admits it and refuses one
+ * that is not a non-empty string, where an unknown keyword would refuse the schema outright.
+ *
+ * **The only one.** The annotations the schemas use besides — `description`, `default` and
+ * `writeOnly` — are Ajv's own, and none uses OpenAPI's `example`, `nullable` or
+ * `discriminator`, which would each have to be declared here.
+ *
+ * A fresh list on each call, so no two Ajvs hold one definition object; shared by the request
+ * validator and every test-side Ajv that compiles a route's response schema, so
+ * that each refuses what the other refuses. The response schemas themselves are compiled by
+ * `fast-json-stringify`'s own Ajv, which turns `strictSchema` off and is not configurable here;
+ * `api-strict-schemas.test.ts` compiles each one under strict instead.
+ */
+export function apiSchemaKeywords(): ReturnType<typeof patternMessageKeyword>[] {
+  return [patternMessageKeyword()];
+}
 
 /**
  * One refusal as a 400's `details.problems` carries it: the fields Ajv gives an error without

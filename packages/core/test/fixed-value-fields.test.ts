@@ -1,6 +1,5 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it, mock } from 'node:test';
-import { Ajv } from 'ajv';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   DEVICE_KINDS,
@@ -102,6 +101,7 @@ import {
   silentLogger,
   type ScratchDatabase,
 } from './support/database.js';
+import { responseSchemaAjv } from './support/response-schema-ajv.js';
 
 /**
  * Fields with a fixed set of values say which values (`P-335`, `P-342`).
@@ -177,7 +177,8 @@ async function serve(
 
     const schema = (declared as Record<string, object> | undefined)?.['200'];
     assert.ok(schema !== undefined, `${route} declares its 200`);
-    const ajv = new Ajv({ strict: false, validateFormats: false });
+    // Strict, as the server reads a schema (`P-383`), so a mistyped keyword here fails.
+    const ajv = responseSchemaAjv();
     for (const shared of Object.values(app.getSchemas())) ajv.addSchema(shared as object);
     const validate = ajv.compile(schema);
     return {
@@ -1551,8 +1552,14 @@ describe('building the object routes', () => {
 
   it('would print one for each union type without allowUnionTypes, so the listening works', async () => {
     // The control: the same build with only that option off is heard, so the empty list above
-    // is the option's doing and not a capture that hears nothing.
-    const heard = await strictWarnings({ ...API_VALIDATOR_OPTIONS, allowUnionTypes: false });
+    // is the option's doing and not a capture that hears nothing. Since `P-383` the server's
+    // options are strict, which would refuse the first union outright rather than log each, so
+    // the control sets type checks back to logging to hear both.
+    const heard = await strictWarnings({
+      ...API_VALIDATOR_OPTIONS,
+      allowUnionTypes: false,
+      strictTypes: 'log',
+    });
     assert.ok(
       heard.some((line) => line.includes('allowUnionTypes') && line.includes('#/properties/tag')),
       heard.join('\n'),

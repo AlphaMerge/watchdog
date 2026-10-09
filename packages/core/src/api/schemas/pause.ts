@@ -110,7 +110,12 @@ export const pauseRequestSchema = {
   },
   // A duration and a moment are two answers to one question, and a window's start needs an end
   // — an outage with no end is not a window, it is a pause somebody will forget about.
-  allOf: [{ not: { required: ['minutes', 'until'] } }, { not: { required: ['minutes', 'from'] } }],
+  // Each name a `not` requires is declared `true`, which constrains nothing, because strict mode
+  // refuses a `required` its own schema does not declare (`P-383`).
+  allOf: [
+    { not: { properties: { minutes: true, until: true }, required: ['minutes', 'until'] } },
+    { not: { properties: { minutes: true, from: true }, required: ['minutes', 'from'] } },
+  ],
   dependencies: { from: ['until'] },
 } as const;
 
@@ -128,7 +133,7 @@ export const acknowledgeRequestSchema = {
     until: { type: 'string', minLength: 1, maxLength: 64 },
     message: { type: 'string', maxLength: 500 },
   },
-  not: { required: ['minutes', 'until'] },
+  not: { properties: { minutes: true, until: true }, required: ['minutes', 'until'] },
 } as const;
 
 export const acknowledgementViewSchema = {

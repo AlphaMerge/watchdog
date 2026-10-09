@@ -144,9 +144,17 @@ const fixture = {
                   from: { type: 'string' },
                   message: { type: 'string' },
                 },
+                // The second as the pause body has it since `P-383`, its names declared `true`
+                // for strict mode; the third declares one with a type, which does constrain.
                 allOf: [
                   { not: { required: ['minutes', 'until'] } },
-                  { not: { required: ['minutes', 'from'] } },
+                  {
+                    not: {
+                      properties: { minutes: true, from: true },
+                      required: ['minutes', 'from'],
+                    },
+                  },
+                  { not: { properties: { message: { type: 'string' } }, required: ['message'] } },
                 ],
                 dependencies: { from: ['until'] },
               },
@@ -385,6 +393,19 @@ describe('the API reference renderer', () => {
     rowFor('from');
     assert.ok(page.includes('- `from` requires `until`'), page);
     assert.ok(page.includes('- `minutes` and `from` are not allowed together'), page);
+  });
+
+  it('reads a `properties` that only declares its required names as saying nothing (P-383)', () => {
+    // The `true`s are there for strict mode, so the rule reads as it did without them; a
+    // `properties` that constrains is still shown raw, so this is not a renderer that drops them.
+    assert.ok(page.includes('- `minutes` and `until` are not allowed together'), page);
+    assert.ok(page.includes('- `minutes` and `from` are not allowed together'), page);
+    assert.ok(
+      page.includes(
+        '- `{"not":{"properties":{"message":{"type":"string"}},"required":["message"]}}`',
+      ),
+      page,
+    );
   });
 
   it('shows a keyword it has no prose for, rather than dropping it', () => {

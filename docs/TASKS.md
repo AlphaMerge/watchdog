@@ -14155,7 +14155,7 @@ because each is a decision rather than a defect:
       when** at most one row can be local (or the choice is made by the live link), with a test
       of two candidate rows.
 
-- [ ] **P-383 — Fastify's request validator still runs Ajv's lax default** · M · P-379 · Found
+- [x] **P-383 — Fastify's request validator still runs Ajv's lax default** · M · P-379 · Found
       2026-10-09 in `P-379`. `API_VALIDATOR_OPTIONS` (`core/src/api/validation.ts`) sets no
       `strict`, so a route schema's keyword with no type is logged and accepted and an undeclared
       `required` passes silently. Every other Ajv in the source now runs strict. **Done when** the
@@ -14163,6 +14163,53 @@ because each is a decision rather than a defect:
       annotations it needs), every route schema compiles under it, the two test-only
       `strict: false` Ajvs (`fixed-value-fields`, `probe-registry`) do the same, and a mistyped
       keyword in a route schema fails a test.
+
+      **P-383 outcome. `API_VALIDATOR_OPTIONS` runs `strict: true`; every route of a full core,
+      every v2 route with it, registers under it; and what each changed schema accepts or refuses
+      is unchanged, with the same problems.** No protocol or migration change.
+      - **What strict refused, and the fix.** Five request schemas, all `strictRequired`, none a
+        keyword: `ms:createObject`, `ms:treeNode` and `ms:updateObject` (a `required` inside each
+        `then`, `not` and `not.anyOf`), the pause body (`allOf` of two `not`s) and the
+        acknowledge body (a `not`). As in `P-379`, each name is declared `true` beside its
+        `required`. `true` constrains nothing, so nothing a client sends is answered differently.
+        No `strictTypes` refusal: every request schema already says its types.
+      - **Keywords.** Only `x-patternMessage` needed declaring. The annotations the schemas use
+        (`description`, `default`, `writeOnly`) are Ajv's own, and none uses `example`,
+        `nullable` or `discriminator`. The list is `apiSchemaKeywords()` in `validation.ts`, used
+        by the validator and the test-side Ajvs alike.
+      - **Response schemas** do not go through this Ajv. Fastify serialises with
+        `fast-json-stringify`, which builds its own Ajv (for `if`/`anyOf` only) with
+        `strictSchema: false` and `validateSchema: false` forced after any options given, so a
+        mistyped keyword in a response schema is ignored at registration whatever is set. They
+        are handled in a test instead: every response schema and every shared schema of the full
+        surface is compiled strict with the same keywords (all pass), and a `maxLenght` in a
+        response schema is found by that walk.
+      - **Test-only Ajvs.** `fixed-value-fields` and `probe-registry` now use
+        `test/support/response-schema-ajv.ts`: strict, `apiSchemaKeywords()`, `allowUnionTypes`,
+        formats unchecked as before. The `P-363` control that heard a warning per union type sets
+        `strictTypes: 'log'` beside `allowUnionTypes: false`, since strict would refuse the first.
+      - **The API reference** is unchanged: its renderer read `{ properties: { host: true },
+        required: ['host'] }` as raw JSON, so it now reads a `properties` that only declares
+        its own required names as `true` as saying nothing; one that constrains is still shown
+        raw (`api-reference-render.test.ts`). `--check` passes.
+      - **Tests** (`api-strict-schemas.test.ts`). The full surface (`v2: 'stubbed'`) builds under
+        the options, naming the five routes; the response walk and its control; and a route
+        schema with a mistyped keyword (body, querystring, params), a keyword with no type, or an
+        undeclared `required` fails `ready()` with Ajv's words. The control: under Ajv's default
+        the mistyped keyword is refused too (`strictSchema` defaults on, so that never compiled),
+        and the other two register, so those two are what this changes. The five schemas, and the
+        same with the `true`s taken out compiled as before, answer 38 bodies the same: validity,
+        the coerced body and each problem as a 400 carries it.
+      - **Mutations** (each restored byte for byte, dist rebuilt). `strict: false`: 6 of 48
+        failed (the option, the four refusals, the comparison's control). `strict` left to Ajv's
+        default: 4 (the option, the untyped keyword, the undeclared `required`, the control); the
+        mistyped-keyword tests pass there, as Ajv's default refuses one too. One `then` in
+        `ms:createObject` undeclared again: the surface no longer builds, so this file and
+        `candidate-surface` cancel all 52 tests behind their hooks. The test-side Ajv
+        `strict: false`: 1 (the response walk's control). The renderer reading any `properties`
+        as declaring only: 1; reading none (as before): 2, and `--check` fails.
+      - **Not done.** `fast-json-stringify`'s own Ajv stays lax (not configurable); the walk
+        above covers it in tests only.
 
 - [ ] **P-384 — the lookup catalogue's problem list repeats a line** · XS · P-379 · Found
       2026-10-09 in `P-379`. A missing `state` is said twice, and since `P-379` a non-array

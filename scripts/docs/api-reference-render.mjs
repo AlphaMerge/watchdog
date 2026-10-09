@@ -354,8 +354,19 @@ export function renderApiReference(doc, options = {}) {
   const names = (keys) => keys.map((key) => code(key));
   const andList = (items) =>
     items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+  // A `properties` that only declares, as `true`, names its `required` lists says nothing more:
+  // it is there because strict mode refuses a `required` its own schema does not declare (`P-383`).
+  const declaresOnly = (schema) =>
+    schema.properties === undefined ||
+    (typeof schema.properties === 'object' &&
+      schema.properties !== null &&
+      Object.entries(schema.properties).every(
+        ([key, value]) => value === true && schema.required.includes(key),
+      ));
   const isRequiredOnly = (schema) =>
-    Array.isArray(schema?.required) && Object.keys(schema).every((key) => key === 'required');
+    Array.isArray(schema?.required) &&
+    Object.keys(schema).every((key) => key === 'required' || key === 'properties') &&
+    declaresOnly(schema);
 
   function condition(schema) {
     const parts = Object.entries(schema.properties ?? {}).map(([key, property]) => {
