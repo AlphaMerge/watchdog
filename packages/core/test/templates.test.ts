@@ -393,6 +393,48 @@ describe('notification methods', () => {
     ]);
     assert.deepEqual(registry.secretsOf('fine'), ['token']);
   });
+
+  it('refuses a pattern with no sentence, and a sentence with no pattern (P-372)', () => {
+    // As the sensor catalogue refuses one (`U-53`): `validate` says the sentence beside a pattern,
+    // so a pattern without one would answer an operator with the expression.
+    const withSettings = (properties: Record<string, unknown>): MethodRegistry =>
+      new MethodRegistry([
+        {
+          id: 'patterned',
+          name: 'Patterned',
+          description: '',
+          usesRecipients: false,
+          summarisable: false,
+          placeholderFields: [],
+          secretDestinations: {},
+          settingsSchema: { type: 'object', properties },
+          describe: () => '',
+        },
+      ]);
+    assert.throws(
+      () => withSettings({ room: { type: 'string', pattern: '^#' } }),
+      /method patterned gives "room" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () => withSettings({ tags: { type: 'object', propertyNames: { pattern: '^[a-z]+$' } } }),
+      /method patterned gives "tags\.propertyNames" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () => withSettings({ room: { type: 'string', 'x-patternMessage': 'must start with #' } }),
+      /method patterned gives "room" x-patternMessage without a pattern/,
+    );
+    const said = withSettings({
+      room: { type: 'string', pattern: '^#', 'x-patternMessage': 'must start with #' },
+    });
+    assert.throws(
+      () => said.validate('patterned', { room: 'general-SECRET' }),
+      (error: unknown) => {
+        assert.ok(error instanceof MethodError);
+        assert.deepEqual(error.details.problems, ['/room must start with #']);
+        return true;
+      },
+    );
+  });
 });
 
 // -------------------------------------------------------------------------------------------

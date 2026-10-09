@@ -157,7 +157,7 @@ An object's configuration history, newest first: who changed it, when, and what 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `before` | query | string, matches `^[0-9]{1,19}$` |  |
+| `before` | query | string, matches `^[0-9]{1,19}$` (must be an audit entry id, 1 to 19 digits, such as the last page’s nextBefore) |  |
 | `limit` | query | integer, 1–500 | default `100` |
 | `id` | path | integer, 1–9007199254740991 | **required** |
 
@@ -177,7 +177,7 @@ Configuration history across the whole installation, newest first — the object
 | `actorRef` | query | string, at most 64 characters |  | One specific actor — a user id, a token id, a component name. "Everything this person did" is the question an audit log gets opened for, and `actorKind` cannot answer it: it narrows to all users, which during an incident is everybody. Pair it with `actorKind`, because an id is only unique within a kind. |
 | `from` | query | string, at most 64 characters |  |  |
 | `to` | query | string, at most 64 characters |  |  |
-| `before` | query | string, matches `^[0-9]{1,19}$` |  |  |
+| `before` | query | string, matches `^[0-9]{1,19}$` (must be an audit entry id, 1 to 19 digits, such as the last page’s nextBefore) |  |  |
 | `limit` | query | integer, 1–500 | default `100` |  |
 
 **200** { items, nextBefore }
@@ -461,8 +461,8 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 | `limits.warningMessage` | string, at most 500 characters |  |  |
 | `lookupId` | string, 1–100 characters | nullable |  |
 | `processing` | object |  |  |
-| `processing.scaleMul` | string, at most 40 characters, matches `^-?[0-9]+(\.[0-9]+)?$` |  |  |
-| `processing.scaleDiv` | string, at most 40 characters, matches `^-?[0-9]+(\.[0-9]+)?$` |  |  |
+| `processing.scaleMul` | string, at most 40 characters, matches `^-?[0-9]+(\.[0-9]+)?$` (must be a decimal number in digits, with an optional leading minus sign and decimal point, such as 8, 0.001 or -2.5) |  |  |
+| `processing.scaleDiv` | string, at most 40 characters, matches `^-?[0-9]+(\.[0-9]+)?$` (must be a decimal number in digits, with an optional leading minus sign and decimal point, such as 8, 0.001 or -2.5) |  |  |
 | `processing.decimals` | integer, 0–10 | nullable |  |
 | `processing.spikeMin` | number | nullable |  |
 | `processing.spikeMax` | number | nullable |  |
@@ -4112,7 +4112,7 @@ one of 4 shapes, by `kind`
 | `comments` | string, at most 10000 characters |  |  |
 | `host` | string, 1–255 characters |  |  |
 | `ipVersion` | `auto` · `v4` · `v6` |  |  |
-| `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` |  |  |
+| `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` (must be a sensor type id: two or more parts separated by dots, in lowercase letters and digits, with dashes allowed after the first dot, such as snmp.traffic or exe.script-advanced) |  |  |
 | `params` | object |  |  |
 | `gid` | string, 1–128 characters | nullable | Binds this probe branch to a connected probe. R-01 replaces setting it by hand with an enrolment flow; until then it is how a probe is told which subtree it owns. |
 
@@ -4314,11 +4314,11 @@ one of 4 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `id` | string, matches `^[A-Za-z0-9_-]{1,40}$` | **required** |  |
+| `id` | string, matches `^[A-Za-z0-9_-]{1,40}$` (must be 1 to 40 letters, digits, "-" or "_") | **required** |  |
 | `name` | string, 1–100 characters | **required** |  |
 | `rule` | object | nullable |  |
 | `rule.roots` | integer[], at most 50 items, each at least 1 |  |  |
-| `rule.types` | string[], at most 50 items, each matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` |  |  |
+| `rule.types` | string[], at most 50 items, each matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` (must be a sensor type id: two or more parts separated by dots, in lowercase letters and digits, with dashes allowed after the first dot, such as snmp.traffic or exe.script-advanced) |  |  |
 | `rule.tags` | string[], at most 50 items, each 1–100 characters |  |  |
 | `rule.states` | (`unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`)[], at most 8 items |  |  |
 | `children` | [ms:libraryNode](#schema-ms-librarynode)[], at most 200 items |  |  |
@@ -4858,7 +4858,7 @@ one of 3 shapes, by `kind`
 | `comments` | string, at most 10000 characters |  |  |
 | `host` | string, 1–255 characters |  |  |
 | `ipVersion` | `auto` · `v4` · `v6` |  |  |
-| `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` |  |  |
+| `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` (must be a sensor type id: two or more parts separated by dots, in lowercase letters and digits, with dashes allowed after the first dot, such as snmp.traffic or exe.script-advanced) |  |  |
 | `params` | object |  |  |
 | `gid` | string, 1–128 characters | nullable |  |
 

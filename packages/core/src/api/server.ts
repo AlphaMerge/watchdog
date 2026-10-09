@@ -23,6 +23,7 @@ import type { HistoryService } from '../timeseries/history.js';
 import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError, type HttpError } from './errors.js';
+import { API_VALIDATOR_OPTIONS, requestProblem, sayRequestRefusal } from './validation.js';
 import { registerAuthentication } from './authentication.js';
 import {
   INSTALLATION,
@@ -302,26 +303,8 @@ export interface ApiServerOptions {
   streamLimits?: Partial<StreamLimits>;
 }
 
-/**
- * What Fastify's validator compiler builds its Ajv with, for every route's body, querystring,
- * params and headers alike (`@fastify/ajv-compiler` keeps one instance per set of options).
- *
- * Exported so that a test building routes on a bare Fastify validates as the server does
- * (`P-363`): a bare `Fastify()` has Ajv's defaults, which coerce differently and print a
- * strict-mode warning for every union type each time the routes are built.
- */
-export const API_VALIDATOR_OPTIONS = {
-  coerceTypes: true,
-  allErrors: true,
-  removeAdditional: false,
-  useDefaults: true,
-  // **`type: ['string', 'array']` is meant (`P-337`).** A repeatable query parameter (`tag`,
-  // `effective`) is a string for one occurrence and an array for several, and the handler reads
-  // both through `asArray`. Without this, strict mode logs "use allowUnionTypes" each time the
-  // object routes are built, once for each. It only lets the schema compile quietly: Ajv
-  // validates a type list the same with it as without, and OpenAPI 3.1 carries the list as it is.
-  allowUnionTypes: true,
-} as const;
+// Where a test building routes on a bare Fastify has always imported it from (`P-363`).
+export { API_VALIDATOR_OPTIONS } from './validation.js';
 
 /**
  * The HTTP API.
@@ -468,6 +451,8 @@ export class ApiServer {
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
       ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } },
+      // The 400's `message` says a failed pattern's sentence rather than its expression (`P-372`).
+      schemaErrorFormatter: sayRequestRefusal,
       // A request id per request, so every log line from a handler ties back to it.
       genReqId: () => newCorrelationId(),
       // Whose `X-Forwarded-For` and `X-Forwarded-Proto` to believe (`A-36`). Nobody's by default,
@@ -731,7 +716,9 @@ export class ApiServer {
                   code: 'OBJECT_INVALID',
                   message: error.message,
                   context: { phase: 'validate-request' },
-                  details: { problems: error.validation },
+                  // Copied field by field (`P-372`): the validator runs `verbose`, so each error
+                  // also holds the refused value, which a 400 never echoes.
+                  details: { problems: error.validation.map(requestProblem) },
                   correlationId: request.id,
                 },
               },

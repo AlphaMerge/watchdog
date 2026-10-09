@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from 'ajv';
 import { AppError } from '@ms/shared';
+import { PATTERN_MESSAGE, patternMessageOf, unsaidPatterns } from '@ms/sensors';
 
 /**
  * How many arguments a program template may carry, split the way the form shows them.
@@ -133,15 +134,6 @@ const HEADER_NAME = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$";
  */
 const HEADER_VALUE = '^[\\t\\x20-\\x7E\\x80-\\xFF]*$';
 
-/** A pattern's refusal in words, where the pattern itself would tell an operator nothing. */
-const PATTERN_WORDS: ReadonlyMap<string, string> = new Map([
-  [HEADER_NAME, "is not a header name: letters, digits and !#$%&'*+-.^_`|~ only"],
-  [
-    HEADER_VALUE,
-    'cannot be sent as a header value: it has a line break or a character above U+00FF',
-  ],
-]);
-
 /**
  * A generic HTTP action (`CAPABILITIES.MD §5.2`) — the method that covers most integrations.
  *
@@ -182,8 +174,19 @@ export const WEBHOOK_METHOD: NotificationMethod = {
         writeOnly: true,
         // Refused here rather than at every delivery (`N-19`): a header Node will not send
         // failed each attempt, retried, and gave up, and the template looked fine until then.
-        propertyNames: { pattern: HEADER_NAME },
-        additionalProperties: { type: 'string', maxLength: 2000, pattern: HEADER_VALUE },
+        // Each pattern's refusal in words (`P-372`), where the pattern itself would tell an
+        // operator nothing; `validate` says it, and `GET /notification-methods` carries it.
+        propertyNames: {
+          pattern: HEADER_NAME,
+          'x-patternMessage': "is not a header name: letters, digits and !#$%&'*+-.^_`|~ only",
+        },
+        additionalProperties: {
+          type: 'string',
+          maxLength: 2000,
+          pattern: HEADER_VALUE,
+          'x-patternMessage':
+            'cannot be sent as a header value: it has a line break or a character above U+00FF',
+        },
         default: {},
       },
       timeoutMs: { type: 'integer', minimum: 100, maximum: 120_000, default: 10_000 },
@@ -330,7 +333,16 @@ const METHODS: readonly NotificationMethod[] = [
 /** Subschema keywords the redactor cannot follow — the same list `SensorCatalogue` refuses. */
 const COMBINATORS = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'items'] as const;
 
-const ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true });
+// `verbose` puts a failed pattern's schema on its error, which is where its `x-patternMessage` is
+// read (`P-372`); it puts the value there too, and `validate` reads only the path, the property
+// name and the message.
+const ajv = new Ajv({
+  allErrors: true,
+  strict: false,
+  useDefaults: true,
+  verbose: true,
+  keywords: [{ keyword: PATTERN_MESSAGE, metaSchema: { type: 'string', minLength: 1 } }],
+});
 
 /**
  * The methods this build knows, the one place a template's settings are checked, and the one
@@ -353,6 +365,17 @@ export class MethodRegistry {
       // that quietly comes back, so finding one is a startup failure rather than a surprise.
       const writeOnly = collectWriteOnly(method.settingsSchema, method.id);
       checkDestinations(method, writeOnly);
+      // A pattern that would be refused in its own expression, as the sensor catalogue refuses
+      // one (`U-53`, `P-372`): `validate` and the template form say the sentence instead.
+      const [unsaid] = unsaidPatterns(method.settingsSchema);
+      if (unsaid !== undefined) {
+        const where = unsaid.path === '' ? 'its settings' : `"${unsaid.path}"`;
+        throw new Error(
+          unsaid.fault === 'unsaid'
+            ? `method ${method.id} gives ${where} a pattern without ${PATTERN_MESSAGE}`
+            : `method ${method.id} gives ${where} ${PATTERN_MESSAGE} without a pattern`,
+        );
+      }
       this.#entries.set(method.id, {
         method,
         validate: ajv.compile(method.settingsSchema),
@@ -395,10 +418,8 @@ export class MethodRegistry {
         .map((error) => {
           const at = error.instancePath === '' ? 'settings' : error.instancePath;
           const name = error.propertyName === undefined ? '' : ` "${error.propertyName}"`;
-          const pattern: unknown =
-            error.keyword === 'pattern' ? error.params['pattern'] : undefined;
-          const words = typeof pattern === 'string' ? PATTERN_WORDS.get(pattern) : undefined;
-          return `${at}${name} ${words ?? error.message ?? 'is invalid'}`;
+          // A pattern's own sentence (`P-372`), read from the schema and never from `data`.
+          return `${at}${name} ${patternMessageOf(error) ?? error.message ?? 'is invalid'}`;
         });
       throw new MethodError(
         `this ${methodId} template cannot be saved`,

@@ -1216,6 +1216,7 @@ describe('a pattern says in words what it wants (U-53)', () => {
       free: 'ab',
     });
     assert.equal(result.valid, false);
+    // Each problem names its keyword too (`P-358`), which landed beside this test.
     assert.deepEqual(result.problems, [
       { path: '/key', message: SAID, keyword: 'pattern' },
       { path: '/extract/1/key', message: 'must be a word', keyword: 'pattern' },

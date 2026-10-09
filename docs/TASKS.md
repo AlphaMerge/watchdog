@@ -13338,12 +13338,27 @@ because each is a decision rather than a defect:
       - **Not done.** `probe-registry.test.ts` and `hardening.test.ts` build bare `Fastify()`
         too, for routes with no union type, and were not changed.
 
-- [ ] **P-364 — two test files build routes with Ajv's defaults** · XS · P-363 · Found 2026-10-09
+- [x] **P-364 — two test files build routes with Ajv's defaults** · XS · P-363 · Found 2026-10-09
       in `P-363`. `probe-registry.test.ts` and `hardening.test.ts` build a bare `Fastify()`, so
       their routes validate differently from the server's (`API_VALIDATOR_OPTIONS`); nothing
       prints today because their routes have no union types. **Done when** both build with
       `API_VALIDATOR_OPTIONS`, and a grep finds no other bare `Fastify()` in core tests that
       registers API routes.
+
+      **P-364 outcome. Both build with `API_VALIDATOR_OPTIONS`; no other core test builds routes
+      on Ajv's defaults.** Test-only.
+      - **Changed.** `probe-registry.test.ts`'s two `GET /probes` apps and `hardening.test.ts`'s
+        `build`, where a test's own options still win.
+      - **The grep.** A grep of every package's tests for `Fastify(` finds these, the two in
+        `fixed-value-fields.test.ts` (`P-363`, already with the options), and one in
+        `hardening.test.ts` that only registers the CSRF guard to see it refused at
+        registration. That one registers no route and validates nothing, so it was left alone.
+      - **Why it matters now.** Since `P-372` the options also declare `x-patternMessage`, so a
+        route module with a pattern built on a bare Fastify would refuse its schema outright
+        ("unknown keyword"). It would not just validate differently.
+      - **Mutation.** None that a test could see: these routes have no union type and no
+        pattern, so their answers are the same either way. The probe-registry and hardening
+        suites pass with the options.
 
 - [ ] **P-365 — a repeatable filter takes the same value twice** · XS · P-362 · Found 2026-10-09
       in `P-362`. `category`, `actorKind`, `kind`, `tag` and `effective` bound their count with
@@ -13469,10 +13484,30 @@ because each is a decision rather than a defect:
       when** `P-331`'s boot test and `P-333`'s policy, whichever lands first, cover it too, or
       this is closed by one of them with a line in its outcome.
 
-- [ ] **P-370 — the audit of a map background keeps its media type as a string** · XS · P-361 ·
+- [x] **P-370 — the audit of a map background keeps its media type as a string** · XS · P-361 ·
       Found 2026-10-09 in `P-361`. `MapBackgroundAudit.mediaType` in `objects/audit.ts` is
       `string` where `ImageMediaType` now exists. **Done when** it is typed from
       `IMAGE_MEDIA_TYPES`, with whatever schema serves it enumerated as `P-351` did.
+
+      **P-370 outcome. `MapBackgroundAudit.mediaType` is an `ImageMediaType`. The schema that
+      serves it is left open on purpose, and a test pins that.** No protocol, migration or
+      validation change.
+      - **The type.** The value is copied from the stored background (`backgroundAuditOf` in
+        `maps/service.ts`), whose `mediaType` `P-361` typed from `IMAGE_MEDIA_TYPES`, so nothing
+        else changed to compile.
+      - **No schema enumerated.** No schema serves it as a field of its own. It reaches a client
+        only as `after` (or `before`) of a `map.background.mediaType` change in an audit entry's
+        `diff`. `ms:auditEntry` declares those values `{}` for every field, as its header says.
+        An entry is also history, kept past the build that wrote it, so an enum there would
+        promise readers that a row from another build's list cannot occur. The type holds the
+        writer; the diff stays open for the reader.
+      - **Test** (`fixed-value-fields.test.ts`):
+        - A compile-time check that the field's type is `ImageMediaType`, both ways round.
+        - For each media type, the diff `DatabaseAuditSink` writes for a background set (read
+          off its INSERT) is served through `GET /audit` and validates against the route's own
+          schema.
+        - `image/gif`, which this build never writes, is served as recorded and validates too.
+      - **Mutation.** The field widened back to `string` fails to compile, at the check.
 
 - [ ] **P-371 — should a trigger's kind be refused at validation?** · XS · P-352 · Found
       2026-10-09 in `P-352`. `ms:triggerInput.kind` is a free string the service refuses with
@@ -13480,11 +13515,90 @@ because each is a decision rather than a defect:
       put those ids in the OpenAPI document. **Done when** decided and, if adopted, done as a
       validation change with a route test.
 
-- [ ] **P-372 — the core's own schemas answer a pattern with the expression** · XS · U-53 · Found
+- [x] **P-372 — the core's own schemas answer a pattern with the expression** · XS · U-53 · Found
       2026-10-09 in `U-53`. `scaleMul` and `scaleDiv` in `api/schemas/objects.ts`, the audit
       `before` cursor, the library node id and notification header names still answer "must
       match pattern …". **Done when** the API's Ajv knows `x-patternMessage`, each of those
       patterns carries one, the 400 says it, and a test refuses an API schema pattern without one.
+
+      **P-372 outcome. Every `pattern` in the core's API schemas carries an `x-patternMessage`,
+      and a 400 says it in place of the expression. This changes the wording of 400 messages**:
+      a client matching on *must match pattern "…"* in `error.message` or in
+      `details.problems[].message` now gets the sentence (`params.pattern` still holds the
+      expression). No protocol or migration change, and no request accepted or refused differently.
+      - **The validator** (`api/validation.ts`, new; `API_VALIDATOR_OPTIONS` moved there and still
+        exported from `server.ts`). Its Ajv declares the keyword through the `keywords` option, as
+        the sensor catalogue does (`U-53`), so strict mode admits it on every route and a bare
+        Fastify given these options does too. It runs `verbose: true`, which puts the failing
+        keyword's schema on each error, and the message is read from there with the sensors
+        package's `patternMessageOf` (exported, with `PATTERN_MESSAGE`, `unsaidPatterns` and
+        `SENSOR_TYPE_ID_MESSAGE`). `ApiServer` sets Fastify's `schemaErrorFormatter` to
+        `sayRequestRefusal`, so `error.message` reads `body/processing/scaleMul must be a decimal
+        number …`, in Fastify's own spelling.
+      - **No request value reaches a 400 or a log.** `verbose` also puts the refused value on each
+        error as `data`, with `schema` and `parentSchema`. The error handler used to send
+        `error.validation` as it was, so it now sends `requestProblem` of each, which copies only
+        the fields Ajv gives without `verbose` (`instancePath`, `schemaPath`, `keyword`, `params`,
+        `propertyName` and `message`): the 400's shape is unchanged. The message comes from the
+        schema alone. `params` and `propertyName` carry the schema's words, and the name of a key
+        the client sent when that key was refused (`additionalProperties`, `propertyNames`), as
+        before. A 400 is not logged (`logIfUnexpected` starts at 500).
+      - **The sentences.** `scaleMul` and `scaleDiv`: one schema, *must be a decimal number in
+        digits, with an optional leading minus sign and decimal point, such as 8, 0.001 or -2.5*.
+        The audit `before` (both routes): one schema, *must be an audit entry id, 1 to 19 digits,
+        such as the last page's nextBefore*. A library node's id: `NODE_ID_MESSAGE`, which
+        `validateNodes` now says too. A sensor type id (`ms:createObject`, the tree-node schema,
+        a library rule's `types[]`): `SENSOR_TYPE_ID_MESSAGE` beside `SENSOR_TYPE_ID.source`; the
+        two object schemas had their own copy of the expression, and now read the constant.
+      - **Notification header names and values.** These are a method's settings, not a route's
+        schema, and already answered in words through a map keyed by the expression. That map is
+        gone. The sentences are `x-patternMessage` on the schema, which `GET
+        /notification-methods` now carries, and `MethodRegistry.validate` reads them the same way,
+        with its own Ajv running `verbose` and reading only the path, the property name and the
+        message. The messages are word for word what they were. The registry refuses at load a
+        settings pattern without a sentence, and a sentence without a pattern, as the catalogue
+        refuses them in a type.
+      - **The web.** No form validates against a core API schema with a pattern. Its schema forms
+        draw sensor parameters, trigger settings and method settings. The only patterned method
+        settings are `secretHeaders`, which the form draws as JSON, so `validate.ts` (`U-53`)
+        already says any sentence a string field carries. Nothing changed there.
+      - **The reference.** The renderer says the sentence in brackets after the expression:
+        ``matches `^[0-9]{1,19}$` (must be an audit entry id, …)``. In brackets because the
+        sentence may hold the commas the constraints are joined with. The keyword is not printed
+        raw as an unknown one. `api-reference.md` is regenerated: 8 lines, the patterns above, and
+        `--check` is current.
+      - **Tests.**
+        - `api-pattern-messages.test.ts` (new) walks every route a full build registers. The
+          surface harness's `onRoute` now records each route's schema and its scope's shared
+          schemas. The walk covers the body, querystring, params, headers, each response, and
+          every shared schema reachable by `$ref`. Using the sensors package's `unsaidPatterns`,
+          it refuses a pattern with no sentence and a sentence with no pattern. A control
+          strips every sentence and finds each place named above, so the empty list is the
+          sentences' doing.
+        - The same file checks the 400 for the scaling factors, a create's `sensorType`, the
+          cursor on both audit routes, and a library node's id and rule type. Each says the
+          sentence, in the message and in its problem. None contains the refused value (a
+          canary), "must match pattern", or a field beyond the non-verbose six. A `limit`
+          beside it keeps Ajv's words.
+        - `templates.test.ts`: the registry's two refusals at load, and a sentence said by
+          `validate`.
+        - `api-reference-render.test.ts`: the bracketed sentence, for a field and for each element
+          of an array.
+      - **Mutations.** Each was restored byte for byte, and dist was rebuilt from the restored
+        source.
+        - The API's message ignoring the sentence: 5 failed.
+        - The raw verbose errors sent as `problems`: 5 failed, on the canary in `data`.
+        - The node id's sentence removed: 2 failed, the walk and the 400.
+        - `unsaidPatterns` blind to an unsaid pattern: 4 failed, the control, the registry's and
+          two of the catalogue's.
+        - The registry's `validate` ignoring the sentence: 3 failed.
+        - The renderer ignoring it: 1 failed.
+      - **Also.** `catalogue.test.ts`'s U-53 assertion was written without the `keyword` that
+        `P-358` added to each problem in the same round, so it failed at base; it now expects it.
+      - **Not done.** The probe protocol's schemas in `@ms/shared` (`messages.test.ts` asserts a
+        *must match pattern* in a fitted result's reason) and the settings, trigger and lookup
+        registries' Ajv are not API schemas and were not changed; none of the latter three has a
+        pattern today.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

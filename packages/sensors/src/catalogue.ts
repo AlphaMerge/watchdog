@@ -31,6 +31,14 @@ import {
 export const SENSOR_TYPE_ID = /^[a-z0-9]+(\.[a-z0-9-]+)+$/;
 
 /**
+ * What a value `SENSOR_TYPE_ID` refuses is told, as the `x-patternMessage` beside every API schema
+ * that carries its `source` (`P-372`): the core's create and tree routes and a library rule.
+ */
+export const SENSOR_TYPE_ID_MESSAGE =
+  'must be a sensor type id: two or more parts separated by dots, in lowercase letters and ' +
+  'digits, with dashes allowed after the first dot, such as snmp.traffic or exe.script-advanced';
+
+/**
  * The longest recovery hold a type may declare, in seconds (`M-18`): a day. Exported so a trigger
  * that sets its own is held to the same bound.
  */
@@ -1142,44 +1150,77 @@ function assertCreateOnlyIsPlaced(schema: JsonSchema, typeId: string): void {
  * expression is said only by a schema that reached here some other way.
  */
 function messageOf(error: ErrorObject): string {
-  if (error.keyword === 'pattern') {
-    const said: unknown = (error.parentSchema as Record<string, unknown> | undefined)?.[
-      PATTERN_MESSAGE
-    ];
-    if (typeof said === 'string' && said.trim() !== '') return said;
-  }
-  return error.message ?? 'is invalid';
+  return patternMessageOf(error) ?? error.message ?? 'is invalid';
+}
+
+/**
+ * The `x-patternMessage` a failed `pattern` says, or undefined for any other error or a schema
+ * without one (`U-53`).
+ *
+ * Read from the error's `parentSchema`, which Ajv puts there only with `verbose: true`, and
+ * **only from the schema**: `verbose` also puts the refused value on the error as `data`, and
+ * nothing here reads it. Exported for the core's own API (`P-372`), whose 400 says the same.
+ */
+export function patternMessageOf(error: {
+  readonly keyword: string;
+  readonly parentSchema?: unknown;
+}): string | undefined {
+  if (error.keyword !== 'pattern') return undefined;
+  const parent = error.parentSchema;
+  if (typeof parent !== 'object' || parent === null) return undefined;
+  const said: unknown = (parent as Record<string, unknown>)[PATTERN_MESSAGE];
+  return typeof said === 'string' && said.trim() !== '' ? said : undefined;
+}
+
+/** A `pattern` that would say its expression, or an `x-patternMessage` nothing would say. */
+export interface UnsaidPattern {
+  /** Dotted, `''` for the schema itself, `*` for an array's entries, and a keyword by name. */
+  readonly path: string;
+  /** `unsaid`: a pattern with no (or a blank) message. `orphan`: a message with no pattern. */
+  readonly fault: 'unsaid' | 'orphan';
 }
 
 /**
  * Refuses a `pattern` that does not say in words what it wants (`U-53`), and an
- * `x-patternMessage` with no `pattern` beside it to explain.
+ * `x-patternMessage` with no `pattern` beside it to explain: the first `unsaidPatterns` finds.
+ */
+function assertPatternsSayWhatTheyMean(schema: JsonSchema, typeId: string): void {
+  const [first] = unsaidPatterns(schema);
+  if (first === undefined) return;
+  const where = first.path === '' ? 'its parameters' : `"${first.path}"`;
+  throw new SensorTypeError(
+    'BAD_SENSOR_TYPE',
+    first.fault === 'unsaid'
+      ? `sensor type "${typeId}" gives ${where} a pattern without ${PATTERN_MESSAGE}: a value it ` +
+          'refuses would be told the expression; say in words what the value must be'
+      : `sensor type "${typeId}" gives ${where} ${PATTERN_MESSAGE} without a pattern, so ` +
+          'nothing would ever say it: put it beside the pattern it explains',
+  );
+}
+
+/**
+ * Every `pattern` that does not say in words what it wants (`U-53`), and every `x-patternMessage`
+ * with no `pattern` beside it to explain, in the order a depth-first walk meets them.
  *
  * **Everywhere a schema can sit**, not only where the form draws a field: the core's 400 says a
  * refusal from any of them, so a pattern under `additionalProperties` or a `oneOf` branch would
- * show its expression there just the same.
+ * show its expression there just the same. A `$ref` is not followed; a caller walks the schema it
+ * names as a schema of its own. Exported for the core's test of its API schemas (`P-372`).
  */
-function assertPatternsSayWhatTheyMean(schema: JsonSchema, typeId: string): void {
+export function unsaidPatterns(schema: unknown): UnsaidPattern[] {
+  const found: UnsaidPattern[] = [];
   walk(schema, '');
+  return found;
 
   function walk(node: unknown, path: string): void {
     if (typeof node !== 'object' || node === null || Array.isArray(node)) return;
     const record = node as Record<string, unknown>;
-    const where = path === '' ? 'its parameters' : `"${path}"`;
     const said = record[PATTERN_MESSAGE];
     if (record['pattern'] !== undefined && (typeof said !== 'string' || said.trim() === '')) {
-      throw new SensorTypeError(
-        'BAD_SENSOR_TYPE',
-        `sensor type "${typeId}" gives ${where} a pattern without ${PATTERN_MESSAGE}: a value it ` +
-          'refuses would be told the expression; say in words what the value must be',
-      );
+      found.push({ path, fault: 'unsaid' });
     }
     if (said !== undefined && record['pattern'] === undefined) {
-      throw new SensorTypeError(
-        'BAD_SENSOR_TYPE',
-        `sensor type "${typeId}" gives ${where} ${PATTERN_MESSAGE} without a pattern, so ` +
-          'nothing would ever say it: put it beside the pattern it explains',
-      );
+      found.push({ path, fault: 'orphan' });
     }
 
     const properties = record['properties'];

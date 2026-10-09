@@ -15,6 +15,34 @@ import { SENSOR_STATES } from '../../state/tables.js';
 import { OBJECT_KINDS, WRITABLE_KINDS } from '../../objects/types.js';
 import { CREDENTIAL_SET_KINDS } from '../../settings/inheritance.js';
 import { MAX_TAG, MAX_TAGS } from '../../libraries/nodes.js';
+// The catalogue's own id shape and its sentence, so a create naming a type is refused in the words
+// registration would use (`P-372`).
+import { SENSOR_TYPE_ID, SENSOR_TYPE_ID_MESSAGE } from '@ms/sensors';
+
+/**
+ * A sensor type id in a request: the catalogue's shape, and what a value outside it is told.
+ * Every `pattern` in an API schema carries an `x-patternMessage` (`P-372`), and a test refuses one
+ * that does not, so a 400 says the sentence and never the expression.
+ */
+const sensorTypeIdSchema = {
+  type: 'string',
+  pattern: SENSOR_TYPE_ID.source,
+  'x-patternMessage': SENSOR_TYPE_ID_MESSAGE,
+  maxLength: 100,
+} as const;
+
+/**
+ * A scaling factor (`M-07`): a decimal string, so 0.001 survives the round trip exactly as the
+ * operator typed it, which `type: number` would not promise.
+ */
+const decimalFactorSchema = {
+  type: 'string',
+  pattern: '^-?[0-9]+(\\.[0-9]+)?$',
+  'x-patternMessage':
+    'must be a decimal number in digits, with an optional leading minus sign and decimal ' +
+    'point, such as 8, 0.001 or -2.5',
+  maxLength: 40,
+} as const;
 
 export const settingSourceSchema = {
   $id: 'ms:settingSource',
@@ -281,10 +309,8 @@ export const channelProcessingPatchSchema = {
   additionalProperties: false,
   minProperties: 1,
   properties: {
-    // A decimal string. `pattern` rather than `type: number`, so 0.001 survives the round trip
-    // exactly as the operator typed it.
-    scaleMul: { type: 'string', pattern: '^-?[0-9]+(\\.[0-9]+)?$', maxLength: 40 },
-    scaleDiv: { type: 'string', pattern: '^-?[0-9]+(\\.[0-9]+)?$', maxLength: 40 },
+    scaleMul: decimalFactorSchema,
+    scaleDiv: decimalFactorSchema,
     decimals: { type: ['integer', 'null'], minimum: 0, maximum: 10 },
     spikeMin: { type: ['number', 'null'] },
     spikeMax: { type: ['number', 'null'] },
@@ -497,7 +523,7 @@ export const createObjectSchema = {
     ...objectFields,
     host: { type: 'string', minLength: 1, maxLength: 255 },
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
-    sensorType: { type: 'string', pattern: '^[a-z0-9]+(\\.[a-z0-9-]+)+$', maxLength: 100 },
+    sensorType: sensorTypeIdSchema,
     params: { type: 'object', additionalProperties: true },
     gid: {
       type: ['string', 'null'],
@@ -568,7 +594,7 @@ export const treeNodeSchema = {
     ...objectFields,
     host: { type: 'string', minLength: 1, maxLength: 255 },
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
-    sensorType: { type: 'string', pattern: '^[a-z0-9]+(\\.[a-z0-9-]+)+$', maxLength: 100 },
+    sensorType: sensorTypeIdSchema,
     params: { type: 'object', additionalProperties: true },
     gid: { type: ['string', 'null'], minLength: 1, maxLength: 128 },
   },

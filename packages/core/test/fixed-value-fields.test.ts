@@ -37,7 +37,7 @@ import { HISTORY_SCHEMAS } from '../src/api/schemas/history.js';
 import { SHARED_SCHEMAS } from '../src/api/schemas/objects.js';
 import { PAUSE_SCHEMAS } from '../src/api/schemas/pause.js';
 import { STATE_SCHEMAS } from '../src/api/schemas/state.js';
-import type { AuditEntry, AuditRepository } from '../src/audit/store.js';
+import { DatabaseAuditSink, type AuditEntry, type AuditRepository } from '../src/audit/store.js';
 import type { DeviceTemplateCatalogue } from '../src/device-templates/catalogue.js';
 import { readFingerprint } from '../src/discovery/fingerprint.js';
 import { NOTIFICATION_SCHEMAS, notificationRoutes } from '../src/api/routes/notifications.js';
@@ -65,7 +65,14 @@ import {
 import { describeRun, SUMMARY_KINDS, type KindCount } from '../src/discovery/summary.js';
 import { NOTIFICATION_REASONS } from '../src/notifications/chain.js';
 import { REQUEST_DISPOSITIONS } from '../src/notifications/summarisation.js';
-import { ACTOR_KINDS, type Actor, type ActorKind, type AuditSink } from '../src/objects/audit.js';
+import {
+  ACTOR_KINDS,
+  type Actor,
+  type ActorKind,
+  type AuditSink,
+  type MapBackgroundAudit,
+  type Mutation,
+} from '../src/objects/audit.js';
 import type { BulkService } from '../src/objects/bulk.js';
 import { flattenActor } from '../src/objects/pause-repository.js';
 import type { ObjectService } from '../src/objects/service.js';
@@ -124,7 +131,8 @@ import {
  * entry's `status` type from `NOTIFICATION_STATUSES`. `P-361` added a history's and a report
  * span's series source, a history segment's table, a report's `runAs.role` and a map
  * background's `mediaType`; the skew's `missing[]` and the lookups' and device templates'
- * `source` stay open, and a test pins each.
+ * `source` stay open, and a test pins each. `P-370` typed the audit log's record of a background's
+ * `mediaType` from the same list, and pins the diff value that serves it open.
  */
 
 /**
@@ -133,6 +141,9 @@ import {
  * held the event loop past the connection's timeout, so the database read as absent.
  */
 const available = await databaseAvailable();
+
+/** `true` only when the two types are the same, both ways round. */
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 interface Served {
   readonly body: Record<string, unknown>;
@@ -1191,6 +1202,86 @@ describe('mediaType in POST /maps/{id}/background', () => {
   it('is an enum: SVG, which the sniffer refuses, is refused', async () => {
     const answer = await served('image/png');
     assert.notEqual(answer.invalid({ ...answer.body, mediaType: 'image/svg+xml' }), null);
+  });
+});
+
+/**
+ * A background's `mediaType` in the audit log (`P-370`). Typed from `IMAGE_MEDIA_TYPES` where it
+ * is written, and served as a diff value, which is open for every field on purpose: an entry is
+ * history, kept past the build that wrote it, so the schema does not promise what a later build's
+ * list is. The type holds the writer; the test holds what the reader is served.
+ */
+describe('map.background.mediaType in ms:auditEntry', () => {
+  // Fails to compile, rather than to run, if the audit record's field is widened to a string.
+  const typed: Same<MapBackgroundAudit['mediaType'], ImageMediaType> = true;
+  void typed;
+
+  const backgroundAudit = (mediaType: ImageMediaType): MapBackgroundAudit => ({
+    mediaType,
+    digest: 'b'.repeat(64),
+    width: 640,
+    height: 480,
+    bytes: 2_048,
+  });
+
+  /** The diff `DatabaseAuditSink` writes for a background set, read back off its INSERT. */
+  const written = async (mutation: Mutation): Promise<AuditEntry['diff']> => {
+    let diffs: unknown;
+    const q = {
+      query: (_sql: string, params: unknown[]) => {
+        diffs = params[8];
+        return Promise.resolve({ rows: [], rowCount: 1 });
+      },
+    } as unknown as Queryable;
+    await new DatabaseAuditSink().record(q, ALICE, [mutation], new Date('2026-10-09T08:00:00Z'));
+    const [diff] = diffs as string[];
+    return JSON.parse(diff ?? '[]') as AuditEntry['diff'];
+  };
+
+  const served = (diff: AuditEntry['diff']): Promise<Served> =>
+    serve('/audit', '/audit', async (app) => {
+      addSharedSchemas(app);
+      const entry: AuditEntry = {
+        id: '70',
+        at: '2026-10-09T08:00:00.000Z',
+        action: 'map.background.set',
+        objectId: null,
+        objectKind: null,
+        actor: ALICE,
+        summary: { mapId: 7 },
+        diff,
+      };
+      const db = { tx: (work: (q: unknown) => unknown) => work({}) } as unknown as Database;
+      const audit = { list: () => Promise.resolve([entry]) } as unknown as AuditRepository;
+      await app.register(auditRoutes, { db, audit });
+    });
+
+  const mediaTypeIn = (body: Record<string, unknown>): unknown => {
+    const [item] = body['items'] as { diff: { field: string; after: unknown }[] }[];
+    return item?.diff.find((change) => change.field === 'map.background.mediaType')?.after;
+  };
+
+  for (const mediaType of IMAGE_MEDIA_TYPES) {
+    it(`is written as ${mediaType}, served, and the route’s own schema allows it`, async () => {
+      const diff = await written({
+        action: 'map.background.set',
+        objectId: null,
+        mapId: 7,
+        before: null,
+        after: backgroundAudit(mediaType),
+      });
+      const answer = await served(diff);
+      assert.equal(mediaTypeIn(answer.body), mediaType);
+      assert.equal(answer.invalid(answer.body), null);
+    });
+  }
+
+  it('stays open: a type another build wrote is served as it was recorded', async () => {
+    const answer = await served([
+      { field: 'map.background.mediaType', before: 'image/png', after: 'image/gif' },
+    ]);
+    assert.equal(mediaTypeIn(answer.body), 'image/gif');
+    assert.equal(answer.invalid(answer.body), null);
   });
 });
 

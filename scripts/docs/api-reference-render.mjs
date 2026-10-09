@@ -227,6 +227,8 @@ export function renderApiReference(doc, options = {}) {
     'minLength',
     'maxLength',
     'pattern',
+    // Said beside its pattern (`P-372`), in brackets, as the 400 says it.
+    'x-patternMessage',
     'minItems',
     'maxItems',
     'uniqueItems',
@@ -292,7 +294,15 @@ export function renderApiReference(doc, options = {}) {
       counted('character'),
     );
     if (length !== undefined) said.push(length);
-    if (typeof schema.pattern === 'string') said.push(`matches ${literal(schema.pattern)}`);
+    if (typeof schema.pattern === 'string') {
+      // The expression for a client to check against, and the sentence a refusal says (`P-372`).
+      // In brackets, since the sentence may hold the commas this list is joined with.
+      const words = schema['x-patternMessage'];
+      said.push(
+        `matches ${literal(schema.pattern)}` +
+          (typeof words === 'string' && words.trim() !== '' ? ` (${words.trim()})` : ''),
+      );
+    }
     const count = rangeOf(
       isNumber(schema.minItems) && schema.minItems > 0 ? { value: schema.minItems } : undefined,
       isNumber(schema.maxItems) ? { value: schema.maxItems } : undefined,

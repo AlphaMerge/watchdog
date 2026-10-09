@@ -1,3 +1,4 @@
+import type { FastifyInstance, FastifySchema } from 'fastify';
 import type { BuildStamp } from '@ms/shared';
 import { ApiServer, type ApiServerOptions } from '../../src/api/server.js';
 import { AuditRepository } from '../../src/audit/store.js';
@@ -43,7 +44,17 @@ export interface SurfaceServer {
   readonly server: ApiServer;
   /** Every route the router registered, HEAD and OPTIONS aside. */
   readonly registered: readonly RouteKey[];
+  /** The same routes with their schemas, for a test that walks what each one validates. */
+  readonly routes: readonly SurfaceRoute[];
   close(): Promise<void>;
+}
+
+/** A route as Fastify registered it (`P-372`). */
+export interface SurfaceRoute {
+  readonly key: RouteKey;
+  readonly schema: FastifySchema | undefined;
+  /** Every shared schema the route's scope can `$ref`, by `$id`, its own plugin's included. */
+  readonly shared: Readonly<Record<string, unknown>>;
 }
 
 export interface SurfaceOptions {
@@ -197,15 +208,19 @@ export async function surfaceServer(
   const server = new ApiServer({ ...base, ...v2 });
 
   const registered: RouteKey[] = [];
-  server.app.addHook('onRoute', (route) => {
+  const routes: SurfaceRoute[] = [];
+  // `this` is the scope the route is registered in, so its schemas include a plugin's own.
+  server.app.addHook('onRoute', function (this: FastifyInstance, route) {
     for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
       if (method === 'HEAD' || method === 'OPTIONS') continue;
-      registered.push(`${String(method)} ${route.url.replace(/:([a-zA-Z]+)/gu, '{$1}')}`);
+      const key: RouteKey = `${String(method)} ${route.url.replace(/:([a-zA-Z]+)/gu, '{$1}')}`;
+      registered.push(key);
+      routes.push({ key, schema: route.schema, shared: this.getSchemas() });
     }
   });
   await server.build(stamp.version, base.service);
   await server.app.ready();
-  return { server, registered, close: () => server.app.close() };
+  return { server, registered, routes, close: () => server.app.close() };
 }
 
 /** A URL for a route: every parameter `1`, which each of them accepts or refuses in a handler. */

@@ -21,14 +21,23 @@ const idParams = {
   properties: { id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } },
 } as const;
 
+/**
+ * The id of the oldest entry already seen. Audit ids are monotonic, so this is a keyset cursor
+ * that happens to be readable — there is nothing to hide in it, and an operator debugging a
+ * paging problem can see where they are. A value outside it is told so in words (`P-372`).
+ */
+const beforeCursor = {
+  type: 'string',
+  pattern: '^[0-9]{1,19}$',
+  'x-patternMessage':
+    'must be an audit entry id, 1 to 19 digits, such as the last page’s nextBefore',
+} as const;
+
 const auditQuery = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    // The id of the oldest entry already seen. Audit ids are monotonic, so this is a keyset
-    // cursor that happens to be readable — there is nothing to hide in it, and an operator
-    // debugging a paging problem can see where they are.
-    before: { type: 'string', pattern: '^[0-9]{1,19}$' },
+    before: beforeCursor,
     limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
   },
 } as const;
@@ -73,7 +82,7 @@ const logQuery = {
     },
     from: { type: 'string', maxLength: 64 },
     to: { type: 'string', maxLength: 64 },
-    before: { type: 'string', pattern: '^[0-9]{1,19}$' },
+    before: beforeCursor,
     limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
   },
 } as const;

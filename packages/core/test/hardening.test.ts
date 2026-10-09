@@ -15,6 +15,7 @@ import {
   registerUpgradeOriginCheck,
 } from '../src/api/hardening.js';
 import { toHttpError } from '../src/api/errors.js';
+import { API_VALIDATOR_OPTIONS } from '../src/api/server.js';
 import { silent } from './support/tree.js';
 import { pollWithin } from './support/within.js';
 
@@ -30,7 +31,13 @@ const build = async (
   install: (app: FastifyInstance) => void,
   options: FastifyServerOptions = {},
 ): Promise<FastifyInstance> => {
-  const app = Fastify({ logger: false, ...options });
+  // Validated as the server validates (`P-364`), not with Ajv's defaults; a test's own options
+  // still win.
+  const app = Fastify({
+    logger: false,
+    ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } },
+    ...options,
+  });
   app.setErrorHandler((error, request, reply) => {
     const mapped = toHttpError(error, request.id);
     void reply.status(mapped.status).send(mapped.body);

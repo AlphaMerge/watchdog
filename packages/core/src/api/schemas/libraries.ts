@@ -1,4 +1,4 @@
-import { SENSOR_TYPE_ID } from '@ms/sensors';
+import { SENSOR_TYPE_ID, SENSOR_TYPE_ID_MESSAGE } from '@ms/sensors';
 import {
   MAX_NODES,
   MAX_NODE_NAME,
@@ -6,6 +6,7 @@ import {
   MAX_TAG,
   MAX_TAGS,
   MAX_TYPES,
+  NODE_ID_MESSAGE,
   NODE_ID_PATTERN,
 } from '../../libraries/nodes.js';
 import { SENSOR_STATES } from '../../state/tables.js';
@@ -32,7 +33,7 @@ export const libraryNodeSchema = {
   required: ['id', 'name'],
   properties: {
     /** Stable within the library, so a view can be matched back to the node that asked. */
-    id: { type: 'string', pattern: NODE_ID_PATTERN },
+    id: { type: 'string', pattern: NODE_ID_PATTERN, 'x-patternMessage': NODE_ID_MESSAGE },
     name: { type: 'string', minLength: 1, maxLength: MAX_NODE_NAME },
     /**
      * What the node shows, or null for a heading that only groups the nodes under it.
@@ -50,7 +51,11 @@ export const libraryNodeSchema = {
         types: {
           type: 'array',
           maxItems: MAX_TYPES,
-          items: { type: 'string', pattern: SENSOR_TYPE_ID.source },
+          items: {
+            type: 'string',
+            pattern: SENSOR_TYPE_ID.source,
+            'x-patternMessage': SENSOR_TYPE_ID_MESSAGE,
+          },
         },
         /** Effective tags, all of, compared folded — as the tree's tag box means them. */
         tags: {

@@ -208,6 +208,19 @@ const fixture = {
                   code: { type: 'string', minLength: 6, maxLength: 6 },
                   slug: { type: 'string', pattern: '^[a-z]+$' },
                   ticked: { type: 'string', pattern: 'a`b' },
+                  said: {
+                    type: 'string',
+                    pattern: '^[0-9]+$',
+                    'x-patternMessage': 'must be digits, such as 7 or 42',
+                  },
+                  saidEach: {
+                    type: 'array',
+                    items: {
+                      type: 'string',
+                      pattern: '^[a-z]+$',
+                      'x-patternMessage': 'must be lowercase letters',
+                    },
+                  },
                   names: {
                     type: 'array',
                     items: { type: 'string', minLength: 1, maxLength: 100 },
@@ -426,6 +439,15 @@ describe('the API reference renderer', () => {
     it('a pattern, as code even when it holds a backtick', () => {
       assert.equal(typeOf('slug'), 'string, matches `^[a-z]+$`');
       assert.equal(typeOf('ticked'), 'string, matches ``a`b``');
+    });
+
+    it('a pattern’s sentence beside it, in brackets, and never as a raw keyword (P-372)', () => {
+      assert.equal(typeOf('said'), 'string, matches `^[0-9]+$` (must be digits, such as 7 or 42)');
+      assert.equal(
+        typeOf('saidEach'),
+        'string[], each matches `^[a-z]+$` (must be lowercase letters)',
+      );
+      assert.ok(!page.includes('`x-patternMessage`'), 'the keyword is not printed as unknown');
     });
 
     it("an array's count, its uniqueness and its elements' own", () => {

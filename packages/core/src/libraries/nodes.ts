@@ -56,6 +56,11 @@ export const MAX_NODES = 200;
  * no longer fits on the screen it is meant to be read on. */
 export const MAX_DEPTH = 6;
 export const NODE_ID_PATTERN = '^[A-Za-z0-9_-]{1,40}$';
+/**
+ * What an id outside `NODE_ID_PATTERN` is told, by `validateNodes` and by the API schema's 400
+ * alike (`P-372`).
+ */
+export const NODE_ID_MESSAGE = 'must be 1 to 40 letters, digits, "-" or "_"';
 export const MAX_NODE_NAME = 100;
 export const MAX_ROOTS = 50;
 export const MAX_TYPES = 50;
@@ -94,7 +99,7 @@ export function validateNodes(raw: unknown): LibraryNode[] {
 
     const id = value['id'];
     if (typeof id !== 'string' || !NODE_ID.test(id)) {
-      throw invalid(`${path}.id`, 'must be 1 to 40 letters, digits, "-" or "_"');
+      throw invalid(`${path}.id`, NODE_ID_MESSAGE);
     }
     if (seen.has(id)) throw invalid(`${path}.id`, `"${id}" is already used by another node`);
     seen.add(id);

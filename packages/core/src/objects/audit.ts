@@ -3,6 +3,7 @@ import type { Queryable } from '../db/pool.js';
 import type { AccessRight } from '../auth/access.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { LibraryNode } from '../libraries/nodes.js';
+import type { ImageMediaType } from '../maps/images.js';
 import type { ChannelDeclaration } from './redeclare.js';
 import type { ChannelProcessing } from './types.js';
 import type {
@@ -942,7 +943,12 @@ export interface MapAudit {
 
 /** A background as the audit log records it: what the file was, never what was in it. */
 export interface MapBackgroundAudit {
-  readonly mediaType: string;
+  /**
+   * One of `IMAGE_MEDIA_TYPES` when written (`P-370`): it is the stored background's, which the
+   * sniffer named and `map_background_media_type_check` holds. The audit entry that carries it is
+   * history, served as a diff whose `before` and `after` are open for every field.
+   */
+  readonly mediaType: ImageMediaType;
   readonly digest: string;
   readonly width: number;
   readonly height: number;

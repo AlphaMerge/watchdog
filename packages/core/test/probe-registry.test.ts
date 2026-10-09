@@ -7,6 +7,7 @@ import { createLogger, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, withCorrelation }
 import { ProbeHealthService, withLastRefusal } from '../src/health/probe-health.js';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import { probeRoutes } from '../src/api/routes/probes.js';
+import { API_VALIDATOR_OPTIONS } from '../src/api/server.js';
 import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -813,7 +814,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
      */
     it('is served by GET /probes as ahead, which the route’s own schema allows (P-313)', async () => {
       let declared: unknown;
-      const app = Fastify();
+      // Validated as the server validates (`P-364`), not with Ajv's defaults.
+      const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
       app.addHook('onRoute', (route) => {
         if (route.url === '/probes' && route.method === 'GET') declared = route.schema?.response;
       });
@@ -1103,7 +1105,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
      * not declare, so the registration having the field is not enough.
      */
     it('is served by GET /probes as protocolAcceptedAt, apart from lastSeenAt (U-33)', async () => {
-      const app = Fastify();
+      // Validated as the server validates (`P-364`), not with Ajv's defaults.
+      const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
       await app.register(probeRoutes, { registry: clocked });
       const listed = async (gid: string): Promise<Record<string, unknown>> => {
         const response = await app.inject({ method: 'GET', url: '/probes' });
