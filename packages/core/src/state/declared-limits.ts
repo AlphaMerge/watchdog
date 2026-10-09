@@ -54,6 +54,15 @@ export interface DeclaredShapes {
    * move a sensor's primary onto it.
    */
   readonly primary: string | null;
+  /**
+   * The type promises its readings name no key `shapes` does not (`declaresEveryChannel`), and
+   * `shapes` is its answer for the sensor's own stored parameters (`P-321`). Then a key the
+   * resolver creates a channel for and `shapes` does not name is a broken promise, or a probe
+   * whose newer build of the type declares it, and is counted and said. False whenever
+   * `undeclared` is set, and for a type this build does not register: neither answer is one the
+   * type stands behind.
+   */
+  readonly everyKey: boolean;
 }
 
 /**
@@ -137,7 +146,12 @@ export function declaredChannelLookup(
   const none: ReadonlyMap<string, ChannelShape> = new Map();
   // A type this build does not register declares nothing, and nothing is what it is given: not
   // a fallback, so not counted.
-  const unregistered: DeclaredShapes = { shapes: none, undeclared: false, primary: null };
+  const unregistered: DeclaredShapes = {
+    shapes: none,
+    undeclared: false,
+    primary: null,
+    everyKey: false,
+  };
   const bare = new Map<string, ReadonlyMap<string, ChannelShape>>();
   for (const id of catalogue.ids()) {
     try {
@@ -156,6 +170,7 @@ export function declaredChannelLookup(
         // The first, so one row at most is promoted whatever a broken type answers: the index
         // allows one, and the catalogue refuses only a `{}` answer that declares two.
         primary: defs.find((def) => def.isPrimary === true)?.key ?? null,
+        everyKey: catalogue.declaration(sensorType).declaresEveryChannel === true,
       };
     } catch (cause) {
       warn(
@@ -163,7 +178,12 @@ export function declaredChannelLookup(
         sensorId,
         errorWithoutParamValues(cause, params, catalogue.writeOnlyPaths(sensorType)),
       );
-      return { shapes: bare.get(sensorType) ?? none, undeclared: true, primary: null };
+      return {
+        shapes: bare.get(sensorType) ?? none,
+        undeclared: true,
+        primary: null,
+        everyKey: false,
+      };
     }
   };
 }

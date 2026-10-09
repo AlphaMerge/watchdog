@@ -78,6 +78,7 @@ function sources(
     resultsRefusedUnfit: number;
     readingsDroppedUnfit: number;
     channelsCreatedUndeclared: number;
+    channelsCreatedOutsideDeclaration: number;
     credentialsToReenter: number;
     unboundedCredentials: number;
     credentialsWithheld: number;
@@ -141,6 +142,7 @@ function sources(
       refusedUnfit: overrides.resultsRefusedUnfit ?? 0,
       discardedUnfitReadings: overrides.readingsDroppedUnfit ?? 0,
       channelsCreatedUndeclared: overrides.channelsCreatedUndeclared ?? 0,
+      channelsCreatedOutsideDeclaration: overrides.channelsCreatedOutsideDeclaration ?? 0,
     }),
     probes: () => ({
       probesDown: overrides.probesDown ?? 0,
@@ -584,6 +586,22 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal((await build({}).read())['channelsCreatedUndeclared'], 0);
     });
 
+    it('counts the channels created outside a declaration that promised every key (`P-321`)', async () => {
+      // The promise `retired` rests on (`P-310`), broken or outrun by a newer probe. A counter,
+      // made a rate, with no limit: alarm volume is unchanged.
+      const reading = await build({ channelsCreatedOutsideDeclaration: 4 }).read();
+      assert.equal(reading['channelsCreatedOutsideDeclaration'], 4);
+      assert.ok(CORE_HEALTH_COUNTERS.has('channelsCreatedOutsideDeclaration'));
+      const channel = coreHealth
+        .channels({})
+        .find((one) => one.key === 'channelsCreatedOutsideDeclaration');
+      assert.ok(channel !== undefined);
+      assert.equal(channel.counter?.bits, 64);
+      assert.equal(channel.limits, undefined, 'no limit: alarm volume is unchanged');
+      assert.equal(channel.lookup, undefined);
+      assert.equal((await build({}).read())['channelsCreatedOutsideDeclaration'], 0);
+    });
+
     it('adds the query answers refused for not fitting to the results refused (`P-300`)', async () => {
       // A query's answer is a probe's result like a batch's, and refused for the same reason:
       // the same older build, met through Check now. One counter for both, the sum of two that
@@ -984,6 +1002,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         resultsRefusedUnfit: 2,
         readingsDroppedUnfit: 3,
         channelsCreatedUndeclared: 2,
+        channelsCreatedOutsideDeclaration: 1,
         lateRefusalWritesGivenUp: 4,
         probeHellosUnproven: 3,
         ingestQueue: 0,
@@ -996,7 +1015,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 22);
+      assert.equal(readings.length, 23);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -1027,6 +1046,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           'readingsDroppedUnfit',
           // `P-306`: channels created without their declared shape.
           'channelsCreatedUndeclared',
+          // `P-321`: channels created outside a declaration that promised every key.
+          'channelsCreatedOutsideDeclaration',
           'lateRefusalWritesGivenUp',
           'probeHellosUnproven',
         ],

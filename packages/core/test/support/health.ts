@@ -75,6 +75,7 @@ export function fixedCoreHealth(
         refusedUnfit: 3,
         discardedUnfitReadings: 5,
         channelsCreatedUndeclared: 6,
+        channelsCreatedOutsideDeclaration: 7,
       }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       credentialsToReenter: () => Promise.resolve(0),

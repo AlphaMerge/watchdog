@@ -345,6 +345,13 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Channels ingestion created from a sensor type’s answer to {} (or from nothing), because the type could not declare its channels for the sensor’s stored parameters. Each may have no lookup or counter width for good; the core log names the type.',
     counter: true,
   },
+  // `P-321`: channels created for a key a type promising to declare every key does not declare.
+  {
+    key: 'channelsCreatedOutsideDeclaration',
+    name: 'ms_core_channels_created_outside_declaration_total',
+    help: 'Channels ingestion created for a key the sensor type does not declare for the sensor’s stored parameters, though the type promises to declare every key it reports: a probe running a newer build of the type than the core, or the type breaking its promise. The readings are kept; the core log names the sensor, the type and the key.',
+    counter: true,
+  },
   {
     key: 'lateRefusalWritesGivenUp',
     name: 'ms_core_late_refusal_writes_given_up_total',

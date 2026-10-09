@@ -11854,17 +11854,102 @@ because each is a decision rather than a defect:
       type is never called retired. **Done when** each remaining type's `execute` is checked and
       flagged where true, with the catalogue test listing them.
 
-- [ ] **P-321 — `declaresEveryChannel` is a promise nothing checks** · S · P-310 · Found
+- [x] **P-321 — `declaresEveryChannel` is a promise nothing checks** · S · P-310 · Found
       2026-10-08 in `P-310`. A flagged type that reports a key its declaration does not name shows
       a live channel as retired. **Done when** such a reading is counted (a Core Health channel)
       and logged naming the type and key, or refused, with a test.
 
-- [ ] **P-322 — a probe newer than the core can have its new channels shown retired** · S ·
+      **P-321 outcome. Counted and logged, not refused: a Core Health channel,
+      `channelsCreatedOutsideDeclaration` (*Channels created outside declaration*, channels), a
+      64-bit counter made a rate, exported as `ms_core_channels_created_outside_declaration_total`.**
+      No protocol change, no migration.
+      - **Why counted.** The reading is real: refusing it would drop a channel that is read (no-data
+        is not zero), and the likeliest sender is not a broken type but a probe running a newer
+        build of it, which ADR-001 Decision 13 allows; refusing would make every such upgrade
+        lose its new channels until the core caught up. `P-322` keeps such a channel from being
+        called retired while it is read, so what was left to fix was that nobody heard of it.
+      - **Where.** In `ChannelResolver.#create`, the one place the declaration for the sensor's
+        stored parameters is already in hand (`declaredChannelLookup`, `P-297`); no query added.
+        `DeclaredShapes` gains `everyKey`: the type sets `declaresEveryChannel` and the answer is
+        its own for those parameters (false on `P-306`'s fallback and for an unregistered type).
+        A key the INSERT returned that `shapes` does not name, for such an answer, is counted
+        (`ResolvedChannels.createdOutsideDeclaration`, summed by `IngestionService` into
+        `stats()`, carried through `ingestionDiscards` as `P-306`'s is) and logged at `warn`
+        with `sensorId`, `sensorType`, `channelKey` and `phase: 'create-channel'`. Once a
+        channel, because the row is created once: a cached channel and a restart's re-read
+        create nothing.
+      - **No limit, so no scenario test.** `channelsCreatedUndeclared`'s reasoning: an alarm
+        would add a Warning and a recovery on the core's own sensor at each first sighting, or
+        hold one until a restart, for a fact the log names. Alarm volume is unchanged.
+      - **Docs.** `administration.md`'s Core Health table has a row (both causes, what to do);
+        `adding-a-sensor-type.md`'s `declaresEveryChannel` section says the promise is checked
+        and how; `sensor-reference.md` regenerated (`--check` current).
+      - **Tests.** `channel-provisioning.test.ts`, table-driven over a flagged `test.promised`
+        and the unflagged `test.columns`: a declared key of a flagged type, not counted or said;
+        an undeclared one, created, counted 1 and said once with its sensor, type and key; an
+        unflagged type's undeclared key, not counted; a flagged type that throws for what is
+        stored, `P-306`'s count and not this one. Each then cached and after a restart: nothing
+        created, counted or said again. `declaredChannelLookup`'s table asserts `everyKey`
+        against each shipped type's flag; `snmp.table` true, `exe.script.advanced` false, a
+        flagged type's fallback false. `retired-channels.test.ts` counts it through a real
+        `IngestionService`. `core-health.test.ts`: carried, a declared 64-bit counter with no
+        limit or lookup, 0 a reading, in the named counter list. `metrics.test.ts`: exported
+        with its value and `# TYPE … counter`. The stubs in three scenario tests and
+        `support/health.ts` carry the field.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): `everyKey` always false fails
+        6 (the counted case, the declaration table's three `snmp.table` rows and its `everyKey`
+        test, the probe-ahead test's count); the warning skipped fails the counted case; Core
+        Health reading 0 fails the Core Health and `/metrics` tests.
+      - **Not done.** Only a channel's creation is checked: a key with a row already (declared
+        once, then edited out) that a broken type goes on reporting is not counted, though
+        `P-322` keeps it from being called retired. The core cannot tell a newer probe from a
+        broken type; the log line and the docs say how an operator can.
+
+- [x] **P-322 — a probe newer than the core can have its new channels shown retired** · S ·
       P-310 · Found 2026-10-08 reviewing `P-310`. `retired` asks the core's catalogue, but readings
       come from the probe's build, and ADR-001 Decision 13 lets a probe run ahead of the core; a
       key a newer build adds to a flagged type is created by ingestion and then called retired.
       **Done when** retired also requires no reading since the declaration changed (or the
       probe's catalogue is consulted), with a test of a probe ahead.
+
+      **P-322 outcome. Retired also needs no reading newer than the sensor's last configuration
+      change, `sensor_config.updated_at`, asked in the query that reads the channels.** No
+      migration, no protocol change.
+      - **The rule.** A channel is retired when its type promises every key (`P-310`), the
+        declaration for the stored parameters does not name it, and `sample` has no row for it
+        after `sensor_config.updated_at`. Every write of the parameters moves that column (its
+        `set_updated_at` trigger), so the declaration stopped naming the key no later than it;
+        a reading after it came from something that still reports the key.
+      - **Why this and not the probe's catalogue.** The core knows a probe's protocol version,
+        not its build's catalogue, and a type gaining a channel moves no protocol number; asking
+        would need a protocol change and a catalogue exchange. The column exists, and a reading
+        is the evidence the ticket asks for, whoever sent it.
+      - **Cost, measured.** `ObjectRepository.channelsWithRetirement` (used by `channels()` and
+        the channel `PATCH`'s answer) adds `CASE … ELSE NOT EXISTS (SELECT 1 FROM sample WHERE
+        channel_id = c.id AND time > sc.updated_at)` to the existing per-sensor SELECT, with the
+        declared keys as a parameter: a declared key, and every key of a type that cannot say,
+        never runs the subquery. For the rest it is `latestValues`' bounded `(channel_id, time)`
+        probe. On the dev database (85.5 million samples, compressed chunks), every channel of a
+        sensor forced undeclared: runtime exclusion of 10 of 11 chunks, warm planning 0.9 ms,
+        execution 0.3 ms. No list read derives `retired` for many sensors, so nothing per
+        channel or per sensor was added there.
+      - **Accepted.** Any later write of `sensor_config` (another edit, `recordVoucher`) shows a
+        newer probe's key retired until its next reading, one scan interval; a Down or paused
+        sensor reads nothing, so until it is read again. A reading a probe took after the edit
+        but before it heard of it, or stamped by a probe clock ahead of the database's, keeps a
+        removed channel not retired until the next change. Both err toward `false`, which `P-310`
+        already defines as "not known to be retired", except the first, which is one interval.
+      - **Docs.** `ChannelRecord.retired` and the `ms:channelRecord` schema description;
+        `web-ui.md`; `adding-a-sensor-type.md`. `api-reference.md` `--check` current (it lists
+        fields, not descriptions).
+      - **Tests.** `retired-channels.test.ts`, through the API and real ingestion: a column
+        edited out with no reading since is retired; a reading of it and of a key the core never
+        declared, stamped after the change as a newer probe sends, makes neither retired (and
+        counts `newer`, `P-321`); put back, live; taken out again with nothing read since,
+        retired; read again, the channel `PATCH` answers `false` and the list agrees. `P-310`'s
+        tests unchanged and green.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): `ELSE true` (readings
+        ignored) fails the probe-ahead test; comparing with `sc.created_at` fails it too.
 
 - [x] **P-323 — a declared primary created before P-314 stays non-primary** · XS · P-314 · Found
       2026-10-08 in `P-314`. Ingestion now makes the declared primary primary when its first reading

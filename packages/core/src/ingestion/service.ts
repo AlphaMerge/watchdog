@@ -244,6 +244,13 @@ export interface ResultStats {
    * of error.
    */
   channelsCreatedUndeclared: number;
+  /**
+   * Of `channelsCreated`, those whose key the sensor's type does not declare for the sensor's
+   * stored parameters though it promises to declare every key it reports (`P-321`): a probe
+   * running a newer build of the type, or the type breaking its promise. On Core Health as
+   * `channelsCreatedOutsideDeclaration`; the core log names the sensor, the type and the key.
+   */
+  channelsCreatedOutsideDeclaration: number;
   cachedChannels: number;
   /** Absent when no state machine is wired. */
   state?: StateStats;
@@ -309,6 +316,7 @@ export class IngestionService {
   #counterWrapped = 0;
   #channelsCreated = 0;
   #channelsCreatedUndeclared = 0;
+  #channelsCreatedOutsideDeclaration = 0;
 
   constructor(options: IngestionServiceOptions) {
     this.#db = options.db;
@@ -355,6 +363,7 @@ export class IngestionService {
       counterWrapped: this.#counterWrapped,
       channelsCreated: this.#channelsCreated,
       channelsCreatedUndeclared: this.#channelsCreatedUndeclared,
+      channelsCreatedOutsideDeclaration: this.#channelsCreatedOutsideDeclaration,
       cachedChannels: this.#resolver.cached,
       ...(this.#states === undefined ? {} : { state: this.#states.stats() }),
     };
@@ -889,6 +898,7 @@ export class IngestionService {
     if (resolved !== null) {
       this.#channelsCreated += resolved.created;
       this.#channelsCreatedUndeclared += resolved.createdUndeclared;
+      this.#channelsCreatedOutsideDeclaration += resolved.createdOutsideDeclaration;
       this.#discardedUnknownSensor += resolved.droppedReadings;
     }
 

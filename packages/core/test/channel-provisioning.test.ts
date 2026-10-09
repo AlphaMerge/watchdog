@@ -69,6 +69,22 @@ const columns: SensorType = {
 };
 
 /**
+ * `test.columns` with `snmp.table`'s promise (`P-310`): every key it reports is one its
+ * parameters declare. A column named `broken` makes `channels()` throw, as parameters an older
+ * build stored might.
+ */
+const promised: SensorType = {
+  ...columns,
+  id: 'test.promised',
+  declaresEveryChannel: true,
+  channels: (params) => {
+    const named = Array.isArray(params['columns']) ? (params['columns'] as { key: string }[]) : [];
+    if (named.some((column) => column.key === 'broken')) throw new TypeError('no such column');
+    return columns.channels(params);
+  },
+};
+
+/**
  * A type that cannot answer for some stored parameters (`P-297` review): `limited` puts limits on
  * a channel only parameters make, which `channelsFor` refuses with `BAD_SENSOR_TYPE` (`P-293`),
  * and `typeError` is a type's own bug, with a secret and a label in its message. Its `{}` answer
@@ -136,7 +152,7 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('provisioning');
       db = scratch.db;
-      harness = await buildHarness(db, { types: [columns, brittle] });
+      harness = await buildHarness(db, { types: [columns, brittle, promised] });
       const probe = await harness.service.create(testActor, {
         kind: 'probe',
         parentId: harness.rootId,
@@ -479,6 +495,126 @@ describe(
       }
     });
 
+    // `P-321`: `declaresEveryChannel` is the promise a channel's `retired` rests on (`P-310`), and
+    // nothing checked it. It is checked where the declaration is already in hand, when a reading
+    // creates a channel: a key outside it is kept, counted for Core Health and said once, naming
+    // the sensor, the type and the key. Once, because the row is created once; a cached channel
+    // and a restart's re-read create nothing.
+    const outsideCases: readonly {
+      name: string;
+      type: string;
+      /** Written behind the type's back after the create, as an older build might have left them. */
+      stored?: Record<string, unknown>;
+      key: string;
+      outside: boolean;
+      undeclared: boolean;
+    }[] = [
+      {
+        name: 'a key a promising type declares',
+        type: 'test.promised',
+        key: 'a',
+        outside: false,
+        undeclared: false,
+      },
+      {
+        name: 'a key a promising type does not declare (a newer probe’s, or a broken promise)',
+        type: 'test.promised',
+        key: 'newer',
+        outside: true,
+        undeclared: false,
+      },
+      {
+        name: 'a key a type making no promise does not declare (a script’s printed key)',
+        type: 'test.columns',
+        key: 'printed',
+        outside: false,
+        undeclared: false,
+      },
+      {
+        name: 'a key a promising type cannot answer for, which is `P-306`’s instead',
+        type: 'test.promised',
+        stored: { columns: [{ key: 'a' }, { key: 'broken' }] },
+        key: 'newer',
+        outside: false,
+        undeclared: true,
+      },
+    ];
+    for (const one of outsideCases) {
+      it(`counts and says once a channel created outside its declaration: ${one.name}`, async () => {
+        const sensor = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: `outside-${one.key}-${String(process.hrtime.bigint())}`,
+          sensorType: one.type,
+          params: { columns: [{ key: 'a' }] },
+        });
+        if (one.stored !== undefined) {
+          await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+            sensor.id,
+            JSON.stringify(one.stored),
+          ]);
+        }
+        await db.query('DELETE FROM channel WHERE sensor_id = $1 AND key = $2', [
+          sensor.id,
+          one.key,
+        ]);
+
+        const lines: string[] = [];
+        const catalogue = testCatalogue([columns, brittle, promised]);
+        const resolver = (): ChannelResolver =>
+          new ChannelResolver({
+            logger: pino(
+              { level: 'info', base: null },
+              { write: (line: string) => lines.push(line) },
+            ),
+            declaredLimits: declaredLimitsLookup(catalogue),
+            declaredShape: declaredChannelLookup(catalogue),
+          });
+        const reading: CheckResult = {
+          sensorId: sensor.id,
+          at: new Date('2026-10-09T10:00:00.000Z').toISOString(),
+          outcome: 'ok',
+          message: '',
+          durationMs: 1,
+          channels: [{ key: one.key, value: 1 }],
+        };
+        const said = (): { sensorId: number; sensorType: string; channelKey: string }[] =>
+          lines
+            .map(
+              (line) =>
+                JSON.parse(line) as {
+                  level: number;
+                  phase?: string;
+                  sensorId: number;
+                  sensorType: string;
+                  channelKey: string;
+                },
+            )
+            .filter((entry) => entry.phase === 'create-channel' && entry.level === 40)
+            .map(({ sensorId, sensorType, channelKey }) => ({ sensorId, sensorType, channelKey }));
+
+        const first = resolver();
+        const created = await db.tx((q) => first.resolve(q, [reading]));
+        assert.equal(created.created, 1, 'the channel is created: the reading is kept');
+        assert.equal(created.droppedReadings, 0);
+        assert.equal(created.createdOutsideDeclaration, one.outside ? 1 : 0);
+        assert.equal(created.createdUndeclared, one.undeclared ? 1 : 0);
+        assert.deepEqual(
+          said(),
+          one.outside ? [{ sensorId: sensor.id, sensorType: one.type, channelKey: one.key }] : [],
+        );
+
+        // Cached, then a restart over the row that now exists: nothing created, counted or said.
+        const cached = await db.tx((q) => first.resolve(q, [reading]));
+        const restarted = await db.tx((q) => resolver().resolve(q, [reading]));
+        for (const again of [cached, restarted]) {
+          assert.equal(again.created, 0);
+          assert.equal(again.createdOutsideDeclaration, 0);
+        }
+        assert.equal(said().length, one.outside ? 1 : 0, 'said once a channel');
+      });
+    }
+
     it('reads a column an edit added from the sensor’s own parameters, not `{}` (P-297)', async () => {
       // **The case `{}` cannot answer.** An edit replaces a sensor's parameters and declares no
       // channels, so a column it adds reaches the `channel` table here, on its first reading.
@@ -668,6 +804,11 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       assert.deepEqual(answer.shapes.get(one.key), one.shape, 'the sensor');
       assert.equal(answer.undeclared, false, 'answered for its own parameters (`P-306`)');
       assert.equal(answer.primary, one.primary, 'its primary (`P-314`)');
+      assert.equal(
+        answer.everyKey,
+        catalogue.declaration(one.type).declaresEveryChannel === true,
+        'whether it promises every key (`P-321`)',
+      );
       assert.deepEqual(shipped(one.type, {}, 1).shapes.get(one.key), one.bare, '`{}`');
     });
   }
@@ -678,6 +819,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     // Nothing to fall back from: not counted as a channel created without its shape (`P-306`).
     assert.equal(answer.undeclared, false);
     assert.equal(answer.primary, null, 'and no primary to move to (`P-314`)');
+    assert.equal(answer.everyKey, false, 'and no promise to hold it to (`P-321`)');
   });
 
   it('falls back to `{}` only when the sensor’s own answer cannot be had', () => {
@@ -734,6 +876,35 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     assert.deepEqual(answered.shapes.get('one'), bare);
     assert.equal(answered.undeclared, false);
     assert.equal(answered.primary, 'one');
+  });
+
+  it('holds only a type that promises every key to its answer for the stored parameters (`P-321`)', () => {
+    // `snmp.table` promises (`P-310`); its sensor's answer is what a key is checked against.
+    const table = shipped(
+      'snmp.table',
+      { tableOid: ifTable, rowIndex: '1', columns: twoColumns },
+      1,
+    );
+    assert.equal(table.everyKey, true);
+    assert.deepEqual([...table.shapes.keys()].sort(), ['col10', 'col8']);
+    // A script's keys come from what it printed: no promise, nothing to hold it to.
+    assert.equal(shipped('exe.script.advanced', { primaryChannel: 'x' }, 1).everyKey, false);
+    // A fallback is not the type's answer for the sensor, so it holds nothing to it either.
+    const promising = new SensorCatalogue();
+    promising.register({
+      ...columns,
+      id: 'test.promising',
+      declaresEveryChannel: true,
+      channels: (params) => {
+        if (params['broken'] === true) throw new Error('cannot read these parameters');
+        return [{ key: 'one', name: 'One', isPrimary: true }];
+      },
+    });
+    const promised = declaredChannelLookup(promising.seal());
+    assert.equal(promised('test.promising', {}, 1).everyKey, true);
+    const fallback = promised('test.promising', { broken: true }, 1);
+    assert.equal(fallback.undeclared, true);
+    assert.equal(fallback.everyKey, false);
   });
 });
 

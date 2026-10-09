@@ -495,6 +495,23 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'channels',
     counter: { bits: 64 },
   },
+  // `P-321`. Channels ingestion created for a key the sensor's type does not declare for the
+  // sensor's stored parameters, though the type sets `declaresEveryChannel`: its promise that every
+  // key it reports is one it declares, on which `retired` (`P-310`) rests. A probe running a newer
+  // build of the type than the core (ADR-001 Decision 13), or a path in the type's `execute` that
+  // breaks the promise. The reading is kept and the channel created, since refusing it would drop
+  // a channel that is read; the core log names the sensor, the type and the key, once a channel.
+  //
+  // **No limit**, as `channelsCreatedUndeclared` has none and for the same reason: an alarm would
+  // add a Warning and a recovery to the core's own sensor at each first sighting, or hold one
+  // until a restart, for a fact the log already names. A counter to graph, and to alert on from
+  // `/metrics` if wanted.
+  {
+    key: 'channelsCreatedOutsideDeclaration',
+    name: 'Channels created outside declaration',
+    unit: 'channels',
+    counter: { bits: 64 },
+  },
   // `P-247`. How far this core's clock is behind every remote probe's, when two or more are
   // connected: the smallest lead among them, 0 when any is not ahead, and a gap with fewer than two,
   // since one probe ahead cannot be told from one probe wrong. **The core's condition, not theirs**:

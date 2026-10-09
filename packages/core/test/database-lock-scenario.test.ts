@@ -272,6 +272,7 @@ describe(
           refusedUnfit: 0,
           discardedUnfitReadings: 0,
           channelsCreatedUndeclared: 0,
+          channelsCreatedOutsideDeclaration: 0,
         }),
         credentialsToReenter: () => Promise.resolve(0),
         // The pool's own count, which is the thing under test.

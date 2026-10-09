@@ -258,7 +258,9 @@ description, so it does not depend on hovering. Its limits judge nothing, so it 
 the sensor's state. On the
 **History** tab its line stops at the edit, as a gap. Put the column back and it is read again,
 with its history. Only a type that promises its readings name no channel it does not declare is
-marked this way (`P-310`); a script's extra channels are never called retired.
+marked this way (`P-310`); a script's extra channels are never called retired. Nor is a channel
+with a reading newer than the sensor's last change: a probe running a newer build than the core
+may still read a key the core's build no longer declares (`P-322`).
 
 Add a sensor beneath a device at `/objects/:id/add-sensor`. Everything after "which type" is
 generated from the type's `paramsSchema`, which is what keeps adding a sensor type a one-file job.

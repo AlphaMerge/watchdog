@@ -219,6 +219,7 @@ describe(
         refusedUnfit: 0,
         discardedUnfitReadings: 0,
         channelsCreatedUndeclared: 0,
+        channelsCreatedOutsideDeclaration: 0,
       }),
       credentialsToReenter: () => Promise.resolve(0),
       database: () => ({ statements: 0, locks: 0 }),

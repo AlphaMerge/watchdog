@@ -306,7 +306,18 @@ parameters it ran with, on every path. Then a channel a sensor has and its store
 longer declare is one nothing will read again — an edit took it out, as removing a `snmp.table`
 column does — and the core shows it as **retired** (`P-310`): `retired: true` on the channel, a
 mark beside it on the sensor page, its row, settings and history kept. Putting the key back makes
-it live again. Nothing is stored: it is worked out from your declaration on each read.
+it live again. Nothing is stored: it is worked out from your declaration on each read. A channel
+with a reading newer than the sensor's last configuration change is not called retired whatever
+the declaration says (`P-322`): a probe may run a newer build of your type than the core does
+(ADR-001 Decision 13), and the core can only ask its own build.
+
+**The core checks the promise where it can** (`P-321`). A reading of a key your declaration does
+not name, for the sensor's stored parameters, creates a channel as any new key does, and is kept:
+refusing it would lose a reading the probe took. The core logs it at `warn` naming the sensor,
+your type and the key, and counts it on Core Health's `channelsCreatedOutsideDeclaration`. That is
+either a probe newer than the core whose build of your type added the key, or a path in your
+`execute` that breaks the promise. If every probe runs the core's version, it is the second: fix
+the path, or unset the flag.
 
 Leave it unset when your keys come from what the check ran into — a script's output
 (`exe.script.advanced`, `ssh.script`), a query's columns — because a key your declaration does

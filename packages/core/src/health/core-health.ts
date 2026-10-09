@@ -106,7 +106,7 @@ export interface CoreHealthSources {
   /**
    * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`),
    * those refused or cut down because they do not fit the protocol (`P-290`), and channels
-   * created without their declared shape (`P-306`).
+   * created without their declared shape (`P-306`) or outside their declaration (`P-321`).
    *
    * Only these of that service's counters are on this sensor, and deliberately: the others
    * describe a batch that was rejected and will be re-offered, while these describe data that is
@@ -126,6 +126,11 @@ export interface CoreHealthSources {
      * could not declare its channels for the sensor's stored parameters (`P-306`).
      */
     channelsCreatedUndeclared: number;
+    /**
+     * Channels ingestion created for a key the sensor's type does not declare for the sensor's
+     * stored parameters, though it promises to declare every key it reports (`P-321`).
+     */
+    channelsCreatedOutsideDeclaration: number;
   };
   /**
    * The clock offsets of the connected probes that are not the local one, in milliseconds as
@@ -474,6 +479,9 @@ export class CoreHealthService {
       readingsDroppedUnfit: discards.discardedUnfitReadings,
       // Channels that may keep no lookup or counter width for good (`P-306`).
       channelsCreatedUndeclared: discards.channelsCreatedUndeclared,
+      // Channels a promise of `declaresEveryChannel` did not name: a probe ahead of this core, or
+      // a type breaking it (`P-321`).
+      channelsCreatedOutsideDeclaration: discards.channelsCreatedOutsideDeclaration,
       // Seconds behind every remote probe, two or more of them (`P-247`); a gap with fewer.
       clockBehind: coreClock.behindSeconds,
       reactionsDeferred: ingestion.deferredReactions,

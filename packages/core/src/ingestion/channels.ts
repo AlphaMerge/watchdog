@@ -48,6 +48,13 @@ export interface ResolvedChannels {
    * Each may lack a lookup or counter width for good: nothing writes the row again.
    */
   createdUndeclared: number;
+  /**
+   * Of `created`, those whose key the sensor's type does not declare for the sensor's stored
+   * parameters though it promises to declare every key it reports (`declaresEveryChannel`,
+   * `P-321`): a probe running a newer build of the type, or the type breaking its promise. Kept,
+   * since the reading is real; each is logged once, naming the sensor, the type and the key.
+   */
+  createdOutsideDeclaration: number;
   /** Readings whose sensor no longer exists. Dropped — but counted, never silently. */
   droppedReadings: number;
   droppedSensors: number;
@@ -258,12 +265,18 @@ export class ChannelResolver {
     undeclared: ReadonlySet<string>;
     /** The key each sensor's own answer makes primary, by sensor id (`P-314`). */
     primaries: ReadonlyMap<string, string>;
+    /**
+     * `sensorId:key` for each wanted key its sensor's type does not declare though it promises
+     * to declare every key it reports (`P-321`).
+     */
+    outside: ReadonlySet<string>;
   } {
     const declared = this.#declaredShape;
     const undeclared = new Set<string>();
     const primaries = new Map<string, string>();
+    const outside = new Set<string>();
     if (declared === undefined) {
-      return { shapes: wanted.map(() => NO_SHAPE), undeclared, primaries };
+      return { shapes: wanted.map(() => NO_SHAPE), undeclared, primaries, outside };
     }
     // Once a sensor, however many of its channels are new: a table sensor's first scan is all of
     // them at once.
@@ -281,9 +294,14 @@ export class ChannelResolver {
         if (answer.undeclared) undeclared.add(id);
         if (answer.primary !== null) primaries.set(id, answer.primary);
       }
-      return answer.shapes.get(one.key) ?? NO_SHAPE;
+      const shape = answer.shapes.get(one.key);
+      // Checked here because this is the one place the declaration is in hand: a key seen for
+      // the first time (`P-321`). Counted by the caller from the rows its INSERT returns, as
+      // `undeclared` is.
+      if (shape === undefined && answer.everyKey) outside.add(`${id}:${one.key}`);
+      return shape ?? NO_SHAPE;
     });
-    return { shapes, undeclared, primaries };
+    return { shapes, undeclared, primaries, outside };
   }
 
   async #sensorsFor(
@@ -335,7 +353,14 @@ export class ChannelResolver {
     }
 
     if (missing.size === 0) {
-      return { ids, created: 0, createdUndeclared: 0, droppedReadings: 0, droppedSensors: 0 };
+      return {
+        ids,
+        created: 0,
+        createdUndeclared: 0,
+        createdOutsideDeclaration: 0,
+        droppedReadings: 0,
+        droppedSensors: 0,
+      };
     }
 
     const generation = this.#generation;
@@ -347,8 +372,9 @@ export class ChannelResolver {
     const absent = wanted.filter((one) => !have.has(`${String(one.sensorId)}:${one.key}`));
     let created = 0;
     let createdUndeclared = 0;
+    let createdOutsideDeclaration = 0;
     if (absent.length > 0) {
-      ({ created, createdUndeclared } = await this.#create(q, absent));
+      ({ created, createdUndeclared, createdOutsideDeclaration } = await this.#create(q, absent));
       found.push(...(await this.#existing(q, absent)));
     }
 
@@ -388,6 +414,7 @@ export class ChannelResolver {
       ids,
       created,
       createdUndeclared,
+      createdOutsideDeclaration,
       droppedReadings,
       droppedSensors: droppedSensors.size,
     };
@@ -412,7 +439,10 @@ export class ChannelResolver {
    * Creates the channels no row exists for, with what their sensors' types declare; returns how
    * many it wrote, and how many of those its sensor's type could not declare for the sensor's
    * stored parameters (`P-306`), counted from the rows the INSERT returned: a key another batch
-   * created first conflicts, and was not made from the fallback here.
+   * created first conflicts, and was not made from the fallback here. And how many of those its
+   * sensor's type does not declare though it promises to (`P-321`), each logged once: counted, not
+   * refused, because the reading is real — most likely from a probe running a newer build of the
+   * type, which ADR-001 Decision 13 allows — and refusing it would drop a channel that is read.
    *
    * **The sensors are locked before their parameters are read** (`P-303` review). The shape comes
    * from `sensor_config.params`, and an edit to those parameters re-declares the channels it can
@@ -437,7 +467,7 @@ export class ChannelResolver {
   async #create(
     q: Queryable,
     absent: readonly { sensorId: number; key: string; name: string; unit: string }[],
-  ): Promise<{ created: number; createdUndeclared: number }> {
+  ): Promise<{ created: number; createdUndeclared: number; createdOutsideDeclaration: number }> {
     const declares = this.#declaredLimits !== undefined || this.#declaredShape !== undefined;
     if (declares) {
       await q.query(
@@ -451,7 +481,7 @@ export class ChannelResolver {
       ? await this.#sensorsFor(q, absent)
       : new Map<string, SensorDeclaring>();
     const limits = this.#declaredFor(sensors, absent);
-    const { shapes, undeclared, primaries } = this.#shapesFor(sensors, absent);
+    const { shapes, undeclared, primaries, outside } = this.#shapesFor(sensors, absent);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
@@ -482,9 +512,25 @@ export class ChannelResolver {
     // batch, holding the sensor before this one could, moved the primary itself.
     const promoted = created.filter((row) => primaries.get(row.sensor_id) === row.key);
     if (promoted.length > 0) await this.#makePrimary(q, promoted);
+    const beyond = created.filter((row) => outside.has(`${row.sensor_id}:${row.key}`));
+    for (const row of beyond) {
+      this.#logger.warn(
+        {
+          sensorId: Number(row.sensor_id),
+          sensorType: sensors.get(row.sensor_id)?.type,
+          channelKey: row.key,
+          phase: 'create-channel',
+        },
+        'a reading named a channel its sensor type does not declare for the sensor’s stored ' +
+          'parameters, though the type promises to declare every channel it reports: a probe ' +
+          'running a newer build of the type than this core, or the type breaking its promise. ' +
+          'The channel was created and its readings are kept',
+      );
+    }
     return {
       created: created.length,
       createdUndeclared: created.filter((row) => undeclared.has(row.sensor_id)).length,
+      createdOutsideDeclaration: beyond.length,
     };
   }
 

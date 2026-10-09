@@ -9,9 +9,10 @@ import type { Database } from '../src/db/pool.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
-import { IngestionService } from '../src/ingestion/service.js';
+import { IngestionService, type ResultStats } from '../src/ingestion/service.js';
 import { PauseRepository } from '../src/objects/pause-repository.js';
 import { catalogueSensorTypeGate } from '../src/objects/sensor-type-gate.js';
+import { declaredChannelLookup } from '../src/state/declared-limits.js';
 import { SensorStateService } from '../src/state/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
@@ -138,8 +139,12 @@ describe(
       scratch = await createScratchDatabase('retired');
       db = scratch.db;
       harness = await buildHarness(db, { types });
-      // As in production: an edit makes ingestion forget the sensor's cached channels (`M-04`).
-      resolver = new ChannelResolver({ logger: silent });
+      // As in production: an edit makes ingestion forget the sensor's cached channels (`M-04`),
+      // and a channel a reading creates is checked against its declaration (`P-321`).
+      resolver = new ChannelResolver({
+        logger: silent,
+        declaredShape: declaredChannelLookup(testCatalogue(types)),
+      });
       harness.audit.also = new CompositeAuditSink([
         new DatabaseAuditSink(),
         new ResultCacheInvalidator({ channels: resolver, logger: silent }),
@@ -226,7 +231,10 @@ describe(
     };
 
     /** One batch through ingestion and the state machine, as the probe endpoint delivers it. */
-    const deliver = async (results: readonly CheckResult[], batchId: string): Promise<void> => {
+    const deliver = async (
+      results: readonly CheckResult[],
+      batchId: string,
+    ): Promise<ResultStats> => {
       const ingestor = new Ingestor({ db, logger: silent, config: CONFIG });
       const service = new IngestionService({ db, logger: silent, ingestor, states, resolver });
       const reply = await service.acceptResults('probe-retired', {
@@ -236,6 +244,7 @@ describe(
       });
       await ingestor.stop();
       assert.equal(reply.type, 'results-ack');
+      return service.stats();
     };
 
     it('says so on the channel list, the object read and a channel write, and not once put back', async () => {
@@ -286,6 +295,77 @@ describe(
 
       await edit(id, { columns: [{ key: 'a' }, { key: 'b' }, { key: 'c' }] });
       assert.deepEqual(await retirement(id), { a: false, b: false, c: false });
+    });
+
+    // `P-322`. `retired` asks this core's catalogue, but readings come from the probe's build, and
+    // ADR-001 Decision 13 lets a probe run ahead of the core: a key a newer build reports that this
+    // build's declaration does not name, or one this build's edit took out and a newer build still
+    // reads. A channel with a reading newer than the sensor's last change is read, so it is not
+    // retired, whatever the declaration says.
+    it('is not said of a channel read after the change that stopped declaring it, as from a probe ahead of the core', async () => {
+      const id = await create('test.columns', { columns: [{ key: 'a' }, { key: 'b' }] });
+      const scan = (at: Date, keys: readonly string[]): CheckResult => ({
+        sensorId: id,
+        at: at.toISOString(),
+        outcome: 'ok',
+        message: '',
+        durationMs: 1,
+        channels: keys.map((key) => ({ key, value: 1 })),
+      });
+      /** Just after the sensor's last change: a reading the probe took once it had it. */
+      const afterChange = async (): Promise<Date> => {
+        const rows = await db.query<{ at: Date }>(
+          'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+          [id],
+        );
+        const at = rows[0]?.at;
+        assert.ok(at !== undefined);
+        // A JS date drops the microseconds, so one millisecond on is strictly after.
+        return new Date(at.getTime() + 1);
+      };
+
+      await deliver([scan(new Date(Date.now() - 5 * 60_000), ['a', 'b'])], `ahead-0-${String(id)}`);
+      await edit(id, { columns: [{ key: 'a' }] });
+      assert.deepEqual(await retirement(id), { a: false, b: true }, 'no reading since the edit');
+
+      // A probe running a newer build reads `b` still, and a key this core never declared.
+      const stats = await deliver(
+        [scan(await afterChange(), ['a', 'b', 'newer'])],
+        `ahead-1-${String(id)}`,
+      );
+      assert.equal(
+        stats.channelsCreatedOutsideDeclaration,
+        1,
+        '`newer` is created and counted (`P-321`), its reading kept',
+      );
+      assert.deepEqual(
+        await retirement(id),
+        { a: false, b: false, newer: false },
+        'each read since the edit, so neither is called retired',
+      );
+
+      // Put back: live, as it is declared.
+      await edit(id, { columns: [{ key: 'a' }, { key: 'b' }] });
+      assert.deepEqual(await retirement(id), { a: false, b: false, newer: true });
+
+      // Taken out again, and nothing has read it since: retired once more. The database's clock
+      // has to have moved past the last reading's for the edit to come after it.
+      await db.query('SELECT pg_sleep(0.01)');
+      await edit(id, { columns: [{ key: 'a' }] });
+      assert.deepEqual(await retirement(id), { a: false, b: true, newer: true });
+
+      // The channel `PATCH` answers from the same rule.
+      await deliver([scan(await afterChange(), ['a', 'b'])], `ahead-2-${String(id)}`);
+      const read = await app.inject({ method: 'GET', url: `/api/v1/objects/${String(id)}` });
+      const patched = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/objects/${String(id)}/channels/b`,
+        headers: { 'if-match': String(read.headers['etag']) },
+        payload: { limits: { upperError: 10 } },
+      });
+      assert.equal(patched.statusCode, 200, patched.body);
+      assert.equal(patched.json<Channel>().retired, false, 'read since the edit');
+      assert.deepEqual(await retirement(id), { a: false, b: false, newer: true });
     });
 
     it('is exact for the shipped `snmp.table`', async () => {

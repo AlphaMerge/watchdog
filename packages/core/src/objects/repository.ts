@@ -10,6 +10,7 @@ import { ObjectError, notFound } from './errors.js';
 import type {
   CarriedGrants,
   ChannelProcessing,
+  ChannelRecord,
   CloneCounts,
   CountsByKind,
   CreateObjectInput,
@@ -1039,47 +1040,62 @@ export class ObjectRepository {
   }
 
   async channels(q: Queryable, sensorId: ObjectId): Promise<StoredChannelRecord[]> {
-    const rows = await q.query<{
-      id: number;
-      sensor_id: string;
-      key: string;
-      name: string;
-      unit: string;
-      is_primary: boolean;
-      scale_mul: string;
-      scale_div: string;
-      decimals: number | null;
-      limits: unknown;
-      spike_min: number | null;
-      spike_max: number | null;
-      show_in_graph: boolean;
-      show_in_table: boolean;
-      lookup_id: string | null;
-    }>(
-      `SELECT id, sensor_id, key, name, unit, is_primary, scale_mul, scale_div, decimals,
-              limits, spike_min, spike_max, show_in_graph, show_in_table, lookup_id
-       FROM channel WHERE sensor_id = $1
-       ORDER BY is_primary DESC, key`,
-      [sensorId],
-    );
+    return (await this.#channelRows(q, sensorId, null)).map(storedChannelOf);
+  }
 
-    return rows.map((row) => ({
-      id: row.id,
-      sensorId: Number(row.sensor_id),
-      key: row.key,
-      name: row.name,
-      unit: row.unit,
-      isPrimary: row.is_primary,
-      scaleMul: row.scale_mul,
-      scaleDiv: row.scale_div,
-      decimals: row.decimals,
-      limits: parseLimits(row.limits),
-      spikeMin: row.spike_min,
-      spikeMax: row.spike_max,
-      showInGraph: row.show_in_graph,
-      showInTable: row.show_in_table,
-      lookupId: row.lookup_id,
+  /**
+   * The sensor's channels with whether each is retired (`P-310`, `P-322`), from the one query
+   * that reads them.
+   *
+   * `reportable` is every key the sensor's type can report for its stored parameters, or `null`
+   * where the type cannot say (`SensorTypeGate.reportableKeys`); with `null` nothing is retired.
+   * A channel whose key it does not name is retired **unless it has a reading newer than the
+   * sensor's last configuration change** (`sensor_config.updated_at`, which every write of the
+   * parameters moves): the declaration stopped naming the key no later than that, so a reading
+   * after it came from something that still reports the key. That is a probe running a newer
+   * build of the type than this core (ADR-001 Decision 13), whose declaration this core cannot
+   * ask, or a type breaking its promise (`P-321`, counted when the channel is created). Either
+   * way the channel is read, and calling it retired would say it is not.
+   *
+   * **Asked only of a key outside the declaration**, inside the `CASE`, so a declared channel,
+   * and every channel of a type that cannot say, costs nothing. For the rest it is one probe of
+   * `sample`'s `(channel_id, time)` index bounded below by the change, the shape `latestValues`
+   * relies on: it stops at the first row after the change, and for a channel nobody reads finds
+   * none at the boundary.
+   */
+  async channelsWithRetirement(
+    q: Queryable,
+    sensorId: ObjectId,
+    reportable: ReadonlySet<string> | null,
+  ): Promise<ChannelRecord[]> {
+    return (await this.#channelRows(q, sensorId, reportable)).map((row) => ({
+      ...storedChannelOf(row),
+      retired: row.retired,
     }));
+  }
+
+  async #channelRows(
+    q: Queryable,
+    sensorId: ObjectId,
+    reportable: ReadonlySet<string> | null,
+  ): Promise<ChannelRow[]> {
+    return q.query<ChannelRow>(
+      `SELECT c.id, c.sensor_id, c.key, c.name, c.unit, c.is_primary, c.scale_mul, c.scale_div,
+              c.decimals, c.limits, c.spike_min, c.spike_max, c.show_in_graph, c.show_in_table,
+              c.lookup_id,
+              CASE
+                WHEN $2::text[] IS NULL OR c.key = ANY($2::text[]) THEN false
+                ELSE NOT EXISTS (
+                  SELECT 1 FROM sample s
+                  WHERE s.channel_id = c.id AND s.time > sc.updated_at
+                )
+              END AS retired
+       FROM channel c
+       LEFT JOIN sensor_config sc ON sc.object_id = c.sensor_id
+       WHERE c.sensor_id = $1
+       ORDER BY c.is_primary DESC, c.key`,
+      [sensorId, reportable === null ? null : [...reportable]],
+    );
   }
 
   /** One channel by the key its sensor type gave it, or null. */
@@ -2194,4 +2210,45 @@ export type { CloneCounts };
  */
 function declaredLimitsJson(draft: ChannelDraft): string | null {
   return draft.limits === undefined ? null : JSON.stringify(limitsFromDeclaration(draft.limits));
+}
+
+/** A `channel` row as the channel reads take it, with `retired` derived in the same statement. */
+interface ChannelRow {
+  id: number;
+  sensor_id: string;
+  key: string;
+  name: string;
+  unit: string;
+  is_primary: boolean;
+  scale_mul: string;
+  scale_div: string;
+  decimals: number | null;
+  limits: unknown;
+  spike_min: number | null;
+  spike_max: number | null;
+  show_in_graph: boolean;
+  show_in_table: boolean;
+  lookup_id: string | null;
+  /** `false` whenever the read was not asked about retirement (`reportable` null). */
+  retired: boolean;
+}
+
+function storedChannelOf(row: ChannelRow): StoredChannelRecord {
+  return {
+    id: row.id,
+    sensorId: Number(row.sensor_id),
+    key: row.key,
+    name: row.name,
+    unit: row.unit,
+    isPrimary: row.is_primary,
+    scaleMul: row.scale_mul,
+    scaleDiv: row.scale_div,
+    decimals: row.decimals,
+    limits: parseLimits(row.limits),
+    spikeMin: row.spike_min,
+    spikeMax: row.spike_max,
+    showInGraph: row.show_in_graph,
+    showInTable: row.show_in_table,
+    lookupId: row.lookup_id,
+  };
 }

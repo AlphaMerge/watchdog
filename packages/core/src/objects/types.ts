@@ -307,9 +307,12 @@ export interface ChannelRecord {
   readonly lookupId: string | null;
   /**
    * Nothing will read this channel again (`P-310`): its sensor's type declares every channel it
-   * reports, and the sensor's stored parameters no longer declare this key. An edit took it out
-   * (a table column removed); the row and its history are kept, and putting the key back makes
-   * it live again.
+   * reports, the sensor's stored parameters no longer declare this key, and it has no reading
+   * newer than the sensor's last configuration change (`P-322`). An edit took it out (a table
+   * column removed); the row and its history are kept, and putting the key back makes it live
+   * again. A reading after the change means something still reports the key — a probe running a
+   * newer build of the type than the core (ADR-001 Decision 13), or a type breaking its promise
+   * (`P-321`) — so such a channel is not called retired.
    *
    * **Derived on every read, never stored**, from the type's current declaration, so it cannot
    * disagree with it. `false` where the type cannot say, which is any type whose readings may
