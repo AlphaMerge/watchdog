@@ -12373,6 +12373,34 @@ because each is a decision rather than a defect:
       **Done when** measured at the v1 target and either the subquery is dropped when nothing needs
       it or the numbers say it does not matter, committed to `docs/findings/`.
 
+- [ ] **P-342 — more fixed-value fields are plain strings** · S · P-335 · Found 2026-10-09 in
+      `P-335`. `ms:alarm.cause`, the discovery summary's `level` and `found.byKind[].kind`, and
+      `ms:notificationRequest`'s `disposition`, `triggerKind`, `reason` and `state` each have a fixed
+      set of values the schema does not name. **Done when** each is an `enum` matching what the code
+      writes (and any CHECK), with P-335's serialise-every-value test, and a build-hygiene sweep
+      flags a response string whose writer draws from a constant list.
+
+- [ ] **P-343 — the secret checks go by name and miss `code` and `recoveryCodes`** · XS · P-334 ·
+      Found 2026-10-09 in `P-334`. The TOTP `code` fields and the `recoveryCodes` response were found
+      by reading the auth routes, not by the check. **Done when** the request check also requires
+      `writeOnly` for these names, and the response check accounts for `recoveryCodes` (shown once
+      at MFA set-up) with a reason.
+
+- [ ] **P-344 — secrets inside free-form objects are checked only at run time** · XS · P-336 ·
+      Found 2026-10-09 in `P-336`. Credential-set `values`, template `settings` and sensor `params`
+      are free-form in the OpenAPI document, so the walk cannot see a secret in them; redaction
+      happens at run time (`ObjectService.#redact`). **Done when** decided whether the document
+      should say so (a description naming the run-time rule) or the check should read the sensor
+      types' `paramsSchema`, written down.
+
+- [ ] **P-345 — a Down sensor's stored message drops the check's own sentence** · S · P-338 ·
+      Found 2026-10-09 in `P-338`. For a `lookup` or `limit` cause, `state/service.ts` stores the
+      channel's message (`result.channels?.message ?? result.message`), so a lost probe's alarm and
+      notification say only "Link to the core is 0 (not connected)", never the refusal P-338 adds,
+      and the same loss applies to every sensor type. **Done when** decided (store both when they
+      differ, or keep the channel's) with an M-17 scenario test over notification and summary
+      bodies, since it changes notification text for every sensor.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -23781,6 +23809,16 @@ because each is a decision rather than a defect:
         position through a Move: the moved cleared entry says nothing until it is left again, though
         its control now moves with it. A JSON entry whose schema takes the string `""` (an untyped
         `items`) cannot be saved holding it; no shipped type has one.
+
+- [ ] **U-48 — a failed save in the settings panel is not announced** · XS · U-46 · Found
+      2026-10-09 in `U-46`. `SettingsPanel`'s `failed` line is rendered only on failure and is not a
+      live region; focus is on Save when the core refuses, so the refusal is never read out (WCAG
+      4.1.3). **Done when** it is announced, with a test.
+
+- [ ] **U-49 — a problem stays with the position, not the entry, after a Move** · XS · U-47 ·
+      Found 2026-10-09 in `U-47`. Entries now keep stable keys, but `SchemaForm`'s `touched` set is
+      keyed by path, so a moved cleared entry says nothing until it is left again. **Done when**
+      touched paths move with their entry on Move and Remove, with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
