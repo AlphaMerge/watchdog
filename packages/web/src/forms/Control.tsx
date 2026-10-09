@@ -234,9 +234,11 @@ function sameJson(a: unknown, b: unknown): boolean {
  *
  * **The text follows the value whenever the value changes from outside** (`U-47`). The box keeps
  * its own text — what was typed, in the operator's spelling, valid or not — for as long as the
- * value it was given is the one that text stands for. A different value is a different entry:
- * array entries are keyed by position, so a Move or a Remove hands a mounted box another entry's
- * value, and a box that kept its text would show one entry while the form saved another.
+ * value it was given is the one that text stands for. A different value came from somewhere else
+ * — a reload, a reset — and a box that kept its text would show one value while the form saved
+ * another. An entry of an array keeps one box for its life, wherever Move takes it, because
+ * `ArrayField` keys entries by identity rather than position; a box handed a JSON-equal
+ * neighbour's place would otherwise keep text the value cannot tell apart (`U-47` review).
  */
 function JsonBox({
   value,
@@ -273,7 +275,10 @@ function JsonBox({
           setText(event.target.value);
           if (event.target.value.trim() === '') {
             setBroken(false);
-            setStands(undefined);
+            // What the form will hold, not what is handed to it: an entry's empty box is `''`
+            // (`U-41`), and standing for `undefined` would read that `''` as a different value and
+            // rebuild the text — taking every space or line break typed into an emptied entry.
+            setStands(entry ? '' : undefined);
             onValue(undefined);
             return;
           }

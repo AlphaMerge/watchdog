@@ -131,7 +131,9 @@ function Field(props: FieldProps): React.JSX.Element {
         )}
         <div className="space-y-4">
           {field.children.map((child) => (
-            <Field key={child.path} {...props} field={child} existing={within} />
+            // By name, not path: inside an entry the path carries the entry's position, and a
+            // key that changed with it would remount the control on every Move (`U-47` review).
+            <Field key={child.name} {...props} field={child} existing={within} />
           ))}
         </div>
       </fieldset>
@@ -308,7 +310,39 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
   const raw = readAt(values, field.path);
   const entries: unknown[] = Array.isArray(raw) ? (raw as unknown[]) : [];
 
-  const replace = (next: unknown[]): void => {
+  // **Each entry keeps one identity for its life** (`U-47` review). Entries have none of their
+  // own, and a key derived from their contents would remount a control on every keystroke, which
+  // takes the caret with it; so this keeps a key per entry and moves it with the entry on Move
+  // and Remove. Keyed by position instead, a Move or a Remove handed each mounted control another
+  // entry's value, and whatever a control holds beside the value — a JSON box's half-typed text,
+  // its "not valid JSON" — stayed behind with the position, on an entry never touched. Values
+  // changed from outside (a reload) keep the keys and only grow or shrink them to fit.
+  const [held, setHeld] = useState<readonly number[]>(() => keysFor([], entries.length));
+  let keys = held;
+  if (keys.length !== entries.length) {
+    keys = keysFor(keys, entries.length);
+    setHeld(keys);
+  }
+
+  // **Focus follows the entry** after a Move or a Remove (WCAG 2.4.3). The entry's own buttons
+  // move with it now, so one that held focus can be taken out of the DOM and put back, which
+  // drops focus, or land where it is disabled; and a Remove takes its button away. Only when
+  // focus was in this list, so a change made elsewhere never pulls focus here.
+  const list = useRef<HTMLOListElement>(null);
+  const add = useRef<HTMLButtonElement>(null);
+  const follow = useRef<{ index: number; action: EntryAction } | null>(null);
+  const keepFocus = (index: number, action: EntryAction): void => {
+    follow.current = list.current?.contains(document.activeElement) ? { index, action } : null;
+  };
+  useLayoutEffect(() => {
+    const wanted = follow.current;
+    if (wanted === null) return;
+    follow.current = null;
+    const target = entryButton(list.current, wanted.index, wanted.action) ?? add.current;
+    if (target !== null && document.activeElement !== target) target.focus();
+  });
+
+  const replace = (next: unknown[], nextKeys: readonly number[]): void => {
     // An array emptied back to nothing is removed rather than saved as `[]`: the schema tells
     // those two apart, and `params` is replaced wholesale on save.
     onChange(
@@ -316,6 +350,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
         ? removeAt(values, field.path)
         : writeAt(values, field.path, next),
     );
+    setHeld(nextKeys);
   };
 
   /**
@@ -326,10 +361,16 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
    * which is a branch no test can hold to account.
    */
   const move = (from: number, to: number): void => {
-    const next: unknown[] = [...entries];
-    const held = next.splice(from, 1);
-    next.splice(to, 0, ...held);
-    replace(next);
+    keepFocus(to, to < from ? 'up' : 'down');
+    replace(movedIn(entries, from, to), movedIn(keys, from, to));
+  };
+
+  const remove = (index: number): void => {
+    keepFocus(index, 'remove');
+    replace(
+      entries.filter((_value, at) => at !== index),
+      keys.filter((_key, at) => at !== index),
+    );
   };
 
   const atLimit = field.schema.maxItems !== undefined && entries.length >= field.schema.maxItems;
@@ -346,21 +387,16 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
       {entries.length === 0 ? (
         <p className="mb-2 text-xs text-text-muted">Nothing here yet.</p>
       ) : (
-        <ol className="mb-2 space-y-3">
+        <ol ref={list} className="mb-2 space-y-3">
           {entries.map((_entry, index) => (
-            <li
-              // Position, deliberately: these entries have no identity of their own, and a key
-              // derived from their contents would remount a control on every keystroke — which
-              // takes the caret with it.
-              key={index}
-              className="border border-border-subtle p-2"
-            >
+            <li key={keys[index]} className="border border-border-subtle p-2">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-text-muted">
                   {entryLabel} {String(index + 1)}
                 </span>
                 <div className="flex gap-1">
                   <EntryButton
+                    action="up"
                     label={`Move ${entryLabel} ${String(index + 1)} up`}
                     text="↑"
                     disabled={disabled || index === 0}
@@ -369,6 +405,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
                     }}
                   />
                   <EntryButton
+                    action="down"
                     label={`Move ${entryLabel} ${String(index + 1)} down`}
                     text="↓"
                     disabled={disabled || index === entries.length - 1}
@@ -377,11 +414,12 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
                     }}
                   />
                   <EntryButton
+                    action="remove"
                     label={`Remove ${entryLabel} ${String(index + 1)}`}
                     text="Remove"
                     disabled={disabled}
                     onClick={() => {
-                      replace(entries.filter((_value, at) => at !== index));
+                      remove(index);
                     }}
                   />
                 </div>
@@ -393,10 +431,11 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
       )}
 
       <button
+        ref={add}
         type="button"
         disabled={disabled || atLimit}
         onClick={() => {
-          replace([...entries, newEntryFor(items)]);
+          replace([...entries, newEntryFor(items)], keysFor(keys, entries.length + 1));
         }}
         className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text disabled:opacity-50"
       >
@@ -439,18 +478,67 @@ function Entry({
   return (
     <div className="space-y-4">
       {children.map((child) => (
-        <Field key={child.path} {...props} field={child} existing={existing} />
+        // By name, not path, which carries this entry's position (`U-47` review).
+        <Field key={child.name} {...props} field={child} existing={existing} />
       ))}
     </div>
   );
 }
 
+type EntryAction = 'up' | 'down' | 'remove';
+
+/**
+ * `keys` grown or shrunk to `length` (`U-47` review): the first ones kept, new ones never used by
+ * any key still here. A key freed by a Remove may come back, which is harmless: its entry is gone.
+ */
+function keysFor(keys: readonly number[], length: number): readonly number[] {
+  if (keys.length >= length) return keys.slice(0, length);
+  const next = keys.reduce((highest, key) => Math.max(highest, key), -1) + 1;
+  return [...keys, ...Array.from({ length: length - keys.length }, (_unused, at) => next + at)];
+}
+
+/** `list` with the item at `from` taken out and put back at `to`. */
+function movedIn<T>(list: readonly T[], from: number, to: number): T[] {
+  const next = [...list];
+  const held = next.splice(from, 1);
+  next.splice(to, 0, ...held);
+  return next;
+}
+
+/**
+ * Where focus goes after a Move or a Remove: the same button of the entry now at `index` — the
+ * entry moved, or the one that took a removed entry's place, or the last if it was the last — or
+ * its first enabled one when that button is disabled there (moved to the top, "up" is). `null`
+ * when the list has no entries left, and the caller falls back to Add.
+ */
+function entryButton(
+  list: HTMLOListElement | null,
+  index: number,
+  action: EntryAction,
+): HTMLButtonElement | null {
+  const items = list?.children;
+  if (items === undefined || items.length === 0) return null;
+  // The entry's own header, which comes first: an entry holding an array has buttons of its own
+  // further down, for its own entries.
+  const header = items[Math.min(index, items.length - 1)]?.firstElementChild;
+  const buttons = [
+    ...(header?.querySelectorAll<HTMLButtonElement>('button[data-entry-action]') ?? []),
+  ].filter((button) => !button.disabled);
+  return (
+    buttons.find((button) => button.getAttribute('data-entry-action') === action) ??
+    buttons[0] ??
+    null
+  );
+}
+
 function EntryButton({
+  action,
   label,
   text,
   disabled,
   onClick,
 }: {
+  action: EntryAction;
   label: string;
   text: string;
   disabled: boolean;
@@ -459,6 +547,7 @@ function EntryButton({
   return (
     <button
       type="button"
+      data-entry-action={action}
       aria-label={label}
       title={label}
       disabled={disabled}

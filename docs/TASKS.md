@@ -23760,11 +23760,27 @@ because each is a decision rather than a defect:
         entry stays as typed and is judged emptied; a non-entry JSON field holding `''` shows `""`,
         and clearing it removes the key. Mutations, each failing: no resync 2; `''` in an entry
         serialised 2; the typed value not remembered 2; `''` shown empty outside an entry too 1.
-      - **Not done.** `touched` is keyed by path, so a problem on an entry stays with the position
-        through a Move: the moved cleared entry says nothing until it is left again. Unparseable text
-        in a box is replaced by the new entry's value on a Move or Remove, since it belongs to the
-        entry that moved. A JSON entry whose schema takes the string `""` (an untyped `items`) cannot
-        be saved holding it; no shipped type has one.
+      - **Review: entries keyed by identity, and an emptied entry keeps its whitespace.** Comparing
+        values alone could not tell a box it had been handed a JSON-equal neighbour's place: Add,
+        Add, half-typed JSON in Row 1, Remove Row 1 left that text and "not valid JSON" on the
+        untouched `{}`. `ArrayField` now keeps a key per entry and moves it with the entry on Move
+        and Remove (grown or shrunk to fit a change from outside); an entry's own fields are keyed by
+        name, not by a path carrying the position. So each control lives with its entry, half-typed
+        text included. Focus follows: after a Move, the moved entry's same button, or its first
+        enabled one where that is disabled; after a Remove, the entry now in its place, or the last,
+        or Add — and only when focus was in that list. Separately, an emptied entry's box stood for
+        `undefined` while the form held `''`, so the resync rebuilt its text on every keystroke and
+        ate each space or Enter typed into it; it now stands for `''`. Tests, in
+        `repeating-field.test.tsx`: whitespace kept in an emptied entry; Remove above a half-typed
+        `{}`; a Move past an equal neighbour carries the text, warning and textarea node; an object
+        entry's field and an object inside an entry keep their nodes; a 7-row focus table and focus
+        left alone from outside. Mutations, each failing: standing for `undefined` 1; keyed by
+        position 3; an entry's fields keyed by path 1; an object's inside an entry 1; focus not
+        followed 5; no fallback for a disabled button 2.
+      - **Not done.** `touched` is keyed by path, so a problem shown on an entry stays with the
+        position through a Move: the moved cleared entry says nothing until it is left again, though
+        its control now moves with it. A JSON entry whose schema takes the string `""` (an untyped
+        `items`) cannot be saved holding it; no shipped type has one.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

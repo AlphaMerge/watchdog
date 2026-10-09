@@ -578,4 +578,134 @@ describe('a JSON entry’s text follows its value (U-47)', () => {
     expect(stored()).toStrictEqual({});
     expect(box('Extra').value).toBe('');
   });
+
+  it('keeps spaces and line breaks typed into an emptied entry (U-47 review)', () => {
+    // The emptied box hands the form "absent", which an entry holds as `''`; the box used to read
+    // that `''` as a new value and rebuild its text, eating each space or Enter as it was typed.
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }] }} />);
+    fireEvent.change(box('Row 1'), { target: { value: '' } });
+    fireEvent.change(box('Row 1'), { target: { value: ' ' } });
+    expect(box('Row 1').value).toBe(' ');
+    fireEvent.change(box('Row 1'), { target: { value: ' \n' } });
+    expect(box('Row 1').value).toBe(' \n');
+    expect(stored()).toStrictEqual({ rows: [''] });
+    fireEvent.change(box('Row 1'), { target: { value: ' \n{"c": 3}' } });
+    expect(stored()).toStrictEqual({ rows: [{ c: 3 }] });
+    expect(box('Row 1').value).toBe(' \n{"c": 3}');
+  });
+});
+
+describe('an entry keeps its controls wherever it goes (U-47 review)', () => {
+  // Entries are keyed by identity, not position, so a control and what it holds beside the value
+  // move with its entry — even past a neighbour holding the same value, which a box comparing
+  // values alone cannot tell apart.
+  const ROWS: JsonSchema = {
+    type: 'object',
+    properties: {
+      rows: { type: 'array', title: 'Rows', items: { type: 'object', title: 'Row' } },
+    },
+  };
+  const BROKEN = 'Not valid JSON — the last valid value will be saved.';
+  const box = (name: string): HTMLTextAreaElement =>
+    screen.getByRole<HTMLTextAreaElement>('textbox', { name });
+  const brokenIn = (item: HTMLElement): boolean => within(item).queryByText(BROKEN) !== null;
+  const rows = (): HTMLElement[] =>
+    within(screen.getByRole('group', { name: 'Rows' })).getAllByRole('listitem');
+  const button = (name: string): HTMLElement => screen.getByRole('button', { name });
+
+  it('shows the surviving entry after a Remove above it, not the removed one’s typing', () => {
+    render(<Harness schema={ROWS} />);
+    fireEvent.click(button('Add row'));
+    fireEvent.click(button('Add row'));
+    expect(stored()).toStrictEqual({ rows: [{}, {}] });
+    fireEvent.change(box('Row 1'), { target: { value: '{"x": ' } });
+    expect(brokenIn(rows()[0] as HTMLElement)).toBe(true);
+
+    fireEvent.click(button('Remove Row 1'));
+    expect(stored()).toStrictEqual({ rows: [{}] });
+    expect(box('Row 1').value).toBe('{}');
+    expect(brokenIn(rows()[0] as HTMLElement)).toBe(false);
+  });
+
+  it('moves a box’s typing with its entry past a neighbour of the same value', () => {
+    render(<Harness schema={ROWS} />);
+    fireEvent.click(button('Add row'));
+    fireEvent.click(button('Add row'));
+    const typed = box('Row 2');
+    fireEvent.change(typed, { target: { value: '{"x": ' } });
+
+    fireEvent.click(button('Move Row 2 up'));
+    expect(stored()).toStrictEqual({ rows: [{}, {}] });
+    // The same box, now first, with its text and its warning; the untouched one second.
+    expect(box('Row 1')).toBe(typed);
+    expect(typed.value).toBe('{"x": ');
+    expect(brokenIn(rows()[0] as HTMLElement)).toBe(true);
+    expect(box('Row 2').value).toBe('{}');
+    expect(brokenIn(rows()[1] as HTMLElement)).toBe(false);
+  });
+
+  it('keeps an object entry’s controls mounted through a Move', () => {
+    render(<Harness initial={{ steps: [{ path: 'a' }, { path: 'b' }] }} />);
+    const steps = (): HTMLElement[] =>
+      within(screen.getByRole('group', { name: 'Steps' })).getAllByRole('listitem');
+    const path = within(steps()[1] as HTMLElement).getByRole('textbox', { name: 'Path' });
+    fireEvent.click(button('Move Step 2 up'));
+    expect(stored()).toStrictEqual({ steps: [{ path: 'b' }, { path: 'a' }] });
+    expect(within(steps()[0] as HTMLElement).getByRole('textbox', { name: 'Path' })).toBe(path);
+  });
+
+  it('keeps the controls of an object inside an entry mounted through a Move', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        hops: {
+          type: 'array',
+          title: 'Hops',
+          items: {
+            type: 'object',
+            title: 'Hop',
+            properties: {
+              auth: { type: 'object', title: 'Auth', properties: { user: { type: 'string' } } },
+            },
+          },
+        },
+      },
+    };
+    render(<Harness schema={schema} initial={{ hops: [{ auth: { user: 'a' } }, { auth: {} }] }} />);
+    const hops = (): HTMLElement[] =>
+      within(screen.getByRole('group', { name: 'Hops' })).getAllByRole('listitem');
+    const user = within(hops()[1] as HTMLElement).getByRole('textbox', { name: 'User' });
+    fireEvent.click(button('Move Hop 2 up'));
+    expect(stored()).toStrictEqual({ hops: [{ auth: {} }, { auth: { user: 'a' } }] });
+    expect(within(hops()[0] as HTMLElement).getByRole('textbox', { name: 'User' })).toBe(user);
+  });
+
+  it.each([
+    // [entries, pressed, focused after]
+    [3, 'Move Row 1 down', 'Move Row 2 down'],
+    [3, 'Move Row 3 up', 'Move Row 2 up'],
+    // At the top "up" is disabled, so the entry's first enabled button.
+    [2, 'Move Row 2 up', 'Move Row 1 down'],
+    // At the bottom "down" is: "up" comes first.
+    [2, 'Move Row 1 down', 'Move Row 2 up'],
+    // The entry that took the removed one's place, or the last when the last went.
+    [2, 'Remove Row 1', 'Remove Row 1'],
+    [2, 'Remove Row 2', 'Remove Row 1'],
+    [1, 'Remove Row 1', 'Add row'],
+  ] as const)('with %i entries, %s leaves focus on %s', (count, pressed, after) => {
+    render(<Harness schema={ROWS} initial={{ rows: Array.from({ length: count }, () => ({})) }} />);
+    const target = button(pressed);
+    target.focus();
+    fireEvent.click(target);
+    expect(document.activeElement).toBe(button(after));
+  });
+
+  it('leaves focus alone when the change came from outside the list', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{}, {}] }} />);
+    const outside = screen.getByTestId('values');
+    outside.tabIndex = -1;
+    outside.focus();
+    fireEvent.click(button('Move Row 2 up'));
+    expect(document.activeElement).toBe(outside);
+  });
 });
