@@ -57,8 +57,9 @@ export interface DeclaredShapes {
   /**
    * The type promises its readings name no key `shapes` does not (`declaresEveryChannel`), and
    * `shapes` is its answer for the sensor's own stored parameters (`P-321`). Then a key the
-   * resolver creates a channel for and `shapes` does not name is a broken promise, or a probe
-   * whose newer build of the type declares it, and is counted and said. False whenever
+   * resolver creates a channel for and `shapes` does not name, from a reading taken under these
+   * parameters, is a broken promise or a probe whose build of the type differs from this one,
+   * and is counted and said. False whenever
    * `undeclared` is set, and for a type this build does not register: neither answer is one the
    * type stands behind.
    */

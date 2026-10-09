@@ -246,8 +246,9 @@ export interface ResultStats {
   channelsCreatedUndeclared: number;
   /**
    * Of `channelsCreated`, those whose key the sensor's type does not declare for the sensor's
-   * stored parameters though it promises to declare every key it reports (`P-321`): a probe
-   * running a newer build of the type, or the type breaking its promise. On Core Health as
+   * stored parameters though it promises to declare every key it reports (`P-321`), in a reading
+   * taken under those parameters: a probe running a different build of the type (newer, or older
+   * and still reporting a key this build renamed), or the type breaking its promise. On Core Health as
    * `channelsCreatedOutsideDeclaration`; the core log names the sensor, the type and the key.
    */
   channelsCreatedOutsideDeclaration: number;

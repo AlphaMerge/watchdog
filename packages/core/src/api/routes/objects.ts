@@ -28,7 +28,7 @@ import {
 } from '../schemas/pause.js';
 import { SENSOR_STATES } from '../../state/tables.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
-import type { CarriedGrants, ChannelProcessing } from '../../objects/types.js';
+import type { CarriedGrants, ChannelProcessing, ChannelRecord } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch, viewedChain } from '../preconditions.js';
 import {
@@ -370,6 +370,17 @@ function parseTokens<T extends string>(raw: string | undefined, known: readonly 
 const parseInclude = (raw: string | undefined): Set<IncludeToken> =>
   parseTokens(raw, INCLUDE_TOKENS);
 
+/**
+ * The ids of a sensor's retired channels, sorted, for the detail's validator (`P-322` review):
+ * the one part of `?include=channels` that a reading, rather than a write, can change.
+ */
+const retiredOf = (channels: readonly ChannelRecord[]): string =>
+  channels
+    .filter((channel) => channel.retired)
+    .map((channel) => channel.id)
+    .sort((a, b) => a - b)
+    .join(',');
+
 // eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugins are async by contract
 export async function objectRoutes(
   app: FastifyInstance,
@@ -411,15 +422,18 @@ export async function objectRoutes(
       : await service.visibleChildCount(id, visibility);
     if (childCount !== undefined) body['childCount'] = childCount;
     if (include.has('settings')) body['settings'] = await service.settings(id);
+    let retired: string | undefined;
     if (include.has('channels') && object.kind === 'sensor') {
-      body['channels'] = await service.channels(id);
+      const channels = await service.channels(id);
+      body['channels'] = channels;
+      retired = retiredOf(channels);
     }
     if (include.has('credentials')) body['credentials'] = await service.credentials(id, true);
     if (include.has('ancestors')) body['ancestors'] = await service.ancestors(id, visibility);
 
     await reply
       .status(status)
-      .header('ETag', await detailTag(request, object, include, visibility, childCount))
+      .header('ETag', await detailTag(request, object, include, visibility, childCount, retired))
       .header('cache-control', PRIVATE)
       .send(body);
   };
@@ -458,16 +472,27 @@ export async function objectRoutes(
     include: ReadonlySet<IncludeToken>,
     visibility: Visibility,
     childCount: number | undefined,
+    /**
+     * `retiredOf` the channels the answer carries, when it carries them (`P-322` review).
+     * `retired` is derived from `sample` on every read, and a reading moves it without moving
+     * the object's version or chain, so without this a client revalidating `?include=channels`
+     * kept a 304 on a channel a reading had made live again, and retention dropping the reading
+     * that kept one live left it shown live. Folded into the chain as a view is (`A-32`), so the
+     * tag stays one `If-Match` reads.
+     */
+    retired?: string,
   ): Promise<string> => {
     const inheritsHidden = include.has('settings') || include.has('credentials');
     const chain =
       include.size === 0
         ? undefined
         : await validatorFor(object.id, inheritsHidden ? undefined : visibility);
+    const derived = retired === undefined ? '' : `|retired:${retired}`;
     if (visibility.everything) {
-      return etagFor(object.version, viewedChain(chain, `#${String(object.childCount)}`));
+      return etagFor(object.version, viewedChain(chain, `#${String(object.childCount)}${derived}`));
     }
-    const view = `${sightOf(request).key}@${String(visibility.epoch)}#${String(childCount)}`;
+    const view =
+      `${sightOf(request).key}@${String(visibility.epoch)}#${String(childCount)}` + derived;
     return etagFor(object.version, viewedChain(chain, view));
   };
 
@@ -746,7 +771,13 @@ export async function objectRoutes(
         const childCount = visibility.everything
           ? undefined
           : await service.visibleChildCount(id, visibility);
-        const current = await detailTag(request, object, include, visibility, childCount);
+        // `retired` is read, not versioned (`P-322`), so it is asked here too: one query of the
+        // sensor's channels, still short of the full render.
+        const retired =
+          include.has('channels') && object.kind === 'sensor'
+            ? retiredOf(await service.channels(id))
+            : undefined;
+        const current = await detailTag(request, object, include, visibility, childCount, retired);
         if (ifNoneMatch === current) {
           await reply.status(304).header('ETag', current).header('cache-control', PRIVATE).send();
           return;

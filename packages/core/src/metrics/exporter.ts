@@ -349,7 +349,7 @@ const CORE_METRICS: readonly Metric[] = [
   {
     key: 'channelsCreatedOutsideDeclaration',
     name: 'ms_core_channels_created_outside_declaration_total',
-    help: 'Channels ingestion created for a key the sensor type does not declare for the sensor’s stored parameters, though the type promises to declare every key it reports: a probe running a newer build of the type than the core, or the type breaking its promise. The readings are kept; the core log names the sensor, the type and the key.',
+    help: 'Channels ingestion created for a key the sensor type does not declare for the sensor’s stored parameters, though the type promises to declare every key it reports: a probe on a different build of the type than the core (newer, or older and still reporting a key the core renamed), or the type breaking its promise. Only readings taken under the current parameters count. The readings are kept; the core log names the sensor, the type and the key.',
     counter: true,
   },
   {

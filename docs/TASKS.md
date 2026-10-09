@@ -11904,6 +11904,24 @@ because each is a decision rather than a defect:
         once, then edited out) that a broken type goes on reporting is not counted, though
         `P-322` keeps it from being called retired. The core cannot tell a newer probe from a
         broken type; the log line and the docs say how an operator can.
+      - **Amended on review** (a second commit). **A reading taken under parameters an edit has
+        since replaced was counted as a broken promise**: a spool replayed after an edit took out
+        a column an earlier edit added, or a scan in flight when the edit landed. Now only a
+        reading more than `DECLARATION_SETTLE_MS` (a minute: the change reaching the probe, a
+        scan in flight, and a probe clock ahead by up to the minute Core Health first warns of)
+        after `sensor_config.updated_at` is counted. The resolver already read the sensor's row
+        to declare the channel, so `updated_at` is one more column of it, and each wanted key
+        carries the newest reading of it in the batch. Cost: a key a broken type first reports
+        within that minute is created uncounted, and never counted after (the row exists). The
+        warning, `administration.md` and `adding-a-sensor-type.md` now name the older-probe
+        cause too (a key the core's build renamed or dropped) and the edit race, and keep the
+        report-the-type advice for a rise with every probe on the core's version; a rise after
+        an upgrade is version skew. Tests: the table gains a spooled reading taken before the
+        edit and one in the minute after it, neither counted, and its counted case reads two
+        minutes after the change; `retired-channels.test.ts` counts a newer probe's key through
+        ingestion two minutes after the change. Mutations: no time condition fails both new
+        cases and the probe-ahead test (which now expects its in-the-minute `newer` uncounted);
+        no allowance fails the in-the-minute case and the probe-ahead test.
 
 - [x] **P-322 — a probe newer than the core can have its new channels shown retired** · S ·
       P-310 · Found 2026-10-08 reviewing `P-310`. `retired` asks the core's catalogue, but readings
@@ -11950,6 +11968,26 @@ because each is a decision rather than a defect:
         tests unchanged and green.
       - **Mutations** (each restored byte for byte, `dist` rebuilt): `ELSE true` (readings
         ignored) fails the probe-ahead test; comparing with `sc.created_at` fails it too.
+      - **Amended on review** (a second commit).
+        - **A 304 could keep a stale `retired`.** The detail's tag for `?include=channels` was
+          the version and chain, which a reading does not move, so a client revalidating kept
+          `retired: true` after a reading made the channel live, and retention dropping the only
+          reading after the edit flipped it back unseen. `detailTag` now folds the sorted ids of
+          the retired channels into the chain (as a view is, `A-32`, so `If-Match` still reads
+          it): from the channels the body carries on a 200, and from one channel read on the
+          conditional path, still short of the full render. Test: conditional GET 304; a
+          reading after the edit, the same tag answers 200 with the channel live and a new tag
+          (304 on it); the post-edit sample deleted, as retention would, 200 again, retired,
+          with the first tag back. Mutation: the retired part left out of the tag fails it.
+        - **A probe clock behind the database's was not covered.** `sample.time` is the probe's
+          clock, `updated_at` the database's, so a probe behind keeps a key it still reads
+          retired for one scan interval **plus its offset** after each change. **Documented, not
+          corrected**: the measured offset lives in the probe's link in the core's memory, not
+          in any table the query can join, and a tolerance subtracted from the change would
+          count readings taken just before an edit, keeping every column an edit removes from a
+          regularly read sensor live until the next change: `P-310`'s case undone. Said in the
+          repository's comment, `ChannelRecord.retired` and the `ms:channelRecord` description.
+          No code, so no mutation.
 
 - [x] **P-323 — a declared primary created before P-314 stays non-primary** · XS · P-314 · Found
       2026-10-08 in `P-314`. Ingestion now makes the declared primary primary when its first reading

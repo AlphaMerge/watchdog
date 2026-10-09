@@ -313,10 +313,15 @@ the declaration says (`P-322`): a probe may run a newer build of your type than 
 
 **The core checks the promise where it can** (`P-321`). A reading of a key your declaration does
 not name, for the sensor's stored parameters, creates a channel as any new key does, and is kept:
-refusing it would lose a reading the probe took. The core logs it at `warn` naming the sensor,
-your type and the key, and counts it on Core Health's `channelsCreatedOutsideDeclaration`. That is
-either a probe newer than the core whose build of your type added the key, or a path in your
-`execute` that breaks the promise. If every probe runs the core's version, it is the second: fix
+refusing it would lose a reading the probe took. If the reading was taken under those parameters
+— more than a minute after they last changed — the core logs it at `warn` naming the sensor, your
+type and the key, and counts it on Core Health's `channelsCreatedOutsideDeclaration`. One taken
+earlier is not counted: the parameters it ran under may have named the key (a spool replayed after
+an edit took out a column an earlier edit added). A counted one has three causes. A probe on a
+different build than the core: a newer one whose build of your type added the key, or an older
+one still reporting a key the core's build renamed or dropped. Or a path in your `execute` that
+breaks the promise. A rise that follows a core or probe upgrade is the first, and goes once every
+probe runs the core's version. Only one with every probe on the core's version is the second: fix
 the path, or unset the flag.
 
 Leave it unset when your keys come from what the check ran into — a script's output

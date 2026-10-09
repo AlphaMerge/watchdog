@@ -312,7 +312,10 @@ export interface ChannelRecord {
    * column removed); the row and its history are kept, and putting the key back makes it live
    * again. A reading after the change means something still reports the key — a probe running a
    * newer build of the type than the core (ADR-001 Decision 13), or a type breaking its promise
-   * (`P-321`) — so such a channel is not called retired.
+   * (`P-321`) — so such a channel is not called retired. Readings carry the probe's clock and the
+   * change the database's, so after each change such a channel reads retired until the probe's
+   * next reading lands after it: one scan interval, plus the probe's clock offset when it runs
+   * behind (`P-322` review).
    *
    * **Derived on every read, never stored**, from the type's current declaration, so it cannot
    * disagree with it. `false` where the type cannot say, which is any type whose readings may

@@ -5,7 +5,11 @@ import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
 import { encodedForms, type CheckResult, type IngestionConfig } from '@ms/shared';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
-import { ChannelResolver, type ResolvedChannels } from '../src/ingestion/channels.js';
+import {
+  ChannelResolver,
+  DECLARATION_SETTLE_MS,
+  type ResolvedChannels,
+} from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
@@ -499,13 +503,19 @@ describe(
     // nothing checked it. It is checked where the declaration is already in hand, when a reading
     // creates a channel: a key outside it is kept, counted for Core Health and said once, naming
     // the sensor, the type and the key. Once, because the row is created once; a cached channel
-    // and a restart's re-read create nothing.
+    // and a restart's re-read create nothing. **Only from a reading taken under the stored
+    // parameters** (`P-321` review): one from before their last change, or from the minute after
+    // it, may have run under parameters that named the key.
     const outsideCases: readonly {
       name: string;
       type: string;
-      /** Written behind the type's back after the create, as an older build might have left them. */
+      /** What the sensor is created with; column `a` alone when absent. */
+      params?: Record<string, unknown>;
+      /** Written after the create, as an edit or an older build would leave them. */
       stored?: Record<string, unknown>;
       key: string;
+      /** When the reading was taken, from the stored configuration's last change. */
+      afterChangeMs: number;
       outside: boolean;
       undeclared: boolean;
     }[] = [
@@ -513,20 +523,43 @@ describe(
         name: 'a key a promising type declares',
         type: 'test.promised',
         key: 'a',
+        afterChangeMs: 2 * DECLARATION_SETTLE_MS,
         outside: false,
         undeclared: false,
       },
       {
-        name: 'a key a promising type does not declare (a newer probe’s, or a broken promise)',
+        name: 'a key a promising type does not declare (a probe on another build, or a broken promise)',
         type: 'test.promised',
         key: 'newer',
+        afterChangeMs: 2 * DECLARATION_SETTLE_MS,
         outside: true,
+        undeclared: false,
+      },
+      {
+        name: 'a spooled reading of a key an edit has since taken out, taken before that edit',
+        type: 'test.promised',
+        params: { columns: [{ key: 'a' }, { key: 'x' }] },
+        stored: { columns: [{ key: 'a' }] },
+        key: 'x',
+        afterChangeMs: -1_000,
+        outside: false,
+        undeclared: false,
+      },
+      {
+        name: 'a reading of a key an edit has just taken out, before its probe heard of the edit',
+        type: 'test.promised',
+        params: { columns: [{ key: 'a' }, { key: 'x' }] },
+        stored: { columns: [{ key: 'a' }] },
+        key: 'x',
+        afterChangeMs: DECLARATION_SETTLE_MS / 2,
+        outside: false,
         undeclared: false,
       },
       {
         name: 'a key a type making no promise does not declare (a script’s printed key)',
         type: 'test.columns',
         key: 'printed',
+        afterChangeMs: 2 * DECLARATION_SETTLE_MS,
         outside: false,
         undeclared: false,
       },
@@ -535,6 +568,7 @@ describe(
         type: 'test.promised',
         stored: { columns: [{ key: 'a' }, { key: 'broken' }] },
         key: 'newer',
+        afterChangeMs: 2 * DECLARATION_SETTLE_MS,
         outside: false,
         undeclared: true,
       },
@@ -546,7 +580,7 @@ describe(
           parentId: deviceId,
           name: `outside-${one.key}-${String(process.hrtime.bigint())}`,
           sensorType: one.type,
-          params: { columns: [{ key: 'a' }] },
+          params: one.params ?? { columns: [{ key: 'a' }] },
         });
         if (one.stored !== undefined) {
           await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
@@ -558,6 +592,12 @@ describe(
           sensor.id,
           one.key,
         ]);
+        const changed = await db.query<{ at: Date }>(
+          'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+          [sensor.id],
+        );
+        const changedAt = changed[0]?.at;
+        assert.ok(changedAt !== undefined);
 
         const lines: string[] = [];
         const catalogue = testCatalogue([columns, brittle, promised]);
@@ -572,7 +612,7 @@ describe(
           });
         const reading: CheckResult = {
           sensorId: sensor.id,
-          at: new Date('2026-10-09T10:00:00.000Z').toISOString(),
+          at: new Date(changedAt.getTime() + one.afterChangeMs).toISOString(),
           outcome: 'ok',
           message: '',
           durationMs: 1,

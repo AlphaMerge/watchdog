@@ -497,9 +497,11 @@ const CHANNELS: readonly ChannelDef[] = [
   },
   // `P-321`. Channels ingestion created for a key the sensor's type does not declare for the
   // sensor's stored parameters, though the type sets `declaresEveryChannel`: its promise that every
-  // key it reports is one it declares, on which `retired` (`P-310`) rests. A probe running a newer
-  // build of the type than the core (ADR-001 Decision 13), or a path in the type's `execute` that
-  // breaks the promise. The reading is kept and the channel created, since refusing it would drop
+  // key it reports is one it declares, on which `retired` (`P-310`) rests. Counted only from a reading
+  // taken under those parameters, a minute or more after their last change. A probe running a
+  // different build of the type than the core (ADR-001 Decision 13): a newer one that added the key,
+  // or an older one still reporting a key the core's build renamed. Or a path in the type's
+  // `execute` that breaks the promise. The reading is kept and the channel created, since refusing it would drop
   // a channel that is read; the core log names the sensor, the type and the key, once a channel.
   //
   // **No limit**, as `channelsCreatedUndeclared` has none and for the same reason: an alarm would

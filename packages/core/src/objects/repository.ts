@@ -1057,6 +1057,13 @@ export class ObjectRepository {
    * ask, or a type breaking its promise (`P-321`, counted when the channel is created). Either
    * way the channel is read, and calling it retired would say it is not.
    *
+   * **Two clocks** (`P-322` review): `sample.time` is the probe's, `updated_at` the database's.
+   * A probe behind the database is seen to read the key only once its clock passes the change, so
+   * such a channel reads retired for one scan interval plus that offset after each change. Not
+   * corrected here: the offset lives in the probe's link, not in any table, and a tolerance
+   * subtracted from the change would count the readings taken just *before* an edit, keeping
+   * every column an edit removes from a regularly read sensor live until the next change.
+   *
    * **Asked only of a key outside the declaration**, inside the `CASE`, so a declared channel,
    * and every channel of a type that cannot say, costs nothing. For the rest it is one probe of
    * `sample`'s `(channel_id, time)` index bounded below by the change, the shape `latestValues`

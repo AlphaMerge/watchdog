@@ -51,8 +51,10 @@ export interface ResolvedChannels {
   /**
    * Of `created`, those whose key the sensor's type does not declare for the sensor's stored
    * parameters though it promises to declare every key it reports (`declaresEveryChannel`,
-   * `P-321`): a probe running a newer build of the type, or the type breaking its promise. Kept,
-   * since the reading is real; each is logged once, naming the sensor, the type and the key.
+   * `P-321`), in a reading taken under those parameters (`DECLARATION_SETTLE_MS` after their last
+   * change): a probe running a different build of the type (newer, or older and still reporting a
+   * key this build renamed), or the type breaking its promise. Kept, since the reading is real;
+   * each is logged once, naming the sensor, the type and the key.
    */
   createdOutsideDeclaration: number;
   /** Readings whose sensor no longer exists. Dropped — but counted, never silently. */
@@ -114,7 +116,31 @@ const INGESTION: Actor = { kind: 'system', component: 'ingestion' };
 interface SensorDeclaring {
   readonly type: string;
   readonly params: Readonly<Record<string, unknown>>;
+  /**
+   * When its configuration last changed (`sensor_config.updated_at`), in epoch milliseconds: a
+   * reading taken before it, or not long enough after it, may have run under parameters that
+   * named a key these do not (`P-321` review).
+   */
+  readonly changedAt: number;
 }
+
+/** A key a reading names and no cached channel answers, with the newest reading of it. */
+interface WantedChannel {
+  readonly sensorId: number;
+  readonly key: string;
+  readonly name: string;
+  readonly unit: string;
+  /** Epoch milliseconds of the newest reading naming it in the batch; `NaN` when unreadable. */
+  readonly at: number;
+}
+
+/**
+ * How long after a sensor's configuration changed a reading may still have run under the
+ * parameters before it (`P-321` review): the change reaching its probe, a scan already in flight,
+ * and a probe clock ahead of the database's by up to the minute Core Health first warns of. A key
+ * outside the declaration in such a reading is not counted as a broken promise.
+ */
+export const DECLARATION_SETTLE_MS = 60_000;
 
 const NO_SHAPE: ChannelShape = { lookup: null, counterBits: null };
 
@@ -259,7 +285,7 @@ export class ChannelResolver {
    */
   #shapesFor(
     sensors: ReadonlyMap<string, SensorDeclaring>,
-    wanted: readonly { sensorId: number; key: string }[],
+    wanted: readonly WantedChannel[],
   ): {
     shapes: ChannelShape[];
     undeclared: ReadonlySet<string>;
@@ -297,8 +323,18 @@ export class ChannelResolver {
       const shape = answer.shapes.get(one.key);
       // Checked here because this is the one place the declaration is in hand: a key seen for
       // the first time (`P-321`). Counted by the caller from the rows its INSERT returns, as
-      // `undeclared` is.
-      if (shape === undefined && answer.everyKey) outside.add(`${id}:${one.key}`);
+      // `undeclared` is. **Only from a reading taken under these parameters** (`P-321` review):
+      // one from before the last change, or too soon after it, may have run under parameters
+      // that named the key — a spool replayed after an edit took out a column an earlier edit
+      // added — and is no evidence against the promise. `NaN` compares false, so an unreadable
+      // time is not counted either.
+      if (
+        shape === undefined &&
+        answer.everyKey &&
+        one.at > sensor.changedAt + DECLARATION_SETTLE_MS
+      ) {
+        outside.add(`${id}:${one.key}`);
+      }
       return shape ?? NO_SHAPE;
     });
     return { shapes, undeclared, primaries, outside };
@@ -308,8 +344,14 @@ export class ChannelResolver {
     q: Queryable,
     wanted: readonly { sensorId: number; key: string }[],
   ): Promise<Map<string, SensorDeclaring>> {
-    const rows = await q.query<{ object_id: string; type: string; params: unknown }>(
-      'SELECT object_id::text, type, params FROM sensor_config WHERE object_id = ANY($1::bigint[])',
+    const rows = await q.query<{
+      object_id: string;
+      type: string;
+      params: unknown;
+      updated_at: Date;
+    }>(
+      `SELECT object_id::text, type, params, updated_at
+       FROM sensor_config WHERE object_id = ANY($1::bigint[])`,
       [[...new Set(wanted.map((one) => one.sensorId))]],
     );
     return new Map(
@@ -317,6 +359,7 @@ export class ChannelResolver {
         row.object_id,
         {
           type: row.type,
+          changedAt: row.updated_at.getTime(),
           params:
             typeof row.params === 'object' && row.params !== null && !Array.isArray(row.params)
               ? (row.params as Record<string, unknown>)
@@ -328,10 +371,7 @@ export class ChannelResolver {
 
   async resolve(q: Queryable, results: readonly CheckResult[]): Promise<ResolvedChannels> {
     const ids = new Map<string, ResolvedChannel>();
-    const missing = new Map<
-      string,
-      { sensorId: number; key: string; name: string; unit: string }
-    >();
+    const missing = new Map<string, WantedChannel>();
 
     for (const result of results) {
       for (const reading of result.channels) {
@@ -341,6 +381,8 @@ export class ChannelResolver {
           ids.set(cacheKey, cached);
           continue;
         }
+        const at = Date.parse(result.at);
+        const before = missing.get(cacheKey)?.at;
         missing.set(cacheKey, {
           sensorId: result.sensorId,
           key: reading.key,
@@ -348,6 +390,8 @@ export class ChannelResolver {
           // the key keeps `channel.name` valid rather than rejecting the whole batch.
           name: reading.name ?? reading.key,
           unit: reading.unit ?? '',
+          // The newest of the batch's readings of it, whatever order they came in (`P-321`).
+          at: before === undefined || Number.isNaN(before) ? at : Math.max(before, at),
         });
       }
     }
@@ -441,8 +485,9 @@ export class ChannelResolver {
    * stored parameters (`P-306`), counted from the rows the INSERT returned: a key another batch
    * created first conflicts, and was not made from the fallback here. And how many of those its
    * sensor's type does not declare though it promises to (`P-321`), each logged once: counted, not
-   * refused, because the reading is real — most likely from a probe running a newer build of the
-   * type, which ADR-001 Decision 13 allows — and refusing it would drop a channel that is read.
+   * refused, because the reading is real — most likely from a probe running a different build of
+   * the type, which ADR-001 Decision 13 allows — and refusing it would drop a channel that is read.
+   * Not from a reading the parameters before the last change may have taken (`P-321` review).
    *
    * **The sensors are locked before their parameters are read** (`P-303` review). The shape comes
    * from `sensor_config.params`, and an edit to those parameters re-declares the channels it can
@@ -466,7 +511,7 @@ export class ChannelResolver {
    */
   async #create(
     q: Queryable,
-    absent: readonly { sensorId: number; key: string; name: string; unit: string }[],
+    absent: readonly WantedChannel[],
   ): Promise<{ created: number; createdUndeclared: number; createdOutsideDeclaration: number }> {
     const declares = this.#declaredLimits !== undefined || this.#declaredShape !== undefined;
     if (declares) {
@@ -521,10 +566,12 @@ export class ChannelResolver {
           channelKey: row.key,
           phase: 'create-channel',
         },
-        'a reading named a channel its sensor type does not declare for the sensor’s stored ' +
-          'parameters, though the type promises to declare every channel it reports: a probe ' +
-          'running a newer build of the type than this core, or the type breaking its promise. ' +
-          'The channel was created and its readings are kept',
+        'a reading taken under the sensor’s current parameters named a channel its sensor ' +
+          'type does not declare for them, though the type promises to declare every channel ' +
+          'it reports: a probe running a different build of the type than this core (a newer ' +
+          'one that added the key, or an older one still reporting a key this build renamed or ' +
+          'dropped), or the type breaking its promise. The channel was created and its ' +
+          'readings are kept',
       );
     }
     return {

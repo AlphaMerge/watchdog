@@ -6,7 +6,7 @@ import type { CheckResult, IngestionConfig } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
-import { ChannelResolver } from '../src/ingestion/channels.js';
+import { ChannelResolver, DECLARATION_SETTLE_MS } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService, type ResultStats } from '../src/ingestion/service.js';
@@ -335,8 +335,9 @@ describe(
       );
       assert.equal(
         stats.channelsCreatedOutsideDeclaration,
-        1,
-        '`newer` is created and counted (`P-321`), its reading kept',
+        0,
+        '`newer` is created, its reading kept, and not counted (`P-321` review): taken in the ' +
+          'minute after the edit, it may have run under the parameters before it',
       );
       assert.deepEqual(
         await retirement(id),
@@ -366,6 +367,108 @@ describe(
       assert.equal(patched.statusCode, 200, patched.body);
       assert.equal(patched.json<Channel>().retired, false, 'read since the edit');
       assert.deepEqual(await retirement(id), { a: false, b: false, newer: true });
+    });
+
+    it('counts a key a probe ahead of the core adds, and does not call its channel retired', async () => {
+      const id = await create('test.columns', { columns: [{ key: 'a' }] });
+      const rows = await db.query<{ at: Date }>(
+        'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+        [id],
+      );
+      const changedAt = rows[0]?.at;
+      assert.ok(changedAt !== undefined);
+      // Well after the sensor's last change, so taken under its parameters (`P-321` review);
+      // ahead of the core's clock by two minutes, inside what ingestion accepts.
+      const stats = await deliver(
+        [
+          {
+            sensorId: id,
+            at: new Date(changedAt.getTime() + 2 * DECLARATION_SETTLE_MS).toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 1,
+            channels: [
+              { key: 'a', value: 1 },
+              { key: 'newer', value: 2 },
+            ],
+          },
+        ],
+        `newer-${String(id)}`,
+      );
+      assert.equal(stats.channelsCreatedOutsideDeclaration, 1, 'counted through ingestion');
+      assert.deepEqual(await retirement(id), { a: false, newer: false });
+    });
+
+    // `P-322` review: `retired` is derived from `sample` on every read, and a reading changes it
+    // without moving the sensor's version. The detail's validator carries it, so a client
+    // revalidating `?include=channels` is not kept on a stale answer either way.
+    it('moves the detail’s tag when a reading changes which channels are retired', async () => {
+      const id = await create('test.columns', { columns: [{ key: 'a' }, { key: 'b' }] });
+      await edit(id, { columns: [{ key: 'a' }] });
+      const url = `/api/v1/objects/${String(id)}?include=channels`;
+      const retiredIn = (response: LightMyRequestResponse): Record<string, boolean> =>
+        Object.fromEntries(
+          response
+            .json<{ channels: Channel[] }>()
+            .channels.map((channel) => [channel.key, channel.retired]),
+        );
+
+      const first = await app.inject({ method: 'GET', url });
+      assert.equal(first.statusCode, 200, first.body);
+      assert.deepEqual(retiredIn(first), { a: false, b: true });
+      const tag = String(first.headers['etag']);
+      const unchanged = await app.inject({ method: 'GET', url, headers: { 'if-none-match': tag } });
+      assert.equal(unchanged.statusCode, 304, 'nothing changed, so revalidated');
+
+      // A reading of `b` after the edit, as a probe ahead of the core sends: live again.
+      const rows = await db.query<{ at: Date }>(
+        'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+        [id],
+      );
+      const changedAt = rows[0]?.at;
+      assert.ok(changedAt !== undefined);
+      await deliver(
+        [
+          {
+            sensorId: id,
+            at: new Date(changedAt.getTime() + 1).toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 1,
+            channels: [
+              { key: 'a', value: 1 },
+              { key: 'b', value: 1 },
+            ],
+          },
+        ],
+        `tag-${String(id)}`,
+      );
+      const live = await app.inject({ method: 'GET', url, headers: { 'if-none-match': tag } });
+      assert.equal(live.statusCode, 200, 'the version did not move, but the answer did');
+      assert.deepEqual(retiredIn(live), { a: false, b: false });
+      const liveTag = String(live.headers['etag']);
+      assert.notEqual(liveTag, tag);
+      assert.equal(
+        (await app.inject({ method: 'GET', url, headers: { 'if-none-match': liveTag } }))
+          .statusCode,
+        304,
+      );
+
+      // And back, as retention dropping the only reading after the edit would leave it.
+      await db.query(
+        `DELETE FROM sample s USING channel c, sensor_config sc
+         WHERE s.channel_id = c.id AND c.sensor_id = $1 AND c.key = 'b'
+           AND sc.object_id = c.sensor_id AND s.time > sc.updated_at`,
+        [id],
+      );
+      const retiredAgain = await app.inject({
+        method: 'GET',
+        url,
+        headers: { 'if-none-match': liveTag },
+      });
+      assert.equal(retiredAgain.statusCode, 200);
+      assert.deepEqual(retiredIn(retiredAgain), { a: false, b: true });
+      assert.equal(String(retiredAgain.headers['etag']), tag, 'the same answer, the same tag');
     });
 
     it('is exact for the shipped `snmp.table`', async () => {
