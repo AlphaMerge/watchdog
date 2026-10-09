@@ -1046,10 +1046,10 @@ Refused templates are reported rather than hidden: one that failed to load creat
 | `items[].description` | string | **required** |  |
 | `items[].sensorCount` | integer | **required** |  |
 | `items[].overridesBuiltIn` | boolean |  |  |
-| `items[].source` | string | **required** |  |
+| `items[].source` | string | **required** | `built-in`, or the path of the file the template was read from. |
 | `problems` | object[] | **required** |  |
 | `problems[].id` | string | **required** |  |
-| `problems[].source` | string | **required** |  |
+| `problems[].source` | string | **required** | `built-in`, or the path of the file that was refused. |
 | `problems[].problems` | string[] | **required** |  |
 
 ### `GET /api/v1/device-templates/{templateId}`
@@ -1972,7 +1972,7 @@ PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decide
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `mediaType` | string | **required** |  |
+| `mediaType` | `image/png` · `image/jpeg` · `image/webp` | **required** |  |
 | `digest` | string | **required** |  |
 | `width` | integer | **required** |  |
 | `height` | integer | **required** |  |
@@ -2522,7 +2522,7 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 | `items[].skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `items[].skew.peerVersion` | integer |  |  |
 | `items[].skew.ownVersion` | integer |  |  |
-| `items[].skew.missing` | string[] |  |  |
+| `items[].skew.missing` | string[] |  | Only on `outdated`: what this probe cannot be asked to do, oldest first, each a phrase for a person that completes "it cannot …". Free text: compare `peerVersion` with `ownVersion` rather than matching on it. |
 | `items[].skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `items[].skew.explanation` | string | **required** |  |
 
@@ -2568,7 +2568,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
-| `skew.missing` | string[] |  |  |
+| `skew.missing` | string[] |  | Only on `outdated`: what this probe cannot be asked to do, oldest first, each a phrase for a person that completes "it cannot …". Free text: compare `peerVersion` with `ownVersion` rather than matching on it. |
 | `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `skew.explanation` | string | **required** |  |
 
@@ -2613,7 +2613,7 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
-| `skew.missing` | string[] |  |  |
+| `skew.missing` | string[] |  | Only on `outdated`: what this probe cannot be asked to do, oldest first, each a phrase for a person that completes "it cannot …". Free text: compare `peerVersion` with `ownVersion` rather than matching on it. |
 | `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `skew.explanation` | string | **required** |  |
 
@@ -2658,7 +2658,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
-| `skew.missing` | string[] |  |  |
+| `skew.missing` | string[] |  | Only on `outdated`: what this probe cannot be asked to do, oldest first, each a phrase for a person that completes "it cannot …". Free text: compare `peerVersion` with `ownVersion` rather than matching on it. |
 | `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `skew.explanation` | string | **required** |  |
 
@@ -2707,7 +2707,7 @@ By name. An administrator sees every report; everybody else sees the ones a grou
 | `items[].resolved.label` | string | **required** |  |
 | `items[].resolved.timezone` | string | **required** |  |
 | `items[].resolved.bucketSeconds` | integer | **required** |  |
-| `items[].resolved.source` | string | **required** |  |
+| `items[].resolved.source` | `sample_1d` · `sample_1h` · `sample_5m` · `sample` | **required** | The table the span would be read from: raw `sample`, or a rollup tier (`sample_5m`, `sample_1h`, `sample_1d`). |
 | `items[].resolved.adjustments` | object[] | **required** |  |
 | `items[].resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
 | `items[].resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
@@ -2798,7 +2798,7 @@ The creator’s primary group is granted full access in the same transaction, or
 | `resolved.label` | string | **required** |  |
 | `resolved.timezone` | string | **required** |  |
 | `resolved.bucketSeconds` | integer | **required** |  |
-| `resolved.source` | string | **required** |  |
+| `resolved.source` | `sample_1d` · `sample_1h` · `sample_5m` · `sample` | **required** | The table the span would be read from: raw `sample`, or a rollup tier (`sample_5m`, `sample_1h`, `sample_1d`). |
 | `resolved.adjustments` | object[] | **required** |  |
 | `resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
 | `resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
@@ -2862,7 +2862,7 @@ A report this account may not read answers 404 rather than 403, so the error can
 | `resolved.label` | string | **required** |  |
 | `resolved.timezone` | string | **required** |  |
 | `resolved.bucketSeconds` | integer | **required** |  |
-| `resolved.source` | string | **required** |  |
+| `resolved.source` | `sample_1d` · `sample_1h` · `sample_5m` · `sample` | **required** | The table the span would be read from: raw `sample`, or a rollup tier (`sample_5m`, `sample_1h`, `sample_1d`). |
 | `resolved.adjustments` | object[] | **required** |  |
 | `resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
 | `resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
@@ -2957,7 +2957,7 @@ Change a report
 | `resolved.label` | string | **required** |  |
 | `resolved.timezone` | string | **required** |  |
 | `resolved.bucketSeconds` | integer | **required** |  |
-| `resolved.source` | string | **required** |  |
+| `resolved.source` | `sample_1d` · `sample_1h` · `sample_5m` · `sample` | **required** | The table the span would be read from: raw `sample`, or a rollup tier (`sample_5m`, `sample_1h`, `sample_1d`). |
 | `resolved.adjustments` | object[] | **required** |  |
 | `resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
 | `resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
@@ -3017,7 +3017,7 @@ A report renders through a named account, not through whoever is asking (`§6`).
 | --- | --- | --- | --- |
 | `runAs` | object | **required** |  |
 | `runAs.login` | string | **required** |  |
-| `runAs.role` | string | **required** |  |
+| `runAs.role` | `admin` · `readwrite` · `readonly` | **required** |  |
 | `visible` | object[] | **required** |  |
 | `visible[].id` | integer | **required** |  |
 | `visible[].kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
@@ -4347,7 +4347,7 @@ one of 4 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `id` | string | **required** |  |
-| `source` | string | **required** |  |
+| `source` | string | **required** | `built-in`, or the path of the file that was refused. |
 | `problems` | string[] | **required** |  |
 
 <a id="schema-ms-lookupsummary"></a>
@@ -4363,7 +4363,7 @@ one of 4 shapes, by `kind`
 | `undefinedState` | `up` · `warning` · `down` | **required** |  |
 | `entryCount` | integer | **required** |  |
 | `overridesBuiltIn` | boolean |  |  |
-| `source` | string | **required** |  |
+| `source` | string | **required** | `built-in`, or the path of the file the definition was read from. |
 
 <a id="schema-ms-moveresult"></a>
 
@@ -4420,7 +4420,7 @@ one of 4 shapes, by `kind`
 | `templateId` | integer | **required** nullable |  |
 | `templateName` | string | **required** nullable |  |
 | `method` | string | **required** nullable |  |
-| `triggerKind` | string | **required** | The kind of trigger that queued it, kept when the trigger is deleted: `state` or `threshold` in this version. |
+| `triggerKind` | string | **required** | The kind of trigger that queued it, kept when the trigger is deleted: `state` or `threshold` in this version. Not an enum on purpose: one queued by a newer build is still listed after a downgrade. `GET /trigger-kinds` lists the kinds this build knows. |
 | `reason` | `initial` · `escalation` · `repeat` · `recovery` · `threshold` · `clear` | **required** |  |
 | `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** |  |
 | `message` | string | **required** |  |
@@ -4615,9 +4615,9 @@ one of 2 shapes, by `kind`
 | `to` | string | **required** |  |
 | `resolutionSeconds` | integer | **required** |  |
 | `bucketCount` | integer | **required** |  |
-| `source` | string | **required** |  |
+| `source` | `sample_1d` · `sample_1h` · `sample_5m` · `sample` | **required** | The table that served the bulk of the range: raw `sample`, or a rollup tier (`sample_5m`, `sample_1h`, `sample_1d`). |
 | `segments` | object[] | **required** |  |
-| `segments[].table` | string | **required** |  |
+| `segments[].table` | `sample_1d` · `sample_1h` · `sample_5m` · `sample` | **required** |  |
 | `segments[].from` | string | **required** |  |
 | `segments[].to` | string | **required** |  |
 | `adjustments` | [ms:queryAdjustment](#schema-ms-queryadjustment)[] | **required** |  |
@@ -4837,7 +4837,7 @@ one of 3 shapes, by `kind`
 | `templateId` | integer | **required** |  |
 | `items` | object[] | **required** |  |
 | `items[].triggerId` | integer | **required** |  |
-| `items[].triggerKind` | string | **required** |  |
+| `items[].triggerKind` | string | **required** | One of the ids `GET /trigger-kinds` lists. A trigger of a kind this build does not know cannot be read for the templates it names, so it is not listed here. |
 | `items[].objectId` | integer | **required** |  |
 | `items[].objectName` | string | **required** |  |
 | `items[].summary` | string | **required** |  |
@@ -4875,7 +4875,7 @@ one of 3 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
-| `kind` | string | **required** |  |
+| `kind` | string | **required** | One of the ids `GET /trigger-kinds` lists (`state` or `threshold` in this version), and not an enum on purpose: a trigger saved by a newer build is still listed after a downgrade, with `kindName` the kind itself and a `summary` saying this build does not know it, so that it can be found and deleted. |
 | `kindName` | string | **required** |  |
 | `settings` | object | **required** |  |
 | `enabled` | boolean | **required** |  |
@@ -4893,7 +4893,7 @@ one of 3 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `kind` | string, 1–40 characters | **required** |  |
+| `kind` | string, 1–40 characters | **required** | One of the ids `GET /trigger-kinds` lists. Any other is refused with 400 `TRIGGER_INVALID`: a kind this build cannot validate is one it must not save. |
 | `settings` | object | **required** |  |
 | `enabled` | boolean | default `true` |  |
 

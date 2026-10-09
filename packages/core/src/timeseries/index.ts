@@ -16,6 +16,7 @@ export {
   planSeries,
   QueryError,
   segmentsFor,
+  SERIES_SOURCES,
   SHORTENED_RANGE_DAYS,
   snapUp,
   sourceFor,

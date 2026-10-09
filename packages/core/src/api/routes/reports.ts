@@ -19,7 +19,8 @@ import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
 import type { Database } from '../../db/pool.js';
 import { OBJECT_KINDS } from '../../objects/types.js';
-import { QUERY_ADJUSTMENT_KINDS } from '../../timeseries/query.js';
+import { QUERY_ADJUSTMENT_KINDS, SERIES_SOURCES } from '../../timeseries/query.js';
+import { ACCOUNT_ROLES } from '../../auth/accounts.js';
 import type { ReportFormatter } from '../../reports/formatter.js';
 import { MAX_PDF_PAGES, mediaTypeOf } from '../../reports/media.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
@@ -152,7 +153,14 @@ const resolvedSchema = {
     timezone: { type: 'string' },
     bucketSeconds: { type: 'integer' },
     /** Which rollup tier answers — the visible consequence of the averaging rule. */
-    source: { type: 'string' },
+    source: {
+      // Computed per request from the rollup tiers and never stored (`P-361`).
+      type: 'string',
+      enum: [...SERIES_SOURCES],
+      description:
+        'The table the span would be read from: raw `sample`, or a rollup tier (`sample_5m`, ' +
+        '`sample_1h`, `sample_1d`).',
+    },
     adjustments: {
       type: 'array',
       items: {
@@ -708,7 +716,11 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
                 type: 'object',
                 additionalProperties: false,
                 required: ['login', 'role'],
-                properties: { login: { type: 'string' }, role: { type: 'string' } },
+                properties: {
+                  login: { type: 'string' },
+                  // `user_account.role`, which `user_account_role_check` holds (`P-361`).
+                  role: { type: 'string', enum: [...ACCOUNT_ROLES] },
+                },
               },
               visible: {
                 type: 'array',

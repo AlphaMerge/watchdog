@@ -1,7 +1,7 @@
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Logger } from '@ms/shared';
-import type { AccountService } from '../../auth/accounts.js';
+import { ACCOUNT_ROLES, type AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import type { SessionService } from '../../auth/sessions.js';
 import type { Admission, LoginThrottle } from '../../auth/throttle.js';
@@ -38,7 +38,7 @@ const principalSchema = {
   properties: {
     userId: { type: 'integer' },
     login: { type: 'string' },
-    role: { type: 'string', enum: ['admin', 'readwrite', 'readonly'] },
+    role: { type: 'string', enum: [...ACCOUNT_ROLES] },
     mustChangePassword: {
       type: 'boolean',
       description:

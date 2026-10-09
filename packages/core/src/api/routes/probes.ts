@@ -79,7 +79,17 @@ const registrationSchema = {
         },
         peerVersion: { type: 'integer' },
         ownVersion: { type: 'integer' },
-        missing: { type: 'array', items: { type: 'string' } },
+        missing: {
+          // Not an enum, deliberately (`P-361`): each is the phrase `missingCapabilities` reads
+          // from `DESCRIPTION` in `@ms/shared`, written for a person and reworded without a
+          // protocol change, so a client switching on one would break on a wording fix.
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Only on `outdated`: what this probe cannot be asked to do, oldest first, each a ' +
+            'phrase for a person that completes "it cannot …". Free text: compare ' +
+            '`peerVersion` with `ownVersion` rather than matching on it.',
+        },
         reason: {
           type: 'string',
           description:

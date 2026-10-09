@@ -1,5 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import type { AccountRole } from '../auth/accounts.js';
+import type { ImageMediaType } from './images.js';
 import { grantedTo, type FlatGrant, type GrantTable } from '../auth/flat-access.js';
 
 /**
@@ -40,7 +41,8 @@ export interface MapLayout {
  * answer a conditional request would defeat the point of answering it.
  */
 export interface MapBackground {
-  readonly mediaType: string;
+  /** The CHECK holds the column to `IMAGE_MEDIA_TYPES`. */
+  readonly mediaType: ImageMediaType;
   readonly digest: string;
   readonly width: number;
   readonly height: number;
@@ -201,7 +203,7 @@ export class MapRepository {
   /** What is stored, without reading it. */
   async background(q: Queryable, mapId: number): Promise<MapBackground | undefined> {
     const rows = await q.query<{
-      media_type: string;
+      media_type: ImageMediaType;
       digest: string;
       width: number;
       height: number;
@@ -246,7 +248,7 @@ export class MapRepository {
     q: Queryable,
     mapId: number,
     image: {
-      mediaType: string;
+      mediaType: ImageMediaType;
       digest: string;
       width: number;
       height: number;

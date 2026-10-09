@@ -4,7 +4,11 @@ import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../db/pool.js';
 import type { DeliveryHealthReader } from '../../notifications/health.js';
 import { NOTIFICATION_REASONS } from '../../notifications/chain.js';
-import { NotificationLogReader } from '../../notifications/log.js';
+import {
+  NOTIFICATION_STATUSES,
+  NotificationLogReader,
+  type NotificationStatus,
+} from '../../notifications/log.js';
 import { REQUEST_DISPOSITIONS } from '../../notifications/summarisation.js';
 import { SENSOR_STATES } from '../../state/tables.js';
 import { INSTALLATION, clears, onQueryObject, visibilityOf } from '../authorization.js';
@@ -14,13 +18,6 @@ export interface NotificationRoutesOptions {
   health: DeliveryHealthReader;
   log?: NotificationLogReader;
 }
-
-/**
- * The statuses a request can be in, which are also the filter values, as
- * `notification_request_status_check` (migration 021) allows. `ms:notificationRequest` enumerates
- * them, and `fixed-value-fields.test.ts` checks them against the constraint (`P-335`).
- */
-export const NOTIFICATION_STATUSES = ['pending', 'sent', 'failed', 'discarded'] as const;
 
 function repeatable(values: readonly string[]): Record<string, unknown> {
   return {
@@ -138,14 +135,15 @@ const entrySchema = {
     templateName: { type: ['string', 'null'] },
     method: { type: ['string', 'null'] },
     triggerKind: {
-      // Deliberately not an enum (`P-342`). This build writes only its own kinds, but the column
-      // has no CHECK and a trigger kind is a registry entry, not a schema change: a row queued by
-      // a newer build is still listed after a downgrade, as its trigger is (`P-139`), and an enum
-      // it broke would be served anyway and claim it could not occur (`P-313`).
+      // Deliberately not an enum, and the column deliberately has no CHECK (`P-342`, `P-352`):
+      // a trigger kind is a registry entry, not a schema change. A row queued by a newer build is
+      // still listed after a downgrade, as its trigger is (`P-139`), and an enum it broke would be
+      // served anyway and claim it could not occur (`P-313`). `ms:trigger.kind` says the rest.
       type: 'string',
       description:
         'The kind of trigger that queued it, kept when the trigger is deleted: `state` or ' +
-        '`threshold` in this version.',
+        '`threshold` in this version. Not an enum on purpose: one queued by a newer build is ' +
+        'still listed after a downgrade. `GET /trigger-kinds` lists the kinds this build knows.',
     },
     // These four are what the table lets the code write: the reason, status and disposition
     // CHECKs, and `sensor_state_kind NOT NULL` (`P-335`, `P-342`).
@@ -179,7 +177,7 @@ const entrySchema = {
 export const NOTIFICATION_SCHEMAS = [methodHealthSchema, healthSchema, entrySchema];
 
 interface LogQuery {
-  status?: string | string[];
+  status?: NotificationStatus | NotificationStatus[];
   sensorId?: number;
   templateId?: number;
   before?: number;

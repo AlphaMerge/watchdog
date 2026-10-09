@@ -219,7 +219,13 @@ const usedBySchema = {
         required: ['triggerId', 'triggerKind', 'objectId', 'objectName', 'summary'],
         properties: {
           triggerId: { type: 'integer' },
-          triggerKind: { type: 'string' },
+          triggerKind: {
+            // A string, as everywhere a trigger kind is served (`P-352`, `ms:trigger.kind`).
+            type: 'string',
+            description:
+              'One of the ids `GET /trigger-kinds` lists. A trigger of a kind this build does ' +
+              'not know cannot be read for the templates it names, so it is not listed here.',
+          },
           objectId: { type: 'integer' },
           objectName: { type: 'string' },
           summary: { type: 'string' },

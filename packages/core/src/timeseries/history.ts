@@ -3,7 +3,13 @@ import type { Database } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
 import { InheritanceResolver } from '../settings/inheritance.js';
 import { SCAN_INTERVAL_SECONDS } from '../settings/registry.js';
-import { planSeries, segmentsFor, type QueryAdjustment, type SeriesRequest } from './query.js';
+import {
+  planSeries,
+  segmentsFor,
+  type QueryAdjustment,
+  type SeriesRequest,
+  type SeriesSource,
+} from './query.js';
 import { SqlTimeSeriesStore, type TimeSeriesStore } from './store.js';
 
 export interface HistoryChannel {
@@ -34,9 +40,9 @@ export interface SensorHistory {
   resolutionSeconds: number;
   bucketCount: number;
   /** Which table served the bulk of the range. */
-  source: string;
+  source: SeriesSource;
   /** How the range was actually assembled. More than one entry means a rollup was behind. */
-  segments: { table: string; from: string; to: string }[];
+  segments: { table: SeriesSource; from: string; to: string }[];
   /** What the query rules changed about the request, and why. */
   adjustments: QueryAdjustment[];
   /** Every bucket boundary in the effective range, ISO-8601. */

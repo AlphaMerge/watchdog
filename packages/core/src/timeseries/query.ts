@@ -1,10 +1,25 @@
 import { AppError } from '@ms/shared';
 import { ROLLUP_TIERS, type RollupTierId } from './tiers.js';
 
-/** Every table a series can be read from, coarsest first. Raw is last because it is finest. */
-export type SeriesSource = RollupTierId | 'sample';
+/**
+ * Every table a series can be read from, coarsest first. Raw is last because it is finest.
+ *
+ * Computed per request and never stored, so this list is the whole set: a history's and a report
+ * span's `source`, and a history segment's `table`, are enums of it (`P-361`).
+ */
+export const SERIES_SOURCES = ['sample_1d', 'sample_1h', 'sample_5m', 'sample'] as const;
+export type SeriesSource = (typeof SERIES_SOURCES)[number];
 
-const CHAIN: readonly SeriesSource[] = ['sample_1d', 'sample_1h', 'sample_5m', 'sample'];
+/** Compiles only while `SERIES_SOURCES` is exactly the rollup tiers and raw. */
+const seriesSourcesMatch: [
+  Exclude<SeriesSource, RollupTierId | 'sample'>,
+  Exclude<RollupTierId | 'sample', SeriesSource>,
+] extends [never, never]
+  ? true
+  : never = true;
+void seriesSourcesMatch;
+
+const CHAIN: readonly SeriesSource[] = SERIES_SOURCES;
 
 const DAY_SECONDS = 86_400;
 

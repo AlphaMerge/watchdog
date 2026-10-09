@@ -82,7 +82,13 @@ export function deviceTemplateRoutes(
                     description: { type: 'string' },
                     sensorCount: { type: 'integer' },
                     overridesBuiltIn: { type: 'boolean' },
-                    source: { type: 'string' },
+                    // Open on purpose (`P-361`): a path is whatever the operator's directory
+                    // holds.
+                    source: {
+                      type: 'string',
+                      description:
+                        '`built-in`, or the path of the file the template was read from.',
+                    },
                   },
                 },
               },
@@ -94,7 +100,10 @@ export function deviceTemplateRoutes(
                   required: ['id', 'source', 'problems'],
                   properties: {
                     id: { type: 'string' },
-                    source: { type: 'string' },
+                    source: {
+                      type: 'string',
+                      description: '`built-in`, or the path of the file that was refused.',
+                    },
                     problems: { type: 'array', items: { type: 'string' } },
                   },
                 },

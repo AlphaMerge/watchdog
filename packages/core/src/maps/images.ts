@@ -15,7 +15,13 @@
  * lying file returns a problem, never an exception and never a wrong number.
  */
 
-export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp';
+/**
+ * The formats a background can be, as `map_background`'s `media_type` CHECK (migration 045)
+ * allows. The upload's response enumerates them, and `fixed-value-fields.test.ts` checks them
+ * against the constraint (`P-361`).
+ */
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
+export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
 
 export interface ImageFacts {
   readonly mediaType: ImageMediaType;

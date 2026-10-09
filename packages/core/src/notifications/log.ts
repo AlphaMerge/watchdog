@@ -5,6 +5,15 @@ import type { NotificationReason } from './chain.js';
 import { describeCounts, type SkipCounts } from './recipients.js';
 import type { RequestDisposition } from './summarisation.js';
 
+/**
+ * The statuses a request can be in, which are also the log's filter values, as
+ * `notification_request_status_check` (migration 021) allows. `ms:notificationRequest` enumerates
+ * them, and `fixed-value-fields.test.ts` checks them against the constraint (`P-335`). Here rather
+ * than beside the route so the entry's type is derived from the same list (`P-352`).
+ */
+export const NOTIFICATION_STATUSES = ['pending', 'sent', 'failed', 'discarded'] as const;
+export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];
+
 /** One notification, and everything that happened to it (`N-13`). */
 export interface NotificationLogEntry {
   readonly id: number;
@@ -19,7 +28,8 @@ export interface NotificationLogEntry {
   /** `notification_request.state`, which is NOT NULL (migration 016). */
   readonly state: SensorState;
   readonly message: string;
-  readonly status: string;
+  /** `notification_request.status`, which its CHECK holds to `NOTIFICATION_STATUSES`. */
+  readonly status: NotificationStatus;
   /** Whether it was sent on its own or folded into a digest (`N-11`). */
   readonly disposition: RequestDisposition;
   readonly attempts: number;
@@ -49,7 +59,7 @@ export interface NotificationLogQuery {
    * the log decides rather than inherits.
    */
   readonly namesAccounts: boolean;
-  readonly status?: readonly string[];
+  readonly status?: readonly NotificationStatus[];
   readonly sensorId?: number;
   readonly templateId?: number;
   /** Page backwards from this id, exclusive. */
@@ -69,7 +79,7 @@ interface Row {
   reason: NotificationReason;
   state: SensorState;
   message: string;
-  status: string;
+  status: NotificationStatus;
   disposition: RequestDisposition;
   attempts: number;
   delivered_at: Date | null;

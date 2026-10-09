@@ -2,12 +2,32 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it, mock } from 'node:test';
 import { Ajv } from 'ajv';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { DEVICE_KINDS, DISCOVERY_LEVEL_IDS, DISCOVERY_LEVELS } from '@ms/shared';
+import {
+  DEVICE_KINDS,
+  DISCOVERY_LEVEL_IDS,
+  DISCOVERY_LEVELS,
+  describeSkew,
+  explainSkew,
+  MIN_PROTOCOL_VERSION,
+} from '@ms/shared';
 import { credentialKindIds } from '@ms/sensors';
 import { alarmRoutes, ALARM_SCHEMAS } from '../src/api/routes/alarms.js';
 import { auditRoutes } from '../src/api/routes/audit.js';
 import { deviceTemplateRoutes } from '../src/api/routes/device-templates.js';
 import { discoveryRoutes } from '../src/api/routes/discovery.js';
+import { historyRoutes } from '../src/api/routes/history.js';
+import { lookupRoutes } from '../src/api/routes/lookups.js';
+import { mapRoutes } from '../src/api/routes/maps.js';
+import { probeRoutes } from '../src/api/routes/probes.js';
+import { LOOKUP_SCHEMAS } from '../src/api/schemas/lookups.js';
+import { ACCOUNT_ROLES, type AccountRole } from '../src/auth/accounts.js';
+import type { LookupCatalogue } from '../src/lookups/catalogue.js';
+import { IMAGE_MEDIA_TYPES, type ImageMediaType } from '../src/maps/images.js';
+import type { MapBackground } from '../src/maps/repository.js';
+import type { MapService } from '../src/maps/service.js';
+import type { ProbeRegistry } from '../src/probes/registry.js';
+import type { HistoryService, SensorHistory } from '../src/timeseries/history.js';
+import { ROLLUP_TIERS } from '../src/timeseries/tiers.js';
 import { objectRoutes } from '../src/api/routes/objects.js';
 import { API_VALIDATOR_OPTIONS } from '../src/api/server.js';
 import { reportRoutes, type ReportRouteOptions } from '../src/api/routes/reports.js';
@@ -20,16 +40,23 @@ import { STATE_SCHEMAS } from '../src/api/schemas/state.js';
 import type { AuditEntry, AuditRepository } from '../src/audit/store.js';
 import type { DeviceTemplateCatalogue } from '../src/device-templates/catalogue.js';
 import { readFingerprint } from '../src/discovery/fingerprint.js';
-import {
-  NOTIFICATION_SCHEMAS,
-  NOTIFICATION_STATUSES,
-  notificationRoutes,
-} from '../src/api/routes/notifications.js';
+import { NOTIFICATION_SCHEMAS, notificationRoutes } from '../src/api/routes/notifications.js';
+import { TEMPLATE_SCHEMAS, templateRoutes } from '../src/api/routes/templates.js';
+import { TRIGGER_SCHEMAS, triggerRoutes } from '../src/api/routes/triggers.js';
+import { Visibility } from '../src/auth/access.js';
+import { TemplateRepository, type TemplateService } from '../src/notifications/templates.js';
+import { triggerKinds } from '../src/triggers/definition.js';
+import type { EffectiveTrigger, TriggerRepository } from '../src/triggers/repository.js';
+import { TriggerService } from '../src/triggers/service.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import { Migrator } from '../src/db/migrator.js';
 import type { DeliveryHealthReader } from '../src/notifications/health.js';
-import type { NotificationLogEntry, NotificationLogReader } from '../src/notifications/log.js';
+import {
+  NOTIFICATION_STATUSES,
+  type NotificationLogEntry,
+  type NotificationLogReader,
+} from '../src/notifications/log.js';
 import {
   DISCOVERY_RUN_STATUSES,
   type DiscoveryRunRow,
@@ -38,7 +65,7 @@ import {
 import { describeRun, SUMMARY_KINDS, type KindCount } from '../src/discovery/summary.js';
 import { NOTIFICATION_REASONS } from '../src/notifications/chain.js';
 import { REQUEST_DISPOSITIONS } from '../src/notifications/summarisation.js';
-import { ACTOR_KINDS, type Actor, type ActorKind } from '../src/objects/audit.js';
+import { ACTOR_KINDS, type Actor, type ActorKind, type AuditSink } from '../src/objects/audit.js';
 import type { BulkService } from '../src/objects/bulk.js';
 import { flattenActor } from '../src/objects/pause-repository.js';
 import type { ObjectService } from '../src/objects/service.js';
@@ -56,7 +83,12 @@ import type { ReportRow } from '../src/reports/repository.js';
 import { CREDENTIAL_SET_KINDS, type CredentialKind } from '../src/settings/inheritance.js';
 import type { Alarm, AlarmPage, AlarmService } from '../src/state/alarms.js';
 import { SENSOR_STATE_CAUSES, SENSOR_STATES, type SensorState } from '../src/state/tables.js';
-import { QUERY_ADJUSTMENT_KINDS } from '../src/timeseries/query.js';
+import {
+  QUERY_ADJUSTMENT_KINDS,
+  SERIES_SOURCES,
+  sourceFor,
+  type SeriesSource,
+} from '../src/timeseries/query.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -87,6 +119,12 @@ import {
  * receipt), the credential kinds (`ms:credentialView`, the unbounded list, a credential delete),
  * a report span's adjustment kinds and the discovery plan's device kinds. The adjustments' and the
  * skew's `reason` are sentences, and stay free text.
+ *
+ * `P-352` left every served trigger kind open, with a test saying why, and derived the log
+ * entry's `status` type from `NOTIFICATION_STATUSES`. `P-361` added a history's and a report
+ * span's series source, a history segment's table, a report's `runAs.role` and a map
+ * background's `mediaType`; the skew's `missing[]` and the lookups' and device templates'
+ * `source` stay open, and a test pins each.
  */
 
 /**
@@ -106,7 +144,8 @@ async function serve(
   route: string,
   url: string,
   register: (app: FastifyInstance) => void | Promise<void>,
-  method: 'GET' | 'DELETE' = 'GET',
+  method: 'GET' | 'DELETE' | 'POST' = 'GET',
+  upload?: { readonly body: Buffer; readonly contentType: string },
 ): Promise<Served> {
   let declared: unknown;
   // Validated as the server validates (`P-363`), which also keeps this file from printing a
@@ -118,7 +157,11 @@ async function serve(
   try {
     await register(app);
     await app.ready();
-    const response = await app.inject({ method, url });
+    const response = await app.inject(
+      upload === undefined
+        ? { method, url }
+        : { method, url, payload: upload.body, headers: { 'content-type': upload.contentType } },
+    );
     assert.equal(response.statusCode, 200, response.body);
 
     const schema = (declared as Record<string, object> | undefined)?.['200'];
@@ -312,6 +355,96 @@ describe('ms:notificationRequest', () => {
       assert.equal(answer.invalid(answer.body), null);
     });
   });
+});
+
+/**
+ * A trigger's kind is open wherever it is served, on purpose (`P-352`). A kind is a registry
+ * entry, not a schema change: `notification_trigger.kind` has no CHECK, so a trigger saved by a
+ * newer build is listed after a downgrade and can be deleted (`P-139`). A CHECK would make every
+ * new kind a migration whose `down` deletes the operator's triggers, and an enum would be served
+ * the newer kind anyway and say it could not occur (`P-313`).
+ */
+describe('a trigger’s kind', () => {
+  /** A trigger defined on object 7, as the repository's `effectiveFor` reads one. */
+  const stored = (
+    id: number,
+    kind: string,
+    settings: Record<string, unknown>,
+  ): EffectiveTrigger => ({
+    id,
+    objectId: 7,
+    kind,
+    settings,
+    enabled: true,
+    createdAt: new Date('2026-10-09T08:00:00.000Z'),
+    updatedAt: new Date('2026-10-09T08:00:00.000Z'),
+    inherited: false,
+    depth: 0,
+    definedOn: { objectId: 7, name: 'London' },
+  });
+  /** Valid settings for each kind this build has, each naming template 1. */
+  const SETTINGS: Readonly<Record<string, Record<string, unknown>>> = {
+    state: { state: 'down', initialTemplateId: 1 },
+    threshold: { channelKey: 'loss', condition: 'above', value: 5, triggerTemplateId: 1 },
+  };
+  const rows = [
+    ...triggerKinds.ids.map((kind, index) =>
+      stored(10 + index, kind, triggerKinds.validate(kind, SETTINGS[kind] ?? {})),
+    ),
+    stored(20, 'forecast', { horizonHours: 4, templateId: 1 }),
+  ];
+
+  it('has settings here for every kind this build has', () => {
+    assert.deepEqual(Object.keys(SETTINGS).sort(), [...triggerKinds.ids].sort());
+  });
+
+  it('in ms:trigger: serves every kind and one this build does not know', async () => {
+    // The service's own reading, which is where an unknown kind is tolerated (`P-139`).
+    const repository = {
+      effectiveFor: () => Promise.resolve(rows),
+    } as unknown as TriggerRepository;
+    const triggers = new TriggerService({
+      db: {} as Database,
+      audit: {} as AuditSink,
+      logger: silentLogger,
+      repository,
+    });
+    const answer = await serve('/objects/:id/triggers', '/objects/7/triggers', (app) => {
+      for (const schema of TRIGGER_SCHEMAS) app.addSchema(schema);
+      triggerRoutes(app, { triggers });
+    });
+    assert.deepEqual(valuesOf(answer.body, 'kind'), [...triggerKinds.ids, 'forecast']);
+    assert.equal(answer.invalid(answer.body), null, 'an unknown kind is listed, as P-139 has it');
+  });
+
+  it('in used-by: lists only the kinds this build can read, and allows any', async () => {
+    const q = { query: () => Promise.resolve(rows.map(asRow)) } as unknown as Queryable;
+    const repository = new TemplateRepository();
+    const templates = {
+      usedBy: (id: number) => repository.usedBy(q, id, Visibility.EVERYTHING),
+    } as unknown as TemplateService;
+    const answer = await serve('/templates/:id/used-by', '/templates/1/used-by', (app) => {
+      for (const schema of TEMPLATE_SCHEMAS) app.addSchema(schema);
+      templateRoutes(app, { templates });
+    });
+    // The unknown kind's settings cannot be read for template references, so it is left out.
+    assert.deepEqual(valuesOf(answer.body, 'triggerKind'), [...triggerKinds.ids]);
+    assert.equal(answer.invalid(answer.body), null);
+    const items = answer.body['items'] as Record<string, unknown>[];
+    const forged = { ...answer.body, items: [{ ...items[0], triggerKind: 'forecast' }] };
+    assert.equal(answer.invalid(forged), null, 'a string, as everywhere a trigger kind is served');
+  });
+
+  /** `usedBy`'s SELECT row for one stored trigger. */
+  function asRow(row: EffectiveTrigger): Record<string, unknown> {
+    return {
+      id: String(row.id),
+      kind: row.kind,
+      settings: row.settings,
+      object_id: String(row.objectId),
+      object_name: 'London',
+    };
+  }
 });
 
 /** A finished run, which every discovery summary test below serves with one field changed. */
@@ -816,18 +949,22 @@ describe('the reports', () => {
     updatedAt: new Date('2026-10-09T08:00:00.000Z'),
   };
   const withReports =
-    (visible: readonly ReportSubject[] = []) =>
+    (
+      visible: readonly ReportSubject[] = [],
+      over: Partial<ReportRow> = {},
+      runAsRole: AccountRole = 'admin',
+    ) =>
     (app: FastifyInstance): void => {
       app.addHook('onRequest', async (request) => {
         (request as unknown as { principal: unknown }).principal = { userId: 1, role: 'admin' };
         await Promise.resolve();
       });
       const options = {
-        reports: { get: () => Promise.resolve(report) },
+        reports: { get: () => Promise.resolve({ ...report, ...over }) },
         context: {
           subjectsFor: () =>
             Promise.resolve({
-              principal: { login: 'alice', role: 'admin' },
+              principal: { login: 'alice', role: runAsRole },
               visible,
               unavailable: [],
             }),
@@ -895,6 +1032,239 @@ describe('the reports', () => {
       const forged = { ...answer.body, visible: [{ id: 10, kind: 'node', name: 'x' }] };
       assert.notEqual(answer.invalid(forged), null, 'a plain string would allow it');
     });
+  });
+
+  describe('runAs.role in GET /reports/{id}/subjects', () => {
+    for (const role of ACCOUNT_ROLES) {
+      it(`serves ${role}, and the route’s own schema allows it`, async () => {
+        const answer = await serve(
+          '/reports/:id/subjects',
+          '/reports/5/subjects',
+          withReports([], {}, role),
+        );
+        assert.equal((answer.body['runAs'] as { role: string }).role, role);
+        assert.equal(answer.invalid(answer.body), null);
+      });
+    }
+
+    it('is an enum: a role `user_account` cannot hold is refused', async () => {
+      const answer = await serve('/reports/:id/subjects', '/reports/5/subjects', withReports());
+      const forged = { ...answer.body, runAs: { login: 'alice', role: 'operator' } };
+      assert.notEqual(answer.invalid(forged), null, 'a plain string would allow it');
+    });
+  });
+
+  describe('resolved.source', () => {
+    /**
+     * One day at each resolution whose buckets a source composes exactly, coarsest first, so
+     * `planReportSpan` itself, the writer, picks each source in `SERIES_SOURCES`' order.
+     */
+    const RESOLUTIONS = [86_400, 3_600, 300, 60] as const;
+    const oneDayAt = (resolutionSeconds: number): Partial<ReportRow> => ({
+      span: {
+        kind: 'custom',
+        from: '2026-10-01T00:00:00.000Z',
+        to: '2026-10-02T00:00:00.000Z',
+        timezone: 'UTC',
+        resolutionSeconds,
+      },
+    });
+
+    it('is each source for some span, in order, and the route’s own schema allows each', async () => {
+      const sources: unknown[] = [];
+      for (const resolution of RESOLUTIONS) {
+        const answer = await serve(
+          '/reports/:id',
+          '/reports/5',
+          withReports([], oneDayAt(resolution)),
+        );
+        sources.push((answer.body['resolved'] as { source: unknown }).source);
+        assert.equal(answer.invalid(answer.body), null, String(resolution));
+      }
+      assert.deepEqual(sources, [...SERIES_SOURCES]);
+    });
+
+    it('is an enum: a table no rule reads from is refused', async () => {
+      const answer = await serve('/reports/:id', '/reports/5', withReports([], oneDayAt(60)));
+      const resolved = answer.body['resolved'] as Record<string, unknown>;
+      const forged = { ...answer.body, resolved: { ...resolved, source: 'sample_15m' } };
+      assert.notEqual(answer.invalid(forged), null, 'a plain string would allow it');
+    });
+  });
+});
+
+describe('source and segments[].table in GET /sensors/{id}/history', () => {
+  it('are the rollup tiers and raw, each what the planner picks for some resolution', () => {
+    assert.deepEqual(
+      [...SERIES_SOURCES].sort(),
+      [...ROLLUP_TIERS.map((tier) => tier.id), 'sample'].sort(),
+    );
+    assert.deepEqual(
+      [86_400, 3_600, 300, 60].map((seconds) => sourceFor(seconds)),
+      [...SERIES_SOURCES],
+    );
+  });
+
+  const history = (source: SeriesSource): SensorHistory => ({
+    sensorId: 7,
+    from: '2026-10-01T00:00:00.000Z',
+    to: '2026-10-02T00:00:00.000Z',
+    resolutionSeconds: 60,
+    bucketCount: 0,
+    source,
+    segments: SERIES_SOURCES.map((table) => ({
+      table,
+      from: '2026-10-01T00:00:00.000Z',
+      to: '2026-10-02T00:00:00.000Z',
+    })),
+    adjustments: [],
+    buckets: [],
+    channels: [],
+  });
+  const served = (source: SeriesSource): Promise<Served> =>
+    serve('/sensors/:id/history', '/sensors/7/history', async (app) => {
+      addSharedSchemas(app);
+      const service = {
+        forSensor: () => Promise.resolve(history(source)),
+      } as unknown as HistoryService;
+      await app.register(historyRoutes, { history: service });
+    });
+
+  for (const source of SERIES_SOURCES) {
+    it(`serves ${source}, and the route’s own schema allows it as both`, async () => {
+      const answer = await served(source);
+      assert.equal(answer.body['source'], source);
+      assert.deepEqual(
+        (answer.body['segments'] as { table: string }[]).map((one) => one.table),
+        [...SERIES_SOURCES],
+      );
+      assert.equal(answer.invalid(answer.body), null);
+    });
+  }
+
+  it('is an enum, both: a table no rule reads from is refused', async () => {
+    const answer = await served('sample');
+    assert.notEqual(answer.invalid({ ...answer.body, source: 'sample_15m' }), null, 'source');
+    const segments = [{ table: 'sample_15m', from: 'x', to: 'y' }];
+    assert.notEqual(answer.invalid({ ...answer.body, segments }), null, 'segments[].table');
+  });
+});
+
+describe('mediaType in POST /maps/{id}/background', () => {
+  const background = (mediaType: ImageMediaType): MapBackground => ({
+    mediaType,
+    digest: 'a'.repeat(64),
+    width: 640,
+    height: 480,
+    bytes: 1_024,
+    uploadedAt: new Date('2026-10-09T08:00:00.000Z'),
+    uploadedBy: 'alice',
+  });
+  const served = (mediaType: ImageMediaType): Promise<Served> =>
+    serve(
+      '/maps/:id/background',
+      '/maps/7/background',
+      (app) => {
+        app.addHook('onRequest', async (request) => {
+          (request as unknown as { principal: unknown }).principal = { userId: 1, role: 'admin' };
+          await Promise.resolve();
+        });
+        const maps = {
+          setBackground: () => Promise.resolve(background(mediaType)),
+        } as unknown as MapService;
+        mapRoutes(app, { maps });
+      },
+      'POST',
+      { body: Buffer.from([0x89, 0x50, 0x4e, 0x47]), contentType: 'application/octet-stream' },
+    );
+
+  for (const mediaType of IMAGE_MEDIA_TYPES) {
+    it(`serves ${mediaType}, and the route’s own schema allows it`, async () => {
+      const answer = await served(mediaType);
+      assert.equal(answer.body['mediaType'], mediaType);
+      assert.equal(answer.invalid(answer.body), null);
+    });
+  }
+
+  it('is an enum: SVG, which the sniffer refuses, is refused', async () => {
+    const answer = await served('image/png');
+    assert.notEqual(answer.invalid({ ...answer.body, mediaType: 'image/svg+xml' }), null);
+  });
+});
+
+/**
+ * Open on purpose, each with a description saying why (`P-361`). A test pins each, so a later
+ * enum has to argue with it.
+ */
+describe('fields left open', () => {
+  it('skew.missing[] in GET /probes: phrases for a person, so any phrase validates', async () => {
+    const skew = describeSkew(MIN_PROTOCOL_VERSION);
+    assert.equal(skew.kind, 'outdated', 'the oldest compatible version lacks something');
+    const probe = {
+      gid: 'probe-1',
+      status: 'approved',
+      displayName: 'Remote probe',
+      protocolVersion: MIN_PROTOCOL_VERSION,
+      protocolAcceptedAt: '2026-10-09T08:00:00.000Z',
+      protocolRefusedAt: null,
+      firstSeenAt: '2026-10-09T08:00:00.000Z',
+      skew: { ...skew, explanation: explainSkew(skew) },
+    };
+    const answer = await serve('/probes', '/probes', (app) => {
+      const registry = { list: () => Promise.resolve([probe]) } as unknown as ProbeRegistry;
+      probeRoutes(app, { registry });
+    });
+    assert.equal(answer.invalid(answer.body), null);
+    const items = answer.body['items'] as Record<string, unknown>[];
+    const skewServed = items[0]?.['skew'] as { missing?: unknown };
+    assert.ok(Array.isArray(skewServed.missing) && skewServed.missing.length > 0);
+    const missing = ['do something this build never said'];
+    const forged = { ...answer.body, items: [{ ...items[0], skew: { ...skewServed, missing } }] };
+    assert.equal(answer.invalid(forged), null);
+  });
+
+  it('source in GET /lookups: `built-in` or a path, so any path validates', async () => {
+    const summary = (source: string): Record<string, unknown> => ({
+      id: 'prtg.standardlookups.yesno',
+      name: 'Yes/No',
+      description: '',
+      type: 'singleInt',
+      undefinedState: 'warning',
+      entryCount: 2,
+      source,
+    });
+    const answer = await serve('/lookups', '/lookups', (app) => {
+      for (const schema of LOOKUP_SCHEMAS) app.addSchema(schema);
+      const lookups = {
+        summaries: () => [summary('built-in'), summary('/var/lib/ms/lookups/yesno.json')],
+        problems: () => [{ id: 'x', source: '/var/lib/ms/lookups/x.json', problems: ['bad'] }],
+      } as unknown as LookupCatalogue;
+      lookupRoutes(app, { lookups });
+    });
+    assert.deepEqual(valuesOf(answer.body, 'source'), [
+      'built-in',
+      '/var/lib/ms/lookups/yesno.json',
+    ]);
+    assert.equal(answer.invalid(answer.body), null);
+  });
+
+  it('source in GET /device-templates: `built-in` or a path, so any path validates', async () => {
+    const answer = await serve('/device-templates', '/device-templates', (app) => {
+      const templates = {
+        summaries: () => [
+          { id: 'linux', name: 'Linux', description: '', sensorCount: 3, source: 'built-in' },
+          { id: 'nas', name: 'NAS', description: '', sensorCount: 2, source: '/etc/ms/nas.json' },
+        ],
+        problems: () => [{ id: 'bad', source: '/etc/ms/bad.json', problems: ['no sensors'] }],
+      } as unknown as DeviceTemplateCatalogue;
+      deviceTemplateRoutes(app, {
+        templates,
+        discovery: {} as DiscoveryService,
+        credentialKindsFor: () => [],
+      });
+    });
+    assert.deepEqual(valuesOf(answer.body, 'source'), ['built-in', '/etc/ms/nas.json']);
+    assert.equal(answer.invalid(answer.body), null);
   });
 });
 
@@ -1034,6 +1404,20 @@ describe(
 
     it('holds exactly the credential kinds the schemas name, `mail` included', async () => {
       assert.deepEqual(await labels('credential_kind'), [...CREDENTIAL_SET_KINDS]);
+    });
+
+    it('allows exactly the account roles the schemas name', async () => {
+      assert.deepEqual(
+        (await allowed('user_account_role_check')).sort(),
+        [...ACCOUNT_ROLES].sort(),
+      );
+    });
+
+    it('allows exactly the background media types the schema names', async () => {
+      assert.deepEqual(
+        (await allowed('map_background_media_type_check')).sort(),
+        [...IMAGE_MEDIA_TYPES].sort(),
+      );
     });
 
     it('holds a notification’s state as a sensor state, never null', async () => {

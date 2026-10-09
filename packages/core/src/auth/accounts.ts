@@ -14,7 +14,13 @@ import { hashPassword, needsRehash, verifyPassword, spendVerificationTime } from
  * have a different answer per object; answering them here would mean answering them once.
  */
 
-export type AccountRole = 'admin' | 'readwrite' | 'readonly';
+/**
+ * Every role an account can hold, as `user_account_role_check` (migration 031) allows. The login
+ * principal's and a report's `runAs` `role` are enums of it, and `fixed-value-fields.test.ts`
+ * checks it against the constraint (`P-361`).
+ */
+export const ACCOUNT_ROLES = ['admin', 'readwrite', 'readonly'] as const;
+export type AccountRole = (typeof ACCOUNT_ROLES)[number];
 
 export interface Account {
   id: number;

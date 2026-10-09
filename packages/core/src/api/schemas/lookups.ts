@@ -12,8 +12,11 @@ export const lookupSummarySchema = {
     entryCount: { type: 'integer' },
     /** True when an operator's file replaced a definition this build ships. */
     overridesBuiltIn: { type: 'boolean' },
-    /** `built-in`, or the path the definition was read from. */
-    source: { type: 'string' },
+    // Open on purpose (`P-361`): a path is whatever the operator's directory holds.
+    source: {
+      type: 'string',
+      description: '`built-in`, or the path of the file the definition was read from.',
+    },
   },
 } as const;
 
@@ -31,7 +34,10 @@ export const lookupProblemSchema = {
   required: ['id', 'source', 'problems'],
   properties: {
     id: { type: 'string' },
-    source: { type: 'string' },
+    source: {
+      type: 'string',
+      description: '`built-in`, or the path of the file that was refused.',
+    },
     problems: { type: 'array', items: { type: 'string' } },
   },
 } as const;

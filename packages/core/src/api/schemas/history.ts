@@ -1,3 +1,5 @@
+import { SERIES_SOURCES } from '../../timeseries/query.js';
+
 /**
  * The historic-data response (S-08).
  *
@@ -88,7 +90,15 @@ export const sensorHistorySchema = {
     to: { type: 'string' },
     resolutionSeconds: { type: 'integer' },
     bucketCount: { type: 'integer' },
-    source: { type: 'string' },
+    // Computed per request from the rollup tiers and never stored, so `SERIES_SOURCES` is the
+    // whole set (`P-361`).
+    source: {
+      type: 'string',
+      enum: [...SERIES_SOURCES],
+      description:
+        'The table that served the bulk of the range: raw `sample`, or a rollup tier ' +
+        '(`sample_5m`, `sample_1h`, `sample_1d`).',
+    },
     segments: {
       type: 'array',
       items: {
@@ -96,7 +106,7 @@ export const sensorHistorySchema = {
         additionalProperties: false,
         required: ['table', 'from', 'to'],
         properties: {
-          table: { type: 'string' },
+          table: { type: 'string', enum: [...SERIES_SOURCES] },
           from: { type: 'string' },
           to: { type: 'string' },
         },

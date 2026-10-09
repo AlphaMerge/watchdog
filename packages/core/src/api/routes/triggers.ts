@@ -35,7 +35,21 @@ const triggerViewSchema = {
   ],
   properties: {
     id: { type: 'integer' },
-    kind: { type: 'string' },
+    kind: {
+      // Open on purpose, here and wherever a trigger kind is served (`P-352`). A kind is a
+      // registry entry, not a schema change (migration 015): `notification_trigger.kind` and
+      // `notification_request.trigger_kind` have no CHECK, so a `[V2]` kind ships without a
+      // migration and a downgrade past it keeps every trigger, listed and deletable (`P-139`). A
+      // CHECK would make each new kind a migration whose `down` deletes the operator's triggers
+      // and rewrites their notification history, and an enum would be served the newer build's
+      // kind anyway and claim it could not occur (`P-313`).
+      type: 'string',
+      description:
+        'One of the ids `GET /trigger-kinds` lists (`state` or `threshold` in this version), ' +
+        'and not an enum on purpose: a trigger saved by a newer build is still listed after a ' +
+        'downgrade, with `kindName` the kind itself and a `summary` saying this build does not ' +
+        'know it, so that it can be found and deleted.',
+    },
     kindName: { type: 'string' },
     /** Shaped by the kind's own schema; served as it was validated and stored. */
     settings: { type: 'object', additionalProperties: true },
@@ -78,7 +92,14 @@ const triggerInputSchema = {
   additionalProperties: false,
   required: ['kind', 'settings'],
   properties: {
-    kind: { type: 'string', minLength: 1, maxLength: 40 },
+    kind: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 40,
+      description:
+        'One of the ids `GET /trigger-kinds` lists. Any other is refused with 400 ' +
+        '`TRIGGER_INVALID`: a kind this build cannot validate is one it must not save.',
+    },
     settings: { type: 'object', additionalProperties: true },
     enabled: { type: 'boolean', default: true },
   },

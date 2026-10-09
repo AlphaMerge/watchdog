@@ -7,7 +7,7 @@ import type { MapLayout, MapRow, MapShare } from '../../maps/repository.js';
 import type { MapResolver } from '../../maps/resolver.js';
 import type { MapService, MapViewer } from '../../maps/service.js';
 import { MapError } from '../../maps/errors.js';
-import { MAX_IMAGE_BYTES } from '../../maps/images.js';
+import { IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../maps/images.js';
 import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';
 import { grantParams, idParams, pathId } from '../params.js';
@@ -118,7 +118,8 @@ const backgroundResponse = {
   additionalProperties: false,
   required: ['mediaType', 'digest', 'width', 'height', 'bytes', 'uploadedAt', 'uploadedBy'],
   properties: {
-    mediaType: { type: 'string' },
+    // The sniffed format, which `map_background`'s CHECK holds to the list (`P-361`).
+    mediaType: { type: 'string', enum: [...IMAGE_MEDIA_TYPES] },
     /** The SHA-256 the serving route answers as a strong `ETag` (`ADR-003` Decision 4). */
     digest: { type: 'string' },
     width: { type: 'integer' },

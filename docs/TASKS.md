@@ -12926,12 +12926,51 @@ because each is a decision rather than a defect:
         filter, which takes any 40-character string. Listed as follow-ups. Trigger kinds are
         `P-352`. `sensorType` stays open, as a registry.
 
-- [ ] **P-352 — trigger kinds are open-ended strings** · XS · P-342 · Found 2026-10-09 in `P-342`.
+- [x] **P-352 — trigger kinds are open-ended strings** · XS · P-342 · Found 2026-10-09 in `P-342`.
       `triggerKind` on notification requests, trigger `kind` on the trigger routes and
       `used-by` `triggerKind` have no CHECK, and P-139 lists unknown kinds after a downgrade; the
       log entry's `status` TS type is still `string`. **Done when** decided (a CHECK and an enum, or
       open by design with a description), and the `status` type derived from
       `NOTIFICATION_STATUSES`.
+
+      **P-352 outcome. Open by design: no CHECK and no enum, with a description on every served
+      kind saying so. `status` is now typed from `NOTIFICATION_STATUSES`.** No protocol or
+      migration change: migration 075 was reserved for this ticket and was not used.
+      - **What decided it: a CHECK would turn `P-139`'s tolerated row into lost triggers.** A
+        trigger kind is a registry entry, not a schema change. Migration 015 says so: settings
+        are jsonb behind each kind's schema so that "a migration every time one arrives" is not
+        needed. `CAPABILITIES.MD` has three `[V2]` kinds still to come (speed, volume, change).
+        Every closed set in this codebase handles its own widening with a migration whose `down`
+        rewrites or deletes the rows the narrower set refuses. 021 rewrites `discarded` to
+        `failed`, and 024 deletes `mail` credential sets. An older core refuses a database a
+        newer one migrated, and the gate tells the operator to restore a backup or migrate down.
+        With a CHECK, each new kind would be such a migration, and its `down` would have to
+        delete the operator's triggers of that kind and rewrite `notification_request` history.
+        Without one, a newer kind needs no migration. A downgrade keeps the schema, and the older
+        build lists the row, says it does not know the kind, and lets the operator delete it
+        (`P-139`). An enum on the response would be served that row anyway and say it could not
+        occur, which is the `P-313` lie.
+      - **Descriptions.** `ms:trigger.kind` names `GET /trigger-kinds` as the list this build
+        knows, says why the field is open, and explains what a newer build's trigger looks like
+        after a downgrade. The used-by `triggerKind` says a trigger of an unknown kind is left
+        out, because its settings cannot be read for template references. `templates.ts`
+        already skipped those rows. `ms:notificationRequest.triggerKind` adds that it is open on
+        purpose. `ms:triggerInput.kind` says any other kind is refused with 400 `TRIGGER_INVALID`.
+        That is not a validation change: `TriggerService` already refused one.
+      - **`status`.** `NOTIFICATION_STATUSES` moved from the route to `notifications/log.ts`, so
+        the entry's type can be derived from it without the log importing a route.
+        `NotificationStatus` is now the type of the log entry's `status`, its row and the log
+        query's filter, and the route's querystring type uses it too.
+      - **Test** (`fixed-value-fields.test.ts`). The trigger list is served by a real
+        `TriggerService` over a stubbed repository holding a trigger of every kind this build
+        has and one `forecast`. Each kind is served, and the answer validates against the
+        route's 200 schema. The used-by list is served by a real `TemplateRepository.usedBy`
+        over the same rows: it lists only the known kinds, and a forged `forecast` still
+        validates. A guard checks that the test's settings cover every registered kind.
+      - **Mutations** (each failed `fixed-value-fields` and was restored byte for byte):
+        `ms:trigger.kind` made an enum of the two kinds failed the trigger-list test. The used-by
+        `triggerKind` made the same enum failed the used-by test. `status` is a compile-time
+        change: `entry(…, { status: 'retrying' })` no longer compiles.
 
 - [x] **P-353 — an empty `tag` or `effective` filter is not refused** · XS · P-347 · Found
       2026-10-09 in `P-347`. Neither filter has a `minLength`: `?tag=` matches nothing and
@@ -13127,12 +13166,74 @@ because each is a decision rather than a defect:
       `channels({})` at registration. **Done when** `channelsFor` refuses that too, with the
       catalogue and gate tests `P-348` added extended to it.
 
-- [ ] **P-361 — the closed sets `P-351` left as strings** · XS · P-351 · Found 2026-10-09 in
+- [x] **P-361 — the closed sets `P-351` left as strings** · XS · P-351 · Found 2026-10-09 in
       `P-351`. `source` on history and the reports' `resolved` is a `SeriesSource`; `runAs.role`
       on `GET /reports/{id}/subjects` is an `AccountRole`; `skew.missing[]` lists capability names;
       lookups' and device templates' `source` and maps' `mediaType` were not checked. **Done
       when** each is an enum of one constant or described as open on purpose, with
       `fixed-value-fields.test.ts` covering the enums.
+
+      **P-361 outcome. Four of the closed sets are now enums of one exported constant, and the
+      other three fields are open on purpose and say why.** No protocol or migration change.
+      Before narrowing each response, every writer and stored source of the value was checked.
+      - **The enums, each with its type derived from its constant:**
+        - **Series source** (a history's `source` and `segments[].table`, a report's
+          `resolved.source`): `SERIES_SOURCES` in `timeseries/query.ts`. `SeriesSource` is
+          derived from it, and the planner's chain now reads it. The value is computed per
+          request by `sourceFor` from `ROLLUP_TIERS` and never stored. A compile-time check holds
+          the list to `RollupTierId | 'sample'`. `SensorHistory.source` and `segments[].table`
+          were typed `string` and are now `SeriesSource`. The segment table was not in the
+          ticket, but it has the same type and the same writer, so it is covered too.
+        - **`runAs.role`** on `GET /reports/{id}/subjects`: `ACCOUNT_ROLES` in
+          `auth/accounts.ts`, with `AccountRole` derived. The value is read from
+          `user_account.role`, which `user_account_role_check` holds to the list. The login
+          principal's inline copy of the list in `routes/auth.ts` now reads the constant.
+        - **`mediaType`** on `POST /maps/{id}/background`: `IMAGE_MEDIA_TYPES` in
+          `maps/images.ts`, with `ImageMediaType` derived. The value comes from the sniffer,
+          `readImage`, and is stored in `map_background.media_type`, which its CHECK holds to
+          the list. `MapBackground.mediaType` and `putBackground`'s argument were typed `string`
+          and are now `ImageMediaType`.
+      - **Open on purpose, each with a description and a test that pins it:**
+        - **`skew.missing[]` holds phrases, not capability names.** `missingCapabilities` maps
+          each capability to its `DESCRIPTION` sentence fragment, for example "run a discovery
+          sweep". These are written for a person and can be reworded without a protocol change,
+          so a client should compare `peerVersion` with `ownVersion` instead.
+        - **The lookups' and device templates' `source`**, in the summaries and the problems, is
+          `built-in` or the path of the file the definition came from, which is whatever the
+          operator's directory holds.
+      - **Test** (`fixed-value-fields.test.ts`, by `P-335`'s method):
+        - **Series source.** The report route serves `resolved.source` through the real
+          `planReportSpan`, the writer. A one-day custom span at 86,400, 3,600, 300 and 60
+          seconds gives each source in order, and each answer validates. The history route is
+          served over a stubbed service, with every source in both `source` and
+          `segments[].table`. `SERIES_SOURCES` is checked against the tier ids plus `sample`,
+          and against `sourceFor` at those four widths.
+        - **Role and media type.** Every role is served through the subjects route, and every
+          media type through an upload whose body goes through the route's content-type parser.
+        - **Refusals.** A value outside each set is refused: `sample_15m` as a source or a
+          table, `operator` as a role, and `image/svg+xml` as a media type.
+        - **Database.** Against a migrated scratch database, `ACCOUNT_ROLES` equals
+          `user_account_role_check` and `IMAGE_MEDIA_TYPES` equals
+          `map_background_media_type_check`.
+        - **Open fields.** A `skew` from `describeSkew(MIN_PROTOCOL_VERSION)` is served through
+          `GET /probes` and validates, as does a phrase this build never wrote. A built-in source
+          and a path are served through `GET /lookups` and `GET /device-templates`.
+      - **Mutations.** Each was restored byte for byte, and dist was rebuilt from the restored
+        source.
+        - Failed `fixed-value-fields`:
+          - the history `source` enum removed, and separately the `segments[].table` enum
+            removed: each failed the history refusal;
+          - the report `resolved.source` enum removed failed its refusal;
+          - the `runAs.role` enum removed failed its refusal;
+          - the `mediaType` enum removed failed the SVG refusal;
+          - `image/gif` added to `IMAGE_MEDIA_TYPES` failed the CHECK comparison.
+        - Failed to compile, so the type checker holds the list before any test runs:
+          - a value dropped from or added to `SERIES_SOURCES` (the tier match);
+          - `readonly` dropped from, or `operator` added to, `ACCOUNT_ROLES` (`CEILING` in
+            `auth/access.ts` is a `Record` over the roles);
+          - `image/webp` dropped from `IMAGE_MEDIA_TYPES` (the sniffer returns it).
+        - Because the role list cannot be changed and still compile, its CHECK comparison
+          guards against a later migration rather than against an edit to the list.
 
 - [x] **P-362 — the audit `actorKind` filter takes any string** · XS · P-351 · Found 2026-10-09
       in `P-351`. `GET /audit?actorKind=` accepts up to 40 characters of anything, where
