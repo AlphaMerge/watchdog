@@ -22,6 +22,7 @@ import { resolveProgram, SCRIPT_DIR_ENV } from '../src/support/script/resolve.js
 import { abortReason, endedHow } from '../src/support/program-ended.js';
 import { SCRIPT_GRACE_MS } from '../src/types/exe-script-shared.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
+import { until } from './support/within.js';
 
 /**
  * The sensors that run programs, and the boundary that decides which.
@@ -461,15 +462,6 @@ describe('the check’s own cancel (P-262)', () => {
   let serial = 0;
   const witness = (): string => join(dir, `p262-${String(process.pid)}-${String((serial += 1))}`);
 
-  /** Polls for `what`, failing after `ms`: every wait here is on another process. */
-  async function until(predicate: () => boolean, what: string, ms = 10_000): Promise<void> {
-    const deadline = Date.now() + ms;
-    while (!predicate()) {
-      if (Date.now() > deadline) throw new Error(`timed out after ${String(ms)} ms: ${what}`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-
   const gone = (pid: number): boolean => {
     try {
       process.kill(pid, 0);
@@ -507,7 +499,7 @@ describe('the check’s own cancel (P-262)', () => {
     const controller = new AbortController();
     const startedAt = performance.now();
     const running = check('halfway.sh', file, controller, 30_000);
-    await until(() => existsSync(file), 'the script to get going');
+    await until(10_000, 'the script to get going', () => existsSync(file));
     controller.abort(new Error('the check exceeded its timeout'));
     await assert.rejects(
       running,
@@ -522,7 +514,7 @@ describe('the check’s own cancel (P-262)', () => {
     const file = witness();
     const controller = new AbortController();
     const running = check('helper.sh', file, controller);
-    await until(() => existsSync(file), 'the script to start its helper');
+    await until(10_000, 'the script to start its helper', () => existsSync(file));
     const pids = await pidsIn(file);
     for (const pid of pids)
       assert.equal(gone(pid), false, `${String(pid)} is running to begin with`);
@@ -532,7 +524,7 @@ describe('the check’s own cancel (P-262)', () => {
       running,
       /helper\.sh was still running .* stopped with SIGTERM: waiting on the helper$/,
     );
-    await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 5_000);
+    await until(5_000, `${pids.join(' and ')} to be gone`, () => pids.every(gone));
   });
 
   it('kills a script that ignores SIGTERM within its grace, and says so', async () => {
@@ -540,7 +532,7 @@ describe('the check’s own cancel (P-262)', () => {
     const controller = new AbortController();
     const calledAt = performance.now();
     const running = check('stubborn.sh', file, controller);
-    await until(() => existsSync(file), 'the script to start its helper');
+    await until(10_000, 'the script to start its helper', () => existsSync(file));
     const pids = await pidsIn(file);
 
     const abortedAt = performance.now();
@@ -573,7 +565,7 @@ describe('the check’s own cancel (P-262)', () => {
     assert.ok(tookMs >= SCRIPT_GRACE_MS - 5, `killed ${String(Math.round(tookMs))} ms after`);
     // Not `runProgram`'s default of 5 s, which would outlast the runner's margin.
     assert.ok(tookMs < 4_000, `killed ${String(Math.round(tookMs))} ms after`);
-    await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 5_000);
+    await until(5_000, `${pids.join(' and ')} to be gone`, () => pids.every(gone));
   });
 
   it('says its own timeout when that comes first, with the check’s still to come', async () => {

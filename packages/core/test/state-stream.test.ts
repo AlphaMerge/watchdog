@@ -2446,19 +2446,7 @@ describe(
         });
       });
       /** How the server closed it — or a failure, not a hang, when it never does. */
-      const closed = async (): Promise<number> => {
-        let timer: NodeJS.Timeout | undefined;
-        const never = new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            reject(new Error('the server never closed the socket'));
-          }, 10_000);
-        });
-        try {
-          return await Promise.race([code, never]);
-        } finally {
-          clearTimeout(timer);
-        }
-      };
+      const closed = (): Promise<number> => within(10_000, 'the server to close the socket', code);
       await within(
         10_000,
         'the socket to open',

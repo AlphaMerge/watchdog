@@ -17,7 +17,7 @@ import {
 } from '../src/runner/index.js';
 import { typicalOf } from '../src/runner/pool.js';
 import { STARTUP_TIMEOUT_MS } from '../src/runner/process-runner.js';
-import { within } from './support/probe-process.js';
+import { pollWithin, within } from './support/within.js';
 import { assertFits } from './support/fits.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
@@ -67,12 +67,8 @@ async function poolOf(
 }
 
 /** Waits for a condition, or fails the test rather than hanging the suite. */
-async function until(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 5);
 }
 
 const request = (sensorId: number, sensorType: string, extra: Record<string, unknown> = {}) => ({

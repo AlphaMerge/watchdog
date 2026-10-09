@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { Logger } from '@ms/shared';
 import { RefusalLog } from '../src/runner/refusal-log.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * Refusals logged once per episode (`P-216` part 3). `P-216c`'s probe wrote a line per refused
@@ -19,12 +20,8 @@ function capture(): { logger: Logger; lines: Record<string, unknown>[] } {
 }
 
 /** Waits for a condition, not for a time (`P-234`). */
-async function until(condition: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (!condition()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function until(condition: () => boolean, what: string): Promise<void> {
+  return pollWithin(5_000, what, condition, 5);
 }
 
 const check = (sensorId: number) => ({

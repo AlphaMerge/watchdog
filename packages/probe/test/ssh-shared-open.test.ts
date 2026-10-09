@@ -6,6 +6,7 @@ import type { CheckResult } from '@ms/shared';
 import { BUILT_IN_SENSOR_TYPES } from '@ms/sensors';
 import { TestSshServer } from '@ms/simulators';
 import { CheckPool } from '../src/runner/pool.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * Whether two SSH checks in a running probe can share one connection being opened (`A-65`).
@@ -45,12 +46,8 @@ after(async () => {
   await server.stop();
 });
 
-async function until(predicate: () => boolean, what: string, timeoutMs = 60_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 60_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 10);
 }
 
 const sshLoad = (sensorId: number) => ({

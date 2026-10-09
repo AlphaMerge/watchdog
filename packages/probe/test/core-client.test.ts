@@ -20,6 +20,7 @@ import {
 } from '@ms/shared';
 import { CoreClient, type ConfigUpdate } from '../src/transport/core-client.js';
 import { loopbackV6Available } from './support/probe-process.js';
+import { pollWithin } from './support/within.js';
 
 const silentLogger = pino({ level: 'silent' });
 
@@ -295,7 +296,7 @@ describe(
           message: 'decommissioned, replaced by web-dc4',
         });
 
-        await waitUntil(() => applied.length === 2, 'the probe kept its assignments');
+        await waitUntil(() => applied.length === 2, 'the probe to keep its assignments');
         const cleared = applied[1];
         assert.ok(cleared?.kind === 'set');
         assert.deepEqual(cleared.sensors, [], 'it must be left scanning nothing at all');
@@ -312,12 +313,12 @@ describe(
         assert.ok(firstHello?.type === 'hello');
 
         core.send({ type: 'reject', code: 'revoked', message: 'this probe has been revoked' });
-        await waitUntil(() => applied.length === 2, 'the probe kept its assignments');
+        await waitUntil(() => applied.length === 2, 'the probe to keep its assignments');
 
         // The core closes the link after refusing; the client reconnects on its own.
         core.closeLink();
         const hellos = () => core.received.filter((m) => m.type === 'hello');
-        await waitUntil(() => hellos().length >= 2, 'the probe never came back');
+        await waitUntil(() => hellos().length >= 2, 'the probe to come back');
 
         const second = hellos()[1];
         assert.ok(second?.type === 'hello');
@@ -410,7 +411,7 @@ describe(
         assert.deepEqual(asked[0], { seq: beat.seq, peerVersion: PROTOCOL_VERSION });
         assert.deepEqual(acked, [], 'nothing is delivered until the core says so');
         core.send({ type: 'heartbeat-ack', seq: beat.seq });
-        await waitUntil(() => acked.length === 1, 'the acknowledgement was not passed on');
+        await waitUntil(() => acked.length === 1, 'the acknowledgement to be passed on');
         assert.deepEqual(acked, [beat.seq]);
       });
     });
@@ -450,7 +451,7 @@ describe(
         assert.ok(beat.type === 'heartbeat');
         assert.equal(beat.seq, 1);
         assert.deepEqual(connectedWhenReported, [false], 'reported before the drain could send');
-        await waitUntil(() => client.connected, 'the client never said it was connected');
+        await waitUntil(() => client.connected, 'the client to say it was connected');
       } finally {
         await client.stop();
         await core.stop();
@@ -522,7 +523,10 @@ describe(
       const failed = (): string | undefined =>
         lines.find((line) => line.includes('connection to core failed') && what.test(line));
       try {
-        await waitUntil(() => failed() !== undefined, `no failed connection said ${String(what)}`);
+        await waitUntil(
+          () => failed() !== undefined,
+          `a failed connection that says ${String(what)}`,
+        );
       } catch (error: unknown) {
         throw new Error(`${String(error)}; logged ${JSON.stringify(lines)}`);
       }
@@ -593,14 +597,6 @@ describe(
 );
 
 /** Polls a condition, because the client acts on a message without answering it. */
-async function waitUntil(
-  condition: () => boolean,
-  message: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error(`timed out: ${message}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+function waitUntil(condition: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
+  return pollWithin(timeoutMs, what, condition, 10);
 }

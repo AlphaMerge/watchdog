@@ -10,7 +10,7 @@ import { resultSink } from '../src/result-sink.js';
 import { CheckPool } from '../src/runner/pool.js';
 import type { ResultMeta } from '../src/runner/types.js';
 import { ResultSpool } from '../src/spool/spool.js';
-import { within } from './support/probe-process.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * A device that resets the connection while a check's command runs, seen from the probe
@@ -53,21 +53,8 @@ after(async () => {
 });
 
 /** Until `predicate` holds, polled, bounded; the polling stops when the wait gives up. */
-async function until(ms: number, what: string, predicate: () => boolean): Promise<void> {
-  const poll = { stopped: false };
-  try {
-    await within(
-      ms,
-      what,
-      (async () => {
-        while (!poll.stopped && !predicate()) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-      })(),
-    );
-  } finally {
-    poll.stopped = true;
-  }
+function until(ms: number, what: string, predicate: () => boolean): Promise<void> {
+  return pollWithin(ms, what, predicate, 10);
 }
 
 const check = (sensorId: number, sensorType: string, params: Record<string, unknown> = {}) => ({

@@ -16,6 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent } from './support/tree.js';
+import { pollWithin } from './support/within.js';
 
 const available = await databaseAvailable();
 
@@ -235,19 +236,19 @@ describe(
                 race.settled = true;
               },
             );
-            const deadline = Date.now() + 5_000;
-            for (;;) {
-              const waiting = await db.query(
-                `SELECT 1 FROM pg_locks
-                 WHERE locktype = 'advisory' AND NOT granted AND $1 = ANY(pg_blocking_pids(pid))`,
-                [pid],
-              );
-              if (waiting.length > 0 || race.settled) return;
-              if (Date.now() > deadline) {
-                throw new Error('the second create neither waited on the first nor finished');
-              }
-              await new Promise((resolve) => setTimeout(resolve, 10));
-            }
+            await pollWithin(
+              5_000,
+              'the second create to wait on the first or to finish',
+              async () => {
+                const waiting = await db.query(
+                  `SELECT 1 FROM pg_locks
+                   WHERE locktype = 'advisory' AND NOT granted AND $1 = ANY(pg_blocking_pids(pid))`,
+                  [pid],
+                );
+                return waiting.length > 0 || race.settled;
+              },
+              10,
+            );
           };
           try {
             await entity().create(who('author'), name);

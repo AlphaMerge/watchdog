@@ -21,6 +21,7 @@ import {
   testDatabaseConfig,
   type ScratchDatabase,
 } from './support/database.js';
+import { pollWithin } from './support/within.js';
 
 const available = await databaseAvailable();
 
@@ -2213,14 +2214,11 @@ describe(
         });
         const running = subject.up();
         // Until three reports, however slow the machine: the count is the claim, not the timing.
-        const deadline = Date.now() + 10_000;
-        while (waits.length < 3 && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-
-        assert.ok(
-          waits.length >= 3,
-          `expected a report at once and on every interval, got ${String(waits.length)}`,
+        await pollWithin(
+          10_000,
+          'three reports: one at once and one on every interval',
+          () => waits.length >= 3,
+          25,
         );
         assert.ok(
           (waits[0]?.elapsedMs ?? Infinity) < 100,

@@ -12638,13 +12638,43 @@ because each is a decision rather than a defect:
       differ, or keep the channel's) with an M-17 scenario test over notification and summary
       bodies, since it changes notification text for every sensor.
 
-- [ ] **P-346 — the last hand-written polls and helpers in the tests** · XS · P-330 · Found
+- [x] **P-346 — the last hand-written polls and helpers in the tests** · XS · P-330 · Found
       2026-10-09 in `P-330`. Three inline polls with their own deadlines (`flat-names.test.ts`,
       `hardening.test.ts`, `migrator.test.ts`), about fifteen local `until`/`waitUntil` helpers in
       probe and sensors, state-stream's hand-written `closed()` race, `ssh-session.test.ts`'s own
       `within` with its arguments in another order, and rule 22 still placing `within` in
       `state-stream.test.ts`. **Done when** they use each package's shared helper and rule 22 names
       where the helpers live.
+
+      **P-346 outcome. Every one is now its package's shared helper, with the same bound and
+      interval; what changed is the failure text, which now reads "timed out after N ms waiting
+      for …" everywhere.** Test code and one line of the findings file only.
+      - **core:** the three inline polls are `pollWithin` at their own bounds (5 s, 5 s, 10 s) and
+        intervals. `flat-names`' predicate is a query, and the old loop read its deadline only
+        after the query answered; a hung query is now bounded too. `hardening`'s and
+        `migrator`'s loops fell through at the deadline to an `assert` after them; that assert is
+        gone, its words now the `what` — `migrator`'s failure no longer says how many reports had
+        come. `state-stream`'s `closed()` is `within(10_000, 'the server to close the socket',
+        code)`, where it said "the server never closed the socket".
+      - **probe:** the `until` in ten files (`process-runner`, `build-profile`, `check-pool`,
+        `pool-memory-cap`, `target-policy-env`, `ssh-shared-open`, `refusal-log`, `spool-drain`,
+        `query-runner`, `perf/reconnect-soak`), `waitUntil` in `core-client`, `until` in
+        `ssh-reset` (the sensors-style one built on `within` by hand) and `goneWithin` in
+        `process-runner` (likewise) are each one `pollWithin` call, kept as a wrapper so their
+        call sites and per-file defaults did not move. `core-client`'s six messages said what had
+        failed ("the probe never came back"); they are reworded to what was waited for ("the
+        probe to come back"), nothing lost. `refusal-log` failed with `assert.fail`, now an
+        `Error`. `process-runner`, `check-pool` and `ssh-reset` take `within` from
+        `support/within.js` instead of its re-export in `probe-process.js`.
+      - **sensors:** the local `until` in `exe-script`, `target-policy-transports`,
+        `target-policy-exception` and `syslog` are gone, their call sites the shared
+        `until(ms, what, predicate)` with the bound each defaulted to. `syslog`'s said only
+        "timed out"; its nine call sites now name what each waited for. `ssh-session`'s own
+        `within(promise, ms, what)` is gone and its 48 calls take the shared one's order.
+      - **Left alone, not polls:** `until` in `probe-health-report` moves a mocked clock, and the
+        one in `listener-restart-scenario` is a local variable.
+      - **Rule 22** names `within` in each package's `test/support/within.ts` and the poller
+        beside it (`pollWithin` in core and probe, `until` in sensors).
 
 - [x] **P-347 — the `tag` and `effective` filters are only half bounded** · XS · P-337 · Found
       2026-10-09 in `P-337`. A single `tag` is limited to 100 characters, but the array form has no

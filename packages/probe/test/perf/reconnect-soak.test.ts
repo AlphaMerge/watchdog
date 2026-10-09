@@ -9,6 +9,7 @@ import { SpoolDrain, type ResultSender } from '../../src/spool/drain.js';
 import { ResultSpool } from '../../src/spool/spool.js';
 import type { ResultsOutcome } from '../../src/transport/core-client.js';
 import { V1_TARGET_INTERVAL_SECONDS, V1_TARGET_SENSORS } from '../../src/measured.js';
+import { pollWithin } from '../support/within.js';
 
 /**
  * A one-hour disconnect, replayed (`R-08`).
@@ -99,12 +100,8 @@ class CountingCore implements ResultSender {
   }
 }
 
-async function until(predicate: () => boolean, what: string, timeoutMs = 120_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 120_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 5);
 }
 
 describe('a disconnect long enough to matter', () => {

@@ -15,6 +15,7 @@ import {
   type MemoryCapReading,
 } from '../src/runner/index.js';
 import { WORKER_RESIDENT_MIB } from '../src/measured.js';
+import { pollWithin } from './support/within.js';
 
 // `P-236`: the pool's ceiling, bounded by the memory the probe may use.
 // `docs/findings/2026-09-29-probe-starvation-b.md` is why.
@@ -32,12 +33,8 @@ after(async () => {
 });
 
 /** Waits for a condition, or fails the test rather than hanging the suite. */
-async function until(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 5);
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

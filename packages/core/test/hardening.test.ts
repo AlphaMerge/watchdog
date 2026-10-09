@@ -16,6 +16,7 @@ import {
 } from '../src/api/hardening.js';
 import { toHttpError } from '../src/api/errors.js';
 import { silent } from './support/tree.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * Security headers, CSRF and rate limiting (`A-09`).
@@ -890,9 +891,7 @@ describe('rate limiting', () => {
         },
       });
     });
-    const deadline = Date.now() + 5_000;
-    while (asked === 0 && Date.now() < deadline) await sleep(5);
-    assert.ok(asked > 0, 'the sweep runs while the server is open');
+    await pollWithin(5_000, 'the sweep to run while the server is open', () => asked > 0, 5);
 
     await swept.close();
     asked = 0;

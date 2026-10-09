@@ -17,7 +17,7 @@ import {
 } from '../src/runner/process-runner.js';
 import { linuxProcessView, type ProcessView } from '../src/runner/script-groups.js';
 import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
-import { within } from './support/probe-process.js';
+import { pollWithin } from './support/within.js';
 import { assertFits } from './support/fits.js';
 
 /**
@@ -74,12 +74,8 @@ function runnerOf(
   return { runner, seen };
 }
 
-async function until(predicate: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 10);
 }
 
 const request = (sensorId: number, sensorType: string, extra: Record<string, unknown> = {}) => ({
@@ -923,20 +919,8 @@ describe('a script check in a process of its own (`P-262`)', () => {
       return pids;
     }
 
-    /** Resolves once every one of `pids` has gone; stops looking when `stop` is aborted. */
-    async function allGone(pids: readonly number[], stop: AbortSignal): Promise<void> {
-      while (!pids.every(gone) && !stop.aborted) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-
-    async function goneWithin(ms: number, pids: readonly number[], what: string): Promise<void> {
-      const stop = new AbortController();
-      try {
-        await within(ms, what, allGone(pids, stop.signal));
-      } finally {
-        stop.abort();
-      }
+    function goneWithin(ms: number, pids: readonly number[], what: string): Promise<void> {
+      return pollWithin(ms, what, () => pids.every(gone), 10);
     }
 
     it('ends the script and its helper when its check process is killed mid-script', async () => {

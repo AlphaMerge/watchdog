@@ -8,6 +8,7 @@ import { parseSyslog, renderSyslog, SEVERITIES } from '../src/support/syslog/par
 import { matches, readRules, syslogReceiver, SYSLOG_LISTENER } from '../src/types/syslog.js';
 import type { CheckContext, CheckExecution, ReceivedNotification } from '../src/contract.js';
 import { assertDeclaresEveryKey } from './support/declared-keys.js';
+import { until } from './support/within.js';
 
 /**
  * The syslog parser, the framings and the sensor.
@@ -221,7 +222,7 @@ describe('the sockets', () => {
         timestamp: new Date('2026-08-27T09:15:00Z'),
       },
     ]);
-    await until(() => seen.length === 1);
+    await until(5_000, 'the UDP message to be received', () => seen.length === 1);
     assert.deepEqual(
       seen.map((one) => [one.transport, one.message.message]),
       [['udp', 'over udp']],
@@ -239,7 +240,7 @@ describe('the sockets', () => {
         });
       });
     });
-    await until(() => seen.length === 1);
+    await until(5_000, 'the TCP line to be received', () => seen.length === 1);
     assert.deepEqual(
       seen.map((one) => [one.transport, one.message.message]),
       [['tcp', 'over tcp with no newline']],
@@ -255,7 +256,7 @@ describe('the sockets', () => {
       await sendTcp(port, [{ message: 'one' }, { message: 'two' }, { message: 'three' }], {
         framing,
       });
-      await until(() => seen.length === 3);
+      await until(5_000, `three ${framing} messages to be received`, () => seen.length === 3);
       assert.deepEqual(
         seen.map((one) => one.message.message),
         ['one', 'two', 'three'],
@@ -273,7 +274,7 @@ describe('the sockets', () => {
       framing: 'non-transparent',
       splitAt: 20,
     });
-    await until(() => seen.length === 1);
+    await until(5_000, 'the split frame to be received', () => seen.length === 1);
     assert.equal(seen[0]?.message.message, 'a message split down the middle');
   });
 });
@@ -309,7 +310,7 @@ describe('a handler that throws (P-217)', () => {
     seen.length = 0;
     malformed.length = 0;
     await sendUdp(port, [{ message: 'boom' }, { message: 'and the next one is still read' }]);
-    await until(() => seen.length === 1);
+    await until(5_000, 'the datagram after the throw to be read', () => seen.length === 1);
     assert.deepEqual(malformed, ['handling a message threw: a defect downstream']);
     assert.deepEqual(seen, ['udp:and the next one is still read']);
   });
@@ -318,24 +319,16 @@ describe('a handler that throws (P-217)', () => {
     seen.length = 0;
     malformed.length = 0;
     await sendTcp(port, [{ message: 'boom' }], { framing: 'non-transparent' });
-    await until(() => malformed.length === 1);
+    await until(5_000, 'the throw to be reported', () => malformed.length === 1);
     assert.deepEqual(malformed, ['handling a message threw: a defect downstream']);
 
     await sendTcp(port, [{ message: 'a new connection is read' }], {
       framing: 'non-transparent',
     });
-    await until(() => seen.length === 1);
+    await until(5_000, 'the new connection to be read', () => seen.length === 1);
     assert.deepEqual(seen, ['tcp:a new connection is read']);
   });
 });
-
-async function until(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error('timed out');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 /** The device the sensor sits under, by address, which is what a listener reports a sender as. */
 const DEVICE = '192.0.2.10';
@@ -544,7 +537,7 @@ describe('which senders are this device’s (`P-246`)', () => {
     };
     if (transport === 'udp') await sendUdp(port, [message], from);
     else await sendTcp(port, [message], { host: from });
-    await until(() => seen.length === 1);
+    await until(5_000, `the message from ${from} to be received`, () => seen.length === 1);
     const [one] = seen;
     assert.ok(one !== undefined);
     return notification({ source: one.source, message: message.message });
@@ -653,7 +646,7 @@ describe('the keys syslog.receiver reports (P-320)', () => {
         message: `severity ${String(severity)}`,
       })),
     );
-    await until(() => seen.length === SEVERITIES.length);
+    await until(5_000, 'one message at each severity', () => seen.length === SEVERITIES.length);
     const items: ReceivedNotification[] = seen.map((one) => ({
       at: '2026-08-27T09:15:00.000Z',
       source: DEVICE,

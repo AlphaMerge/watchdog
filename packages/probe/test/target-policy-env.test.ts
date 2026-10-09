@@ -7,6 +7,7 @@ import { TARGET_POLICY_ENV } from '@ms/sensors';
 import { CheckPool } from '../src/runner/pool.js';
 import { ProcessRunner } from '../src/runner/process-runner.js';
 import { handTargetPolicy } from '../src/target-policy-env.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * `probe.targetPolicy` reaches a check, in a worker thread and in a check process (`A-65`).
@@ -34,12 +35,8 @@ after(async () => {
   await Promise.all([...pools.map((pool) => pool.stop()), ...runners.map((one) => one.stop())]);
 });
 
-async function until(predicate: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 10);
 }
 
 const request = (sensorId: number) => ({

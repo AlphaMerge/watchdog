@@ -7,6 +7,7 @@ import { dispatchTables, missingTypeError, probeCatalogue } from '../src/catalog
 import { dueDispatcher } from '../src/due-dispatch.js';
 import { QueryRunner } from '../src/queries/runner.js';
 import { CheckPool, type ResultMeta } from '../src/runner/index.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * What a probe build carries (`H-12`), asked of the running thing.
@@ -50,12 +51,8 @@ async function asProfile<T>(profile: BuildProfile, run: () => Promise<T>): Promi
   }
 }
 
-async function until(done: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (!done()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+function until(done: () => boolean, what: string): Promise<void> {
+  return pollWithin(15_000, what, done, 10);
 }
 
 /**

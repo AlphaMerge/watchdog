@@ -28,6 +28,7 @@ import { mailSmtp } from '../src/types/mail-smtp.js';
 import { portTcp } from '../src/types/port-tcp.js';
 import { sshLoad } from '../src/types/ssh-load.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
+import { until } from './support/within.js';
 
 /**
  * One device's exception to its probe's target policy (`A-64`).
@@ -451,15 +452,6 @@ async function counting(): Promise<{
   };
 }
 
-/** Waits for something the far end does on its own time, with a bound of its own. */
-async function until(done: () => boolean, what: string, withinMs = 3_000): Promise<void> {
-  const deadline = Date.now() + withinMs;
-  while (!done()) {
-    if (Date.now() > deadline) assert.fail(`${what} did not happen within ${String(withinMs)} ms`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
 describe('the catalogue hands a check the exception it arrived with', () => {
   const seen: (readonly string[] | undefined)[] = [];
   const witness: SensorType = {
@@ -511,13 +503,13 @@ describe('TCP port, under `private`', () => {
     const execution = await execute(portTcp, dns, { params: params(), exception: ['127.0.0.1'] });
     assert.ok((execution.channels.find((one) => one.key === 'connectTime')?.value ?? -1) >= 0);
     assert.deepEqual(dns.calls, [NAME]);
-    await until(() => listener.connections() === 1, 'the listener’s accept');
+    await until(3_000, 'the listener’s accept', () => listener.connections() === 1);
     await execute(portTcp, answering(), {
       params: params(),
       host: '127.0.0.1',
       exception: ['127.0.0.1'],
     });
-    await until(() => listener.connections() === 2, 'the second accept');
+    await until(3_000, 'the second accept', () => listener.connections() === 2);
   });
 });
 

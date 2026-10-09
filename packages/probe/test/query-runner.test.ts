@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pino } from 'pino';
 import type { CheckResult, ProbeQuery, QueryFailure, SensorAssignment } from '@ms/shared';
 import { QueryRunner } from '../src/queries/runner.js';
+import { pollWithin } from './support/within.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -66,12 +67,8 @@ async function runnerOf(options: { size?: number; queueMaxLength?: number } = {}
   return { runner, answers };
 }
 
-async function until(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 5);
 }
 
 after(async () => {

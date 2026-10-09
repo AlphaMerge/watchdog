@@ -9,6 +9,7 @@ import { SpoolDrain, type ResultSender } from '../src/spool/drain.js';
 import { ResultSpool } from '../src/spool/spool.js';
 import type { ResultsOutcome } from '../src/transport/core-client.js';
 import { assertCoreTakesAsSent } from './support/fits.js';
+import { pollWithin } from './support/within.js';
 
 const silent = pino({ level: 'silent' });
 const dirs: string[] = [];
@@ -153,12 +154,8 @@ describe('a spool that will not drain', () => {
 });
 
 /** Waits for a condition rather than for a duration, or fails instead of hanging the suite. */
-async function until(predicate: () => boolean, what: string, timeoutMs = 3_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function until(predicate: () => boolean, what: string, timeoutMs = 3_000): Promise<void> {
+  return pollWithin(timeoutMs, what, predicate, 5);
 }
 
 describe('spool drain', () => {
