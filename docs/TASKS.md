@@ -14588,6 +14588,24 @@ because each is a decision rather than a defect:
       - **Not done.** `fast-json-stringify`'s own Ajv stays lax. It is not configurable, and
         it does not need to be once every schema it reads has compiled strict first.
 
+- [ ] **P-391 — an unmapped unique violation answers with the constraint's name** · S · P-386 ·
+      Found 2026-10-09 in `P-386`. `toHttpError`'s general 23505 branch (`api/errors.ts`)
+      answers any unmapped unique violation as `409 OBJECT_INVALID` with PostgreSQL's message,
+      which names the constraint and not the object in the way. That is how `P-386` hid.
+      **Done when** every unique constraint a route can reach is listed, each has its own
+      refusal naming what is in the way (to callers allowed to see it), and a test fails when a
+      new constraint is reachable without one.
+
+- [ ] **P-392 — the alias-sort check's blind spots and the tests it does not read** · S · P-389 ·
+      Found 2026-10-09 in `P-389`. Six test queries sort by a text-cast id alias:
+      `backfill.test.ts:745`, `credential-pinning.test.ts:3351`, `migrator.test.ts:763`,
+      `recipients.test.ts:119` and `perf/visibility-performance.test.ts` 237 and 243. The check
+      also does not follow a column made text in a CTE or subquery and sorted outside it, text
+      made by `concat`, `to_char` or `||`, or an alias written without `AS`. **Done when** the six
+      are qualified, the check reads `packages/core/test` too, and the blind spots are covered
+      or listed in the check's own comment. `P-388` must delete its two `ALLOWED` entries if it
+      qualifies them.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -27366,6 +27384,38 @@ because each is a decision rather than a defect:
         4; the prop ignored for the context 2.
       - **Not done.** The Logs page's tabs still send focus to its heading; `keepsFocus` would do
         it in three places.
+
+- [ ] **U-77 — a hung read stalls the poll that waits for it** · S · U-71 · Found 2026-10-09 in
+      `U-71`. `request()` has no timeout, so a *Try again* read that never answers stops the
+      values poll, which waits for it, and leaves any *Try again* in the app busy for good.
+      **Done when** `request()` gives up after a bound that is said as a failure (an
+      `UNREACHABLE`-style error, with what was asked), with tests for a poll and a *Try again*.
+
+- [ ] **U-78 — focus odds and ends from round 21** · S · U-71, U-73, U-76 · Found 2026-10-09.
+      - The Logs page's tabs do not set `keepsFocus`, so their panels' *Try again* still sends
+        focus to the page heading (the status-log round in `try-again-focus` expects it).
+      - Going back to Overview while a poll failure is held mounts the readings region with its
+        text already in it, which may not be announced (`U-41`).
+      - In the template editor, `SchemaForm` and *Cancel* are `disabled` while saving, so Enter
+        in a settings field disables the field that has focus.
+      - `sameWords` is in both `SharedMapView` and `ObjectDetailView`.
+
+      **Done when** each is fixed or explained, with tests.
+
+- [ ] **U-79 — the tree still asks on every key** · S · U-75 · Found 2026-10-09 in `U-75`. Only
+      the address write waits for a pause, so a held key is one `GET /objects` per character. A
+      keyboard *Back* or a reload inside the 300 ms pause leaves the last keys out of the
+      address. `useAddressLater` reads `UNSAFE_NavigationContext`'s navigator, an internal of
+      react-router 7 that falls back to writing on every key if it disappears. **Done when** the
+      search asks after the same pause, `pagehide` flushes the write, and a test fails if the
+      navigator stops exposing `location`.
+
+- [ ] **U-80 — the shared map's age, and its clock** · XS · U-74 · Found 2026-10-09 in `U-74`.
+      The map says when it was last read but gives no cue when that is old. The time is the
+      display's own clock, so a wrong clock shows a wrong time; the core could put a time in the
+      public payload. After a 404 the minute clock still re-renders for nothing. **Decision
+      first** on the stale cue's wording and whether it is announced; then do all three, with
+      tests.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
