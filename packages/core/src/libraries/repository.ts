@@ -59,7 +59,7 @@ const COLUMNS = 'id, name, description, priority, nodes, version, created_at, up
 export class LibraryRepository {
   async list(q: Queryable): Promise<LibraryRow[]> {
     const rows = await q.query<RawLibrary>(
-      `SELECT ${COLUMNS} FROM library ORDER BY priority DESC, lower(name)`,
+      `SELECT ${COLUMNS} FROM library ORDER BY priority DESC, lower(name), id`,
     );
     return rows.map(toLibrary);
   }
@@ -70,7 +70,7 @@ export class LibraryRepository {
     const rows = await q.query<RawLibrary>(
       `SELECT ${COLUMNS} FROM library l
        WHERE ${grantedTo(LIBRARY_GRANTS, 'l.id', '$1')}
-       ORDER BY l.priority DESC, lower(l.name)`,
+       ORDER BY l.priority DESC, lower(l.name), l.id`,
       [groupIds],
     );
     return rows.map(toLibrary);

@@ -167,7 +167,7 @@ const RETURNING = `${COLUMNS}, ${RUN_AS_DISABLED}`;
 export class ReportRepository {
   async list(q: Queryable): Promise<ReportRow[]> {
     const rows = await q.query<RawReport>(
-      `SELECT ${RETURNING} FROM report r ORDER BY lower(r.name)`,
+      `SELECT ${RETURNING} FROM report r ORDER BY lower(r.name), r.id`,
     );
     return rows.map(toReport);
   }
@@ -180,7 +180,7 @@ export class ReportRepository {
     const rows = await q.query<RawReport>(
       `SELECT ${RETURNING} FROM report r
        WHERE ${grantedTo(REPORT_GRANTS, 'r.id', '$1')}
-       ORDER BY lower(r.name)`,
+       ORDER BY lower(r.name), r.id`,
       [groupIds],
     );
     return rows.map(toReport);

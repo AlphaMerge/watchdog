@@ -58,23 +58,35 @@ export function renderMessage(options: SyslogMessageOptions = {}): string {
  * Sends one datagram per message and returns once they are all handed to the socket.
  *
  * From an IPv6 socket when `host` is an IPv6 address, so a test can be a sender of either family.
+ *
+ * **`trailer`, for a test that has to know the sender is done** (`P-378`). UDP has no end of
+ * stream, so a collector cannot tell the last datagram from a gap before the next. A trailer is
+ * sent as it is, not rendered, after every message and from the same socket, once the last
+ * message's send has called back. The test leans on the loopback delivering one socket's
+ * datagrams to one address in the order they were sent: then a collector that has read the
+ * trailer has read everything before it, an excess datagram included. A trailer sent from a
+ * socket of the test's own would be a second sender, which Linux does not order against the
+ * first: their datagrams can sit in different CPUs' backlogs.
  */
 export async function sendUdp(
   port: number,
   messages: readonly SyslogMessageOptions[],
   host = '127.0.0.1',
+  options: { trailer?: string } = {},
 ): Promise<void> {
   const socket = createSocket(isIPv6(host) ? 'udp6' : 'udp4');
+  const send = (payload: Buffer): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      socket.send(payload, port, host, (error) => {
+        if (error === null) resolve();
+        else reject(error);
+      });
+    });
   try {
     for (const message of messages) {
-      const payload = Buffer.from(renderMessage(message), 'utf8');
-      await new Promise<void>((resolve, reject) => {
-        socket.send(payload, port, host, (error) => {
-          if (error === null) resolve();
-          else reject(error);
-        });
-      });
+      await send(Buffer.from(renderMessage(message), 'utf8'));
     }
+    if (options.trailer !== undefined) await send(Buffer.from(options.trailer, 'utf8'));
   } finally {
     socket.close();
   }

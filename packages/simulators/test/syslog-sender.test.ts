@@ -102,42 +102,29 @@ describe('the syslog sender', () => {
       pollWithin(5_000, what, met);
 
     /**
-     * A datagram the test sends itself once `sendUdp` has returned (`P-378`), standing in for the
-     * end UDP does not have. `sendUdp` returns only once every send's callback has fired, so all
-     * it sent, an excess datagram included, is on the loopback ahead of this, and loopback
-     * delivers in order: once it arrives, everything the sender sent has been read. `P-373`
-     * waited a fixed 100 ms instead, which a machine slower than that would outrun.
+     * The trailer `sendUdp` sends after its messages, from the same socket (`P-378`), standing in
+     * for the end UDP does not have: once it is read, everything the sender sent before it has
+     * been, an excess datagram included. `P-373` waited a fixed 100 ms instead, which a machine
+     * slower than that would outrun; a sentinel from a socket of the test's own was a second
+     * sender that the kernel need not deliver in order with the first.
      */
-    const SENTINEL = 'sentinel: the sender is done';
-
-    const sendSentinel = async (port: number): Promise<void> => {
-      const socket = createSocket('udp4');
-      try {
-        await new Promise<void>((resolve, reject) => {
-          socket.send(SENTINEL, port, '127.0.0.1', (error) => {
-            if (error === null) resolve();
-            else reject(error);
-          });
-        });
-      } finally {
-        socket.close();
-      }
-    };
+    const TRAILER = 'trailer: the sender is done';
 
     it('sends one datagram per message over UDP', async () => {
       const { port, lines, socket } = await collectUdp();
       try {
-        await sendUdp(port, [{ message: 'first' }, { message: 'second' }]);
-        await sendSentinel(port);
+        await sendUdp(port, [{ message: 'first' }, { message: 'second' }], '127.0.0.1', {
+          trailer: TRAILER,
+        });
         await arrived(
-          () => `the sentinel after the sender's datagrams; got ${JSON.stringify(lines)}`,
-          () => lines.includes(SENTINEL),
+          () => `the trailer after the sender's datagrams; got ${JSON.stringify(lines)}`,
+          () => lines.includes(TRAILER),
         );
       } finally {
         socket.close();
       }
 
-      assert.equal(lines.at(-1), SENTINEL, 'the sentinel arrives last');
+      assert.equal(lines.at(-1), TRAILER, 'the trailer arrives last');
       const sent = lines.slice(0, -1);
       assert.equal(sent.length, 2, `exactly two datagrams: ${JSON.stringify(sent)}`);
       assert.match(sent[0] ?? '', /first$/);

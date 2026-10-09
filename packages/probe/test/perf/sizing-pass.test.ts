@@ -33,7 +33,7 @@ const FIXTURES = join(import.meta.dirname, '..', 'support', 'check-fixtures.js')
 /** A pass must stay far below the one-second tick it shares a thread with. */
 const BUDGET_MS = 50;
 const PASSES = 20;
-/** Completed checks to measure: about the 1,024 samples the duration window holds. */
+/** Settled checks to measure: about the 1,024 samples the duration window holds. */
 const WINDOW = 1_000;
 
 const pools: CheckPool[] = [];
@@ -62,8 +62,19 @@ describe('one sizing pass at the v1 target (P-48)', () => {
     // spare: a smaller queue or pool would have left the poll waiting 30 s for a count no check
     // still in flight could reach. A refusal is `queue-full`, and anything else is the pool
     // giving up, which is said at once rather than waited out.
+    //
+    // **Waited for as settled, not as succeeded.** The pool records a check's duration for every
+    // result a worker returns, ok or not, before it counts which; a check that times out or
+    // whose worker dies records none, and is counted as `timedOut` or `failed`. Each accepted
+    // check lands in exactly one of `completed`, `failed` and `timedOut`, so the sum reaches the
+    // window once every accepted check has an answer. Waiting for `completed` alone, one check
+    // that failed left the count one short for good and the poll waiting out its 30 s.
     let submitted = 0;
     let accepted = 0;
+    const settled = (): number => {
+      const stats = pool.stats();
+      return stats.completed + stats.failed + stats.timedOut;
+    };
     const topUp = (): void => {
       while (accepted < WINDOW) {
         submitted += 1;
@@ -82,11 +93,12 @@ describe('one sizing pass at the v1 target (P-48)', () => {
     await pollWithin(
       30_000,
       () =>
-        `enough completed checks to fill the window, ${String(WINDOW)}; ` +
-        `${String(accepted)} accepted, ${String(pool.stats().completed)} completed`,
+        `enough settled checks to fill the window, ${String(WINDOW)}; ` +
+        `${String(accepted)} accepted, ${String(settled())} settled ` +
+        `(${String(pool.stats().failed)} failed, ${String(pool.stats().timedOut)} timed out)`,
       () => {
         topUp();
-        return pool.stats().completed >= WINDOW;
+        return settled() >= WINDOW;
       },
       100,
     );

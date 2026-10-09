@@ -13923,25 +13923,38 @@ because each is a decision rather than a defect:
       the sizing test submits until 1,000 complete (or asserts on what the submits answered), and
       the UDP case waits for a sentinel, with a mutation each.
 
-      **P-378 outcome. The sizing test submits until it has its thousand, and the UDP case waits
-      for a datagram of its own.** Test code only.
+      **P-378 outcome. The sizing test submits until it has its thousand and waits for them to
+      settle, and the UDP case waits for a trailer from the sender's own socket.** One option on
+      the simulator's `sendUdp`; otherwise test code only.
       - **`sizing-pass`:** checks go in with fresh sensor ids until 1,000 have been accepted, and
         each 100 ms poll tops up what the queue has drained, so the count it waits for is always
         one the checks in flight can reach. The submit's answer decides: `queue-full` ends that
         round, and anything else (`stopped`, `disabled`) fails at once and names it rather than
-        being waited out. The poll's `what` says how many were accepted and how many completed.
-      - **`syslog-sender` over UDP:** once `sendUdp` returns, the test sends a sentinel datagram
-        from its own socket and waits (5 s) for it. `sendUdp` returns only after every send's
-        callback, so everything it sent, an excess datagram included, is on the loopback ahead
-        of the sentinel, and loopback delivers in order. The case then asserts that the sentinel
-        came last and that exactly two datagrams came before it. The 100 ms window and its
-        `sleep` are gone.
+        being waited out.
+      - **Waited for as settled, not as succeeded** (review). `completed` counts only ok results,
+        so one check that failed left it at 999 for good and the poll waiting out its 30 s. The
+        poll now waits for `completed + failed + timedOut`. Each accepted check lands in exactly
+        one of the three. The pool records a duration for every result a worker returns, ok or
+        not, before it counts which (`pool.ts`, `#recordTypeDuration` ahead of `if (result.ok)`).
+        A check that times out, or whose worker dies, records none. So the window holds one
+        sample per settled check less those, and there are none here. The poll's `what` gives
+        accepted, settled, failed and timed out.
+      - **`syslog-sender` over UDP:** `sendUdp` takes a `trailer`, sent raw after the messages
+        from the same socket once the last send has called back. The case waits (5 s) for it,
+        then asserts that it came last and that exactly two datagrams came before it. The first
+        version sent a sentinel from a socket of the test's own. The review pointed out that
+        Linux does not order two sockets' loopback datagrams against each other: they can sit in
+        different CPUs' backlogs. The 100 ms window and its `sleep` are gone.
       - **Mutations** (each restored byte for byte, and dist rebuilt with `tsc -b --force`):
         - the pool given `queueMaxLength: 50`: the sizing test still passes, in 1.9 s. The old
           loop would have had 66 checks accepted (16 running, 50 queued) and waited out its
           30 s. That figure is reasoned from the pool's admission rule, not run;
+        - the first check a `test.throw`: passes. With the poll put back to `completed` alone,
+          the same mutation fails at 30,203 ms;
+        - the first check a `test.crash`, which takes its worker down: passes;
         - `sendUdp` sending its last message twice: the UDP case fails with "exactly two
-          datagrams", 3 against 2, and lists all three.
+          datagrams", 3 against 2, and lists all three. This held for both the sentinel and the
+          trailer.
 
 - [x] **P-379 — Ajvs that say nothing of a mistyped keyword** · XS · P-376 · Found 2026-10-09 in
       `P-376`. The protocol Ajv and the setting, trigger-kind and lookup registries run
@@ -14092,13 +14105,47 @@ because each is a decision rather than a defect:
           build transitions, but that is one transition per sensor, and `react` takes its
           caller's order. `enumerateSubtree`'s `destroyed` names every object, and nothing reads
           its order.
-      - **Not done.**
-        - `main.ts`'s `localProbeLog` takes `rows[0]` of `probe_config WHERE is_local`. Approval
-          never clears `is_local`, so two rows are possible. An `ORDER BY` would not pick the
-          right one, which is the probe whose link is connected.
-        - An `ORDER BY` on a key that is not unique, ahead of a `LIMIT`, still leaves ties to the
-          plan. Two examples are a schedule's users by name and `delaysElapsed`. These were not
-          part of this audit.
+      - **Review: orders whose ties were the plan's.** An `ORDER BY` on a key that is not unique
+        leaves equal rows to the plan, and a ranking or a `LIMIT` over it leaves the cut there
+        too. Each one below now ends on an id:
+        - **`MapResolver.#sensorLists`.** The ranking is now
+          `row_number() OVER (PARTITION BY b.root ORDER BY lower(o.name), o.id)`. Names repeat,
+          since every device has a Ping, so which sensors made a list's hundred, and their
+          order, was the plan's. A Down Ping could drop off a wall display between two
+          refreshes.
+          - Tested in `maps-resolver.test.ts`, "shows the hundred lowest ids, in id order,
+            whatever plan the ranking gets". 101 sensors all named Ping. The lowest id is
+            written again, and index scans, merge joins and nested loops are off.
+          - Its precondition: the ranking by name alone, under that plan, leaves the lowest id
+            out.
+          - With the id removed from the ranking, the test fails.
+        - **The schedule's users.** `ScheduleRepository`'s objects (`ORDER BY o.name, o.id`) and
+          rediscovery rules (`ORDER BY name, id`), each ahead of a `LIMIT`. Neither name is
+          unique.
+        - **Maps, libraries and reports.** The lists end on `id` after `lower(name)`. Since 064
+          a name is unique only among what one viewer can read, so an administrator's list can
+          hold two.
+        - **`AccessService`'s single-object right.** It ends on `group_id`. Two groups granting
+          the same right at the same depth made `sourceGroupId`, which is what an administrator
+          debugging a grant reads, the plan's choice.
+
+        Only the resolver's tie is tested under a flipped plan. The others are the same
+        one-column addition against the same mechanism, a sort's ties left in input order. A
+        test of each would be that test again, five times.
+      - **Left as they are, by design:**
+        - `delaysElapsed`, `PauseRepository.expired`, the chunks due compression, and the
+          reports and deliveries due all order by a time ahead of a `LIMIT`. Each is a sweep,
+          and a row left past the cut is taken by the next pass. Nothing is shown in that order,
+          and nothing is dropped;
+        - the lists of groups, schedules and notification templates order by a name with a
+          unique index;
+        - `FlatAccess.#granted` and `rightsOf` keep only the right, which tied rows share;
+        - every `DISTINCT ON` orders its pick by a depth or a time that is unique within its
+          key.
+      - **Not done.** `main.ts`'s `localProbeLog` takes `rows[0]` of
+        `probe_config WHERE is_local`. Approval never clears `is_local`, so two rows are
+        possible. An `ORDER BY` would not pick the right one, which is the probe whose link is
+        connected.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

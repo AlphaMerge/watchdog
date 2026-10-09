@@ -593,3 +593,136 @@ describe(
     });
   },
 );
+
+/**
+ * Which hundred sensors a list shows when their names repeat (`P-381`'s review).
+ *
+ * Every device has a Ping, so a list over a group ranks a great many equal names, and ranked by
+ * name alone the cut fell wherever the plan's input order put it. Here a hundred and one sensors
+ * share one name, and the lowest id is written again so a table read in last-written order gives
+ * it last. Index scans, merge joins and nested loops are off, so every table is read that way. The
+ * ranking without its id is run under the same plan first and must leave the lowest id out; that
+ * is the precondition, so a planner that changed its mind fails the test rather than passing it.
+ */
+describe(
+  'a sensor list where names repeat (P-381)',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+    let db: Database;
+
+    before(async () => {
+      scratch = await createScratchDatabase('mapcut');
+      db = scratch.db;
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    /** The ranking as it was, by name alone: which ids made a list of `$2`. */
+    const RANKED_BY_NAME = `WITH RECURSIVE below AS (
+        SELECT o.id AS root, o.id AS id, 0 AS depth FROM object o WHERE o.id = $1
+        UNION ALL
+        SELECT b.root, c.id, b.depth + 1 FROM object c JOIN below b ON c.parent_id = b.id
+        WHERE b.depth < 64
+      ),
+      ranked AS (
+        SELECT o.id, row_number() OVER (PARTITION BY b.root ORDER BY lower(o.name)) AS rn
+        FROM below b
+        JOIN object o ON o.id = b.id
+        JOIN sensor_runtime r ON r.object_id = o.id
+        WHERE o.kind = 'sensor'
+      )
+      SELECT id::text AS id FROM ranked WHERE rn <= $2`;
+
+    /** `fn` in a transaction whose plans read each table in the order its rows were last written. */
+    const lastWrittenFirst = <T>(fn: (q: Queryable) => Promise<T>): Promise<T> =>
+      db.tx(async (q) => {
+        for (const setting of [
+          'enable_indexscan',
+          'enable_indexonlyscan',
+          'enable_bitmapscan',
+          'enable_mergejoin',
+          'enable_nestloop',
+        ]) {
+          await q.query(`SET LOCAL ${setting} = off`);
+        }
+        return fn(q);
+      });
+
+    it('shows the hundred lowest ids, in id order, whatever plan the ranking gets', async () => {
+      const harness = await buildHarness(db);
+      const resolver = new MapResolver({
+        db,
+        access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+        history: new HistoryService({ db, logger: silent }),
+      });
+      const admins = await db.query<{ id: string }>(
+        `INSERT INTO user_group (name, is_admin) VALUES ('cut-admins', true) RETURNING id`,
+      );
+      const admin = await db.query<{ id: string }>(
+        `INSERT INTO user_account (login, display_name, password_hash, role)
+         VALUES ('cut-admin', 'cut', 'x', 'admin') RETURNING id`,
+      );
+      const adminId = Number(admin[0]?.id);
+      await db.query(
+        `INSERT INTO user_group_member (group_id, user_id, is_primary) VALUES ($1, $2, true)`,
+        [Number(admins[0]?.id), adminId],
+      );
+
+      const probe = await harness.service.create(testActor, {
+        kind: 'probe',
+        name: 'cut-probe',
+        parentId: harness.rootId,
+      });
+      const device = await harness.service.create(testActor, {
+        kind: 'device',
+        name: 'cut-device',
+        parentId: probe.id,
+        host: '10.0.0.1',
+      });
+      const ids: number[] = [];
+      for (let i = 0; i <= 100; i += 1) {
+        const made = await harness.service.create(testActor, {
+          kind: 'sensor',
+          name: 'Ping',
+          parentId: device.id,
+          sensorType: 'icmp.ping',
+        });
+        ids.push(made.id);
+      }
+      ids.sort((a, b) => a - b);
+      const lowest = ids[0] ?? 0;
+      const highest = ids.at(-1) ?? 0;
+      await db.query('UPDATE object SET name = name WHERE id = $1', [lowest]);
+      await db.query('UPDATE sensor_runtime SET message = message WHERE object_id = $1', [lowest]);
+
+      const { byName, widgets } = await lastWrittenFirst(async (q) => ({
+        byName: (await q.query<{ id: string }>(RANKED_BY_NAME, [device.id, 100])).map((row) =>
+          Number(row.id),
+        ),
+        widgets: (
+          await resolver.resolve(
+            { widgets: [{ id: 'list', kind: 'sensor-list', objectId: device.id }] },
+            { kind: 'public', maker: { userId: adminId, role: 'admin' } },
+            q,
+          )
+        ).widgets,
+      }));
+      assert.equal(byName.length, 100);
+      assert.equal(
+        byName.includes(lowest),
+        false,
+        'the plan this test needs: by name alone, the rewritten lowest id misses the cut',
+      );
+
+      const list = widgets[0];
+      assert.ok(list?.state === 'ok');
+      assert.ok(list.data.kind === 'sensor-list');
+      const shown = list.data.sensors.map((sensor) => sensor.id);
+      assert.deepEqual(shown, ids.slice(0, 100), 'the hundred lowest ids, in id order');
+      assert.equal(shown.includes(highest), false);
+    });
+  },
+);

@@ -202,7 +202,7 @@ export class ScheduleRepository {
       `SELECT s.object_id::text AS object_id, o.name
        FROM object_setting s JOIN object o ON o.id = s.object_id
        WHERE s.key = $1 AND s.value = to_jsonb($2::bigint) AND ${visible}
-       ORDER BY o.name
+       ORDER BY o.name, o.id
        LIMIT $3`,
       values,
     );
@@ -266,7 +266,7 @@ export class ScheduleRepository {
     const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ id: string; name: string }>(
       `SELECT id::text AS id, name FROM discovery_schedule
-       WHERE schedule_id = $1 AND ${visible} ORDER BY name LIMIT $2`,
+       WHERE schedule_id = $1 AND ${visible} ORDER BY name, id LIMIT $2`,
       values,
     );
     return rows.map((row) => ({ ruleId: Number(row.id), name: row.name }));

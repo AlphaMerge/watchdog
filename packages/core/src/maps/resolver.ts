@@ -270,6 +270,11 @@ export class MapResolver {
    * included — names, states and failure messages. The viewer's visibility is a condition in the
    * ranking, so the hundred are a hundred the viewer may see; for a public map, a hundred its
    * link's maker may see (`A-22`).
+   *
+   * **By name, then id** (`P-381`'s review). Names repeat: every device has a Ping. Ranked by name
+   * alone, which of the equal names made the hundred, and in what order, was the plan's choice,
+   * so a Down Ping could drop off a wall display between two refreshes. The id makes the cut and
+   * the order one answer.
    */
   async #sensorLists(
     q: Queryable,
@@ -310,7 +315,7 @@ export class MapResolver {
        ranked AS (
          SELECT b.root::text AS root, o.id::text AS id, o.name,
                 r.state::text AS state, r.message,
-                row_number() OVER (PARTITION BY b.root ORDER BY lower(o.name)) AS rn
+                row_number() OVER (PARTITION BY b.root ORDER BY lower(o.name), o.id) AS rn
          FROM below b
          JOIN object o ON o.id = b.id
          JOIN sensor_runtime r ON r.object_id = o.id

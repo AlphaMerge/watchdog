@@ -637,7 +637,7 @@ export class AccessService {
       -- ancestor found, so a grant added for one group cannot displace another's.
       SELECT right_, object_id::text AS object_id, group_id::text AS group_id, depth
       FROM nearest
-      ORDER BY access_rank(right_) DESC, depth ASC
+      ORDER BY access_rank(right_) DESC, depth ASC, group_id
       LIMIT 1
       `,
       [userId, objectId],

@@ -108,7 +108,7 @@ const COLUMNS = 'id, name, description, priority, layout, version, created_at, u
 export class MapRepository {
   async list(q: Queryable): Promise<MapRow[]> {
     const rows = await q.query<RawMap>(
-      `SELECT ${COLUMNS} FROM map ORDER BY priority DESC, lower(name)`,
+      `SELECT ${COLUMNS} FROM map ORDER BY priority DESC, lower(name), id`,
     );
     return rows.map(toMap);
   }
@@ -125,7 +125,7 @@ export class MapRepository {
     const rows = await q.query<RawMap>(
       `SELECT ${COLUMNS} FROM map m
        WHERE ${grantedTo(MAP_GRANTS, 'm.id', '$1')}
-       ORDER BY m.priority DESC, lower(m.name)`,
+       ORDER BY m.priority DESC, lower(m.name), m.id`,
       [groupIds],
     );
     return rows.map(toMap);
