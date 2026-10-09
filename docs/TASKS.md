@@ -23810,15 +23810,66 @@ because each is a decision rather than a defect:
         its control now moves with it. A JSON entry whose schema takes the string `""` (an untyped
         `items`) cannot be saved holding it; no shipped type has one.
 
-- [ ] **U-48 — a failed save in the settings panel is not announced** · XS · U-46 · Found
+- [x] **U-48 — a failed save in the settings panel is not announced** · XS · U-46 · Found
       2026-10-09 in `U-46`. `SettingsPanel`'s `failed` line is rendered only on failure and is not a
       live region; focus is on Save when the core refuses, so the refusal is never read out (WCAG
       4.1.3). **Done when** it is announced, with a test.
 
-- [ ] **U-49 — a problem stays with the position, not the entry, after a Move** · XS · U-47 ·
+      **U-48 outcome. The refusal line is always rendered, empty, as `role="alert"`.**
+      - **An alert, not polite.** It answers the operator's own action, and what it says is that
+        the change they think they made did not happen; that should not wait in the queue behind
+        whatever the screen reader is reading. It is said once per attempt, so it cannot become
+        noise. It is also how `ParamsForm`, `CredentialsPanel` and `RediscoveryPanel` already say a
+        refused save. Unlike those it exists before its text does, since a region added with its
+        text already in it is not reliably announced (`U-41`). The problem region above it stays
+        polite: it changes as the operator types.
+      - **Emptied as the next attempt starts** (`run` already cleared `failed`), so a second refusal
+        in the same words is a change and is announced again, and an accepted save leaves it empty.
+      - **`U-46`'s spacing kept**: `mt-1.5`, now with `empty:mt-0`, outside the setting's stack,
+        so it takes no space while it says nothing (`U-45`).
+      - **Tests.** `settings-panel.test.tsx`, rendered against a stubbed core: the alert exists
+        empty before anything is sent; a 409 puts the core's message in that same node and calls
+        no `onChanged`; the next Save empties it as it starts and an accepted one leaves it empty;
+        a second refusal in the same words empties it first and fills it again; a 2-row table
+        (overridden, inherited): `:empty`, `mt-1.5` and `empty:mt-0`, no `space-y-*` parent, not
+        hidden in any of four ways. Mutations, each failing: rendered only on failure 4; no role
+        4 (every test finds the region by it); no `empty:mt-0` 2.
+      - **Not done.** The line shows the message only; `ParamsForm` adds the correlation id, and
+        a 412 there gets a sentence saying to reload. A setting has no `If-Match` to refuse.
+
+- [x] **U-49 — a problem stays with the position, not the entry, after a Move** · XS · U-47 ·
       Found 2026-10-09 in `U-47`. Entries now keep stable keys, but `SchemaForm`'s `touched` set is
       keyed by path, so a moved cleared entry says nothing until it is left again. **Done when**
       touched paths move with their entry on Move and Remove, with a test.
+
+      **U-49 outcome. `ArrayField` says how it rearranged, and `touched` is remapped by path.**
+      - **Remapped, not re-keyed.** `touched` stays keyed by path, the key every check, every
+        server problem and `writeAt` already use. Keying it by the stable entry keys would have
+        meant a second, position-free identity for every control, threaded through `Field`,
+        `Entry` and nested arrays, beside the path each of them must still carry; the array that
+        rearranges already knows exactly how, in one place. So Move and Remove call
+        `moveTouched(field.path, order)`, where `order[j]` is the position the entry now at `j`
+        held, and `movedPaths` (`schema.ts`) rewrites `arr.i…` to `arr.j…`, drops a removed
+        entry's paths, and leaves everything outside the array alone. A nested array's paths come
+        along with their outer entry (`steps.0.headers.1` → `steps.1.headers.1`); a name that
+        only starts the same (`rowsOld`) is not the array.
+      - **What it fixes.** A cleared entry left and then moved says *cannot be empty* at once in
+        its new place, still `aria-invalid` and described by it; the untouched entry now in its old
+        place says nothing. A removed entry's "left" no longer passes to the entry that takes its
+        place, so an emptied entry never left stays quiet until it is; one below a Remove keeps its
+        message one place up. Add needs nothing: a Remove drops the removed entry's paths, so the
+        index Add reuses is clean.
+      - **Tests.** `repeating-field.test.tsx`, 4 rendered: the moved cleared entry (same textarea
+        node) keeps its message and back again, its old place says none; Remove of a touched entry
+        above an emptied, never-left one; a touched entry below a Remove; a header emptied in Step
+        1's own list moves with Step 1. `schema-form.test.ts`: a 12-row `movedPaths` table, each
+        also checking the input set is not changed. Mutations, each failing: Move not remapping 2;
+        Remove not remapping 2; a removed entry's paths kept 4; only a path naming the entry
+        itself moved, not one into it 4.
+      - **Not done.** Server problems are keyed by path too and stay with the position through a
+        Move or a Remove: a 400 naming `steps.1.path` stays on Step 2 after Step 2 moves up, until
+        the next save clears it. `replacing` is keyed by path as well, but cannot meet an entry:
+        the catalogue refuses a `writeOnly` under `items`.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

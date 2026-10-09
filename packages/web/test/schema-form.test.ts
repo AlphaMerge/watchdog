@@ -3,6 +3,7 @@ import {
   defaultFor,
   fieldsOf,
   labelFor,
+  movedPaths,
   newEntryFor,
   readAt,
   removeAt,
@@ -752,5 +753,54 @@ describe('an entry of an array of scalars (U-41)', () => {
     ).toStrictEqual([
       { path: 'steps.0.headers.1', message: 'cannot be empty: type a value, or remove the entry' },
     ]);
+  });
+});
+
+describe('paths that move with their entry (U-49)', () => {
+  // `order[j]` is where the entry now at `j` was: a Move swaps two, a Remove leaves one out.
+  it.each([
+    // [label, paths, array, order, after]
+    ['a Move down takes an entry path along', ['rows.0'], 'rows', [1, 0], ['rows.1']],
+    [
+      'and the neighbour’s comes the other way',
+      ['rows.0', 'rows.1'],
+      'rows',
+      [1, 0],
+      ['rows.1', 'rows.0'],
+    ],
+    ['a field inside the entry', ['steps.0.path'], 'steps', [1, 0, 2], ['steps.1.path']],
+    ['a nested array’s entry', ['steps.0.headers.1'], 'steps', [1, 0], ['steps.1.headers.1']],
+    ['a removed entry’s path is dropped', ['rows.0', 'rows.0.a'], 'rows', [1], []],
+    ['an entry below a Remove moves up', ['rows.2'], 'rows', [0, 2], ['rows.1']],
+    ['an entry above a Remove stays', ['rows.0'], 'rows', [0, 2], ['rows.0']],
+    ['the last entry removed, then Add finds it clean', ['rows.1'], 'rows', [0], []],
+    [
+      'a path outside the array is kept',
+      ['count', 'other.0'],
+      'rows',
+      [1, 0],
+      ['count', 'other.0'],
+    ],
+    [
+      'a longer name that starts the same is not the array',
+      ['rowsOld.0'],
+      'rows',
+      [1, 0],
+      ['rowsOld.0'],
+    ],
+    ['the array itself is kept', ['rows'], 'rows', [], ['rows']],
+    [
+      'inside an entry, only that entry’s list',
+      ['steps.1.headers.0', 'steps.0.headers.0'],
+      'steps.1.headers',
+      [],
+      ['steps.0.headers.0'],
+    ],
+  ] as const)('%s', (_label, paths, array, order, after) => {
+    const before = new Set<string>(paths);
+    const moved = movedPaths(before, array, order);
+    expect([...moved].sort()).toStrictEqual([...after].sort());
+    // A new set: the old one is React state and is not changed under it.
+    expect([...before]).toStrictEqual([...paths]);
   });
 });

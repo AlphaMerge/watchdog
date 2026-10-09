@@ -217,7 +217,19 @@ function Setting({
           value is typed, and a region rendered only with its text already in it is not
           announced. Outside the stack above, so it takes no space while empty (`U-45`). */}
       <ProblemRegion id={`${id}-problem`} problems={problems} />
-      {failed !== null && <p className="mt-1.5 text-xs text-down-fg">{failed.message}</p>}
+      {/* **The core's refusal, always there and an alert** (`U-48`, WCAG 4.1.3). Focus is on Save
+          or the toggle when the refusal comes back, and nothing moves it, so only a live region
+          says the save did not happen; and one added with its text already in it is not reliably
+          announced, so it exists, empty, from the start. An alert (assertive) and not polite: it
+          answers the operator's own action, and the change they think they made did not happen,
+          which should not wait in a queue behind whatever is being read; it is said once per
+          attempt, so it cannot become noise. `ParamsForm`, `CredentialsPanel` and
+          `RediscoveryPanel` say a refused save the same way. `run` empties it as the next attempt
+          starts, so a second refusal in the same words is a change and is announced again.
+          Outside the stack above, and `empty:mt-0`, so it takes no space while empty (`U-45`). */}
+      <p role="alert" className="mt-1.5 text-xs text-down-fg empty:mt-0">
+        {failed?.message}
+      </p>
     </div>
   );
 }

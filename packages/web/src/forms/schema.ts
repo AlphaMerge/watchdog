@@ -455,6 +455,45 @@ function isContainer(value: unknown): value is Container {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * `paths` after the entries of the array at `array` were rearranged (`U-49`): `order[j]` is the
+ * position the entry now at `j` held before, so a Move swaps two positions and a Remove leaves
+ * one out.
+ *
+ * **A path into an entry goes with the entry.** The form keeps what it knows about a control —
+ * that the operator has left it — by path, and a path carries its entry's position, so without
+ * this a Move left that knowledge with the position: the moved entry said nothing until it was
+ * left again, and its neighbour, never touched, inherited it. A path into an entry no longer in
+ * `order` is dropped, so it cannot attach to the entry that takes its place; every path outside
+ * the array is kept as it is. Paths inside a nested array come along with their outer entry.
+ */
+export function movedPaths(
+  paths: ReadonlySet<string>,
+  array: string,
+  order: readonly number[],
+): ReadonlySet<string> {
+  const prefix = `${array}.`;
+  const now = new Map(order.map((was, at) => [was, at]));
+  const next = new Set<string>();
+  for (const path of paths) {
+    if (!path.startsWith(prefix)) {
+      next.add(path);
+      continue;
+    }
+    const rest = path.slice(prefix.length);
+    const dot = rest.indexOf('.');
+    const head = dot === -1 ? rest : rest.slice(0, dot);
+    // Not an entry's position: not a path this rearrangement says anything about.
+    if (!isIndex(head)) {
+      next.add(path);
+      continue;
+    }
+    const at = now.get(Number(head));
+    if (at !== undefined) next.add(`${prefix}${String(at)}${dot === -1 ? '' : rest.slice(dot)}`);
+  }
+  return next;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Fixed once the sensor exists (`U-34`).
 // ---------------------------------------------------------------------------------------------

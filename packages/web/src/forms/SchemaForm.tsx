@@ -7,6 +7,7 @@ import {
   fixedChangedReason,
   fixedState,
   isMultiline,
+  movedPaths,
   newEntryFor,
   readAt,
   removeAt,
@@ -73,6 +74,13 @@ export function SchemaForm({
     setTouched((held) => new Set(held).add(path));
   }, []);
 
+  // **What has been left moves with its entry** (`U-49`). `touched` is keyed by path, the key
+  // every check and every server problem already uses, and an array that rearranges its entries
+  // says how, so the paths are remapped there rather than given a second, position-free identity.
+  const moveTouched = useCallback((array: string, order: readonly number[]) => {
+    setTouched((held) => movedPaths(held, array, order));
+  }, []);
+
   if (fields.length === 0) {
     return <p className="text-sm text-text-muted">This sensor type takes no parameters.</p>;
   }
@@ -91,6 +99,7 @@ export function SchemaForm({
           disabled={disabled}
           touched={touched}
           markTouched={markTouched}
+          moveTouched={moveTouched}
           serverProblems={serverProblems}
           existing={existing}
         />
@@ -109,6 +118,8 @@ interface FieldProps {
   disabled: boolean;
   touched: ReadonlySet<string>;
   markTouched: (path: string) => void;
+  /** The array at `array` rearranged: `order[j]` is where the entry now at `j` was (`U-49`). */
+  moveTouched: (array: string, order: readonly number[]) => void;
   serverProblems: readonly FieldProblem[];
   /** What the sensor already has around this field (`U-34`); `existingWithin` says how. */
   existing: Existing;
@@ -301,7 +312,7 @@ function Control({
  * reachable from a keyboard, which `U-11`'s WCAG pass requires and a drag target is not.
  */
 function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): React.JSX.Element {
-  const { field, values, onChange, disabled } = props;
+  const { field, values, onChange, disabled, moveTouched } = props;
   // **The entry's own noun, where the item schema gives one.** The fieldset is named for the
   // parameter — "Steps" — and an entry inside it wants the singular. Nothing here can derive one
   // from the other without guessing at English plurals, so `items.title` is the hook: a type
@@ -363,14 +374,14 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
   const move = (from: number, to: number): void => {
     keepFocus(to, to < from ? 'up' : 'down');
     replace(movedIn(entries, from, to), movedIn(keys, from, to));
+    moveTouched(field.path, movedIn(positions(entries), from, to));
   };
 
   const remove = (index: number): void => {
     keepFocus(index, 'remove');
-    replace(
-      entries.filter((_value, at) => at !== index),
-      keys.filter((_key, at) => at !== index),
-    );
+    const kept = (_value: unknown, at: number): boolean => at !== index;
+    replace(entries.filter(kept), keys.filter(kept));
+    moveTouched(field.path, positions(entries).filter(kept));
   };
 
   const atLimit = field.schema.maxItems !== undefined && entries.length >= field.schema.maxItems;
@@ -495,6 +506,11 @@ function keysFor(keys: readonly number[], length: number): readonly number[] {
   if (keys.length >= length) return keys.slice(0, length);
   const next = keys.reduce((highest, key) => Math.max(highest, key), -1) + 1;
   return [...keys, ...Array.from({ length: length - keys.length }, (_unused, at) => next + at)];
+}
+
+/** Each entry's position, `0` to `length - 1`: the order a rearrangement is described from. */
+function positions(list: readonly unknown[]): number[] {
+  return list.map((_entry, at) => at);
 }
 
 /** `list` with the item at `from` taken out and put back at `to`. */

@@ -709,3 +709,120 @@ describe('an entry keeps its controls wherever it goes (U-47 review)', () => {
     expect(document.activeElement).toBe(outside);
   });
 });
+
+describe('a problem shown on an entry goes with the entry (U-49)', () => {
+  // What the operator has left is kept by path, and a path carries its entry's position: a Move
+  // used to leave the message with the position, on an entry nobody had touched, while the
+  // emptied entry said nothing until it was left again.
+  const ROWS: JsonSchema = {
+    type: 'object',
+    properties: {
+      rows: { type: 'array', title: 'Rows', items: { type: 'object', title: 'Row' } },
+    },
+  };
+  const EMPTY = 'cannot be empty: type a value, or remove the entry';
+  const box = (name: string): HTMLTextAreaElement =>
+    screen.getByRole<HTMLTextAreaElement>('textbox', { name });
+  const problemIn = (control: HTMLElement): string | null | undefined =>
+    document.getElementById(`${control.id}-problem`)?.textContent;
+  const problemOf = (name: string): string | null | undefined => problemIn(box(name));
+  const button = (name: string): HTMLElement => screen.getByRole('button', { name });
+  const shown = (value: unknown): string => JSON.stringify(value, null, 2);
+
+  it('moves the message with a cleared entry, and leaves none on the one now in its place', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    const cleared = box('Row 1');
+    fireEvent.change(cleared, { target: { value: '' } });
+    fireEvent.blur(cleared);
+    expect(problemOf('Row 1')).toBe(EMPTY);
+
+    fireEvent.click(button('Move Row 1 down'));
+    expect(stored()).toStrictEqual({ rows: [{ b: 2 }, ''] });
+    // Without being left again: it was left, and it is the same entry.
+    expect(box('Row 2')).toBe(cleared);
+    expect(problemOf('Row 2')).toBe(EMPTY);
+    expect(cleared.getAttribute('aria-invalid')).toBe('true');
+    expect((cleared.getAttribute('aria-describedby') ?? '').split(' ')).toContain(
+      `${cleared.id}-problem`,
+    );
+    // Row 1 now holds the entry that was never touched.
+    expect(box('Row 1').value).toBe(shown({ b: 2 }));
+    expect(problemOf('Row 1')).toBe('');
+    expect(box('Row 1').hasAttribute('aria-invalid')).toBe(false);
+
+    // And back up: it goes with the entry both ways.
+    fireEvent.click(button('Move Row 2 up'));
+    expect(problemOf('Row 1')).toBe(EMPTY);
+    expect(problemOf('Row 2')).toBe('');
+  });
+
+  it('does not hand a removed entry’s message to the entry that takes its place', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    fireEvent.change(box('Row 1'), { target: { value: '' } });
+    fireEvent.blur(box('Row 1'));
+    // Emptied too, but never left: nothing to say yet.
+    fireEvent.change(box('Row 2'), { target: { value: '' } });
+    expect(problemOf('Row 1')).toBe(EMPTY);
+    expect(problemOf('Row 2')).toBe('');
+
+    fireEvent.click(button('Remove Row 1'));
+    expect(stored()).toStrictEqual({ rows: [''] });
+    expect(problemOf('Row 1')).toBe('');
+    expect(box('Row 1').hasAttribute('aria-invalid')).toBe(false);
+    // It says so once it is left, as any entry does.
+    fireEvent.blur(box('Row 1'));
+    expect(problemOf('Row 1')).toBe(EMPTY);
+  });
+
+  it('keeps the message on an entry below a Remove, now one place up', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    fireEvent.change(box('Row 2'), { target: { value: '' } });
+    fireEvent.blur(box('Row 2'));
+    fireEvent.click(button('Remove Row 1'));
+    expect(stored()).toStrictEqual({ rows: [''] });
+    expect(problemOf('Row 1')).toBe(EMPTY);
+    expect(box('Row 1').getAttribute('aria-invalid')).toBe('true');
+  });
+
+  it('moves the message inside an entry’s own list with the outer entry', () => {
+    // A path inside a nested array starts with the outer entry's position.
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          title: 'Steps',
+          items: {
+            type: 'object',
+            title: 'Step',
+            properties: {
+              headers: {
+                type: 'array',
+                title: 'Headers',
+                items: { type: 'string', title: 'Header', minLength: 1 },
+              },
+            },
+          },
+        },
+      },
+    };
+    render(
+      <Harness schema={schema} initial={{ steps: [{ headers: ['a'] }, { headers: ['b'] }] }} />,
+    );
+    const headerIn = (step: number): HTMLInputElement => {
+      const group = screen.getAllByRole('group', { name: 'Headers' })[step];
+      if (group === undefined) throw new Error(`no headers in step ${String(step + 1)}`);
+      return within(group).getByRole<HTMLInputElement>('textbox', { name: 'Header 1' });
+    };
+    const first = headerIn(0);
+    fireEvent.change(first, { target: { value: '' } });
+    fireEvent.blur(first);
+    expect(problemIn(first)).toBe(EMPTY);
+
+    fireEvent.click(button('Move Step 1 down'));
+    expect(stored()).toStrictEqual({ steps: [{ headers: ['b'] }, { headers: [''] }] });
+    expect(headerIn(1)).toBe(first);
+    expect(problemIn(first)).toBe(EMPTY);
+    expect(problemIn(headerIn(0))).toBe('');
+  });
+});
