@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { request, useApi, ApiError, type Loadable } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
@@ -86,10 +86,44 @@ export function TreeView(): React.JSX.Element {
   const searchPath =
     searching && listed ? searchPathOf(query.trim(), tag.trim(), invalidParams) : null;
   const asked = useApi<ObjectPage>(searchPath);
-  // An answer to an earlier search, or to none, is not this one's, for even a render.
+  const answer =
+    asked.status === 'ready' ? asked.data : asked.status === 'error' ? asked.error : null;
+  // **An answer in hand when this request was asked for is not its answer**, for even a render.
+  // `useApi` learns of a new path or a reload only in its effect, after the render that asked, so
+  // until then it still holds the last answer. `answered` alone does not tell them apart: a path
+  // set to null keeps it, and the same path asked for again (untick, tick) or reloaded (*Try
+  // again*) matches it. So the answer held at the moment of asking is set aside, by identity:
+  // every read parses a new one. Set during render, not in an effect, so the stale answer is
+  // never committed. This covers a search changed to another one too, so `answered` is not
+  // compared as well: what is not set aside is an answer read after this path was asked for.
+  const [askedFor, setAskedFor] = useState<AskedFor>({
+    path: searchPath,
+    stale: null,
+    retrying: false,
+  });
+  if (askedFor.path !== searchPath) {
+    setAskedFor({ path: searchPath, stale: answer, retrying: false });
+  }
   const found: Loadable<ObjectPage> =
-    asked.status !== 'loading' && asked.answered === searchPath ? asked : { status: 'loading' };
+    asked.status !== 'loading' && answer !== askedFor.stale ? asked : { status: 'loading' };
   const said = invalidParams ? filterStatus(found, narrowed) : '';
+
+  // *Try again* stays on the page, unavailable, while it re-reads, so focus stays on it. If the
+  // answer takes it away (the list, or a check that stopped), focus goes to the filter's own box,
+  // which is always there, rather than falling to the page.
+  const retrying = askedFor.retrying && found.status === 'loading';
+  const retry = (): void => {
+    setAskedFor({ path: searchPath, stale: answer, retrying: true });
+    asked.reload();
+  };
+  const filterBox = useRef<HTMLInputElement>(null);
+  const wasRetrying = useRef(false);
+  const stillChecking = found.status === 'error' && notChecked(found.error) === 'checking';
+  useEffect(() => {
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (wasRetrying.current && !retrying && !stillChecking && lost) filterBox.current?.focus();
+    wasRetrying.current = retrying;
+  }, [retrying, stillChecking]);
 
   return (
     <div className="space-y-4">
@@ -102,10 +136,17 @@ export function TreeView(): React.JSX.Element {
           <PageTitle title="Tree" />
           <StreamIndicator status={live.status} />
           {/*
-          Wraps and shrinks. `w-56` + `w-32` + a gap is 376px, which does not fit the 320px
-          WCAG 1.4.10 asks for reflow at — and `ml-auto` on a row that cannot wrap pushed the
-          pair off the right edge rather than dropping them onto their own line.
-        */}
+            Wraps and shrinks. `w-56` + `w-32` + a gap is 376px, which does not fit the 320px
+            WCAG 1.4.10 asks for reflow at — and `ml-auto` on a row that cannot wrap pushed the
+            pair off the right edge rather than dropping them onto their own line.
+
+            Below `sm` the invalid-parameters box has a line of its own (`basis-full`), and the
+            search takes what the tag leaves: the page is the viewport less 32px of gutter, so
+            the search is 184px at 320, 239px at 375 and 278px at 414. Left to wrap on its own,
+            the ~212px label stayed beside them from about 356px to 460px and crushed the search
+            to 19–58px. From `sm` up the row is 224 + 128 + ~212 + two 8px gaps, about 580px,
+            within the 608px of a 640px viewport, and it drops below the title when it must.
+          */}
           <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
             <label className="sr-only" htmlFor="tree-search">
               Search objects
@@ -133,8 +174,9 @@ export function TreeView(): React.JSX.Element {
               placeholder="tag"
               className="w-24 min-w-0 border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
             />
-            <label className="flex items-center gap-1.5 text-sm text-text">
+            <label className="flex basis-full items-center gap-1.5 text-sm text-text sm:basis-auto">
               <input
+                ref={filterBox}
                 type="checkbox"
                 checked={invalidParams}
                 onChange={(event) => {
@@ -176,6 +218,8 @@ export function TreeView(): React.JSX.Element {
           <SearchResults
             found={found}
             reload={asked.reload}
+            retry={retry}
+            retrying={retrying}
             invalidParams={invalidParams}
             live={live.states}
           />
@@ -184,6 +228,16 @@ export function TreeView(): React.JSX.Element {
         ))}
     </div>
   );
+}
+
+/**
+ * The search being asked for, what was in hand when it was asked (not its answer), and whether
+ * *Try again* asked.
+ */
+interface AskedFor {
+  readonly path: string | null;
+  readonly stale: unknown;
+  readonly retrying: boolean;
 }
 
 /** The listing a search asks for: each filter that is on, and every row's path. */
@@ -532,31 +586,27 @@ function TreeRow({
 function SearchResults({
   found,
   reload,
+  retry,
+  retrying,
   invalidParams,
   live,
 }: {
   found: Loadable<ObjectPage>;
+  /** Reads again, for a failure the error panel says. */
   reload: () => void;
+  /** Reads again for *Try again*, which stays on the page while it does. */
+  retry: () => void;
+  retrying: boolean;
   invalidParams: boolean;
   live: ReadonlyMap<number, LiveState>;
 }): React.JSX.Element | null {
-  if (found.status === 'loading') return <Loading what="matching objects" />;
+  if (found.status === 'loading') {
+    return retrying ? <RetryCheck busy onRetry={retry} /> : <Loading what="matching objects" />;
+  }
   if (found.status === 'error') {
     const pass = invalidParams ? notChecked(found.error) : null;
     if (pass === 'stopped') return null;
-    if (pass === 'checking') {
-      return (
-        <div>
-          <button
-            type="button"
-            onClick={reload}
-            className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text"
-          >
-            Try again
-          </button>
-        </div>
-      );
-    }
+    if (pass === 'checking') return <RetryCheck busy={false} onRetry={retry} />;
     return <ErrorPanel error={found.error} retry={reload} />;
   }
   if (found.data.items.length === 0) {
@@ -623,6 +673,30 @@ function SearchResults({
         </p>
       )}
     </Card>
+  );
+}
+
+/**
+ * *Try again*, for a start-up check still running.
+ *
+ * The same element while it re-reads and after, in the same place in `SearchResults` either way,
+ * so focus stays on it. Unavailable by `aria-disabled` rather than `disabled` while it re-reads: a
+ * disabled control loses focus, which is what this is here to keep.
+ */
+function RetryCheck({ busy, onRetry }: { busy: boolean; onRetry: () => void }): React.JSX.Element {
+  return (
+    <div>
+      <button
+        type="button"
+        aria-disabled={busy}
+        onClick={() => {
+          if (!busy) onRetry();
+        }}
+        className="ms-label border border-control px-2 py-1 text-text-muted hover:text-text aria-disabled:opacity-50"
+      >
+        Try again
+      </button>
+    </div>
   );
 }
 

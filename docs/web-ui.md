@@ -85,14 +85,16 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
   stored and an edit of one is refused until it is mended. It is `?invalidParams=true` in the
   address, as on `GET /objects`, so it is a link you can send. It combines with the search and
   the tag, and Core Health's **Sensors with invalid parameters** links to it (**Which sensors**).
-  The rows are the search's rows and nothing more: no parameter, path or problem message (the
-  core log and an edit's refusal name those). A status line under the search says, in words, how
-  many the list holds or that none fail. The core has no list until its start-up check has read
-  every sensor, and the line says so instead: still being checked, so try again shortly (with a
-  **Try again** button), or not checked since the last start and checked again at the next. That
-  is not shown as an error. The line is a polite live region, on the page and empty from the
-  start, so the answer is announced when it arrives. Like Core Health's count, the list is of
-  the sensors you can see, so the count can be higher than the list is long.
+  The rows are the search's rows and nothing more: no parameter values, parameter paths or
+  problem messages (the core log and an edit's refusal name those). A status line under the
+  search says, in words, how many the list holds or that none fail. The core has no list until
+  its start-up check has read every sensor, and the line says so instead: still being checked,
+  so try again shortly (with a **Try again** button, which keeps focus while it asks again), or
+  not checked since the last start and checked again at the next. That is not shown as an error.
+  The line is a polite live region, on the page and empty from the start, so the answer is
+  announced when it arrives. The list is of the sensors you can see. Core Health counts every
+  sensor in the installation, so its number can be higher than the list is long. Below the `sm`
+  breakpoint the box has a line of its own under the search and tag.
 - **Full keyboard navigation**, to the ARIA tree pattern: arrows move and expand, `Home`/`End`
   jump to the ends, `Enter` or `Space` opens the row. Collapsing a branch you were inside keeps
   focus somewhere real rather than dropping it.

@@ -66,19 +66,25 @@ const LISTED: Answer = {
 };
 const NONE: Answer = { status: 200, body: { items: [], nextCursor: null } };
 
+const ONE: Answer = {
+  status: 200,
+  body: { items: [summary(12, 'sensor', 'Fan tray')], nextCursor: null },
+};
+
 /**
  * Records every URL asked for. The tree starts at the root; a listing with the filter answers
- * from `listing` in turn (the last one repeating), and is held until `release` while `hold` is
- * set; any other listing is an empty level.
+ * from `listing` in turn (the last one repeating), and from the `holdFrom`th such request on
+ * (counting from 0) is held until `release`; any other listing is an empty level.
  */
-function stubFetch(listing: Answer[], hold = false): { asked: string[]; release: () => void } {
+function stubFetch(
+  listing: Answer[],
+  holdFrom = Number.POSITIVE_INFINITY,
+): { asked: string[]; release: () => void } {
   const asked: string[] = [];
   let released: () => void = () => undefined;
-  const gate = hold
-    ? new Promise<void>((resolve) => {
-        released = resolve;
-      })
-    : Promise.resolve();
+  const gate = new Promise<void>((resolve) => {
+    released = resolve;
+  });
   let next = 0;
   vi.stubGlobal('fetch', async (url: string) => {
     asked.push(url);
@@ -88,7 +94,7 @@ function stubFetch(listing: Answer[], hold = false): { asked: string[]; release:
     if (url.includes('invalidParams=true')) {
       const answer = listing[Math.min(next, listing.length - 1)] ?? NONE;
       next += 1;
-      await gate;
+      if (next > holdFrom) await gate;
       return json(answer);
     }
     return json(NONE);
@@ -99,6 +105,34 @@ function stubFetch(listing: Answer[], hold = false): { asked: string[]; release:
       released();
     },
   };
+}
+
+/**
+ * Every text `node` held while `act` ran, read from the mutation records: by the time an observer
+ * runs, React may have committed again, so the node as it is then can be empty either way.
+ */
+async function textsDuring(node: HTMLElement, during: () => Promise<void>): Promise<string[]> {
+  const said: string[] = [];
+  const watch = new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.oldValue !== null) said.push(record.oldValue);
+      for (const added of [...record.addedNodes, ...record.removedNodes]) {
+        said.push(added.textContent ?? '');
+      }
+      if (record.type === 'characterData') said.push(record.target.textContent ?? '');
+    }
+  });
+  watch.observe(node, {
+    childList: true,
+    characterData: true,
+    characterDataOldValue: true,
+    subtree: true,
+  });
+  await during();
+  // Records queued by the last commit are delivered as a microtask, before this task.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  watch.disconnect();
+  return said;
 }
 
 let location = '';
@@ -227,6 +261,10 @@ describe('the tree’s invalid-parameters filter', () => {
     renderTree('/tree');
     const box = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Invalid parameters only' });
     expect(box.checked).toBe(false);
+    // Its own line below `sm`, so on a phone it does not crush the search beside it.
+    const label = box.closest('label');
+    expect(label?.classList.contains('basis-full')).toBe(true);
+    expect(label?.classList.contains('sm:basis-auto')).toBe(true);
     await waitFor(() => {
       expect(asked).toContain('/api/v1/objects/tops');
     });
@@ -275,7 +313,7 @@ describe('the tree’s invalid-parameters filter', () => {
   });
 
   it('has its region on the page and empty before the answer, which lands in it', async () => {
-    const { release } = stubFetch([notChecked('checking')], true);
+    const { release } = stubFetch([notChecked('checking')], 0);
     renderTree('/tree?invalidParams=true');
     const before = region();
     expectQuiet(before, ['mt-3', 'empty:mt-0'], 'polite');
@@ -293,7 +331,7 @@ describe('the tree’s invalid-parameters filter', () => {
   });
 
   it('says a check still running in words, not as an error, and offers to ask again', async () => {
-    const { asked } = stubFetch([notChecked('checking'), LISTED]);
+    const { asked, release } = stubFetch([notChecked('checking'), LISTED], 1);
     renderTree('/tree?invalidParams=true');
     await waitFor(() => {
       expect(region().textContent).toBe(CHECKING);
@@ -301,12 +339,59 @@ describe('the tree’s invalid-parameters filter', () => {
     expect(screen.queryAllByRole('alert')).toEqual([]);
     expect(screen.queryByText(/OBJECT_PARAMS_NOT_CHECKED/u)).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Try again' });
+    button.focus();
+    fireEvent.click(button);
+    // While it asks again: the same button, still focused, unavailable, and the region empty.
+    await waitFor(() => {
+      expect(filterAsks(asked)).toHaveLength(2);
+    });
+    expect(screen.getByRole('button', { name: 'Try again' })).toBe(button);
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(region().textContent).toBe('');
+    // A second press while it asks is nothing.
+    fireEvent.click(button);
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
     await screen.findByRole('link', { name: 'Uplink' });
     expect(filterAsks(asked)).toHaveLength(2);
     expect(region().textContent).toBe(
       '2 sensors have parameters their type now refuses, among those you can see.',
     );
+    // The list took the button away, and focus went to the filter's own box, not the page.
+    expect(button.isConnected).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole('checkbox', { name: 'Invalid parameters only' }),
+    );
+  });
+
+  it('empties the region on Try again, and says a check still running again', async () => {
+    const { release } = stubFetch([notChecked('checking'), notChecked('checking')], 1);
+    renderTree('/tree?invalidParams=true');
+    await waitFor(() => {
+      expect(region().textContent).toBe(CHECKING);
+    });
+    const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Try again' });
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(region().textContent).toBe('');
+    });
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(region().textContent).toBe(CHECKING);
+    });
+    expect(screen.getByRole('button', { name: 'Try again' })).toBe(button);
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute('aria-disabled')).toBe('false');
   });
 
   it('says a stopped check in words, not as an error, and offers nothing to retry', async () => {
@@ -332,7 +417,7 @@ describe('the tree’s invalid-parameters filter', () => {
   });
 
   it('never says what an earlier search answered, even for a render', async () => {
-    const { release } = stubFetch([LISTED], true);
+    const { release } = stubFetch([LISTED], 0);
     renderTree('/tree');
     fireEvent.change(await screen.findByLabelText('Search objects'), {
       target: { value: 'Disk' },
@@ -340,26 +425,11 @@ describe('the tree’s invalid-parameters filter', () => {
     // The search alone answers an empty list, which is not the filter's answer.
     await screen.findByText('Nothing matches.');
 
-    // Every text the region held, read from the records: by the time an observer runs, React
-    // may have committed again, so the region as it is then can be empty either way.
-    const said: string[] = [];
-    const watch = new MutationObserver((records) => {
-      for (const record of records) {
-        if (record.oldValue !== null) said.push(record.oldValue);
-        for (const node of [...record.addedNodes, ...record.removedNodes]) {
-          said.push(node.textContent ?? '');
-        }
-        if (record.type === 'characterData') said.push(record.target.textContent ?? '');
-      }
+    const box = screen.getByRole('checkbox', { name: 'Invalid parameters only' });
+    const said = await textsDuring(region(), async () => {
+      fireEvent.click(box);
+      await screen.findByText('Loading matching objects…');
     });
-    watch.observe(region(), {
-      childList: true,
-      characterData: true,
-      characterDataOldValue: true,
-      subtree: true,
-    });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Invalid parameters only' }));
-    await screen.findByText('Loading matching objects…');
     expect(said.filter((text) => text !== '')).toEqual([]);
 
     await act(async () => {
@@ -367,11 +437,50 @@ describe('the tree’s invalid-parameters filter', () => {
       await Promise.resolve();
     });
     await screen.findByRole('link', { name: 'Disk C' });
-    watch.disconnect();
-    expect(new Set(said.filter((text) => text !== ''))).toEqual(
-      new Set(['2 sensors have parameters their type now refuses, among those you can see.']),
+    expect(region().textContent).toBe(
+      '2 sensors have parameters their type now refuses, among those you can see.',
     );
   });
+
+  it.each([
+    [
+      'a list',
+      LISTED,
+      '2 sensors have parameters their type now refuses, among those you can see.',
+    ],
+    ['a check still running', notChecked('checking'), CHECKING],
+  ])(
+    'never says the last answer again when the box is unticked and ticked: %s',
+    async (_, first, firstSaid) => {
+      const { release } = stubFetch([first, ONE], 1);
+      renderTree('/tree?invalidParams=true');
+      await waitFor(() => {
+        expect(region().textContent).toBe(firstSaid);
+      });
+      const box = screen.getByRole('checkbox', { name: 'Invalid parameters only' });
+      fireEvent.click(box);
+      await waitFor(() => {
+        expect(region().textContent).toBe('');
+      });
+
+      const said = await textsDuring(region(), async () => {
+        fireEvent.click(box);
+        await screen.findByText('Loading matching objects…');
+      });
+      expect(said.filter((text) => text !== '')).toEqual([]);
+      expect(screen.queryByRole('link', { name: 'Disk C' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+
+      await act(async () => {
+        release();
+        await Promise.resolve();
+      });
+      await screen.findByRole('link', { name: 'Fan tray' });
+      expect(region().textContent).toBe(
+        '1 sensor has parameters its type now refuses, among those you can see.',
+      );
+    },
+  );
 
   it('leaves any other failure to the error panel, and says nothing in the region', async () => {
     stubFetch([

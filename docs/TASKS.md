@@ -26022,6 +26022,36 @@ because each is a decision rather than a defect:
       - **Not done.** The tree's search and tag are still not in the URL. Nothing retries on
         its own after `Retry-After`: the web cannot read that header through `request`, and a
         button was enough for a pass that takes a third of a second.
+      - **Review.** Five fixes.
+        - *A stale answer by identity, not by path.* Untick then tick (no search) set the path to
+          null and back. `useApi` kept its answer and `answered`, so the old count, the old
+          *still being checked* or the old rows were committed for a render before its effect
+          reset. `TreeView` now sets aside the answer in hand when a path is asked for, or when
+          *Try again* asks, by identity (each read parses a new one). It is set during render, so
+          it is never committed. That covers the search-then-tick case too, so `answered` is no
+          longer compared. `client.ts` is untouched.
+        - *Try again keeps focus.* It used to give way to *Loading…*, which dropped focus to the
+          page. It now stays mounted, the same element, `aria-disabled` while it re-reads (not
+          `disabled`, which loses focus). A press while it is unavailable does nothing. When the
+          answer takes it away (the list, or a stopped check), focus goes to the
+          *Invalid parameters only* box, but only if it had fallen to the page.
+        - *Phones.* The ~212px label stayed on the search row from about 356px to 460px wide and
+          crushed the search to 19–58px. Below `sm` it is `basis-full`, on a line of its own, so
+          the search is 184px at 320, 239px at 375 and 278px at 414. From `sm` up the row is
+          about 580px, within the 608px at 640. The row's comment says so.
+        - *Docs.* `web-ui.md` said the list and Core Health's count were both of what you can
+          see. Only the list is: the count is the whole installation's. It also said rows show
+          no path. They show their tree path, so it now says no parameter values, parameter paths
+          or problem messages.
+        - *Tests*, 14 in `invalid-params.test.tsx`. *Try again*: the same button stays focused
+          and `aria-disabled` with the region empty while it re-reads, and a second press asks
+          nothing. After the list arrives, focus is on the box. `checking` then `checking`
+          empties the region and says it again. Untick and tick after a list and after
+          `checking`: no text in the region's mutation records before the new answer, and no
+          old rows or button. The label's `basis-full sm:basis-auto`. Thirteen mutations, each
+          killed: the nine before, with the `answered` check replaced by the identity check, plus
+          *Try again* unmounted while re-reading, focus not moved, a press while busy asking
+          again, and the label sharing the row.
 
 - [x] **U-64 — a refused template delete drops focus, and the run card shares one region** · XS ·
       U-56 · Found 2026-10-09 in `U-56`. A refused delete removes *Yes, delete*, which had focus,
