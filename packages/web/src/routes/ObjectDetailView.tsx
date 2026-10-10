@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { useApi, type ApiError } from '../api/client';
+import { sameWords, useApi, type ApiError } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
 import type {
   AncestorsView,
@@ -801,9 +801,4 @@ function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
       )}
     </div>
   );
-}
-
-/** Two failures a reader could not tell apart, ids aside (`U-59`). */
-function sameWords(a: ApiError, b: ApiError): boolean {
-  return a.code === b.code && a.message === b.message;
 }

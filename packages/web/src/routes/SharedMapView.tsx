@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { type ApiError, useApi } from '../api/client';
+import { type ApiError, sameWords, useApi } from '../api/client';
 import type { SharedMap } from '../api/types';
 import { CorrelationId, ErrorPanel, Loading } from '../components/Panels';
 import { MapCanvas } from '../maps/MapBoard';
@@ -196,11 +196,6 @@ function readAt(at: number): string {
   const time = when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   if (when.toDateString() === new Date().toDateString()) return time;
   return `${when.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}, ${time}`;
-}
-
-/** The same failure, by what it says: a new correlation id is not news. */
-function sameWords(a: ApiError, b: ApiError): boolean {
-  return a.code === b.code && a.message === b.message;
 }
 
 /** Stable, so the canvas does not re-render for a new empty map on every tick. */

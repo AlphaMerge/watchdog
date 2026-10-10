@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -81,6 +81,8 @@ interface Script {
   hold?: Promise<void>;
   /** Counts the DELETEs sent. */
   deleted?: { count: number };
+  /** The one notification method offered, when not `METHOD`. */
+  method?: NotificationMethod;
 }
 
 function core(script: Script): void {
@@ -171,7 +173,9 @@ function core(script: Script): void {
       );
     }
     if (path === '/templates') return reply(200, { items: [TEMPLATE] });
-    if (path === '/notification-methods') return reply(200, { items: [METHOD] });
+    if (path === '/notification-methods') {
+      return reply(200, { items: [script.method ?? METHOD] });
+    }
     if (
       path === '/notification-placeholders' ||
       path === '/summarisation-modes' ||
@@ -332,6 +336,51 @@ describe('focus through a refused save or create (U-73)', () => {
 
   it('keeps focus on Create template while it creates and when it is refused', async () => {
     await refusedKeepsFocus('Create template');
+  });
+
+  // The settings form was `disabled` while saving, and Cancel with it: Enter in a settings box
+  // disabled the box focus was in (`U-78`).
+  it('keeps focus in the settings box Enter saved from, with Cancel unavailable but not disabled', async () => {
+    const written = { count: 0 };
+    const { hold, answer } = held();
+    core({
+      saves: [{ id: 'req-78' }],
+      holdSave: hold,
+      written,
+      method: {
+        ...METHOD,
+        settingsSchema: {
+          type: 'object',
+          properties: { url: { type: 'string', title: 'URL' } },
+        },
+      },
+    });
+    await open();
+    const box = screen.getByRole<HTMLInputElement>('textbox', { name: /URL/u });
+    const form = box.closest('form');
+    if (form === null) throw new Error('no form');
+    act(() => {
+      box.focus();
+    });
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(written.count).toBe(1);
+    });
+
+    // Out: the box is not disabled and keeps focus; Cancel says it is unavailable, and is.
+    expect(box.disabled).toBe(false);
+    expect(document.activeElement).toBe(box);
+    const cancel = button('Cancel');
+    expect(cancel.disabled).toBe(false);
+    expect(cancel.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(cancel);
+    expect(screen.getByRole('heading', { name: 'Editing Alert hook' })).toBeTruthy();
+
+    answer();
+    await alertSaying('the template was refused');
+    expect(document.activeElement).toBe(box);
+    expect(cancel.getAttribute('aria-disabled')).toBe('false');
+    expect(written.count).toBe(1);
   });
 });
 

@@ -27416,7 +27416,7 @@ because each is a decision rather than a defect:
         no bound 6; abort without the race 3; a timeout said as `UNREACHABLE` 5; the panel's
         heading for it removed 2. Full web suite 1,116 passed.
 
-- [ ] **U-78 — focus odds and ends from round 21** · S · U-71, U-73, U-76 · Found 2026-10-09.
+- [x] **U-78 — focus odds and ends from round 21** · S · U-71, U-73, U-76 · Found 2026-10-09.
       - The Logs page's tabs do not set `keepsFocus`, so their panels' *Try again* still sends
         focus to the page heading (the status-log round in `try-again-focus` expects it).
       - Going back to Overview while a poll failure is held mounts the readings region with its
@@ -27426,6 +27426,41 @@ because each is a decision rather than a defect:
       - `sameWords` is in both `SharedMapView` and `ObjectDetailView`.
 
       **Done when** each is fixed or explained, with tests.
+
+      **U-78 outcome. All four fixed.** Web only.
+      - **The Logs page's tabs keep focus** (`LogsView`): all three panels are `keepsFocus`, so a
+        *Try again* taken away by a good read puts focus on the tab's panel, not on the page's
+        heading above the tab strip and the filters, as on the sensor page (`U-76`).
+        `try-again-focus.test.tsx` runs the whole round on each tab (status, objects, system),
+        expecting the panel.
+      - **A held failure is said when its region mounts with it** (`HeldListFailure`). A values
+        poll fails on the History tab, where nothing shows it, and going back to Overview mounted
+        the readings' region with the failure already in it, which is not reliably announced
+        (`U-41`). The region now comes on empty and is filled `PLACED_MS` (100 ms) later, a
+        timer rather than the effect alone, since after a click React runs a passive effect
+        before the browser paints. *Try again* is there from the start. This holds for every
+        `HeldListFailure` (the channel list, the readings, History's series, the templates); a
+        failure that arrives after the region is placed is said at once, as before.
+      - **The template editor's settings form is not disabled while saving.** *Name*,
+        *Description* and *Subject* never were; Enter in a settings box saved and disabled the box
+        that had focus. A change made meanwhile stays in the draft, as theirs do. **Cancel is
+        `aria-disabled`, not `disabled`**: it could hold focus as a save starts, since Safari
+        does not focus a clicked button.
+      - **`sameWords` is one function**, exported from `api/client.ts` beside `ApiError`, used by
+        the sensor page, the shared map and Discovery's run poll. That poll compared only the
+        message; it now compares the code too, since the error panel's heading is chosen by it
+        (`U-77`'s *The core did not answer*).
+      - **Tests.** `held-list-failure.test.tsx` (3, new): mounted with a failure, the region is
+        empty until `PLACED_MS` and then said in the same node; a later failure is said at once;
+        no timer is left on unmount. `readings-held.test.tsx`: a poll fails on History, and back
+        on Overview the readings and an empty region are there, and the failure is added into it.
+        `templates-refused.test.tsx`: Enter in a settings box while the save is held keeps focus
+        in a box that is not disabled; *Cancel* is `aria-disabled` and does nothing; refused,
+        focus is still in the box. `read-timeout.test.tsx`: `sameWords` ignores the id, not the
+        message or the code. **Mutations** (restored and compared byte for byte): Logs tabs
+        without `keepsFocus` 3; the region said on mount 2; placed in the effect without the
+        timer 2; the settings form disabled while saving 1; *Cancel* `disabled` 1; `sameWords`
+        on the message only 1. Full web suite 1,132 passed.
 
 - [x] **U-79 — the tree still asks on every key** · S · U-75 · Found 2026-10-09 in `U-75`. Only
       the address write waits for a pause, so a held key is one `GET /objects` per character. A

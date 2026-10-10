@@ -286,23 +286,32 @@ describe('the callers (U-68)', () => {
     });
   });
 
-  it('the status log, read a page at a time', async () => {
-    const { asked } = core({
-      '/state-log': [fail('req-1'), fail('req-2'), { ok: { items: [], nextBefore: null } }],
+  // Each Logs tab, read a page at a time. Focus lands on the tab's panel, not the page's heading,
+  // which is above the tab strip and the filters (`U-78`, as the sensor page's tabs since `U-76`).
+  for (const { tab, path, empty } of [
+    { tab: 'status', path: '/state-log', empty: 'No status changes match.' },
+    { tab: 'objects', path: '/audit', empty: 'No configuration changes match.' },
+    { tab: 'system', path: '/notification-requests', empty: 'No notifications match.' },
+  ]) {
+    it(`the Logs page’s ${tab} tab, read a page at a time`, async () => {
+      const { asked } = core({
+        [path]: [fail('req-1'), fail('req-2'), { ok: { items: [], nextBefore: null } }],
+      });
+      render(
+        <MemoryRouter initialEntries={[tab === 'status' ? '/logs' : `/logs?tab=${tab}`]}>
+          <Routes>
+            <Route path="/logs" element={<LogsView />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await roundTrip({
+        heading: 'Logs',
+        landsOn: () => document.getElementById(`panel-${tab}`),
+        answered: () => screen.getByText(empty),
+        reads: () => asked(path),
+      });
     });
-    render(
-      <MemoryRouter initialEntries={['/logs']}>
-        <Routes>
-          <Route path="/logs" element={<LogsView />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    await roundTrip({
-      heading: 'Logs',
-      answered: () => screen.getByText('No status changes match.'),
-      reads: () => asked('/state-log'),
-    });
-  });
+  }
 
   it('the tree, read again from its first level', async () => {
     vi.stubGlobal(

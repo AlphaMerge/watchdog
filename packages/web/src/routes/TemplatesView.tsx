@@ -310,6 +310,10 @@ function Editor({
             <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
               {method?.name ?? 'Method'} settings
             </legend>
+            {/* **Not disabled while saving** (`U-78`), as *Name*, *Description* and *Subject* are
+                not: Enter in a settings box saves, and disabling the box it was pressed in took
+                the focus it held to the page. A change made while the save is out is kept in the
+                draft and sent by the next save, as theirs are. */}
             <SchemaForm
               schema={schema}
               values={draft.settings}
@@ -319,7 +323,6 @@ function Editor({
               }}
               replacing={replacing}
               onReplace={onReplace}
-              disabled={saving}
             />
           </fieldset>
 
@@ -464,11 +467,17 @@ function Editor({
               >
                 {saving ? 'Saving…' : template === undefined ? 'Create template' : 'Save template'}
               </button>
+              {/* *Cancel* is unavailable while saving, so the editor is not closed under a save
+                still out, and **`aria-disabled`, not `disabled`** (`U-78`), as the button beside
+                it: it can hold focus as a save starts, since Safari does not move focus to a
+                button that is clicked. */}
               <button
                 type="button"
-                disabled={saving}
-                onClick={onCancel}
-                className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+                aria-disabled={saving}
+                onClick={() => {
+                  if (!saving) onCancel();
+                }}
+                className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text aria-disabled:opacity-50"
               >
                 Cancel
               </button>

@@ -1,6 +1,13 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, READ_TIMEOUT_MS, request, setReadTimeout, useApi } from '../src/api/client';
+import {
+  ApiError,
+  READ_TIMEOUT_MS,
+  request,
+  sameWords,
+  setReadTimeout,
+  useApi,
+} from '../src/api/client';
 import { ErrorPanel } from '../src/components/Panels';
 
 /**
@@ -148,5 +155,23 @@ describe('Try again', () => {
     fireEvent.click(button);
     await screen.findByText('Ping');
     expect(asked).toBe(3);
+  });
+});
+
+describe('sameWords (U-59, shared since U-78)', () => {
+  const said = (code: string, message: string, id: string): ApiError =>
+    new ApiError(0, code, message, id);
+
+  it('is the same failure whatever its correlation id', () => {
+    expect(
+      sameWords(said('UNREACHABLE', 'gone', 'req-1'), said('UNREACHABLE', 'gone', 'req-2')),
+    ).toBe(true);
+  });
+
+  it('is not, in other words or under another code, whose panel is headed otherwise', () => {
+    expect(sameWords(said('UNREACHABLE', 'gone', 'a'), said('UNREACHABLE', 'went', 'a'))).toBe(
+      false,
+    );
+    expect(sameWords(said('UNREACHABLE', 'gone', 'a'), said('NO_ANSWER', 'gone', 'a'))).toBe(false);
   });
 });

@@ -3,6 +3,12 @@ import type { ApiError } from '../api/client';
 import { CorrelationId } from './Panels';
 
 /**
+ * How long the region is on the page, empty, before it says a failure it mounted with (`U-78`):
+ * time for a screen reader to have registered it, as live-region announcers allow.
+ */
+export const PLACED_MS = 100;
+
+/**
  * A list held on the page whose re-read failed (`U-67`).
  *
  * A page that keeps the list it last read while it reads it again (`ObjectDetailView`'s channel
@@ -15,7 +21,10 @@ import { CorrelationId } from './Panels';
  *   were reading is still there to read (`U-60`'s first read is polite for the same reason). The
  *   caller passes the failure only while a list is held; with none held the page has its own
  *   error panel. Emptied as each read starts — the caller's `error` is null while one is out — so
- *   the same failure twice is said twice; the next good read leaves it empty.
+ *   the same failure twice is said twice; the next good read leaves it empty. **Empty as it
+ *   mounts, too** (`U-78`): a failure already held when the region comes onto the page — the
+ *   sensor page's readings, failed while the History tab was open, on coming back to Overview —
+ *   is put in a moment after it, rather than arriving with it and going unsaid.
  * - ***Try again* is one element from the failure until a read answers**, outside the region so
  *   the region can be empty while it stays (`U-63`'s `RetryCheck`): `aria-disabled`, not
  *   `disabled`, while the read is out, since a disabled control can lose the focus it holds, and
@@ -54,6 +63,18 @@ export function HeldListFailure({
 }): React.JSX.Element {
   const [offered, setOffered] = useState(false);
   const showing = error !== null || (reading && offered);
+  // Whether the region has been on the page long enough to be heard: until then it says nothing
+  // (`U-78`). Not the effect alone: after a click React runs it before the browser paints, so the
+  // text would still come in the same frame as the region.
+  const [placed, setPlaced] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPlaced(true);
+    }, PLACED_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, []);
   // The latest `focusAfter`, so a caller need not hold one function across renders for it.
   const after = useRef(focusAfter);
   useEffect(() => {
@@ -76,7 +97,7 @@ export function HeldListFailure({
   return (
     <div>
       <p role="status" className="mb-2 text-sm text-warning-fg empty:mb-0">
-        {error !== null && (
+        {placed && error !== null && (
           <>
             {what} could not be read again, so {held}: {error.message}
             <CorrelationId id={error.correlationId} />

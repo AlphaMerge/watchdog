@@ -111,17 +111,17 @@ export function LogsView(): React.JSX.Element {
       />
 
       {active === 'status' && (
-        <TabPanel id="status">
+        <TabPanel id="status" keepsFocus>
           <StatusChanges params={params} set={set} />
         </TabPanel>
       )}
       {active === 'objects' && (
-        <TabPanel id="objects">
+        <TabPanel id="objects" keepsFocus>
           <ObjectHistory params={params} set={set} />
         </TabPanel>
       )}
       {active === 'system' && (
-        <TabPanel id="system">
+        <TabPanel id="system" keepsFocus>
           <SystemEvents params={params} set={set} />
         </TabPanel>
       )}

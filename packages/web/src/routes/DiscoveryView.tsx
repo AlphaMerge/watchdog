@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ApiError, request, send, useApi } from '../api/client';
+import { ApiError, request, sameWords, send, useApi } from '../api/client';
 import type {
   DeviceTemplateSummary,
   DiscoveryPreview,
@@ -458,7 +458,7 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
           // A poll that fails again in the same words keeps the failure already shown, id and
           // all: each answer from the core has its own correlation id, and a region whose text
           // changed every five seconds would say the same failure every five seconds (`U-59`).
-          setProblem((shown) => (shown !== null && shown.message === next.message ? shown : next));
+          setProblem((shown) => (shown !== null && sameWords(shown, next) ? shown : next));
           // Kept asking, because a core that was briefly unreachable is the common case and a
           // page that gave up would need a reload to notice it came back.
           timer = setTimeout(tick, 5_000);

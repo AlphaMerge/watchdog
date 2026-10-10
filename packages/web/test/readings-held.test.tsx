@@ -360,6 +360,54 @@ describe('the readings, kept while the next are read (U-71)', () => {
     expect(watching.removed.some((node) => node.contains(table))).toBe(false);
   });
 
+  it('say a failure held while History was open into a region already there, back on Overview (U-78)', async () => {
+    valuesReply = (_id, read) => (read >= 2 ? 'fail' : 'answer');
+    mount('/objects/9');
+    await waitFor(() => {
+      expect(reading()).toBe(shown(9, 1));
+    });
+
+    // The History tab keeps the poll going (its series are the same channels), and it fails there,
+    // where nothing on the tab says so.
+    act(() => {
+      go('/objects/9?tab=history');
+    });
+    await onePoll();
+    expect(document.getElementById('panel-overview')).toBeNull();
+
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => {
+      records.push(...batch);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      act(() => {
+        go('/objects/9');
+      });
+      // Back on Overview: the readings and their region, empty as they come onto the page...
+      const region = readingsRegion();
+      expect(reading()).toBe(shown(9, 1));
+      expect(region.textContent).toBe('');
+      // ...and the failure put in it after, so it is said, not arriving with it.
+      await waitFor(() => {
+        expect(region.textContent).toBe(SAID);
+      });
+      expect(readingsRegion()).toBe(region);
+      for (const record of observer.takeRecords()) records.push(record);
+    } finally {
+      observer.disconnect();
+    }
+    const region = readingsRegion();
+    expect(
+      records.some(
+        (record) =>
+          region.contains(record.target) &&
+          [...record.addedNodes].some((node) => (node.textContent ?? '').includes('restarting')),
+      ),
+    ).toBe(true);
+    expect(speaking()).toEqual([]);
+  });
+
   it('are never shown as current past the core’s window', async () => {
     // Every poll after the first fails, so the first answer is held for as long as the test runs.
     valuesReply = (_id, read) => (read === 1 ? 'answer' : 'fail');

@@ -85,6 +85,15 @@ export class ApiError extends Error {
 }
 
 /**
+ * Two failures a reader could not tell apart, ids aside (`U-59`): a poll that fails again in the
+ * same words is not news, and each answer from the core carries its own correlation id. The code
+ * counts as well as the message, since the error panel's heading is chosen by it (`U-77`).
+ */
+export function sameWords(a: ApiError, b: ApiError): boolean {
+  return a.code === b.code && a.message === b.message;
+}
+
+/**
  * What to do when the core says a request needed a session it did not have (`U-17`).
  *
  * **The filter is the code, not the status, and the difference is the whole login form.**

@@ -177,7 +177,9 @@ Notification templates — what a message says, who receives it, and when it is 
 - **A save, a create or a delete closes the editor and says so** under the title ("Template
   Alert hook saved."), with focus on **New template** (`U-64`, `U-69`). While it is being sent,
   **Save template** or **Create template** reads *Saving…*, keeps focus and does nothing if pressed
-  again; refused, focus is still on it (`U-73`). The list is then read
+  again; refused, focus is still on it (`U-73`). The fields stay as they are while it is out, the
+  method's settings with them, so Enter in a settings box saves without taking focus from that
+  box; **Cancel** does nothing until the answer is in (`U-78`). The list is then read
   again; if that read fails, the list in hand stays and a line above it says it may be out of
   date, with **Try again** (`U-67`).
 - **A recipient is an address, a user or a group.** Users and groups are picked by typing a name,
@@ -482,8 +484,12 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
   saying *Trying again…*; a second failure is said again in the same alert, and a read that
   succeeds puts focus on the page's heading rather than dropping it to the page. On an object's
   page focus goes to the tab it was in instead, the panel under the tab strip, rather than back
-  above the header and every card (`U-76`). A list kept on screen whose re-read failed has its own
-  **Try again** beside it, which keeps the list in place.
+  above the header and every card (`U-76`), and on the Logs page to the tab's panel rather than
+  above the tab strip and its filters (`U-78`). A list kept on screen whose re-read failed has its
+  own **Try again** beside it, which keeps the list in place. Its line is said when it is filled,
+  and also when it comes onto the page already failed, as the readings do on going back to
+  Overview from the History tab, where a failed poll is not shown: it comes on empty and is
+  filled a moment after (`U-78`).
 - **No read waits for ever.** A read the core has not answered within 30 seconds, headers or
   body, is given up and said as *The core did not answer*, naming what was asked — not as *not
   reachable*, since the core may be up and only slow — and **Try again** is free again (`U-77`).
