@@ -99,7 +99,10 @@ export const UNIQUE_CONSTRAINTS = {
 
   // ── schedules ────────────────────────────────────────────────────────────────────────────
   schedule_pkey: { unreachable: 'generated' },
-  schedule_name_key: { refused: 'SCHEDULE_NAME_TAKEN', by: 'ScheduleService (create, update)' },
+  schedule_name_key: {
+    refused: 'SCHEDULE_NAME_TAKEN',
+    by: 'ScheduleService (create, update); seedBuiltIns takes the next free name (P-393)',
+  },
   schedule_built_in_id_key: { unreachable: 'start-up seeding only, ON CONFLICT (built_in_id)' },
 
   // ── accounts and access ──────────────────────────────────────────────────────────────────

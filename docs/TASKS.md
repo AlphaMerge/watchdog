@@ -14710,13 +14710,34 @@ because each is a decision rather than a defect:
         reached through its alias `ow`); a CTE's alias ignored; no bare alias; no `to_char`; a
         cast of the last operand read as the whole's; the fixtures read as source.
 
-- [ ] **P-393 — a new built-in schedule stops the core starting when an operator's has its name** ·
+- [x] **P-393 — a new built-in schedule stops the core starting when an operator's has its name** ·
       XS · P-391 · Found 2026-10-10 in `P-391`. `ScheduleRepository.seed` inserts each built-in
       with `ON CONFLICT (built_in_id) DO NOTHING`, which does not cover `schedule_name_key`. A
       build that adds a built-in whose name an operator already gave a schedule of their own
       raises 23505 at start-up, and nothing catches it. **Done when** the seed decides what
       happens then (rename the built-in, adopt the operator's, or refuse with a sentence that says
       which schedule to rename), with a test.
+
+      **P-393 outcome. The built-in is renamed: it is added as `Weekends (built-in)`, or the first
+      free one of `(built-in 2)` to `(built-in 9)`, and the operator's schedule is left as it
+      was.** `ScheduleService.seedBuiltIns` tries each name in a savepoint and goes on to the next
+      when `schedule_name_key` refuses it, so a name another transaction commits during the seed is
+      handled the same way. Start-up logs one warning naming the operator's schedule and the name
+      the built-in took. Either schedule can be renamed afterwards; the seed goes by built-in id
+      and never adds it again.
+      - **Not adopting the operator's:** the delete path would then refuse their schedule, and the
+        built-in's definition would be one they did not write.
+      - **Not refusing to start:** the operator did nothing wrong, and a core that will not start
+        cannot be used to rename the schedule. Only when all ten names are taken does the seed
+        refuse, with `SCHEDULE_NAME_TAKEN` and a sentence naming the schedule to rename, and it
+        adds nothing.
+      - **No look before the insert.** `ON CONFLICT (built_in_id)` is checked before the name, so a
+        built-in already there ends at its first name whatever the others hold.
+      - `test/schedule-seed.test.ts`, 7 tests. Mutations, each caught: names limited to the
+        built-in's own (3 tests fail), the name violation not caught (4), no savepoint (4), no
+        warning (1). A look by built-in id before the names was redundant, and its mutation
+        survived, so it was removed.
+      - `UNIQUE_CONSTRAINTS` names the seed as a writer of `schedule_name_key`.
 
 - [ ] **P-394 — a state row lost when ingestion and a route write one sensor in the same
       millisecond** · S · P-108 · Found 2026-10-10 in `P-391`'s sweep, not reproduced.
@@ -14725,6 +14746,17 @@ because each is a decision rather than a defect:
       re-evaluates the same sensor in the same millisecond can have its row dropped while
       `sensor_runtime` still moves: the divergence `runtime.ts` describes for `P-108`. **Done
       when** it is reproduced or shown unreachable, and fixed if it is reachable.
+
+- [ ] **P-395 — `target-policy-exception`'s two-administrators test races its own lock** · XS ·
+      A-64 · Found 2026-10-10 in `P-393`'s full core run: 5,248 of 5,249 passed, and the file alone
+      passed 8 reruns of 8. It failed on "Without If-Match the later write wins": the last audit
+      row was the test's first write, not the late one. The test starts the transaction that
+      holds the device and sends `late` without waiting for the lock to be held. If `late` gets
+      it first, it finds the exception already `['169.254.10.5']`, changes nothing, and writes no
+      audit row. Both halves also wait a fixed 400 ms for the racers to be "in their transactions".
+      **Done when** each holder is known to hold its lock before the racers start, and the racers
+      are known to be waiting (`pg_locks` or `pg_stat_activity`, bounded with `within`) rather
+      than slept for.
 
 - [ ] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
       2026-10-10 in `P-391`. `GroupService.create` trims the name and refuses a blank one;

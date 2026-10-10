@@ -1,10 +1,10 @@
 import type { Logger } from '@ms/shared';
-import type { Database, Queryable } from '../db/pool.js';
+import { savepoint, uniqueViolation, type Database, type Queryable } from '../db/pool.js';
 import { refusingTaken } from '../db/unique-constraints.js';
 import { Visibility } from '../auth/access.js';
 import type { Actor, AuditSink, ScheduleAudit } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
-import { builtInSchedules } from './built-in.js';
+import { builtInSchedules, type SeedSchedule } from './built-in.js';
 import {
   formatPeriods,
   gridToIntervals,
@@ -101,30 +101,73 @@ export class ScheduleService {
    * gets it on the next start; one that changes an existing built-in's definition changes it
    * for new installations only, which is the honest behaviour — silently rewriting a schedule
    * somebody is relying on would move when several thousand sensors are watched.
+   *
+   * **A new built-in whose name an operator's schedule already has is added under another
+   * name** (`P-393`): its own with `(built-in)` after it, or the first of `(built-in 2)` and on
+   * that is free, and the start-up log says which schedule had the name. Not adopting the
+   * operator's: that would make their schedule one the delete path refuses, under a definition
+   * they did not write. Not refusing to start: the operator did nothing wrong, and a core that
+   * will not start until somebody renames a schedule cannot be used to rename it. Either can be
+   * renamed afterwards; the seed goes by built-in id, so it never adds the built-in again.
    */
   async seedBuiltIns(): Promise<number> {
     let inserted = 0;
     await this.#db.tx(async (q) => {
       for (const schedule of builtInSchedules()) {
-        const created = await this.#repo.seed(
-          q,
-          {
-            name: schedule.name,
-            description: schedule.description,
-            authoredAs: schedule.authoredAs,
-            definition: {
-              periods: schedule.periods,
-              polarity: schedule.polarity,
-              timezone: null,
-            },
-          },
-          schedule.id,
-        );
-        if (created) inserted += 1;
+        if (await this.#seedOne(q, schedule)) inserted += 1;
       }
     });
     if (inserted > 0) this.#logger.info({ inserted }, 'built-in schedules seeded');
     return inserted;
+  }
+
+  /** One built-in, under the first of `seedNames` nothing has; false if it is there already. */
+  async #seedOne(q: Queryable, schedule: SeedSchedule): Promise<boolean> {
+    // A built-in already seeded ends at the first name, whatever it is called now and whatever
+    // its other names hold: `seed`'s `ON CONFLICT (built_in_id)` is checked before the insert, so
+    // the name is never reached.
+    const names = seedNames(schedule.name);
+    for (const name of names) {
+      const write: ScheduleWrite = {
+        name,
+        description: schedule.description,
+        authoredAs: schedule.authoredAs,
+        definition: { periods: schedule.periods, polarity: schedule.polarity, timezone: null },
+      };
+      let created: boolean;
+      try {
+        // A name taken, whenever it was committed, is the constraint's to find: in a savepoint,
+        // so the transaction goes on to the next name rather than ending the start-up.
+        created = await savepoint(q, (inner) => this.#repo.seed(inner, write, schedule.id));
+      } catch (error) {
+        if (uniqueViolation(error) === 'schedule_name_key') continue;
+        throw error;
+      }
+      if (created && name !== schedule.name) {
+        this.#logger.warn(
+          {
+            builtIn: schedule.id,
+            name,
+            heldBy: await scheduleNamed(q, schedule.name),
+          },
+          `a schedule already has the name of the built-in "${schedule.name}", which is added ` +
+            `as "${name}"; either can be renamed`,
+        );
+      }
+      return created;
+    }
+    const heldBy = await scheduleNamed(q, schedule.name);
+    throw new ObjectError(
+      'SCHEDULE_NAME_TAKEN',
+      `the built-in schedule "${schedule.name}" cannot be added: schedule ` +
+        `${String(heldBy ?? '?')} has its name, and schedules have every name it would take ` +
+        `instead, up to "${names.at(-1) ?? schedule.name}". Rename schedule ` +
+        `${String(heldBy ?? '?')} and start the core again`,
+      {
+        context: { phase: 'schedules' },
+        details: { builtIn: schedule.id, name: schedule.name, heldBy },
+      },
+    );
   }
 
   /** `usedBy` counts only the objects the reader can see (`A-12`). */
@@ -437,6 +480,28 @@ async function nameTaken(q: Queryable, name: string, self: number | null): Promi
       details: { name, heldBy: Number(held.id) },
     },
   );
+}
+
+/** The schedule called exactly `name`, as `schedule_name_key` compares it, or null. */
+async function scheduleNamed(q: Queryable, name: string): Promise<number | null> {
+  const rows = await q.query<{ id: string }>(
+    'SELECT id::text AS id FROM schedule WHERE name = $1',
+    [name],
+  );
+  const held = rows[0];
+  return held === undefined ? null : Number(held.id);
+}
+
+/** How many names a built-in tries before it refuses: its own, then `(built-in)` and 2 to 9. */
+const SEED_NAMES = 10;
+
+/** The names a built-in is added under, in order (`P-393`). */
+export function seedNames(name: string): string[] {
+  return [
+    name,
+    `${name} (built-in)`,
+    ...Array.from({ length: SEED_NAMES - 2 }, (_, i) => `${name} (built-in ${String(i + 2)})`),
+  ];
 }
 
 function notFound(id: number): ObjectError {
