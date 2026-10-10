@@ -37,6 +37,9 @@ jobs:
       # `CI_DB_HOST` to `127.0.0.1` if these jobs are ever moved back to a hosted runner.
       MS_TEST_DB_HOST: ${{ vars.CI_DB_HOST || 'host.docker.internal' }}
       MS_TEST_DB_PORT: '55432'
+      # A database this job failed to reach fails the suites that need it, rather than skipping
+      # them (`P-397`). Locally the run decides for itself, from one probe before any file starts.
+      MS_TEST_DB_REQUIRED: '1'
 
     steps:
       - uses: actions/checkout@v4

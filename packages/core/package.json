@@ -13,8 +13,8 @@
     "pretest": "tsc -b",
     "pretest:perf": "tsc -b",
     "test": "npm run test:unit",
-    "test:unit": "node --test \"dist/test/*.test.js\"",
-    "test:perf": "node --test --test-concurrency=1 \"dist/test/perf/*.test.js\""
+    "test:unit": "node --test --test-global-setup=dist/test/support/database-run.js \"dist/test/*.test.js\"",
+    "test:perf": "node --test --test-concurrency=1 --test-global-setup=dist/test/support/database-run.js \"dist/test/perf/*.test.js\""
   },
   "dependencies": {
     "@fastify/static": "^10.1.3",
