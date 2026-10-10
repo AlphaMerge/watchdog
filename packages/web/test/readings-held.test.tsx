@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setReadTimeout } from '../src/api/client';
 import type * as Stream from '../src/api/stream';
 import type { ChannelRecord, ObjectDetail, SensorValues } from '../src/api/types';
 import { formatValue } from '../src/routes/detail/model';
@@ -468,6 +469,41 @@ describe('the poll and the values’ error panel (U-71)', () => {
     expect(document.activeElement).toBe(document.getElementById('panel-overview'));
     expect(focus.lost()).toBe(0);
     focus.stop();
+  });
+
+  // `U-77`: Try again's read never answers. It used to hold the poll, which waits for it, for
+  // good; it is given up after the read bound, said, and the poll goes on.
+  it('is not stalled by a Try again whose read never answers', async () => {
+    const restoreBound = setReadTimeout(80);
+    try {
+      valuesReply = (_id, read) => (read === 1 ? 'fail' : read === 2 ? 'hold' : 'answer');
+      mount('/objects/9');
+      const alert = await alertSaying('restarting');
+      const button = within(alert).getByRole('button', { name: 'Try again' });
+      act(() => {
+        button.focus();
+      });
+      fireEvent.click(button);
+      await waitFor(() => {
+        expect(reads[9]).toBe(2);
+      });
+
+      // Never released: given up after the bound, said in the same panel, the button free again.
+      await waitFor(() => {
+        expect(alert.textContent).toContain('The core did not answer');
+      });
+      expect(alert.textContent).toContain('GET /sensors/9/values');
+      expect(within(alert).getByRole('button', { name: 'Try again' })).toBe(button);
+      expect(document.activeElement).toBe(button);
+
+      // And the poll goes on: the next interval asks, and its answer is shown.
+      await onePoll();
+      await waitFor(() => {
+        expect(reading()).toBe(shown(9, 3));
+      });
+    } finally {
+      restoreBound();
+    }
   });
 
   it('keeps the panel through a poll that fails again, until a read answers', async () => {

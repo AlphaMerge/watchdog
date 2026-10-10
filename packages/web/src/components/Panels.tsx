@@ -149,6 +149,8 @@ export function ErrorPanel({
   }, []);
 
   const unreachable = error.code === 'UNREACHABLE';
+  // A read given up after `READ_TIMEOUT_MS` (`U-77`): the core may be up, so no *start it* hint.
+  const unanswered = error.code === 'NO_ANSWER';
   return (
     <div
       ref={panel}
@@ -158,7 +160,11 @@ export function ErrorPanel({
       {!busy && (
         <>
           <p className="ms-label text-down-fg">
-            {unreachable ? 'The core is not reachable' : `Request failed — ${error.code}`}
+            {unreachable
+              ? 'The core is not reachable'
+              : unanswered
+                ? 'The core did not answer'
+                : `Request failed — ${error.code}`}
           </p>
           <p className="mt-1.5">{error.message}</p>
           {unreachable && (

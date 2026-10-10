@@ -421,7 +421,8 @@ line it first showed rather than saying it again every 15 seconds; other words r
 once it has been held past the core's own window (three scan intervals) it says *no recent
 reading*, as a fresh answer would. If the first read of a sensor's readings fails, an error panel
 takes the table's place, and the 15-second poll does not ask again while its **Try again** is
-out.
+out. That wait is bounded: a read the core does not answer within 30 seconds is given up and said
+(`U-77`), so a hung **Try again** cannot stop the poll.
 
 ### Graphs
 
@@ -479,6 +480,10 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
   page focus goes to the tab it was in instead, the panel under the tab strip, rather than back
   above the header and every card (`U-76`). A list kept on screen whose re-read failed has its own
   **Try again** beside it, which keeps the list in place.
+- **No read waits for ever.** A read the core has not answered within 30 seconds, headers or
+  body, is given up and said as *The core did not answer*, naming what was asked — not as *not
+  reachable*, since the core may be up and only slow — and **Try again** is free again (`U-77`).
+  Writes are not bounded this way: a save that is given up may still have been made.
 
 ## What is not here
 

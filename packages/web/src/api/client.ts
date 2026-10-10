@@ -161,24 +161,100 @@ interface ErrorBody {
   };
 }
 
-export async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${BASE}${path}`, {
-      signal: signal ?? null,
-      headers: { accept: 'application/json' },
-    });
-  } catch {
-    // Every rejection from fetch itself means the same thing here, and saying so beats
-    // "Failed to fetch" — the browser's phrasing for nine different problems.
-    throw new ApiError(0, 'UNREACHABLE', 'the core is not reachable', undefined);
-  }
+/**
+ * How long a read may take before it is given up (`U-77`).
+ *
+ * **A read that never answers used to hold its caller for ever.** `fetch` has no timeout of its
+ * own, so a core that accepted the connection and then said nothing — a stalled proxy, a request
+ * stuck behind a lock — left *Loading…* up for good, a *Try again* busy for good, and the
+ * sensor page's poll, which waits for a *Try again* that is out, stopped. Thirty seconds is twice
+ * the poll's interval and longer than any read the core is meant to take; a read past it is said
+ * as a failure, which every caller already knows how to show and to try again.
+ */
+export const READ_TIMEOUT_MS = 30_000;
+let readTimeoutMs = READ_TIMEOUT_MS;
 
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as ErrorBody;
-    throw refusal(response.status, response.statusText, body);
+/** For tests: a shorter bound, so a hung read is given up without waiting half a minute. */
+export function setReadTimeout(ms: number): () => void {
+  readTimeoutMs = ms;
+  return () => {
+    readTimeoutMs = READ_TIMEOUT_MS;
+  };
+}
+
+/** A read the core did not answer in time, saying what was asked and how long it was given. */
+function noAnswer(path: string, ms: number): ApiError {
+  return new ApiError(
+    0,
+    'NO_ANSWER',
+    `the core did not answer GET ${path} within ${ms >= 1000 ? `${String(Math.round(ms / 1000))} s` : `${String(ms)} ms`}`,
+    undefined,
+  );
+}
+
+/**
+ * A read.
+ *
+ * **Bounded, headers and body alike** (`U-77`): a core can send its status line and then stall
+ * the body, so the bound runs until the JSON is in hand, not until `fetch` resolves. It is raced
+ * as well as aborted, so a `fetch` that does not honour its signal still lets the caller go. A
+ * caller's own abort is not a timeout and is reported as it always was.
+ *
+ * **`NO_ANSWER`, not `UNREACHABLE`.** The core may be up and only slow, and the error panel's
+ * *the core is not reachable* — with how to start it — would send somebody to start a service
+ * that is running.
+ */
+export async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const bound = readTimeoutMs;
+  const controller = new AbortController();
+  const forward = (): void => {
+    controller.abort();
+  };
+  if (signal?.aborted === true) controller.abort();
+  else signal?.addEventListener('abort', forward, { once: true });
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(noAnswer(path, bound));
+    }, bound);
+  });
+
+  const read = async (): Promise<T> => {
+    let response: Response;
+    try {
+      response = await fetch(`${BASE}${path}`, {
+        signal: controller.signal,
+        headers: { accept: 'application/json' },
+      });
+    } catch {
+      if (timedOut) throw noAnswer(path, bound);
+      // Every rejection from fetch itself means the same thing here, and saying so beats
+      // "Failed to fetch" — the browser's phrasing for nine different problems.
+      throw new ApiError(0, 'UNREACHABLE', 'the core is not reachable', undefined);
+    }
+
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as ErrorBody;
+      if (timedOut) throw noAnswer(path, bound);
+      throw refusal(response.status, response.statusText, body);
+    }
+    try {
+      return (await response.json()) as T;
+    } catch (error: unknown) {
+      if (timedOut) throw noAnswer(path, bound);
+      throw error;
+    }
+  };
+
+  try {
+    return await Promise.race([read(), expired]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', forward);
   }
-  return (await response.json()) as T;
 }
 
 /**

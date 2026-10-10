@@ -27385,11 +27385,36 @@ because each is a decision rather than a defect:
       - **Not done.** The Logs page's tabs still send focus to its heading; `keepsFocus` would do
         it in three places.
 
-- [ ] **U-77 — a hung read stalls the poll that waits for it** · S · U-71 · Found 2026-10-09 in
+- [x] **U-77 — a hung read stalls the poll that waits for it** · S · U-71 · Found 2026-10-09 in
       `U-71`. `request()` has no timeout, so a *Try again* read that never answers stops the
       values poll, which waits for it, and leaves any *Try again* in the app busy for good.
       **Done when** `request()` gives up after a bound that is said as a failure (an
       `UNREACHABLE`-style error, with what was asked), with tests for a poll and a *Try again*.
+
+      **U-77 outcome. `request()` gives a read 30 seconds, headers and body, and then says
+      `NO_ANSWER`, naming what was asked; a hung *Try again* no longer holds the poll or its
+      button.** Web only.
+      - **The bound** (`api/client.ts`, `READ_TIMEOUT_MS`): twice the values poll's interval and
+        longer than any read the core is meant to take. It runs until the JSON is in hand, so a
+        core that sends its status line and stalls the body is caught too. It aborts the fetch and
+        also races it, so a `fetch` that ignores its signal still lets the caller go. A caller's
+        own abort is reported as before. Every caller of `request()` is an ordinary page read; none
+        is a long poll or a download.
+      - **`NO_ANSWER`, not `UNREACHABLE`**: "the core did not answer GET /sensors/9/values within
+        30 s". The error panel heads it *The core did not answer* and leaves out the *start it with*
+        hint `UNREACHABLE` carries, since the core may be up and only slow.
+      - **Writes are not bounded.** A `send()` given up may still have been made, and saying it
+        failed would be worse than waiting.
+      - **Tests.** `read-timeout.test.tsx` (9): given up and named; the fetch aborted; a fetch that
+        ignores its signal; a stalled body; an answer inside the bound with nothing firing after;
+        a refusal unchanged; a caller's abort still `UNREACHABLE`; and a *Try again* whose read
+        hangs: the same focused button is free again, the panel says *The core did not answer*,
+        and pressing it asks again. `readings-held.test.tsx`: the values panel's *Try again* read
+        never answers; it is given up and said in the same panel with focus kept, and the next
+        poll asks and shows its answer. The bound is shortened with `setReadTimeout` in tests;
+        timers are real. **Mutations** (restored byte for byte; the web package has no `dist`):
+        no bound 6; abort without the race 3; a timeout said as `UNREACHABLE` 5; the panel's
+        heading for it removed 2. Full web suite 1,116 passed.
 
 - [ ] **U-78 — focus odds and ends from round 21** · S · U-71, U-73, U-76 · Found 2026-10-09.
       - The Logs page's tabs do not set `keepsFocus`, so their panels' *Try again* still sends
