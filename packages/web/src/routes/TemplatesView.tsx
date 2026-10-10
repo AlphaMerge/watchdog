@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type {
@@ -713,7 +713,14 @@ function Delete({
   const region = useId();
   const question = useId();
 
-  useEffect(() => {
+  // **A layout effect, not a passive one (`U-81`).** `focusNext` is set in a click handler and is
+  // meant for the render that click causes. A passive effect from an earlier commit can still be
+  // pending when the click comes — a page that has just drawn *Delete* on a busy machine — and
+  // React runs it before rendering the click's update: that stale run read `'keep'`, cleared it,
+  // and found no *Keep it* to focus yet, so the run that followed had nothing left to do and focus
+  // stayed on the page. A layout effect runs inside its own commit, so none is ever left over to
+  // take the next click's intent.
+  useLayoutEffect(() => {
     const target = focusNext.current;
     if (target === null) return;
     focusNext.current = null;

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NotificationMethod, ObjectSummary, TemplateView } from '../src/api/types';
 import { SessionContext, type SessionContextValue } from '../src/auth/session';
@@ -528,6 +529,60 @@ describe('focus after a refused template delete (U-64)', () => {
     });
     expect(screen.getByText('Delete it?')).toBeDefined();
     expect(onPage()).toBe(false);
+  });
+
+  // `U-81`: the case the two tests above met about one run in eight under load. *Delete* is
+  // pressed in the moment after the commit that draws it and before React has run that commit's
+  // passive effects. Outside `act`, a fetch's answer renders at the default priority, so those
+  // effects wait for a later task, while a MutationObserver's callback runs in the microtask right
+  // after the commit: pressing from there lands in that window every time. A focus effect that
+  // runs then took the press's intent before *Keep it* was drawn, and focus stayed on the page.
+  it('puts it on Keep it when Delete is pressed before the page’s effects have run (U-81)', async () => {
+    core({});
+    const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean | undefined };
+    const previous = env.IS_REACT_ACT_ENVIRONMENT;
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    const named = (name: string): HTMLButtonElement | undefined =>
+      Array.from(container.querySelectorAll('button')).find((b) => b.textContent === name);
+    try {
+      let early = false;
+      const pressed = new Promise<void>((resolve) => {
+        const observer = new MutationObserver(() => {
+          const del = named('Delete');
+          if (del === undefined) return;
+          observer.disconnect();
+          // Pressed in the commit's own microtask: nothing has run Delete's effects yet.
+          early = named('Keep it') === undefined;
+          del.focus();
+          // A native click, not `fireEvent`: that wraps it in `act`, which runs the waiting
+          // effects first and hides the case.
+          del.click();
+          resolve();
+        });
+        observer.observe(container, { childList: true, subtree: true });
+      });
+      root.render(
+        <SessionContext.Provider value={SESSION}>
+          <MemoryRouter initialEntries={['/templates?id=9']}>
+            <TemplatesView />
+          </MemoryRouter>
+        </SessionContext.Provider>,
+      );
+      await pressed;
+      expect(early).toBe(true);
+      // Every effect has had its turn.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const keep = named('Keep it');
+      expect(keep).toBeDefined();
+      expect(document.activeElement).toBe(keep);
+    } finally {
+      root.unmount();
+      container.remove();
+      env.IS_REACT_ACT_ENVIRONMENT = previous;
+    }
   });
 });
 

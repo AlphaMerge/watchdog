@@ -27417,7 +27417,7 @@ because each is a decision rather than a defect:
       first** on the stale cue's wording and whether it is announced; then do all three, with
       tests.
 
-- [ ] **U-81 — the template-delete focus tests fail about one run in eight** · S · U-64, U-68 ·
+- [x] **U-81 — the template-delete focus tests fail about one run in eight** · S · U-64, U-68 ·
       Found 2026-10-09 in round 21's suite. In `templates-refused.test.tsx`, "puts it on Keep
       it when the question is asked" and "never leaves it on the page while a delete is out"
       each fail now and then with focus on `<body>`. On a quiet VM, running the file alone, it
@@ -27426,6 +27426,31 @@ because each is a decision rather than a defect:
       `Delete`'s `focusNext` effect, or a test that reads `document.activeElement` before the
       effect has run. **Done when** the cause is found and fixed in the code or the test, and the
       file passes 50 runs in a row.
+
+      **U-81 outcome. A real race in `Delete`, not only in the test: its focus effect is a layout
+      effect now, so focus reaches *Keep it* however soon after the page drew *Delete* it is
+      pressed.** Web only.
+      - **The cause.** `Delete` keeps where focus goes next in a ref, set by a click handler for
+        the render that click causes, and read by a passive effect. On a busy machine the passive
+        effects of the commit that drew *Delete* were still waiting when the test pressed it.
+        React runs those before it renders the click's update, so that stale run read `'keep'`,
+        cleared it and found no *Keep it* yet; the run that followed the click found nothing to do,
+        and focus stayed on the page. A light focus trace under load showed it: focus on *Delete*,
+        the press, then `body`, and no focus event on *Keep it* at all. It was not `U-68`'s
+        `keep-focus.ts`, which only moves focus out of a panel that held it. A fast click on a
+        slow machine could meet it in a browser too.
+      - **The fix** (`TemplatesView.tsx`): the effect is a `useLayoutEffect`, which runs inside its
+        own commit, so none is left waiting to take the next click's intent. No other focus effect
+        in the web reads a one-shot intent from a ref; the others take theirs from state, which
+        belongs to a render.
+      - **Test** (`templates-refused.test.tsx`), deterministic: rendered without `act`, *Delete*
+        is pressed with a native click from a MutationObserver callback, the microtask right after
+        the commit that drew it and before its passive effects; it asserts *Keep it* was not drawn
+        yet when pressed and then has focus. **Mutation**: the effect back to `useEffect` fails it
+        5 runs in 5 with the flake's own error (`expected <body> to be <button>`); the fix passes 5
+        in 5. Restored byte for byte.
+      - **The bar.** The whole file 52 runs in a row with four copies running at once — the load
+        that reproduced it once in 48 before the fix — all passed. Full web suite 1,106 passed.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
