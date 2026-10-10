@@ -24,7 +24,9 @@ services:
       NPM_CONFIG_FUND: 'false'
       CI: 'true'
       # Integration tests reach PostgreSQL by service name on the compose network. They skip
-      # themselves when nothing is listening, so `npm test` still works with the stack down.
+      # themselves when nothing is listening, so `npm test` still works with the stack down —
+      # unless the run found it before its first file started, when a file that cannot reach it
+      # fails instead (`P-397`).
       MS_TEST_DB_HOST: postgres
       # The database sensors (T-18). Behind the `db` compose profile, so these resolve to nothing
       # unless somebody brought them up; the tests skip themselves in that case.

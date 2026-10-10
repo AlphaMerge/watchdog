@@ -16853,6 +16853,61 @@ because each is a decision rather than a defect:
       - `waits-for-lock.test.ts` has three cases for `sessionsWait`: the count, the event it asks
         for, and the failure's words.
 
+- [x] **P-397 — a reachable PostgreSQL read as absent mid-run, and the skip said nothing** · S ·
+      P-49 · Found 2026-10-10. A full `npm test -w @ms/core` reported `tests 5213 … skipped 0`
+      where the run before had 5,242. `credential-pinning.test.ts`'s 29-test database `describe`
+      had skipped: `databaseAvailable()` made one `client.connect()` and read any error as "no
+      database", most likely under the load of 200 files at once, and `node:test` counts a skipped
+      `describe` as nothing, so the only trace was a `﹣` line. The file alone passed 215/215.
+      `test-all.sh` reports `﹣` lines (`P-49`); a bare `npm test` does not. **Done when** a
+      reachable database is not read as absent mid-run, a run that does skip a database suite says
+      so in its summary, and a mutation that fails the first connect shows the difference.
+
+      **P-397 outcome.** Four parts, in `test/support/database.ts` and `database-run.ts`:
+      - **Retried.** `probeDatabase` makes up to four attempts, 250, 750 and 1,500 ms apart, each
+        under its own `within` bound (connect timeout + 2 s). Each failure is recorded with its
+        duration and error.
+      - **Decided once per run.** `npm test` and `npm run test:perf` in `@ms/core` pass
+        `--test-global-setup=dist/test/support/database-run.js`, which probes before any file starts
+        and sets `MS_TEST_DB_REQUIRED` for every file: `1` if PostgreSQL answered, `0` if not. A
+        value already set is kept. CI sets `1`.
+      - **Fails where expected.** With `MS_TEST_DB_REQUIRED=1`, a file that cannot reach PostgreSQL
+        registers a failing test, `PostgreSQL at host:port is reachable`, whose error lists every
+        attempt. Its suites still skip and its other tests still run. With `0` it tries once
+        and skips, so a laptop without the stack pays no backoff.
+      - **Counted when skipped.** Otherwise the same test is registered skipped, so a run that
+        skipped database suites reads `skipped N`, one per file, and never `skipped 0`.
+      - The answer is memoised per process. `databaseAvailable()` must be called at a file's top
+        level, because the test it registers would otherwise land under an `it`.
+        `database-wait.test.ts`'s two calls inside tests were moved there. The other 145 callers
+        already called it at the top level and are unchanged.
+      - **Tests.** `database-available.test.ts` (new, 10): the retry, the attempt bound on a hung
+        connect, the backoff, the options, and `node --test` children for required/absent/run-setup.
+        It also covers the incident: a proxy in front of the real PostgreSQL drops the first
+        connection, and a required file still passes its suite.
+      - **Mutations.** (a) The *old* `databaseAvailable` with its first connect failing:
+        `credential-pinning.test.ts` alone reports `tests 186, pass 186, fail 0, skipped 0`
+        and exits 0, the incident exactly. (b) The new code with the same mutation: `215/215`,
+        with and without the run setup. (c) The run setup reaching PostgreSQL and every
+        connect from the file failing: exit 1, `fail 1`, and the four attempts in the error.
+        (d) Back to one attempt in `probeOptions`: 3 of the 9 new tests fail, including
+        the proxy test. Restored with a moved mtime, and the rebuilt `dist` was checked for the
+        mutation text and found clean.
+      - **Review** (landed by the orchestrator 2026-10-17, rebased onto `e4b6adda`). One finding,
+        from both lenses, fixed: the run-setup test passed with the hand-off broken. A file that
+        never saw the setup's `0` makes four refused attempts instead of one and skips the same
+        way. Mutation (c) was manual, and no committed test sent the setup's `1` to a file. Now the
+        fixture prints the `MS_TEST_DB_REQUIRED` it was handed, and every child run asserts it. A
+        tenth test puts a proxy in front of the real PostgreSQL that passes the setup's
+        connection and drops every later one: exit 1, `fail 1`, `required=1`. Not changed: a
+        server's own refusal (53300, 57P03) still reads as absent to the setup, as it did per file
+        before; four attempts over 2.5 s make that a server refusing for the whole window.
+      - **Full run.** `npm test -w @ms/core`: `tests 5251` (5,242 + the 9 new), no `﹣` line,
+        `skipped 0`, and the run setup's line `PostgreSQL at postgres:5432 answered`. One failure,
+        `package-provenance.test.ts`'s `H-32` launcher check, came from this worktree never having
+        built `packages/probe`: `-w @ms/core` builds only the core's references. That file passed
+        28/28 once the probe was built.
+
 - [x] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
       2026-10-10 in `P-391`. `GroupService.create` trims the name and refuses a blank one;
       `update` stores what it is sent, so `" On call"` is a different group name from `"On call"`

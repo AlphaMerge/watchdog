@@ -14,6 +14,10 @@ import {
 import { databaseAvailable, silentLogger, testDatabaseConfig } from './support/database.js';
 import { shippedUnit, startLimitOf } from './support/units.js';
 
+// At the top level, where every database file asks: an absent database registers a test that
+// says so, and inside an `it` that test would land under it (`P-397`).
+const available = await databaseAvailable();
+
 /** What `pg` throws, shaped as `Database` wraps it: a `DatabaseError` whose cause carries the code. */
 function wrapped(code: string, message = `failure ${code}`): DatabaseError {
   const cause = Object.assign(new Error(message), { code });
@@ -393,7 +397,7 @@ describe('classifyDatabaseFailure, against the real driver (P-222)', () => {
   }
 
   it("refuses an empty password against the test PostgreSQL, the way a fresh install's is", async (t) => {
-    if (!(await databaseAvailable())) {
+    if (!available) {
       t.skip('no PostgreSQL');
       return;
     }
@@ -414,7 +418,7 @@ describe('classifyDatabaseFailure, against the real driver (P-222)', () => {
   });
 
   it('refuses a wrong password against the test PostgreSQL', async (t) => {
-    if (!(await databaseAvailable())) {
+    if (!available) {
       t.skip('no PostgreSQL');
       return;
     }
