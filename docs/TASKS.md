@@ -14653,7 +14653,7 @@ because each is a decision rather than a defect:
         template check 2; no schedule check 2; no rename check 1; no account lock 1; no branch
         lock 1; the fallback saying PostgreSQL's sentence 1.
 
-- [ ] **P-392 — the alias-sort check's blind spots and the tests it does not read** · S · P-389 ·
+- [x] **P-392 — the alias-sort check's blind spots and the tests it does not read** · S · P-389 ·
       Found 2026-10-09 in `P-389`. Six test queries sort by a text-cast id alias:
       `backfill.test.ts:745`, `credential-pinning.test.ts:3351`, `migrator.test.ts:763`,
       `recipients.test.ts:119` and `perf/visibility-performance.test.ts` 237 and 243. The check
@@ -14662,6 +14662,53 @@ because each is a decision rather than a defect:
       are qualified, the check reads `packages/core/test` too, and the blind spots are covered
       or listed in the check's own comment. `P-388` must delete its two `ALLOWED` entries if it
       qualifies them.
+
+      **P-392 outcome. The six are qualified; the check reads `packages/core/test` as well as
+      `src`; it now follows a text column out of a CTE or a `FROM` subquery, reads an alias
+      written without `AS` and `to_char`; and what it still cannot see is listed in its comment,
+      each with the reason.** It found one more in `src`, now fixed, and one that is right.
+      - **The six** (`backfill`, `credential-pinning`, `migrator`, `recipients`, and two in
+        `perf/visibility-performance`) sort by the table's column now (`ORDER BY object.id`).
+        `credential-pinning`'s tiebreak was an enum made text; it is the enum's order now.
+      - **The tests are read.** `build-hygiene` walks `test/` as well, apart from the check's own
+        fixtures (`build-hygiene.test.ts`, `support/sql-order-aliases.ts`). A floor of 300
+        literals with a `SELECT` is asserted for each tree. `where` in `ALLOWED` now starts with
+        `src/` or `test/`.
+      - **A CTE's or subquery's text column, sorted outside.** A level now knows the CTEs in scope
+        that it names (under their own name or an alias it gives them) and its `FROM` subqueries,
+        with their output columns. A sort key that reaches one of their text columns is reported:
+        bare, qualified (`page.id`, which is still the text), by ordinal, or through `*`. A CTE is
+        followed into every level below the one that defines it.
+      - **Found: `maps/resolver.ts`**, the top-N sensors per map widget. The `ranked` CTE made
+        each root id text and the outer level sorted by it. The order across roots was harmless
+        (the rows go into a map by root), but it was the shape: the CTE keeps the number now, and
+        the outer level makes it text and sorts `ranked.root`.
+      - **Allowed: `credential-vouching.ts`'s owners**, by sensor and then credential kind. The
+        kind is an enum made text to compare with a text array, and its names are the order meant.
+        `ALLOWED` has four entries now.
+      - **Text by construction.** `to_char` is read as making text. `concat`, `concat_ws`,
+        `format` and `||` under another name are not: with no types to read, reporting them
+        reported five keys built from text in the tests and nothing that sorted a number. Under
+        their own column's name they are still reported. This is in the comment's list.
+      - **Casts read more exactly.** A cast is the expression's only when it is the last
+        operation and nothing before it is an operator: `ARRAY[o.id::text]`, `x::text[]` and
+        `a || b::text` are not a cast of the whole (the first was reported in `repository.ts`'s
+        walk, and the last in `clock-freeze`, before this).
+      - **An alias without `AS`** (`id::text id`) is read, except after a word that ends an
+        expression or a type (`END`, `NULL`, `precision`, `zone`) or before an operand (`IS`,
+        `COLLATE`, …).
+      - **Still not seen, in the comment:** a column whose type the text does not say (a table's,
+        a view's, a function's, a CTE renamed by a column list); select list and `ORDER BY` in
+        different literals or built with `${…}`; text joined under another name; a CTE reached
+        without its name in the level's own text.
+      - **Tests (`build-hygiene.test.ts`).** Nineteen shapes caught (eight new: the bare alias,
+        `to_char`, `||` under its own name, and five CTE or subquery shapes) and twenty-four
+        passed (twelve new). The maps, backfill, credential-pinning, migrator and recipients suites
+        pass with the qualified queries. **Mutations** (restored with an mtime that moves), each
+        failing the check: a test query unqualified again, and a perf one; the resolver's CTE
+        text again; CTE and subquery inputs ignored (which also loses the allowed owners query,
+        reached through its alias `ow`); a CTE's alias ignored; no bare alias; no `to_char`; a
+        cast of the last operand read as the whole's; the fixtures read as source.
 
 - [ ] **P-393 — a new built-in schedule stops the core starting when an operator's has its name** ·
       XS · P-391 · Found 2026-10-10 in `P-391`. `ScheduleRepository.seed` inserts each built-in

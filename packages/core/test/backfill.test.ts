@@ -744,7 +744,7 @@ describe(
         return db.query(
           `SELECT id::text, attempts, last_error,
                   extract(epoch FROM retry_at - now())::float8 AS retry_in
-           FROM rollup_backfill ORDER BY id`,
+           FROM rollup_backfill ORDER BY rollup_backfill.id`,
         );
       }
 

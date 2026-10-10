@@ -1031,14 +1031,14 @@ describe('SQL that sorts by its own computed column', () => {
    */
   const ALLOWED: readonly { where: string; column: string; reason: string }[] = [
     {
-      where: 'notifications/health.ts ORDER BY',
+      where: 'src/notifications/health.ts ORDER BY',
       column: "coalesce(t.method, '…') AS method",
       reason:
         "Delivery Health's rows, by method name (`ORDER BY 1`). The text is what is meant: the " +
         'coalesce only names the requests that have no template.',
     },
     {
-      where: 'state/runtime.ts DISTINCT ON, ORDER BY',
+      where: 'src/state/runtime.ts DISTINCT ON, ORDER BY',
       column: 'sensor_id::text AS sensor_id',
       reason:
         "`orderedAfterLast`: each sensor's newest row. Text and bigint ids are one to one, so " +
@@ -1046,7 +1046,14 @@ describe('SQL that sorts by its own computed column', () => {
         'Whether the text key costs the index is `P-388`.',
     },
     {
-      where: 'timeseries/store.ts DISTINCT ON, ORDER BY',
+      where: 'src/objects/credential-vouching.ts ORDER BY',
+      column: 'cs.kind::text AS kind (from owners)',
+      reason:
+        'The credential owners for a write, by sensor and then by credential kind: the kind is an ' +
+        "enum's name, made text to compare with a text array, and its names are the order meant.",
+    },
+    {
+      where: 'src/timeseries/store.ts DISTINCT ON, ORDER BY',
       column: 'sensor_id::text AS sensor_id',
       reason:
         "`stateAtHorizon`: each sensor's last state before the horizon, the same shape and the " +
@@ -1054,24 +1061,41 @@ describe('SQL that sorts by its own computed column', () => {
     },
   ];
 
-  const srcRoot = join(import.meta.dirname, '..', '..', 'src');
+  const packageRoot = join(import.meta.dirname, '..', '..');
 
-  /** Every finding in `packages/core/src`, as `ALLOWED` names them, with how much was read. */
-  let scanned: Promise<{ found: Finding[]; literals: number }> | undefined;
-  const scan = (): Promise<{ found: Finding[]; literals: number }> => (scanned ??= read());
-  async function read(): Promise<{ found: Finding[]; literals: number }> {
+  /**
+   * The check's own fixtures, which are the shapes it must catch, planted on purpose. Paths from
+   * the package root, as `where` names files.
+   */
+  const FIXTURES = new Set(['test/build-hygiene.test.ts', 'test/support/sql-order-aliases.ts']);
+
+  interface Scan {
+    readonly found: Finding[];
+    /** Literals with a `SELECT` in them, read under `src` and under `test`. */
+    readonly literals: { readonly src: number; readonly test: number };
+  }
+
+  /**
+   * Every finding in `packages/core/src` and `packages/core/test` (`P-392`), as `ALLOWED` names
+   * them, with how much was read. The tests' SQL is read too: a test that sorts a text id lists
+   * rows in an order nobody meant, and passes only until the ids cross a power of ten.
+   */
+  let scanned: Promise<Scan> | undefined;
+  const scan = (): Promise<Scan> => (scanned ??= read());
+  async function read(): Promise<Scan> {
     const found: Finding[] = [];
-    let literals = 0;
-    const walk = async (dir: string): Promise<void> => {
+    const literals = { src: 0, test: 0 };
+    const walk = async (dir: string, tree: 'src' | 'test'): Promise<void> => {
       for (const entry of await readdir(dir, { withFileTypes: true })) {
         const here = join(dir, entry.name);
-        if (entry.isDirectory()) await walk(here);
-        else if (entry.name.endsWith('.ts')) {
+        const file = relative(packageRoot, here);
+        if (entry.isDirectory()) await walk(here, tree);
+        else if (entry.name.endsWith('.ts') && !FIXTURES.has(file)) {
           for (const literal of templateLiterals(await readFile(here, 'utf8'))) {
-            if (/\bSELECT\b/u.test(literal.text)) literals += 1;
+            if (/\bSELECT\b/u.test(literal.text)) literals[tree] += 1;
             for (const hit of sortedAliases(literal.text, literal.line)) {
               found.push({
-                where: `${relative(srcRoot, here)} ${hit.clauses.join(', ')}`,
+                where: `${file} ${hit.clauses.join(', ')}`,
                 column: hit.column,
                 line: hit.line,
               });
@@ -1080,7 +1104,8 @@ describe('SQL that sorts by its own computed column', () => {
         }
       }
     };
-    await walk(srcRoot);
+    await walk(join(packageRoot, 'src'), 'src');
+    await walk(join(packageRoot, 'test'), 'test');
     return { found, literals };
   }
 
@@ -1098,11 +1123,18 @@ describe('SQL that sorts by its own computed column', () => {
     return { unexplained, stale: left.map((entry) => `${entry.where}: ${entry.column}`) };
   }
 
-  it('has none in packages/core/src that the allow-list does not explain', async () => {
+  it('has none in packages/core/src or test that the allow-list does not explain', async () => {
     const { found, literals } = await scan();
     // A floor on the reading itself: a lexer that lost its place would find no SQL, and this would
     // pass for ever while checking nothing.
-    assert.ok(literals > 300, `read only ${String(literals)} literals with a SELECT`);
+    assert.ok(
+      literals.src > 300,
+      `read only ${String(literals.src)} literals with a SELECT in src`,
+    );
+    assert.ok(
+      literals.test > 300,
+      `read only ${String(literals.test)} literals with a SELECT in test`,
+    );
     const { unexplained } = unmatched(found);
     assert.deepEqual(
       unexplained.map((one) => `${one.where} (line ${String(one.line)}): ${one.column}`),
@@ -1184,6 +1216,52 @@ describe('SQL that sorts by its own computed column', () => {
       column: '(o.id + 1)::text',
       clauses: ['ORDER BY'],
     },
+    // An alias written without `AS` (`P-392`).
+    {
+      sql: 'SELECT id::text id, name FROM object ORDER BY id',
+      column: 'id::text AS id',
+      clauses: ['ORDER BY'],
+    },
+    // A number made text by `to_char` rather than by a cast (`P-392`), and text joined under the
+    // name of a column it reads.
+    {
+      sql: "SELECT to_char(id, 'FM0000') AS code FROM object ORDER BY code",
+      column: "to_char(id, '…') AS code",
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: "SELECT 'p-' || id AS id FROM object ORDER BY 1",
+      column: "'…' || id AS id",
+      clauses: ['ORDER BY'],
+    },
+    // A CTE's or a subquery's text column, sorted by the level that reads it (`P-392`): bare,
+    // qualified, by ordinal, through `*`, and from a level below the one that names the CTE.
+    {
+      sql: 'WITH page AS (SELECT id::text AS id FROM object) SELECT id FROM page ORDER BY id',
+      column: 'id::text AS id (from page)',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'WITH page AS (SELECT id::text AS id FROM object) SELECT p.id FROM page p ORDER BY p.id',
+      column: 'id::text AS id (from page)',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'WITH page AS (SELECT id::text AS id FROM object) SELECT DISTINCT ON (id) * FROM page ORDER BY id',
+      column: 'id::text AS id (from page)',
+      clauses: ['DISTINCT ON', 'ORDER BY'],
+    },
+    {
+      sql: `WITH page AS (SELECT id::text AS id FROM object)
+            SELECT n FROM (SELECT id, 1 AS n FROM page ORDER BY 1) t`,
+      column: 'id::text AS id (from page)',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'SELECT s.id FROM other JOIN (SELECT id::text AS id FROM object) s ON true ORDER BY s.id',
+      column: 'id::text AS id (from s)',
+      clauses: ['ORDER BY'],
+    },
   ];
 
   /** The shapes that resolve an input column, or sort a value that is what it says. */
@@ -1203,8 +1281,27 @@ describe('SQL that sorts by its own computed column', () => {
     'SELECT lower(name) AS key FROM object ORDER BY key',
     // `GROUP BY` resolves an input column first.
     'SELECT id::text AS id FROM object GROUP BY id',
-    // The outer level reads the CTE's column as an input; this cannot see its type.
+    // A CTE's text column the outer level does not sort by, and one it sorts that is not text.
     'WITH x AS (SELECT id::text AS id FROM object) SELECT id FROM x',
+    'WITH x AS (SELECT id::text AS label, id FROM object) SELECT label FROM x ORDER BY id',
+    'WITH x AS (SELECT id FROM object) SELECT id FROM x ORDER BY x.id',
+    // Cast back to a number on the way out: the outer level sorts the number.
+    'WITH x AS (SELECT id::text AS id FROM object) SELECT id::bigint AS n FROM x ORDER BY n',
+    // A table aliased like a CTE's column, but not the CTE.
+    'WITH x AS (SELECT id::text AS id FROM object) SELECT o.id FROM object o ORDER BY o.id',
+    // Words that end an expression, or a type, are not aliases written without `AS`.
+    'SELECT CASE WHEN kind = $1 THEN 1 END FROM object ORDER BY 1',
+    'SELECT name IS NULL FROM object ORDER BY 1',
+    'SELECT name COLLATE "C" FROM object ORDER BY 1',
+    // Text joined under another name: a label or a key, nearly always text already (listed as
+    // not seen in the check's comment).
+    "SELECT 'p-' || name AS label FROM object ORDER BY label",
+    "SELECT concat(kind, ':', name) AS key FROM object ORDER BY key",
+    // An array whose elements are cast, which is not a cast of the array.
+    'SELECT ARRAY[name, id::text] AS path FROM object ORDER BY path',
+    'SELECT id::text[] AS ids FROM object ORDER BY ids',
+    // A cast of the last operand, not of the whole: `::` binds tighter than `||`.
+    "SELECT name || ':' || kind::text AS key FROM object ORDER BY key",
     // In a comment or a string, not SQL.
     "SELECT id FROM object -- id::text AS id ORDER BY id\n WHERE note = 'x::text AS x ORDER BY x'",
   ];

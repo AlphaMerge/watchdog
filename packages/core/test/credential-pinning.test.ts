@@ -3349,7 +3349,7 @@ describe(
     const history = (sensorId: number): Promise<{ state: string; previous: string | null }[]> =>
       db.query<{ state: string; previous: string | null }>(
         `SELECT state::text AS state, previous_state::text AS previous
-         FROM sensor_state WHERE sensor_id = $1 ORDER BY time, state`,
+         FROM sensor_state WHERE sensor_id = $1 ORDER BY time, sensor_state.state`,
         [sensorId],
       );
 

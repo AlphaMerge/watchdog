@@ -234,14 +234,14 @@ describe(
       // four hundred holes spread over every customer, forty of them with a grant inside.
       const deviceIds = (
         await db.query<{ id: string }>(
-          `SELECT id::text AS id FROM object WHERE kind = 'device' ORDER BY id`,
+          `SELECT id::text AS id FROM object WHERE kind = 'device' ORDER BY object.id`,
         )
       ).map((row) => Number(row.id));
       const carved = deviceIds.filter((_, index) => index % 5 === 0);
       const reopened = (
         await db.query<{ id: string }>(
           `SELECT DISTINCT ON (parent_id) id::text AS id FROM object
-           WHERE parent_id = ANY($1::bigint[]) ORDER BY parent_id, id`,
+           WHERE parent_id = ANY($1::bigint[]) ORDER BY parent_id, object.id`,
           [carved.filter((_, index) => index % 10 === 0)],
         )
       ).map((row) => Number(row.id));

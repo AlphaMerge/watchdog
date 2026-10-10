@@ -313,7 +313,7 @@ export class MapResolver {
          WHERE b.depth < ${String(MAX_WALK_DEPTH)}
        ),
        ranked AS (
-         SELECT b.root::text AS root, o.id::text AS id, o.name,
+         SELECT b.root, o.id::text AS id, o.name,
                 r.state::text AS state, r.message,
                 row_number() OVER (PARTITION BY b.root ORDER BY lower(o.name), o.id) AS rn
          FROM below b
@@ -321,7 +321,9 @@ export class MapResolver {
          JOIN sensor_runtime r ON r.object_id = o.id
          WHERE o.kind = 'sensor' AND ${visible}
        )
-       SELECT root, id, name, state, message FROM ranked WHERE rn <= $2 ORDER BY root, rn`,
+       -- The root made text on the way out, and sorted as the number it is (P-392).
+       SELECT root::text AS root, id, name, state, message FROM ranked
+       WHERE rn <= $2 ORDER BY ranked.root, rn`,
       values,
     );
 

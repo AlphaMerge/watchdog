@@ -116,7 +116,7 @@ describe(
       await access.grant(id['customerA'] ?? 0, id['teamA'] ?? 0, 'read', actorNamed('test'));
       await access.grant(id['customerB'] ?? 0, id['teamB'] ?? 0, 'read', actorNamed('test'));
       const admins = await db.query<{ id: string }>(
-        `SELECT id::text AS id FROM user_group WHERE is_admin ORDER BY id LIMIT 1`,
+        `SELECT id::text AS id FROM user_group WHERE is_admin ORDER BY user_group.id LIMIT 1`,
       );
       await db.query(`INSERT INTO user_group_member (group_id, user_id) VALUES ($1, $2)`, [
         Number(admins[0]?.id),

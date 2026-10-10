@@ -761,7 +761,7 @@ describe(
 
         const writers = await q.query<{ id: string; by: string; account: string | null }>(
           `SELECT id::text AS id, written_by AS by, written_by_user::text AS account
-           FROM discovery_schedule ORDER BY id`,
+           FROM discovery_schedule ORDER BY discovery_schedule.id`,
         );
         assert.deepEqual(
           writers.map(({ id, by, account }) => [id, by, account]),
