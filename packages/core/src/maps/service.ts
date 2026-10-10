@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { refusingTaken } from '../db/unique-constraints.js';
 import { AccessService, atLeast, grantedByLabel, type AccessRight } from '../auth/access.js';
 import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
 import type { Actor, AuditSink, MapAudit, MapBackgroundAudit } from '../objects/audit.js';
@@ -319,29 +320,34 @@ export class MapService {
     const minted = mintShareToken();
     return this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      // Checked rather than caught, the same way `create` checks a map name: a unique violation
-      // inside a transaction aborts it, and every statement after that fails for the wrong reason.
-      const clash = await tx.query<{ id: string }>(
-        `SELECT id FROM map_share
-         WHERE map_id = $1 AND lower(label) = lower($2) AND revoked_at IS NULL`,
-        [id, label],
-      );
-      if (clash.length > 0) {
-        throw new MapError('MAP_NAME_TAKEN', `this map already has a link called ${label}`, {
-          context: { mapId: id, phase: 'share' },
-        });
-      }
+      // Checked before the write, the same way `create` checks a map name, and checked again when
+      // `map_share_label_idx` refuses one a concurrent request made in between (`P-391`): the
+      // write is in a savepoint, so the transaction is still readable when it does.
+      const clash = async (q: Queryable): Promise<MapError | null> => {
+        const rows = await q.query<{ id: string }>(
+          `SELECT id FROM map_share
+           WHERE map_id = $1 AND lower(label) = lower($2) AND revoked_at IS NULL`,
+          [id, label],
+        );
+        return rows.length === 0
+          ? null
+          : new MapError('MAP_NAME_TAKEN', `this map already has a link called ${label}`, {
+              context: { mapId: id, phase: 'share' },
+            });
+      };
 
-      const share = await this.#repository.createShare(tx, id, {
-        label,
-        tokenHash: minted.tokenHash,
-        prefix: minted.prefix,
-        expiresAt: request.expiresAt,
-        createdBy: grantedByLabel(actor),
-        // The viewer, not the actor: the account whose rights were checked is the one a public
-        // view is resolved through (`A-22`).
-        createdByUser: viewer.userId,
-      });
+      const share = await refusingTaken(tx, 'map_share_label_idx', clash, (q) =>
+        this.#repository.createShare(q, id, {
+          label,
+          tokenHash: minted.tokenHash,
+          prefix: minted.prefix,
+          expiresAt: request.expiresAt,
+          createdBy: grantedByLabel(actor),
+          // The viewer, not the actor: the account whose rights were checked is the one a public
+          // view is resolved through (`A-22`).
+          createdByUser: viewer.userId,
+        }),
+      );
       await this.#audit.record(
         tx,
         actor,

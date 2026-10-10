@@ -20,6 +20,9 @@ export type ObjectErrorCode =
   | 'OBJECT_PRECONDITION_REQUIRED'
   | 'OBJECT_CREDENTIALS_WITHHELD'
   | 'OBJECT_CHANNEL_MODE_FIXED'
+  | 'OBJECT_GID_TAKEN'
+  | 'TEMPLATE_NAME_TAKEN'
+  | 'SCHEDULE_NAME_TAKEN'
   | 'OBJECT_TREE_BUSY'
   | 'OBJECT_PARAMS_NOT_CHECKED'
   | 'CREDENTIAL_VAULT_UNAVAILABLE';
@@ -51,6 +54,14 @@ export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
   // 409: the parameters are fine, and would make a new sensor; this sensor's channel refuses
   // them, since its stored samples and the new ones would mean two things on one series.
   OBJECT_CHANNEL_MODE_FIXED: 409,
+  // A probe object given a gid another probe object already holds (`P-391`). 409: the request is
+  // well formed and the tree is what refuses it; the sentence names the holder to a caller who
+  // can see it, as `PROBE_CONFLICT` does on the approval route (`P-386`).
+  OBJECT_GID_TAKEN: 409,
+  // A template or schedule given a name another already has (`P-391`). Both lists are read by
+  // anybody who may write either, so the one in the way is named.
+  TEMPLATE_NAME_TAKEN: 409,
+  SCHEDULE_NAME_TAKEN: 409,
   // Another change held the tree for longer than this one would wait (`P-229`). 503 with
   // `Retry-After`: nothing about the request was wrong, and the same one can succeed.
   OBJECT_TREE_BUSY: 503,

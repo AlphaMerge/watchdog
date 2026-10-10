@@ -38,6 +38,8 @@ import {
 import { testCatalogue } from './support/sensor-types.js';
 import { straddleAPowerOfTen } from './support/ids.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
@@ -1342,6 +1344,77 @@ describe(
       assert.ok(
         JSON.stringify(response.json()).includes('never monitor'),
         'and says so in terms an operator can act on',
+      );
+    });
+
+    // -------------------------------------------------------------------------------------
+    // A name another schedule already has (`P-391`).
+    // -------------------------------------------------------------------------------------
+
+    it('refuses a name another schedule has, naming it, on create and on a rename onto it', async () => {
+      const held = await schedules.create(testActor, {
+        name: 'Taken',
+        periods: 'mo:09:00-mo:17:00',
+      });
+      const sentence = `schedule ${String(held.id)} is already called Taken; choose another name`;
+
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/schedules',
+        payload: { name: 'Taken', periods: 'tu:09:00-tu:17:00' },
+      });
+      assert.equal(created.statusCode, 409);
+      const { error } = created.json<{ error: { code: string; message: string } }>();
+      assert.equal(error.code, 'SCHEDULE_NAME_TAKEN');
+      assert.equal(error.message, sentence);
+      assert.ok(!created.body.includes('schedule_name_key'), created.body);
+
+      const other = await schedules.create(testActor, {
+        name: 'Other',
+        periods: 'mo:09:00-mo:17:00',
+      });
+      const renamed = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/schedules/${String(other.id)}`,
+        payload: { name: 'Taken', periods: 'mo:09:00-mo:17:00' },
+      });
+      assert.equal(renamed.statusCode, 409);
+      assert.equal(renamed.json<{ error: { message: string } }>().error.message, sentence);
+
+      // Saved under its own name: nothing is in the way.
+      const kept = await schedules.update(
+        testActor,
+        held.id,
+        { name: 'Taken', periods: 'we:09:00-we:17:00' },
+        Visibility.EVERYTHING,
+      );
+      assert.equal(kept.name, 'Taken');
+    });
+
+    it('refuses it the same way when the other is committed after the check', async () => {
+      let creating: Promise<unknown> = Promise.resolve();
+      let raced = 0;
+      await db.tx(async (q) => {
+        const rows = await q.query<{ id: string }>(
+          `INSERT INTO schedule (name, periods, polarity, authored_as)
+           SELECT 'Raced', periods, polarity, authored_as FROM schedule
+           WHERE built_in_id IS NOT NULL LIMIT 1
+           RETURNING id::text AS id`,
+        );
+        raced = Number(rows[0]?.id);
+        creating = schedules
+          .create(testActor, { name: 'Raced', periods: 'mo:09:00-mo:17:00' })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await somebodyWaits(db, 'the create to wait on the other schedule');
+      });
+      const error = await within(10_000, 'the create to finish', creating);
+      assert.equal((error as { code?: string }).code, 'SCHEDULE_NAME_TAKEN', String(error));
+      assert.equal(
+        (error as Error).message,
+        `schedule ${String(raced)} is already called Raced; choose another name`,
       );
     });
   },

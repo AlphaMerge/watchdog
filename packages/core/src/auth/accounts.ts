@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { AppError, type Logger } from '@ms/shared';
 import { AuthError } from './errors.js';
-import type { Database, Queryable } from '../db/pool.js';
+import { uniqueViolation, type Database, type Queryable } from '../db/pool.js';
 import type { AccountAudit, Actor, AuditSink } from '../objects/audit.js';
 import { hashPassword, needsRehash, verifyPassword, spendVerificationTime } from './passwords.js';
 
@@ -100,7 +100,7 @@ export class AccountService {
       this.#logger.info({ login, role: request.role }, 'account created');
       return account;
     } catch (error: unknown) {
-      if (isUniqueViolation(error)) {
+      if (uniqueViolation(error) === 'user_account_login_idx') {
         throw new AuthError('ACCOUNT_EXISTS', `an account named ${login} already exists`);
       }
       throw error;
@@ -546,14 +546,6 @@ function read(row: AccountRow): Account {
 }
 
 /**
- * Whether this is PostgreSQL's unique-violation, through the wrapper the pool puts around it.
- *
- * **The pool wraps every driver error in an `AppError`**, carrying the SQLSTATE in `context`
- * rather than on the error itself — so the obvious `error.code === '23505'` matches nothing and
- * a duplicate login surfaces as a 500 instead of "that name is taken". The raw shape is still
- * accepted, for a query that has not been through the pool.
- */
-/**
  * The trigger `A-04` installs, seen through the pool's wrapper.
  *
  * Matched on SQLSTATE plus the sentence the trigger raises: `check_violation` alone covers every
@@ -564,10 +556,4 @@ function isReadonlyAdminViolation(error: unknown): boolean {
   if (!(error instanceof AppError)) return false;
   if (error.context['sqlstate'] !== '23514') return false;
   return error.message.includes('cannot be in a group that administers');
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  if (error instanceof AppError && error.context['sqlstate'] === '23505') return true;
-  return 'code' in error && error.code === '23505';
 }

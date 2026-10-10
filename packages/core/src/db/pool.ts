@@ -32,6 +32,11 @@ export const SQLSTATE = {
    * `Database` raises it at the `COMMIT` itself.
    */
   inFailedTransaction: '25P02',
+  /**
+   * `unique_violation`. Which rule was broken is the constraint's name, never the text: see
+   * `uniqueViolation` and `db/unique-constraints.ts` (`P-391`).
+   */
+  uniqueViolation: '23505',
 } as const;
 
 /**
@@ -748,6 +753,19 @@ export function postgresErrorIn(error: unknown): { error: object; sqlstate: stri
     current = (current as { cause?: unknown }).cause;
   }
   return undefined;
+}
+
+/**
+ * The unique constraint or index `error` broke (`P-391`), through however many layers wrap the
+ * driver's error; `''` for a unique violation that names none; null for anything else. A caller
+ * that refuses a duplicate switches on the name, so a second unique rule on the same table is
+ * never reported as the first.
+ */
+export function uniqueViolation(error: unknown): string | null {
+  const found = postgresErrorIn(error);
+  if (found?.sqlstate !== SQLSTATE.uniqueViolation) return null;
+  const { constraint } = found.error as { constraint?: unknown };
+  return typeof constraint === 'string' ? constraint : '';
 }
 
 function errorOf(value: unknown): Error {

@@ -1,5 +1,5 @@
 import { AppError, describeError, type Logger } from '@ms/shared';
-import { DatabaseError, postgresErrorIn, SQLSTATE } from '../db/pool.js';
+import { DatabaseError, postgresErrorIn, SQLSTATE, uniqueViolation } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
 import { MapError } from '../maps/errors.js';
 import { ReportError } from '../reports/errors.js';
@@ -251,7 +251,21 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
 
   if (error instanceof DatabaseError) {
     const sqlstate = error.sqlstate;
-    if (sqlstate === '23514' || sqlstate === '23503' || sqlstate === '23505') {
+    if (sqlstate === SQLSTATE.uniqueViolation) {
+      // **Every unique rule a route can break has a refusal of its own** (`P-391`,
+      // `db/unique-constraints.ts`), naming what is in the way. One that arrives here was missed
+      // there, so it says only what it can — not PostgreSQL's sentence, which names an index and
+      // not the object — and `logIfUnexpected` logs it as the bug it is.
+      return envelope(
+        409,
+        'OBJECT_INVALID',
+        'this change would duplicate something that must be unique; if somebody else was ' +
+          'changing the same thing at the same moment, read it again and retry',
+        { phase: error.context['phase'] ?? 'database' },
+        { sqlstate, ...(error.constraint === undefined ? {} : { constraint: error.constraint }) },
+      );
+    }
+    if (sqlstate === '23514' || sqlstate === '23503') {
       // A constraint or trigger that escaped a pre-check: the caller broke a real rule and
       // deserves to know which one. The constraint name goes out; the statement does not.
       return envelope(
@@ -319,6 +333,16 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
 
 /** Anything that escapes as a 500 is a bug; log it with everything we know. */
 export function logIfUnexpected(logger: Logger, error: unknown, status: number): void {
+  // Only the fallback above: a service's own refusal of a duplicate is not a surprise.
+  const unique = error instanceof DatabaseError ? uniqueViolation(error) : null;
+  if (unique !== null) {
+    // A 409, but not the caller's to fix: the rule should have been answered before the write.
+    logger.error(
+      { err: describeError(error), constraint: unique },
+      'a unique rule refused a write that nothing answered first (see db/unique-constraints.ts)',
+    );
+    return;
+  }
   if (status < 500) return;
   const sqlstate = postgresErrorIn(error)?.sqlstate;
   if (sqlstate === SQLSTATE.lockNotAvailable || sqlstate === SQLSTATE.queryCanceled) {

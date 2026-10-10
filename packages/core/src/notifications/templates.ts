@@ -1,6 +1,7 @@
 import type { Logger } from '@ms/shared';
 import { recipientId } from './recipients.js';
 import type { Database, Queryable } from '../db/pool.js';
+import { refusingTaken } from '../db/unique-constraints.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { Visibility } from '../auth/access.js';
 import { AuthError } from '../auth/errors.js';
@@ -547,7 +548,12 @@ export class TemplateService {
     const now = new Date();
     return this.#db.tx(async (q) => {
       await this.#requireSchedule(q, write.scheduleId);
-      const id = await this.#repo.create(q, write);
+      const id = await refusingTaken(
+        q,
+        'notification_template_name_key',
+        (inner) => nameTaken(inner, write.name, null),
+        (inner) => this.#repo.create(inner, write),
+      );
       await this.#audit.record(
         q,
         actor,
@@ -601,7 +607,12 @@ export class TemplateService {
           ? notificationMethods.secretsLeftBehind(write.method, input.settings, before.settings)
           : [];
       await this.#requireSchedule(q, write.scheduleId);
-      await this.#repo.update(q, id, write);
+      await refusingTaken(
+        q,
+        'notification_template_name_key',
+        (inner) => nameTaken(inner, write.name, id),
+        (inner) => this.#repo.update(inner, id, write),
+      );
       await this.#audit.record(
         q,
         actor,
@@ -896,6 +907,27 @@ function refuseNewAccounts(
 
 function recipientKey(recipient: Recipient): string {
   return `${recipient.kind}\u0000${recipient.value}`;
+}
+
+/**
+ * The refusal for a name another template already has, naming it, or null (`P-391`). Names are
+ * compared as `notification_template_name_key` compares them: exactly.
+ */
+async function nameTaken(q: Queryable, name: string, self: number | null): Promise<Error | null> {
+  const rows = await q.query<{ id: string }>(
+    'SELECT id::text AS id FROM notification_template WHERE name = $1 AND id IS DISTINCT FROM $2::bigint',
+    [name, self],
+  );
+  const held = rows[0];
+  if (held === undefined) return null;
+  return new ObjectError(
+    'TEMPLATE_NAME_TAKEN',
+    `template ${held.id} is already called ${name}; choose another name`,
+    {
+      context: { phase: 'templates', ...(self === null ? {} : { templateId: self }) },
+      details: { name, heldBy: Number(held.id) },
+    },
+  );
 }
 
 function notFound(id: number): ObjectError {

@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
-import type { Database, Queryable } from '../db/pool.js';
+import { uniqueViolation, type Database, type Queryable } from '../db/pool.js';
+import { refusingTaken } from '../db/unique-constraints.js';
 import type { Actor, AuditSink, GroupAudit, GroupRef, Mutation } from '../objects/audit.js';
 import { AuthError } from './errors.js';
 
@@ -92,9 +93,7 @@ export class GroupService {
       this.#logger.info({ name, isAdmin: request.isAdmin ?? false }, 'group created');
       return group;
     } catch (error: unknown) {
-      if (isUniqueViolation(error)) {
-        throw new AuthError('GROUP_EXISTS', `a group named ${name} already exists`);
-      }
+      if (uniqueViolation(error) === 'user_group_name_idx') throw groupExists(name);
       throw error;
     }
   }
@@ -160,8 +159,12 @@ export class GroupService {
     const values: unknown[] = [id, request.name ?? null, request.description ?? null];
     const setAdmin =
       request.isAdmin === undefined ? '' : `is_admin = $${String(values.push(request.isAdmin))},`;
-    const rows = await q.query<GroupRow>(
-      `UPDATE user_group g
+    // A rename onto another group's name (`P-391`) is refused as a create onto it is, where it
+    // reached `user_group_name_idx` and went out as PostgreSQL's sentence.
+    const rename = request.name;
+    const write = (inner: Queryable): Promise<GroupRow[]> =>
+      inner.query<GroupRow>(
+        `UPDATE user_group g
        SET name = COALESCE($2, name),
            description = COALESCE($3, description),
            ${setAdmin}
@@ -169,8 +172,23 @@ export class GroupService {
        WHERE g.id = $1
        RETURNING ${COLUMNS},
                  (SELECT count(*) FROM user_group_member m WHERE m.group_id = g.id) AS member_count`,
-      values,
-    );
+        values,
+      );
+    const rows =
+      rename === undefined
+        ? await write(q)
+        : await refusingTaken(
+            q,
+            'user_group_name_idx',
+            async (inner) => {
+              const taken = await inner.query<{ id: string }>(
+                'SELECT id::text AS id FROM user_group WHERE lower(name) = lower($1) AND id <> $2',
+                [rename, id],
+              );
+              return taken.length === 0 ? null : groupExists(rename);
+            },
+            write,
+          );
     const row = rows[0];
     if (row === undefined) throw new AuthError('GROUP_NOT_FOUND', `no group with id ${String(id)}`);
     const updated = read(row);
@@ -186,6 +204,17 @@ export class GroupService {
 
   async delete(id: number, actor: Actor): Promise<void> {
     const name = await this.#db.tx(async (q) => {
+      // The members' primary groups are locked before the group is (`P-391`): `addMember` takes
+      // an account's lock and then the group's row, so taking them the other way round here
+      // could wait on each other.
+      const before = await q.query<{ user_id: string }>(
+        'SELECT user_id::text AS user_id FROM user_group_member WHERE group_id = $1',
+        [id],
+      );
+      await lockPrimaries(
+        q,
+        before.map((row) => Number(row.user_id)),
+      );
       const existing = await locked(q, id);
       if (existing === null) {
         throw new AuthError('GROUP_NOT_FOUND', `no group with id ${String(id)}`);
@@ -224,6 +253,8 @@ export class GroupService {
       const gone: GroupRef = { groupId: id, groupName: existing.name };
       for (const member of members.filter((one) => one.is_primary)) {
         const userId = Number(member.user_id);
+        // Joined since the look above: locked now, as every other writer of a primary is.
+        await lockPrimaries(q, [userId]);
         const next = await this.#repairPrimary(q, userId);
         if (next !== null) {
           mutations.push({
@@ -296,6 +327,7 @@ export class GroupService {
    */
   async addMember(groupId: number, userId: number, actor: Actor, primary = false): Promise<void> {
     await this.#db.tx(async (q) => {
+      await lockPrimaries(q, [userId]);
       const found = await q.query<{
         name: string;
         is_admin: boolean;
@@ -384,6 +416,7 @@ export class GroupService {
    */
   async removeMember(groupId: number, userId: number, actor: Actor): Promise<void> {
     await this.#db.tx(async (q) => {
+      await lockPrimaries(q, [userId]);
       const removed = await q.query<{
         is_primary: boolean;
         name: string;
@@ -436,6 +469,7 @@ export class GroupService {
   /** Makes one of a user's existing groups their primary one. Audited when it moves (`A-18`). */
   async setPrimary(groupId: number, userId: number, actor: Actor): Promise<void> {
     await this.#db.tx(async (q) => {
+      await lockPrimaries(q, [userId]);
       const rows = await q.query<{ name: string; is_primary: boolean; login: string }>(
         `SELECT g.name, m.is_primary, a.login
          FROM user_group_member m
@@ -605,8 +639,27 @@ function isReadonlyAdminViolation(error: unknown): boolean {
   );
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return sqlstateOf(error) === '23505';
+/**
+ * Holds these accounts' primary groups until the transaction ends (`P-391`).
+ *
+ * Every writer of `is_primary` clears an account's old primary and then sets one, and two of them
+ * at once could each clear and each set: `user_group_primary_idx` refused the second, and its
+ * 23505 went out as PostgreSQL's sentence. Taken by `addMember`, `removeMember`, `setPrimary` and
+ * `delete`, several in ascending order, so two deletes take shared accounts in the same order. An
+ * advisory lock rather than the account's row, which a sign-in writes and would queue behind.
+ */
+async function lockPrimaries(q: Queryable, userIds: readonly number[]): Promise<void> {
+  for (const userId of [...new Set(userIds)].sort((a, b) => a - b)) {
+    await q.query(
+      "SELECT pg_advisory_xact_lock(hashtext('user_group_primary_idx'), hashtext($1::text))",
+      [userId],
+    );
+  }
+}
+
+/** A group name another group has, as `user_group_name_idx` compares them: ignoring case. */
+function groupExists(name: string): AuthError {
+  return new AuthError('GROUP_EXISTS', `a group named ${name} already exists`);
 }
 
 function isForeignKeyViolation(error: unknown): boolean {

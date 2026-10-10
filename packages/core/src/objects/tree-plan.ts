@@ -134,6 +134,21 @@ export function planTree(input: TreePlanInput, parentKind: ObjectKind): TreePlan
     byRef.set(node.ref, index);
   });
 
+  // Two probes claiming one gid (`P-391`): `probe_config_gid_unique` refused the second as a
+  // sentence about an index, and only after the first was written.
+  const byGid = new Map<string, number>();
+  nodes.forEach((node, index) => {
+    if (node.kind !== 'probe' || typeof node.gid !== 'string') return;
+    const seen = byGid.get(node.gid);
+    if (seen !== undefined) {
+      throw invalid(
+        `two nodes both claim probe ${node.gid} (${String(seen)} and ${String(index)}${describeRef(node.ref)})`,
+        { gid: node.gid, first: seen, second: index },
+      );
+    }
+    byGid.set(node.gid, index);
+  });
+
   const planned: PlannedNode[] = nodes.map((node, index) => {
     if (node.parentRef === undefined) {
       return {

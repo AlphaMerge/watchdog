@@ -14588,13 +14588,70 @@ because each is a decision rather than a defect:
       - **Not done.** `fast-json-stringify`'s own Ajv stays lax. It is not configurable, and
         it does not need to be once every schema it reads has compiled strict first.
 
-- [ ] **P-391 — an unmapped unique violation answers with the constraint's name** · S · P-386 ·
+- [x] **P-391 — an unmapped unique violation answers with the constraint's name** · S · P-386 ·
       Found 2026-10-09 in `P-386`. `toHttpError`'s general 23505 branch (`api/errors.ts`)
       answers any unmapped unique violation as `409 OBJECT_INVALID` with PostgreSQL's message,
       which names the constraint and not the object in the way. That is how `P-386` hid.
       **Done when** every unique constraint a route can reach is listed, each has its own
       refusal naming what is in the way (to callers allowed to see it), and a test fails when a
       new constraint is reachable without one.
+
+      **P-391 outcome. All 77 unique constraints and indexes are listed in
+      `db/unique-constraints.ts`, each either refused by its service or unreachable with the
+      reason, and a test fails for one that is not. Five could be reached and answered with
+      PostgreSQL's sentence; each now has its own refusal.**
+      - **The sweep.** Every write to every table with a unique rule, from every route. What a
+        route could break, and what it got:
+
+        | Rule | Route | Now |
+        | --- | --- | --- |
+        | `probe_config_gid_unique` | `POST /objects`, `POST /objects/tree`, `PATCH /objects/:id` with a probe's `gid` | `409 OBJECT_GID_TAKEN` |
+        | `notification_template_name_key` | `POST`, `PUT /templates` | `409 TEMPLATE_NAME_TAKEN` |
+        | `schedule_name_key` | `POST`, `PUT /schedules` | `409 SCHEDULE_NAME_TAKEN` |
+        | `user_group_name_idx` | `PUT /groups/:id` (a rename; create was refused already) | `409 GROUP_EXISTS` |
+        | `probe_registration_object_idx` | two approvals onto one branch at once | `409 PROBE_CONFLICT` |
+        | `user_group_primary_idx` | two writers of one account's primary group at once | serialised |
+        | `map_share_label_idx` | a share label committed between the check and the write | `409 MAP_NAME_TAKEN` |
+
+        Every other rule is unreachable: no route writes the table, the key is generated, an
+        `ON CONFLICT` absorbs it, or a lock serialises the writers. Each says which.
+      - **The usual shape is `refusingTaken`**: a read of what is in the way before the write,
+        and the constraint as the backstop, the write in a savepoint so a row another transaction
+        commits in between is read and named too. Constraint names are typed against the
+        registry, so a misspelt one does not compile.
+      - **Who is named.** A probe gid names the probe object holding it to a writer who can see
+        it (`answeredSight`) and says *another probe object* to one who cannot, since which branch
+        a probe serves is not something a hidden subtree tells. Templates and schedules are listed
+        to anybody who may write one, so the one in the way is named by id.
+      - **Two in one request.** A tree whose two probe nodes claim one gid is a `400
+        OBJECT_INVALID` naming both nodes, before anything is written. Each level of a tree checks
+        only its own gids, so a probe the level before it wrote is not taken for somebody else.
+      - **The two races are locks, not refusals.** `ProbeRegistry.approve` takes the branch's
+        advisory lock before its check, so a second approval waits and then reads the first as
+        the holder. `addMember`, `removeMember`, `setPrimary` and group `delete` take an advisory
+        lock per account, so two of them cannot each clear and each set a primary. An advisory lock
+        rather than the account row, which a sign-in writes. `delete` takes its members' locks
+        before the group's row, the order `addMember` takes them in.
+      - **`uniqueViolation(error)`** (`db/pool.ts`) returns the constraint a 23505 broke, through
+        the pool's wrapper. `accounts.ts`, `groups.ts` and `tokens.ts` each had their own check
+        that took *any* 23505 as "the name is taken", so a token-hash collision would have read as a
+        duplicate token name. They now switch on the constraint.
+      - **The fallback.** A 23505 that still reaches `toHttpError` is a `409 OBJECT_INVALID` that
+        says something must be unique and to read again and retry, not PostgreSQL's sentence. The
+        constraint stays in `details`, and `logIfUnexpected` logs it at error, since reaching it
+        means the registry is wrong.
+      - **Tests.** `unique-constraints.test.ts` (new): the schema's unique indexes, read from a
+        migrated database, against the registry, both ways (it found `credential_set_pkey` left
+        out); each `refused` code thrown somewhere in `src`; `refusingTaken`'s three paths on a
+        table of its own; the fallback's sentence and its log line; `uniqueViolation`. Per rule:
+        `objects-service.test.ts` 6, `templates.test.ts` 3, `schedules.test.ts` 2, `groups.test.ts`
+        2, `probe-registry.test.ts` 1. Each race test holds the other row, or the lock, in a second
+        session, uncommitted, until the call under test waits on it, then commits, the way
+        `P-386`'s backstop test does: without the fix, each meets the constraint. **Mutations**
+        (restored with an mtime that moves, so `tsc -b` rebuilds): no gid check 5; every level
+        claiming the whole tree's gids 1; two gids in one tree unchecked 1; no backstop 4; no
+        template check 2; no schedule check 2; no rename check 1; no account lock 1; no branch
+        lock 1; the fallback saying PostgreSQL's sentence 1.
 
 - [ ] **P-392 — the alias-sort check's blind spots and the tests it does not read** · S · P-389 ·
       Found 2026-10-09 in `P-389`. Six test queries sort by a text-cast id alias:
@@ -14605,6 +14662,28 @@ because each is a decision rather than a defect:
       are qualified, the check reads `packages/core/test` too, and the blind spots are covered
       or listed in the check's own comment. `P-388` must delete its two `ALLOWED` entries if it
       qualifies them.
+
+- [ ] **P-393 — a new built-in schedule stops the core starting when an operator's has its name** ·
+      XS · P-391 · Found 2026-10-10 in `P-391`. `ScheduleRepository.seed` inserts each built-in
+      with `ON CONFLICT (built_in_id) DO NOTHING`, which does not cover `schedule_name_key`. A
+      build that adds a built-in whose name an operator already gave a schedule of their own
+      raises 23505 at start-up, and nothing catches it. **Done when** the seed decides what
+      happens then (rename the built-in, adopt the operator's, or refuse with a sentence that says
+      which schedule to rename), with a test.
+
+- [ ] **P-394 — a state row lost when ingestion and a route write one sensor in the same
+      millisecond** · S · P-108 · Found 2026-10-10 in `P-391`'s sweep, not reproduced.
+      `writeStateHistory` inserts `sensor_state` with `ON CONFLICT (sensor_id, time) DO
+      NOTHING`. Ingestion writes it before it takes the runtime row's lock, so a route that
+      re-evaluates the same sensor in the same millisecond can have its row dropped while
+      `sensor_runtime` still moves: the divergence `runtime.ts` describes for `P-108`. **Done
+      when** it is reproduced or shown unreachable, and fixed if it is reachable.
+
+- [ ] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
+      2026-10-10 in `P-391`. `GroupService.create` trims the name and refuses a blank one;
+      `update` stores what it is sent, so `" On call"` is a different group name from `"On call"`
+      only when it came in through a rename. **Done when** both go through one check, with a
+      test.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

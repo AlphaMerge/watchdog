@@ -8,6 +8,9 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor, type Harness } from './support/tree.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
+import type { Writer } from '../src/objects/sensor-reads.js';
 import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
@@ -877,6 +880,125 @@ describe(
       );
       return Number(rows[0]?.count ?? 0);
     }
+
+    // ── a probe gid another probe object holds (P-391) ───────────────────────────────────
+
+    describe('a probe gid another probe object holds (P-391)', () => {
+      const probe = async (name: string, gid: string | null = null): Promise<ObjectId> =>
+        (await h.service.create(testActor, { kind: 'probe', parentId: h.rootId, name, gid })).id;
+      const named = (gid: string, holder: ObjectId): string =>
+        `probe ${gid} already belongs to probe object ${String(holder)}; clear it there first`;
+
+      /** An account that sees nothing of the tree, as somebody granted one branch sees another. */
+      const blind: Writer = {
+        kind: 'user',
+        userId: 7,
+        login: 'blind',
+        voucher: {
+          kind: 'account',
+          userId: 7,
+          sees: Visibility.nothing(null),
+          writes: () => Promise.resolve(new Set()),
+        },
+      };
+
+      it('is refused on create, naming the holder, and nothing is written', async () => {
+        const holder = await probe('Edge', 'edge-01');
+        const error = await rejects(() => probe('Second', 'edge-01'));
+        assert.equal(error.code, 'OBJECT_GID_TAKEN');
+        assert.equal(error.status, 409);
+        assert.equal(error.message, named('edge-01', holder));
+        assert.deepEqual(error.details, { gid: 'edge-01', heldBy: holder });
+        const rows = await scratch.db.query("SELECT 1 FROM object WHERE name = 'Second'");
+        assert.equal(rows.length, 0);
+      });
+
+      it('names no holder to a writer who cannot see it', async () => {
+        await probe('Edge', 'edge-01');
+        const error = await rejects(() =>
+          h.service.create(blind, {
+            kind: 'probe',
+            parentId: h.rootId,
+            name: 'Second',
+            gid: 'edge-01',
+          }),
+        );
+        assert.equal(error.code, 'OBJECT_GID_TAKEN');
+        assert.equal(error.message, 'probe edge-01 already belongs to another probe object');
+        assert.deepEqual(error.details, { gid: 'edge-01' });
+      });
+
+      it('is refused on an update onto it, and an update keeping its own is not', async () => {
+        const holder = await probe('Edge', 'edge-01');
+        const other = await probe('Other', 'other-01');
+        const error = await rejects(() =>
+          h.service.update(testActor, other, { kind: 'probe', gid: 'edge-01' }, { kind: 'none' }),
+        );
+        assert.equal(error.code, 'OBJECT_GID_TAKEN');
+        assert.equal(error.message, named('edge-01', holder));
+        const kept = await h.service.update(
+          testActor,
+          holder,
+          { kind: 'probe', name: 'Edge, renamed', gid: 'edge-01' },
+          { kind: 'none' },
+        );
+        assert.equal(kept.name, 'Edge, renamed');
+      });
+
+      it('is refused in a tree, held already or claimed twice in the one request', async () => {
+        const holder = await probe('Edge', 'edge-01');
+        const held = await rejects(() =>
+          h.service.createTree(testActor, {
+            parentId: h.rootId,
+            nodes: [{ kind: 'probe', name: 'Tree probe', gid: 'edge-01' }],
+          }),
+        );
+        assert.equal(held.code, 'OBJECT_GID_TAKEN');
+        assert.equal(held.message, named('edge-01', holder));
+
+        const twice = await rejects(() =>
+          h.service.createTree(testActor, {
+            parentId: h.rootId,
+            nodes: [
+              { kind: 'probe', name: 'One', gid: 'new-01' },
+              { kind: 'probe', name: 'Two', gid: 'new-01', ref: 'two' },
+            ],
+          }),
+        );
+        assert.equal(twice.code, 'OBJECT_INVALID');
+        assert.equal(twice.message, 'two nodes both claim probe new-01 (0 and 1 ("two"))');
+      });
+
+      it('does not refuse a tree its own gid, once a level has written it', async () => {
+        // Each level is checked for the gids it claims: the group's level must not find the
+        // probe the level before it wrote holding `site-01` and call that somebody else.
+        const made = await h.service.createTree(testActor, {
+          parentId: h.rootId,
+          nodes: [
+            { kind: 'probe', name: 'Site probe', gid: 'site-01', ref: 'site' },
+            { kind: 'group', name: 'Site', parentRef: 'site' },
+          ],
+        });
+        assert.equal(made.count, 2);
+      });
+
+      it('is refused the same way when the holder is committed after the check', async () => {
+        const other = await probe('Other');
+        let creating: Promise<unknown> = Promise.resolve();
+        await scratch.db.tx(async (q) => {
+          await q.query("UPDATE probe_config SET gid = 'raced-01' WHERE object_id = $1", [other]);
+          creating = probe('Second', 'raced-01').then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+          await somebodyWaits(scratch.db, 'the create to wait on the other probe');
+        });
+        const error = await within(10_000, 'the create to finish', creating);
+        assert.ok(error instanceof ObjectError, String(error));
+        assert.equal(error.code, 'OBJECT_GID_TAKEN');
+        assert.equal(error.message, named('raced-01', other));
+      });
+    });
 
     async function rejectsAny(fn: () => Promise<unknown>): Promise<unknown> {
       try {

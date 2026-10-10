@@ -3,6 +3,7 @@ import { isRestricted, restrictionOf } from '@ms/sensors';
 import { exceptionProblem, MAX_EXCEPTION_ADDRESSES, type Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
+import { refusingTaken } from '../db/unique-constraints.js';
 import type { Reach, Visibility } from '../auth/access.js';
 import { AuthError } from '../auth/errors.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
@@ -42,6 +43,7 @@ import {
 } from './credential-vouching.js';
 import {
   actorOf,
+  answeredSight,
   assertMayName,
   voucherOf,
   voucherSight,
@@ -1654,6 +1656,70 @@ export class ObjectService {
   }
 
   /**
+   * The refusal for a probe gid that another probe object already holds (`P-391`), or null.
+   *
+   * `probe_config_gid_unique` refused it before, and its 23505 went out as PostgreSQL's sentence,
+   * which names the index and not the object in the way (`P-386` found the same on the approval
+   * route). The holder is named to a writer who can see it, and called *another probe object*
+   * to one who cannot: which branch a probe serves is not something a hidden subtree tells.
+   * `claims` pairs each gid with the object it is for, null for one not written yet, so an object
+   * that keeps its own gid is not refused for holding it.
+   */
+  async #heldGid(
+    q: Queryable,
+    writer: Writer,
+    claims: readonly { readonly gid: string; readonly objectId: ObjectId | null }[],
+    phase: string,
+  ): Promise<ObjectError | null> {
+    const rows = await q.query<{ gid: string; object_id: string }>(
+      'SELECT gid, object_id::text AS object_id FROM probe_config WHERE gid = ANY($1::text[])',
+      [claims.map((claim) => claim.gid)],
+    );
+    for (const claim of claims) {
+      const held = rows.find(
+        (row) => row.gid === claim.gid && Number(row.object_id) !== claim.objectId,
+      );
+      if (held === undefined) continue;
+      const holder = Number(held.object_id);
+      const sight = await answeredSight(q, writer);
+      const named =
+        sight === null || sight.everything || (await sight.visibleAmong(q, [holder])).has(holder);
+      return new ObjectError(
+        'OBJECT_GID_TAKEN',
+        named
+          ? `probe ${claim.gid} already belongs to probe object ${String(holder)}; clear it there first`
+          : `probe ${claim.gid} already belongs to another probe object`,
+        {
+          context: {
+            phase,
+            gid: claim.gid,
+            ...(claim.objectId === null ? {} : { objectId: claim.objectId }),
+          },
+          details: named ? { gid: claim.gid, heldBy: holder } : { gid: claim.gid },
+        },
+      );
+    }
+    return null;
+  }
+
+  /** `write`, refused when a gid it claims is held elsewhere (`#heldGid`, `refusingTaken`). */
+  #claimingGids<T>(
+    q: Queryable,
+    writer: Writer,
+    claims: readonly { readonly gid: string; readonly objectId: ObjectId | null }[],
+    phase: string,
+    write: (q: Queryable) => Promise<T>,
+  ): Promise<T> {
+    if (claims.length === 0) return write(q);
+    return refusingTaken(
+      q,
+      'probe_config_gid_unique',
+      (inner) => this.#heldGid(inner, writer, claims, phase),
+      write,
+    );
+  }
+
+  /**
    * Runs a write in a transaction, or runs it and takes it back (`U-21`).
    *
    * **A preview is the write itself, rolled back, and not a second calculation of what the write
@@ -2007,7 +2073,15 @@ export class ObjectService {
       if (parent === null) throw parentNotFound(normalised.parentId);
       if (!parent.accepts) throw parentKindInvalid(normalised.kind, parent.kind);
 
-      const id = await this.#repo.insert(q, normalised);
+      const id = await this.#claimingGids(
+        q,
+        writer,
+        normalised.kind === 'probe' && typeof normalised.gid === 'string'
+          ? [{ gid: normalised.gid, objectId: null }]
+          : [],
+        'create',
+        (inner) => this.#repo.insert(inner, normalised),
+      );
 
       if (normalised.kind === 'sensor') {
         await this.#checkReads(q, writer, [id], {
@@ -2112,14 +2186,22 @@ export class ObjectService {
           node,
           input: this.#normalisedFor(node.input, input.parentId),
         }));
-        const written = await this.#repo.createLevel(
-          q,
-          normalised.map(({ node, input: filled }) => ({
-            // Resolved here rather than in the planner because only this point knows the ids:
-            // the planner works in indices, which is what makes it testable without a database.
-            parentId: node.parentId ?? ids.get(node.parentIndex ?? -1) ?? input.parentId,
-            input: filled,
-          })),
+        // This level's gids only: a probe an earlier level wrote holds its own by then.
+        const claims = normalised.flatMap(({ input: filled }) =>
+          filled.kind === 'probe' && typeof filled.gid === 'string'
+            ? [{ gid: filled.gid, objectId: null }]
+            : [],
+        );
+        const written = await this.#claimingGids(q, writer, claims, 'create-tree', (inner) =>
+          this.#repo.createLevel(
+            inner,
+            normalised.map(({ node, input: filled }) => ({
+              // Resolved here rather than in the planner because only this point knows the ids:
+              // the planner works in indices, which is what makes it testable without a database.
+              parentId: node.parentId ?? ids.get(node.parentIndex ?? -1) ?? input.parentId,
+              input: filled,
+            })),
+          ),
         );
         normalised.forEach(({ node, input: filled }, at) => {
           const id = written[at];
@@ -2468,7 +2550,15 @@ export class ObjectService {
             }
           : patch;
 
-      const updated = await this.#repo.update(q, id, applied, pre);
+      const updated = await this.#claimingGids(
+        q,
+        writer,
+        applied.kind === 'probe' && typeof applied.gid === 'string'
+          ? [{ gid: applied.gid, objectId: id }]
+          : [],
+        'update',
+        (inner) => this.#repo.update(inner, id, applied, pre),
+      );
 
       // What the new parameters change about the channels the sensor has (`P-303`): written to
       // match, or the edit refused when it would turn one from a counter into a gauge or back.

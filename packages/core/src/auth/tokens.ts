@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { Logger } from '@ms/shared';
-import type { Database, Queryable } from '../db/pool.js';
+import { uniqueViolation, type Database, type Queryable } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { cappedBy, grantedByLabel, type AccessRight } from './access.js';
 import type { AccountRole } from './accounts.js';
@@ -148,7 +148,7 @@ export class TokenService {
       this.#logger.info({ userId: owner.userId, name, scope }, 'api token issued');
       return { token, secret };
     } catch (error: unknown) {
-      if (isUniqueViolation(error)) {
+      if (uniqueViolation(error) === 'api_token_name_idx') {
         throw new AuthError('TOKEN_EXISTS', `this account already has a token named ${name}`);
       }
       throw error;
@@ -336,13 +336,4 @@ function read(row: TokenRow): ApiToken {
     revokedAt: row.revoked_at === null ? null : row.revoked_at.toISOString(),
     createdAt: row.created_at.toISOString(),
   };
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  if ('context' in error) {
-    const context = (error as { context?: Record<string, unknown> }).context;
-    if (context?.['sqlstate'] === '23505') return true;
-  }
-  return 'code' in error && error.code === '23505';
 }

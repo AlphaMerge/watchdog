@@ -359,6 +359,38 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       );
     });
 
+    it('refuses the second of two identities approved onto one branch at once (P-391)', async () => {
+      // The other session binds the first identity to the branch and has not committed: the
+      // check before the write could not see it, and the second approval's write met
+      // `probe_registration_object_idx` instead. The branch's lock makes the second wait and then
+      // read the first as the holder.
+      const first = await registry.admit(hello());
+      const second = await registry.admit(hello({ gid: 'another-machine' }));
+      assert.ok(first.kind === 'pending' && second.kind === 'pending');
+
+      let approving: Promise<unknown> = Promise.resolve();
+      await db.tx(async (q) => {
+        await q.query(
+          "SELECT pg_advisory_xact_lock(hashtext('probe_registration_object_idx'), hashtext($1::text))",
+          [probeId],
+        );
+        await q.query(
+          "UPDATE probe_registration SET status = 'approved', object_id = $2 WHERE gid = $1",
+          [first.gid, probeId],
+        );
+        approving = registry.approve(second.gid, probeId, testActor).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await somebodyWaits(db, 'the second approval to wait on the branch');
+      });
+      const error = await within(10_000, 'the second approval to finish', approving);
+      assert.ok(error instanceof ProbeRegistryError, String(error));
+      assert.equal(error.code, 'PROBE_CONFLICT');
+      assert.equal(error.message, `that probe object already belongs to ${first.gid}`);
+      assert.equal((await registry.get(second.gid))?.status, 'pending', 'and decided nothing');
+    });
+
     it('reports a probe that is not there', async () => {
       await assert.rejects(
         () => registry.approve('never-seen', probeId, testActor),

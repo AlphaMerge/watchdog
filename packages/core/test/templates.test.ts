@@ -23,6 +23,8 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
@@ -959,5 +961,82 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
     assert.equal(response.statusCode, 409, 'the request is fine; the state of the world refuses');
     const body = response.json<{ error: { details: { usedBy: unknown[] } } }>();
     assert.equal(body.error.details.usedBy.length, 1);
+  });
+
+  describe('a name another template already has (P-391)', () => {
+    const create = (name: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/templates',
+        payload: { name, method: 'webhook', settings: { url: 'https://example.test/hook' } },
+      });
+
+    it('is refused on create, naming the template that has it, and not the index', async () => {
+      const first = await create('Pager');
+      assert.equal(first.statusCode, 201);
+      const id = first.json<{ id: number }>().id;
+
+      const second = await create('Pager');
+      assert.equal(second.statusCode, 409);
+      const { error } = second.json<{ error: { code: string; message: string } }>();
+      assert.equal(error.code, 'TEMPLATE_NAME_TAKEN');
+      assert.equal(
+        error.message,
+        `template ${String(id)} is already called Pager; choose another name`,
+      );
+      assert.ok(!second.body.includes('notification_template_name_key'), second.body);
+      assert.ok(!second.body.includes('duplicate key'), second.body);
+    });
+
+    it('is refused on a rename onto it, and a save that keeps its own name is not', async () => {
+      const pager = (await create('Pager')).json<{ id: number }>().id;
+      const other = (await create('Other')).json<{ id: number }>().id;
+      const put = (id: number, name: string) =>
+        app.inject({
+          method: 'PUT',
+          url: `/api/v1/templates/${String(id)}`,
+          payload: { name, method: 'webhook', settings: { url: 'https://example.test/hook' } },
+        });
+
+      const renamed = await put(other, 'Pager');
+      assert.equal(renamed.statusCode, 409);
+      assert.equal(
+        renamed.json<{ error: { message: string } }>().error.message,
+        `template ${String(pager)} is already called Pager; choose another name`,
+      );
+      assert.equal((await put(pager, 'Pager')).statusCode, 200);
+    });
+
+    it('is refused the same way when the other is committed after the check', async () => {
+      // The other session holds a template called Race, not yet committed: the check before the
+      // write does not see it, the write waits on the index, and the commit makes it a 23505.
+      let creating: Promise<unknown> = Promise.resolve();
+      let raced = 0;
+      await db.tx(async (q) => {
+        const rows = await q.query<{ id: string }>(
+          `INSERT INTO notification_template (name, method, settings)
+           VALUES ('Race', 'webhook', '{"url": "https://example.test/hook"}')
+           RETURNING id::text AS id`,
+        );
+        raced = Number(rows[0]?.id);
+        creating = templates
+          .create(testActor, {
+            name: 'Race',
+            method: 'webhook',
+            settings: { url: 'https://example.test/hook' },
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        await somebodyWaits(db, 'the create to wait on the other template');
+      });
+      const error = await within(10_000, 'the create to finish', creating);
+      assert.equal((error as { code?: string }).code, 'TEMPLATE_NAME_TAKEN', String(error));
+      assert.equal(
+        (error as Error).message,
+        `template ${String(raced)} is already called Race; choose another name`,
+      );
+    });
   });
 });

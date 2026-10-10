@@ -13,6 +13,8 @@ import {
 } from './support/database.js';
 import { testActor } from './support/tree.js';
 import { DatabaseAuditSink } from '../src/audit/store.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 
 /**
  * User groups and the primary group (`A-02`).
@@ -296,6 +298,65 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
 
     it('refuses an empty name', async () => {
       await assert.rejects(() => groups.create({ name: '   ' }, testActor), /between 1 and 100/);
+    });
+
+    it('refuses a rename onto another group’s name, whatever its case (P-391)', async () => {
+      await groups.create({ name: 'On call' }, testActor);
+      const other = await groups.create({ name: 'Night shift' }, testActor);
+      await assert.rejects(
+        () => groups.update(other.id, { name: 'ON CALL' }, testActor),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, 'GROUP_EXISTS');
+          assert.equal((error as Error).message, 'a group named ON CALL already exists');
+          return true;
+        },
+      );
+      // Its own name, in another case: nothing else is in the way.
+      assert.equal(
+        (await groups.update(other.id, { name: 'NIGHT SHIFT' }, testActor)).name,
+        'NIGHT SHIFT',
+      );
+    });
+  });
+
+  describe('a primary group written by two at once (P-391)', () => {
+    it('waits for the other, and then joins as a second group rather than a second primary', async () => {
+      // The account belongs nowhere, so joining a group makes it primary. Another session makes
+      // a different group its primary and has not committed: without the account's lock the
+      // join passed the "belongs nowhere" check, and `user_group_primary_idx` refused it.
+      await db.query('DELETE FROM user_group_member WHERE user_id = $1', [userId]);
+      const first = await groups.create({ name: 'First' }, testActor);
+      const second = await groups.create({ name: 'Second' }, testActor);
+
+      let joining: Promise<unknown> = Promise.resolve();
+      await db.tx(async (q) => {
+        await q.query(
+          "SELECT pg_advisory_xact_lock(hashtext('user_group_primary_idx'), hashtext($1::text))",
+          [userId],
+        );
+        await q.query(
+          'INSERT INTO user_group_member (group_id, user_id, is_primary) VALUES ($1, $2, true)',
+          [second.id, userId],
+        );
+        joining = groups.addMember(first.id, userId, testActor).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await somebodyWaits(db, 'the join to wait on the account');
+      });
+      assert.equal(await within(10_000, 'the join to finish', joining), undefined);
+
+      const rows = await db.query<{ group_id: string; is_primary: boolean }>(
+        'SELECT group_id::text AS group_id, is_primary FROM user_group_member WHERE user_id = $1 ORDER BY group_id',
+        [userId],
+      );
+      assert.deepEqual(
+        rows.map((row) => [Number(row.group_id), row.is_primary]),
+        [
+          [first.id, false],
+          [second.id, true],
+        ].sort((a, b) => Number(a[0]) - Number(b[0])),
+      );
     });
   });
 

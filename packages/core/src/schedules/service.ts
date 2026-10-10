@@ -1,5 +1,6 @@
 import type { Logger } from '@ms/shared';
-import type { Database } from '../db/pool.js';
+import type { Database, Queryable } from '../db/pool.js';
+import { refusingTaken } from '../db/unique-constraints.js';
 import { Visibility } from '../auth/access.js';
 import type { Actor, AuditSink, ScheduleAudit } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
@@ -150,7 +151,12 @@ export class ScheduleService {
   async create(actor: Actor, input: ScheduleInput, now = new Date()): Promise<ScheduleView> {
     const write = this.#parse(input);
     return this.#db.tx(async (q) => {
-      const id = await this.#repo.create(q, write, null);
+      const id = await refusingTaken(
+        q,
+        'schedule_name_key',
+        (inner) => nameTaken(inner, write.name, null),
+        (inner) => this.#repo.create(inner, write, null),
+      );
       await this.#audit.record(
         q,
         actor,
@@ -186,7 +192,12 @@ export class ScheduleService {
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);
 
-      await this.#repo.update(q, id, write);
+      await refusingTaken(
+        q,
+        'schedule_name_key',
+        (inner) => nameTaken(inner, write.name, id),
+        (inner) => this.#repo.update(inner, id, write),
+      );
       await this.#audit.record(
         q,
         actor,
@@ -405,6 +416,27 @@ export class ScheduleService {
       definition,
     };
   }
+}
+
+/**
+ * The refusal for a name another schedule already has, naming it, or null (`P-391`). Names are
+ * compared as `schedule_name_key` compares them: exactly.
+ */
+async function nameTaken(q: Queryable, name: string, self: number | null): Promise<Error | null> {
+  const rows = await q.query<{ id: string }>(
+    'SELECT id::text AS id FROM schedule WHERE name = $1 AND id IS DISTINCT FROM $2::bigint',
+    [name, self],
+  );
+  const held = rows[0];
+  if (held === undefined) return null;
+  return new ObjectError(
+    'SCHEDULE_NAME_TAKEN',
+    `schedule ${held.id} is already called ${name}; choose another name`,
+    {
+      context: { phase: 'schedules', ...(self === null ? {} : { scheduleId: self }) },
+      details: { name, heldBy: Number(held.id) },
+    },
+  );
 }
 
 function notFound(id: number): ObjectError {

@@ -464,6 +464,14 @@ export class ProbeRegistry {
     const local = options.local ?? false;
     const approved = await this.#db.tx(async (q) => {
       const existing = await this.#lock(q, gid);
+      // **The branch is held from here until this approval commits** (`P-391`). `#lock` holds
+      // this identity's row, not the branch's, so two identities approved onto one branch at once
+      // both passed the check below, and `probe_registration_object_idx` refused the second as
+      // PostgreSQL's sentence. Now the second waits, and then reads the first as the holder.
+      await q.query(
+        "SELECT pg_advisory_xact_lock(hashtext('probe_registration_object_idx'), hashtext($1::text))",
+        [objectId],
+      );
 
       // **A revoked identity does not hold a branch**, which is what revoking means — the row
       // stays so the decision survives and the GID cannot return by reconnecting, but the branch
