@@ -58,12 +58,18 @@ const json = (body: unknown): Response =>
   });
 
 /** The tree starts at the root; any filtered listing answers one sensor, `Disk C`. */
+/** Every search the tree has asked the core for, by its query and tag (`U-79`). */
+let searches: string[] = [];
 function stubFetch(): void {
   vi.stubGlobal('fetch', (url: string) => {
     if (url === '/api/v1/objects/tops') {
       return Promise.resolve(json({ items: [summary(ROOT.id, 'root', 'Root')] }));
     }
     const filtered = /[?&](q|tag|invalidParams)=/u.test(url);
+    if (filtered) {
+      const asked = new URL(url, 'http://core').searchParams;
+      searches.push(`q=${asked.get('q') ?? ''} tag=${asked.get('tag') ?? ''}`);
+    }
     return Promise.resolve(
       json({ items: filtered ? [summary(10, 'sensor', 'Disk C')] : [], nextCursor: null }),
     );
@@ -197,6 +203,7 @@ beforeEach(() => {
   stubFetch();
   location = '';
   drawn = [];
+  searches = [];
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -248,14 +255,21 @@ describe('the tree’s address, written after a pause (U-75)', () => {
   it('has what was typed when a result is followed, and Back brings it with no entry added', async () => {
     await openAt(['/start', '/tree']);
     searchBox().focus();
-    type(searchBox(), 'Disk');
-    // Following a result leaves the box first, as a click or a Tab does: written then.
+    // Asked, and written, a pause after the last key (`U-79`); then typed on, and the results of
+    // the first search are still there to follow while the next write waits.
+    type(searchBox(), 'Dis');
+    wait(ADDRESS_PAUSE_MS);
     const link = await result();
-    expect(location).toBe('/tree');
+    expect(location).toBe('/tree?q=Dis');
+    type(searchBox(), 'Disk');
+    expect(location).toBe('/tree?q=Dis');
+    // Following a result leaves the box first, as a click or a Tab does: written then, and the
+    // result stays to be pressed.
     act(() => {
       link.focus();
     });
     expect(location).toBe('/tree?q=Disk');
+    expect(link.isConnected).toBe(true);
     fireEvent.click(link);
     await turnUntil(shown('Object page'), 'the result was not followed');
 
@@ -272,9 +286,13 @@ describe('the tree’s address, written after a pause (U-75)', () => {
 
   it('never writes what waited over the page navigated to', async () => {
     await openAt(['/start', '/tree']);
+    type(searchBox(), 'Dis');
+    wait(ADDRESS_PAUSE_MS);
+    const link = await result();
     type(searchBox(), 'Disk');
-    // Followed without the box being left (a script, or a key that does not move focus).
-    fireEvent.click(await result());
+    // Followed without the box being left (a script, or a key that does not move focus), with
+    // the write for `Disk` still waiting.
+    fireEvent.click(link);
     await turnUntil(shown('Object page'), 'the result was not followed');
     expect(location).toBe('/objects/10');
 
@@ -337,6 +355,77 @@ describe('the tree’s address, written after a pause (U-75)', () => {
     wait(ADDRESS_PAUSE_MS);
     expect(location).toBe('/tree?q=Disk+C');
     expect(searchBox().value).toBe('Disk C');
+  });
+});
+
+describe('the search, asked after the same pause (U-79)', () => {
+  it('asks once, a pause after the last of many keys, for what the boxes say', async () => {
+    await openAt(['/tree']);
+    for (const typed of ['D', 'Di', 'Dis', 'Disk']) {
+      type(searchBox(), typed);
+      wait(ADDRESS_PAUSE_MS - 50);
+    }
+    type(tagBox(), 'core');
+    wait(ADDRESS_PAUSE_MS - 50);
+    await turnUntil(() => true, 'never');
+    expect(searches).toEqual([]);
+
+    wait(50);
+    await result();
+    expect(searches).toEqual(['q=Disk tag=core']);
+  });
+
+  it('does not ask when a box is left, so a result being followed stays on the page', async () => {
+    await openAt(['/tree']);
+    searchBox().focus();
+    type(searchBox(), 'Dis');
+    wait(ADDRESS_PAUSE_MS);
+    const link = await result();
+    expect(searches).toEqual(['q=Dis tag=']);
+
+    type(searchBox(), 'Disk');
+    act(() => {
+      link.focus();
+    });
+    // The address is written at once; the search waits for its pause, and the link is still there.
+    expect(location).toBe('/tree?q=Disk');
+    await turnUntil(() => true, 'never');
+    expect(searches).toEqual(['q=Dis tag=']);
+    expect(link.isConnected).toBe(true);
+
+    wait(ADDRESS_PAUSE_MS);
+    await turnUntil(() => searches.length === 2, 'the search did not follow the box');
+    expect(searches).toEqual(['q=Dis tag=', 'q=Disk tag=']);
+  });
+
+  it('asks at once for what the address holds, on opening and when it is moved', async () => {
+    await openAt(['/tree?q=Dis']);
+    await result();
+    expect(searches).toEqual(['q=Dis tag=']);
+
+    // Moved by something other than the page (a link, Back): read in, and asked for with no
+    // time passing.
+    act(() => {
+      void navigateFromOutside('/tree?q=Disk');
+    });
+    await turnUntil(at('/tree?q=Disk'), 'the address was not moved');
+    await turnUntil(() => searches.length === 2, 'the moved address was not asked for at once');
+    expect(searches).toEqual(['q=Dis tag=', 'q=Disk tag=']);
+    expect(searchBox().value).toBe('Disk');
+  });
+
+  it('writes what waited when the page is hidden, a reload or a closed tab within the pause', async () => {
+    await openAt(['/start', '/tree']);
+    type(searchBox(), 'Disk');
+    expect(location).toBe('/tree');
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    expect(location).toBe('/tree?q=Disk');
+    // Written once: nothing more when the pause ends.
+    const entries = drawn.length;
+    wait(ADDRESS_PAUSE_MS * 2);
+    expect(drawn.length).toBe(entries);
   });
 });
 

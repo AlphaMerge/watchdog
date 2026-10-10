@@ -111,6 +111,19 @@ const tagBox = (): HTMLInputElement =>
 const invalidBox = (): HTMLInputElement =>
   screen.getByRole<HTMLInputElement>('checkbox', { name: 'Invalid parameters only' });
 
+/**
+ * `Disk C` once the search for `what` (`q|tag|invalidParams`) has been asked and answered. The
+ * search waits out the same pause as the address (`U-79`), so the link on the page when the address
+ * is written can still be the one the search before it drew, and the answer replaces it.
+ */
+async function resultFor(asked: readonly string[], what: string): Promise<HTMLElement> {
+  await waitFor(() => {
+    expect(searches(asked)).toContain(what);
+    expect(screen.queryByText('Loading matching objects…')).toBeNull();
+  });
+  return screen.findByRole('link', { name: 'Disk C' });
+}
+
 const back = (): void => {
   fireEvent.click(screen.getByRole('button', { name: 'Back' }));
 };
@@ -149,7 +162,7 @@ describe('the tree’s search and tag in the address', () => {
       expect(location).toBe('/tree?q=Disk&tag=core');
     });
 
-    fireEvent.click(await screen.findByRole('link', { name: 'Disk C' }));
+    fireEvent.click(await resultFor(asked, 'Disk|core|'));
     await screen.findByText('Object page');
     expect(location).toBe('/objects/10');
 

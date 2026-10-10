@@ -29,7 +29,7 @@ import {
   notCheckedSentence,
 } from '../tree/invalid-params';
 import { filtersKey, filtersOf, withFilters, type TreeFilters } from '../tree/filters';
-import { useAddressLater } from '../tree/address-later';
+import { ADDRESS_PAUSE_MS, useAddressLater, useSettled } from '../tree/address-later';
 
 const KIND_GLYPH: Record<string, string> = {
   root: '⌂',
@@ -43,6 +43,16 @@ const ROW_HEIGHT = 36;
 const VIEWPORT_HEIGHT = 560;
 /** One level at a time, and the server's own ceiling for a page of children. */
 const PAGE = 500;
+
+/** The search and the tag as one string, so the two can wait out one pause together (`U-79`). */
+function boxesKey(filters: TreeFilters): string {
+  return JSON.stringify([filters.query, filters.tag]);
+}
+
+function boxesOf(key: string): readonly [query: string, tag: string] {
+  const [query, tag] = JSON.parse(key) as [string, string];
+  return [query, tag];
+}
 
 /**
  * The object tree (`U-03`).
@@ -64,7 +74,7 @@ const PAGE = 500;
  * `GET /objects`: invalid parameters since `U-63`, so Core Health's count of those sensors links
  * to their list, and the search and the tag since `U-70`, so a filtered tree is a link somebody
  * can send and reload and *Back* bring it back; the search and tag are written a pause after the
- * last key (`U-75`). Until the core's start-up check has read every sensor there is no list of
+ * last key (`U-75`), and asked for after the same pause (`U-79`). Until the core's start-up check has read every sensor there is no list of
  * invalid parameters, and the page says why in words, in a polite status region that is on the
  * page from the start.
  */
@@ -96,17 +106,30 @@ export function TreeView(): React.JSX.Element {
   const navigation = useNavigationType();
   const inAddress = filtersOf(params);
   const [filters, setFilters] = useState<TreeFilters>(inAddress);
+  // **The search asks after the same pause** (`U-79`): it follows the boxes `ADDRESS_PAUSE_MS`
+  // after the last key, as the address does, not on every key, where a held key was one
+  // `GET /objects` per character. Reading the address in (the page opening, *Back*) asks at once,
+  // and so does the checkbox, one press being one change. **Leaving a box does not**, though it
+  // writes the address at once: a result is followed by leaving the box, and a search asked then
+  // would take the results — and the link being pressed — off the page under the click.
+  // The two boxes wait as one: a key in either starts the pause again for both, so moving from the
+  // search to the tag does not ask for the search without its tag.
+  const [settled, ask] = useSettled(boxesKey(filters), ADDRESS_PAUSE_MS);
   const [read, setRead] = useState(() => filtersKey(inAddress));
   if (read !== filtersKey(inAddress)) {
     setRead(filtersKey(inAddress));
-    if (navigation !== NavigationType.Replace) setFilters(inAddress);
+    if (navigation !== NavigationType.Replace) {
+      setFilters(inAddress);
+      ask(boxesKey(inAddress));
+    }
   }
   const change = (next: Partial<TreeFilters>, at: 'later' | 'now'): void => {
     const changed = { ...filters, ...next };
     setFilters(changed);
     address[at](withFilters(params, changed));
   };
-  const { query, tag, invalidParams } = filters;
+  const { invalidParams } = filters;
+  const [query, tag] = boxesOf(settled);
 
   const narrowed = query.trim() !== '' || tag.trim() !== '';
   const searching = narrowed || invalidParams;
@@ -185,7 +208,7 @@ export function TreeView(): React.JSX.Element {
             <input
               id="tree-search"
               type="search"
-              value={query}
+              value={filters.query}
               onChange={(event) => {
                 change({ query: event.target.value }, 'later');
               }}
@@ -199,7 +222,7 @@ export function TreeView(): React.JSX.Element {
             <input
               id="tree-tag"
               type="search"
-              value={tag}
+              value={filters.tag}
               onChange={(event) => {
                 change({ tag: event.target.value }, 'later');
               }}

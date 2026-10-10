@@ -86,8 +86,12 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
   rewrites the address in place (`replace`, as the alarm filters do) rather than adding a history
   entry per key, so *Back* from the tree still leaves it. The search and tag are written a moment
   (300 ms) after the last key, and at once when you leave the box, so a held key cannot run into
-  the browser's limit on history writes (`U-75`); the checkbox is written as it is pressed. Only
-  *Back* pressed from the keyboard within that moment leaves the last keys typed out of the tree's
+  the browser's limit on history writes (`U-75`); the checkbox is written as it is pressed. The
+  search is asked for after the same moment, not on every key (`U-79`), the two boxes waiting as
+  one; leaving a box writes the address but does not ask, so the result you are leaving it for
+  stays on the page under your click. Opening the tree on an address, and *Back* or a link to one,
+  asks at once. A reload or a closed tab within the moment writes the last keys first
+  (`pagehide`). Only *Back* pressed from the keyboard within it leaves them out of the tree's
   address, so *Forward* comes back to the search without them. A blank box is left out, so the
   plain tree is `/tree`. When something else moves the address while the tree is open — the
   navigation bar's **Tree** link, or *Back* and *Forward* between two tree addresses — the

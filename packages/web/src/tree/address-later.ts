@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useRef } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { UNSAFE_NavigationContext, useLocation, useSearchParams } from 'react-router-dom';
 
 /**
@@ -40,8 +40,10 @@ export interface AddressWriter {
  * ending) leaves what was typed in the address; a page taken away by a navigation writes nothing,
  * since its entry is no longer current and cannot be written. Mouse and Tab leave a box before
  * anything else on the page is pressed, so the caller flushes on blur, and what was typed is
- * written before a link is followed; only a *Back* pressed within the pause, from the keyboard,
- * loses the last of it.
+ * written before a link is followed. **And on `pagehide`** (`U-79`): a reload or a closed tab
+ * within the pause keeps the last keys, since the entry is still this page's when the page goes.
+ * Only a *Back* pressed within the pause, from the keyboard, loses the last of it: by the time the
+ * page hears of it the entry is another's, and nothing may be written there.
  *
  * A router whose navigator does not say where the history is (neither `BrowserRouter` nor
  * `MemoryRouter`) is written to as before, and never on unmount.
@@ -76,10 +78,10 @@ export function useAddressLater(): AddressWriter {
    * is written to, except on unmount, when the page has most likely been navigated away from.
    */
   const send = useCallback((next: URLSearchParams, atUnmount: boolean): void => {
-    const current = keyOf(history.current);
+    const current = historyKeyOf(history.current);
     if (current === null ? atUnmount : current !== expected.current) return;
     write.current(next, { replace: true });
-    const written = keyOf(history.current);
+    const written = historyKeyOf(history.current);
     if (written !== null) {
       ours.current.add(written);
       expected.current = written;
@@ -117,6 +119,13 @@ export function useAddressLater(): AddressWriter {
     expected.current = shown;
   }, [shown, drop]);
 
+  useEffect(() => {
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+    };
+  }, [flush]);
+
   useEffect(
     () => () => {
       const next = waiting.current;
@@ -132,12 +141,36 @@ export function useAddressLater(): AddressWriter {
 /**
  * The key of the history's current entry, from the router's navigator: `BrowserRouter` and
  * `MemoryRouter` both hand it their history, which says where it is. `null` for one that does not.
+ *
+ * **An internal of react-router 7**, read through `UNSAFE_NavigationContext`. Exported for the test
+ * that holds the app's own router to it (`U-79`): if an upgrade stops exposing it, the address is
+ * written on every key again and never on leaving, with nothing on the page to show it.
  */
-function keyOf(navigator: unknown): string | null {
+export function historyKeyOf(navigator: unknown): string | null {
   if (typeof navigator !== 'object' || navigator === null || !('location' in navigator)) {
     return null;
   }
   const { location } = navigator;
   if (typeof location !== 'object' || location === null || !('key' in location)) return null;
   return typeof location.key === 'string' ? location.key : null;
+}
+
+/**
+ * A value as it stood `ms` after it last changed (`U-79`), and a way to settle it at once.
+ *
+ * The tree's search asks the core for what the boxes say; asked on every key, a held key was one
+ * `GET /objects` per character. It asks after the same pause the address waits for, and at once
+ * when the caller settles it (a box left, the address read in).
+ */
+export function useSettled<T>(value: T, ms: number): readonly [T, (to: T) => void] {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSettled(value);
+    }, ms);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [value, ms]);
+  return [settled, setSettled];
 }

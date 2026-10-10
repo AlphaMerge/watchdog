@@ -27427,13 +27427,45 @@ because each is a decision rather than a defect:
 
       **Done when** each is fixed or explained, with tests.
 
-- [ ] **U-79 — the tree still asks on every key** · S · U-75 · Found 2026-10-09 in `U-75`. Only
+- [x] **U-79 — the tree still asks on every key** · S · U-75 · Found 2026-10-09 in `U-75`. Only
       the address write waits for a pause, so a held key is one `GET /objects` per character. A
       keyboard *Back* or a reload inside the 300 ms pause leaves the last keys out of the
       address. `useAddressLater` reads `UNSAFE_NavigationContext`'s navigator, an internal of
       react-router 7 that falls back to writing on every key if it disappears. **Done when** the
       search asks after the same pause, `pagehide` flushes the write, and a test fails if the
       navigator stops exposing `location`.
+
+      **U-79 outcome. The search is asked for 300 ms after the last key, as the address is
+      written; `pagehide` writes a waiting address; and the app's router is held to the internal
+      the address writes read.** Web only.
+      - **One pause for both boxes** (`useSettled` in `tree/address-later.ts`, used by
+        `TreeView`). The search and the tag settle together, so moving from one box to the other
+        within the pause does not ask for the search without its tag. Reading the address in (the
+        page opening, *Back*, *Forward*, a link to another tree address) settles at once, and the
+        checkbox asks as it is pressed.
+      - **Leaving a box writes the address but does not ask.** A result is followed by leaving the
+        box; a search asked then would put *Loading* where the results were and take the link
+        from under the click. The search follows the pause instead.
+      - **`pagehide`** writes what was waiting, so a reload or a closed tab within the pause keeps
+        the last keys. A keyboard *Back* within it still loses them: the router has moved before
+        anything on the page hears of it, and writing then would put the tree's address over the
+        page gone to (`U-75`).
+      - **The router internal.** `historyKeyOf` (exported from `address-later.ts`) reads
+        `UNSAFE_NavigationContext`'s `navigator.location.key`. `router-history-key.test.tsx`
+        renders `BrowserRouter` (the app's, in `main.tsx`) and `MemoryRouter`, opens, pushes and
+        replaces, and expects the navigator's key to be a string equal to `useLocation().key`
+        every time, so a react-router upgrade that drops it fails a test rather than quietly
+        writing on every key.
+      - **Tests.** `tree-address-pause.test.tsx` (4 new): one search a pause after many keys
+        across both boxes; leaving a box asks nothing and the link stays connected; an address
+        opened on, then moved, asks at once with no timer advanced; `pagehide` writes the waiting
+        address and nothing is written after the pause. Two existing tests there now let the
+        search's pause pass before taking a result. `tree-filters-url.test.tsx` waits for the
+        settled search to be answered before following a result, since the link drawn by the
+        search before it is replaced. **Mutations** (restored and compared byte for byte): asking
+        on every key 4; the address read in waiting for the pause 1; no `pagehide` 1; the
+        navigator read as not saying 6, the two router canaries among them. Full web suite
+        1,123 passed.
 
 - [ ] **U-80 — the shared map's age, and its clock** · XS · U-74 · Found 2026-10-09 in `U-74`.
       The map says when it was last read but gives no cue when that is old. The time is the
