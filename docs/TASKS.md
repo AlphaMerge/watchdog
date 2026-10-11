@@ -13163,7 +13163,7 @@ because each is a decision rather than a defect:
         method is refused before the check runs — the method registry will not load it — so the
         real-schema half is shown by the fixture, not by that mutant.
 
-- [ ] **P-345 — a Down sensor's stored message drops the check's own sentence** · S · P-338 ·
+- [x] **P-345 — a Down sensor's stored message drops the check's own sentence** · S · P-338 ·
       Found 2026-10-09 in `P-338`. For a `lookup` or `limit` cause, `state/service.ts` stores the
       channel's message (`result.channels?.message ?? result.message`), so a lost probe's alarm and
       notification say only "Link to the core is 0 (not connected)", never the refusal P-338 adds,
@@ -13174,6 +13174,27 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** store both when they differ: the channel's
       message, then the check's sentence, in notifications and summaries too, with an `M-17`
       scenario test over the bodies.
+
+      **P-345 outcome. A sensor in a state its readings decided stores the channel's sentence,
+      then " — ", then the check's, when the two differ; either alone when the other is empty or
+      the same.**
+      - **One place.** `readingMessage` in `state/machine.ts`, used by `decide` for causes
+        `limit` and `lookup`. Everything downstream reads that one stored message: the state
+        history, the API and stream, `%lastmessage` in notification bodies, and digest lines,
+        which are the templates' subjects rendered per notification. A channel message that was
+        empty used to store an empty message; it now stores the check's.
+      - **Alarm volume.** No notification is added: new words while the breach stands are stored
+        and send nothing, as before. **One effect on summaries:** a template whose subject
+        carries `%lastmessage` has longer digest lines, and the §5.2 caps (1,000 characters, 25
+        lines) split a digest into more parts sooner. The test asserts the parts are exactly the
+        caps' answer for the lines as written.
+      - **Tests.** `reading-message-scenario.test.ts`: the rule as a table, and the `M-17`
+        scenario: twenty pings breach a response-time limit with an email trigger (summarised)
+        and a webhook trigger at the root; the immediate email, every digest line and every
+        webhook body carry both sentences, each sensor appears once, and a second scan with new
+        words queues nothing. `saturated-memory-cap-scenario.test.ts` now asserts that the
+        *breach* names no memory (`P-244`'s intent): Probe Health's own sentence beside it
+        describes the memory cap, which holds the pool and breached nothing.
 - [x] **P-346 — the last hand-written polls and helpers in the tests** · XS · P-330 · Found
       2026-10-09 in `P-330`. Three inline polls with their own deadlines (`flat-names.test.ts`,
       `hardening.test.ts`, `migrator.test.ts`), about fifteen local `until`/`waitUntil` helpers in

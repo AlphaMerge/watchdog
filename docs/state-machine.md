@@ -476,7 +476,13 @@ Four things this settles, none of which `WORKFLOW.MD` states:
   cause `limit` reads "Response time is 812 ms, above the error limit of 500 ms", and a Down with
   cause `scan` reads whatever the probe said. When several channels breach, the message lists the
   worst three and counts the rest — a sensor may have fifty channels, and a message naming all
-  fifty is one nobody reads.
+  fifty is one nobody reads. **The check's own sentence follows, when it says something else**
+  (`P-345`): "Response time is 812 ms, above the error limit of 500 ms — 2/2 replies, min 812 ms".
+  The channel's comes first because it is why the sensor is in that state; the check's was lost
+  before, so a lost probe's Probe Health never said the refusal its check had named. It reaches
+  `%lastmessage`, so a digest whose subject carries it has longer lines, and the §5.2 caps split
+  it into more parts; no notification is added. New words from the check while the breach
+  stands are stored and send nothing, as before.
 
 Limits that contradict each other — a warning limit past its error limit, or a lower limit above
 an upper one — are refused when they are set, with the reason. A threshold that could never fire

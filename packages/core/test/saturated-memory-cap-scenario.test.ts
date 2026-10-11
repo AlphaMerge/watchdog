@@ -274,9 +274,13 @@ describe(
           `${name}: ${JSON.stringify(seen)}`,
         );
         for (const row of seen.filter((r) => r.state === 'down')) {
-          // Down for the pool, and for nothing about memory.
-          assert.match(row.message, /pool/iu, `${name}: ${row.message}`);
-          assert.doesNotMatch(row.message, /memory/iu, `${name}: ${row.message}`);
+          // Down for the pool, and for nothing about memory. The breach is the channel's part of
+          // the message, its reading and its error message; the check's own sentence follows it
+          // (`P-345`) and describes the memory cap, which holds the pool but breached nothing.
+          const [reading, error] = row.message.split(' — ');
+          const breach = `${reading ?? ''} — ${error ?? ''}`;
+          assert.match(breach, /^Worker pool in use is .* the worker pool is full/iu, row.message);
+          assert.doesNotMatch(breach, /memory/iu, `${name}: ${row.message}`);
         }
       }
     });

@@ -150,6 +150,21 @@ export function operatorDecided(decision: Decision): boolean {
   );
 }
 
+/**
+ * What a sensor whose readings decided its state says (`P-345`): the channel's sentence, which is
+ * why it is in that state, then the check's own, when the two differ.
+ *
+ * Before `P-345` the channel's alone was stored, so a lost probe's Probe Health said only "Link to
+ * the core is 0 (not connected)" and never the refusal its check had named, and every sensor type
+ * lost what its check said beside a breach in the same way. Either alone, when the other says
+ * nothing or the same.
+ */
+export function readingMessage(channel: string, check: string): string {
+  if (channel === '' || channel === check) return check;
+  if (check === '') return channel;
+  return `${channel} — ${check}`;
+}
+
 export function isPaused(flags: PauseFlags): boolean {
   return PAUSE_SOURCES.some((source) => flags[source]);
 }

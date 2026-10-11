@@ -24,6 +24,7 @@ import {
   isPaused,
   isStaleResult,
   operatorDecided,
+  readingMessage,
   DEFAULT_FAILURE_POLICY,
   type Decision,
   type FailurePolicy,
@@ -409,7 +410,7 @@ export class SensorStateService {
         const message = operatorDecided(applied.decision)
           ? (this.#withheldMessage(sensorId, applied.decision) ?? runtime.message)
           : applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
-            ? (result.channels?.message ?? result.message)
+            ? readingMessage(result.channels?.message ?? '', result.message)
             : result.message;
 
         const changed =
