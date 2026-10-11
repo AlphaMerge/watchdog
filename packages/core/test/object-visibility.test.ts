@@ -20,7 +20,15 @@ import { ScheduleService } from '../src/schedules/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { RediscoveryService } from '../src/discovery/rediscovery.js';
-import { existingInGroup, ProvisionService, provisionRun } from '../src/discovery/provision.js';
+import {
+  existingInGroup,
+  NO_WRITE_ON_GROUP,
+  ProvisionService,
+  provisionRun,
+  scheduledSight,
+  type ProvisionReport,
+  type ProvisionSight,
+} from '../src/discovery/provision.js';
 import { DeviceTemplateCatalogue } from '../src/device-templates/catalogue.js';
 import { BUILT_IN_DEVICE_TEMPLATES } from '../src/device-templates/built-in.js';
 import { LookupCatalogue } from '../src/lookups/catalogue.js';
@@ -44,6 +52,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import type { Actor } from '../src/objects/audit.js';
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { connectedLink, fixedCoreHealth, probeHealthOver } from './support/health.js';
@@ -133,6 +142,13 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
   /** The team's read-write account, which starts a run for `A-77`'s provisioning test. */
   let operatorUserId = 0;
   let discovery: DiscoveryService;
+  let rediscovery: RediscoveryService;
+  /** A provisioning pass as `main.ts` wires one, for the scheduled pass (`A-82`). */
+  let provisionPass: (
+    runId: number,
+    actor: Actor,
+    sight: ProvisionSight,
+  ) => Promise<ProvisionReport>;
 
   const cookies = new Map<string, string>();
 
@@ -171,7 +187,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     });
     const triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
     const schedules = new ScheduleService({ db, audit: new DatabaseAuditSink(), logger: silent });
-    const rediscovery = new RediscoveryService({
+    rediscovery = new RediscoveryService({
       db,
       audit: new DatabaseAuditSink(),
       logger: silent,
@@ -217,6 +233,32 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       probeHealth: () => probeHealth,
     });
 
+    // **The real thing, as `main.ts` wires it** (`A-77`): what a pass matches, reports and
+    // writes under is the caller's, and a stub could not show it.
+    provisionPass = (runId, actor, sight) =>
+      provisionRun(
+        {
+          discovery,
+          provisioner: new ProvisionService({
+            db,
+            objects: harness.service,
+            templates: deviceTemplates,
+            logger: silent,
+            credentialsFor: () => Promise.resolve(new Set<string>()),
+            recordDevice: (run, address, device) => discovery.recordDevice(run, address, device),
+          }),
+          existing: (groupId) => existingInGroup(db, groupId),
+          vouchers: {
+            authRequired: true,
+            ruleWriter: (ruleId) => rediscovery.writerOf(ruleId),
+            rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
+          },
+        },
+        runId,
+        actor,
+        sight,
+      );
+
     server = new ApiServer({
       config: {
         host: '127.0.0.1',
@@ -239,31 +281,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       schedules,
       discovery,
       rediscovery,
-      // **The real thing, as `main.ts` wires it** (`A-77`): what a pass matches, reports and
-      // writes under is the caller's, and a stub could not show it.
-      provision: (runId, actor, sight) =>
-        provisionRun(
-          {
-            discovery,
-            provisioner: new ProvisionService({
-              db,
-              objects: harness.service,
-              templates: deviceTemplates,
-              logger: silent,
-              credentialsFor: () => Promise.resolve(new Set<string>()),
-              recordDevice: (run, address, device) => discovery.recordDevice(run, address, device),
-            }),
-            existing: (groupId) => existingInGroup(db, groupId),
-            vouchers: {
-              authRequired: true,
-              ruleWriter: (ruleId) => rediscovery.writerOf(ruleId),
-              rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
-            },
-          },
-          runId,
-          actor,
-          sight,
-        ),
+      provision: (runId, actor, sight) => provisionPass(runId, actor, sight),
       // The built-in ones, so `/device-templates/:templateId` and `/lookups/:id` have one to
       // answer with.
       deviceTemplates,
@@ -3807,6 +3825,96 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal(whole.matched, 5, wholeSaid);
     });
 
+    it('answers a scheduled pass as its rule’s writer, and its problems only to a writer of the group (A-82)', async () => {
+      // A room the operator writes, holding a device carved out of their view. The operator
+      // writes a rediscovery rule for it; the schedule fires a run and provisions it with nobody
+      // asking. Before `A-82` the pass saw the installation: it matched the hidden device by id
+      // and stored nothing that said so, and any reader of the room read what it did store.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-scheduled-room' });
+      const hidden = await create({
+        kind: 'device',
+        parentId: room,
+        name: `${MARK}-scheduled-hidden`,
+        host: '10.0.10.2',
+      });
+      await grant(room, 'write');
+      await grant(hidden, 'none');
+      const rule = await rediscovery.create(
+        {
+          groupId: room,
+          probeId,
+          name: 'a-scheduled-rule',
+          range: '10.0.10.0/29',
+          cadence: 'daily',
+        },
+        { kind: 'user', userId: operatorUserId, login: 'operator' },
+      );
+      const nobody: Actor = { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' };
+
+      /** A run the schedule started, provisioned as `main.ts` provisions it. */
+      const scheduled = async (
+        addresses: readonly string[],
+      ): Promise<{ runId: number; report: ProvisionReport }> => {
+        const run = await discovery.start(
+          { groupId: room, probeId, range: '10.0.10.0/29', scheduleId: rule.id },
+          nobody,
+        );
+        await db.query(
+          `INSERT INTO discovery_host (run_id, address) SELECT $1, unnest($2::inet[])`,
+          [run.id, [...addresses]],
+        );
+        const sight = await scheduledSight(run.scheduleId, {
+          authRequired: true,
+          ruleWriter: (ruleId) => rediscovery.writerOf(ruleId),
+          db,
+          visibilityFor: (principal) => access.visibilityFor(principal),
+          rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
+        });
+        return { runId: run.id, report: await provisionPass(run.id, nobody, sight) };
+      };
+      const problems = async (
+        login: string,
+        runId: number,
+      ): Promise<{ status: number; body: string }> => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/discovery/${String(runId)}/problems`,
+          headers: as(login),
+        });
+        return { status: response.statusCode, body: response.body };
+      };
+
+      const { runId, report } = await scheduled(['10.0.10.2', '10.0.10.3']);
+      const said = JSON.stringify(report);
+      assert.ok(!said.includes(MARK), said);
+      assert.ok(!report.devices.some((one) => one.deviceId === hidden), said);
+      assert.deepEqual(report.problems, [
+        { address: '10.0.10.2', problem: 'a device outside your view already has this address' },
+      ]);
+      assert.equal(report.devicesCreated, 1, 'the new host, in a group the writer writes');
+
+      // Stored in the writer's words, and read only with the bar the writer cleared.
+      const theirs = await problems('operator', runId);
+      assert.equal(theirs.status, 200, theirs.body);
+      assert.ok(theirs.body.includes('a device outside your view'), theirs.body);
+      const reader = await problems('branch', runId);
+      assert.equal(reader.status, 403, reader.body);
+      assert.ok(!reader.body.includes('outside your view'), reader.body);
+      assert.equal((await problems('admin', runId)).status, 200);
+
+      // The writer has lost write on the room since writing the rule: the pass creates nothing.
+      await grant(room, 'read');
+      try {
+        const lost = await scheduled(['10.0.10.4']);
+        assert.deepEqual(lost.report.problems, [
+          { address: '10.0.10.4', problem: NO_WRITE_ON_GROUP },
+        ]);
+        assert.equal(lost.report.devicesCreated, 0);
+      } finally {
+        await grant(room, 'write');
+      }
+    });
+
     it('holds a master named through a setting or in bulk to the dependency route’s read bar', async () => {
       // `a-ping` is the operator's to write. A hidden master, a hidden device and an id never
       // issued are one answer on every route that can name a master.
@@ -5089,7 +5197,7 @@ const NAMED_BY: readonly (readonly [name: string, route: string])[] = [
   ['a-lonely', '/api/v1/objects'],
   ['a-found-run', '/api/v1/discovery/:id'],
   ['a-found-host', '/api/v1/discovery/:id/hosts'],
-  ['a-found-problem', '/api/v1/discovery/:id/problems'],
+  // Not '/api/v1/discovery/:id/problems': write on the group since `A-82`, which this account lacks.
   ['a-found-vendor', '/api/v1/discovery/:id/summary'],
   ['Customer A library', '/api/v1/libraries'],
   ['Customer A wall', '/api/v1/maps'],
@@ -5125,6 +5233,9 @@ const NEVER_ANSWERS_THE_BRANCH: readonly string[] = [
   '/metrics',
   // Read on the probe, which is above the branch.
   '/api/v1/probes/:id/health',
+  // Write on the run's group (`A-82`): a pass's problems are worded for the account it answered,
+  // and the branch account is read-only. The A-82 test above covers who it answers.
+  '/api/v1/discovery/:id/problems',
   // The fixture's map has no background, for anybody. `maps-api.test.ts` covers both routes.
   '/api/v1/maps/:id/background',
   '/api/v1/public/maps/:token/background',

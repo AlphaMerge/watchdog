@@ -435,6 +435,15 @@ point it at a machine of their own and be sent the group's community at the next
   "its rule was deleted": one still going is stopped, and one that finished creates nothing when
   somebody asks to provision it (409 `DISCOVERY_RUN_FAILED`). Nobody stands behind those
   addresses any more; start a new run to provision them.
+- **A scheduled rediscovery provisions as the account that last wrote its rule** (`A-82`): it
+  matches, reports and creates within what that account can see and write now, as a pass that
+  account started by hand would. A device it cannot see is reported as "a device outside your
+  view already has this address", and nothing is made beside it. An account that has lost write
+  on the group since, or has been disabled or deleted, makes nothing: each new host is a problem
+  saying so. Save the rule again as an account that should stand behind it. A rule the
+  installation wrote, or any rule with `api.requireAuthentication` off, sees the installation.
+  **A run's problems need write on its group** (`GET /discovery/:id/problems`): they are worded
+  for the account the pass answered, and can say what only it could see.
 - **Upgrading changes nothing.** The first start of this version records the installation as
   voucher for every set in use, in one transaction, before any probe is configured. A later
   release that changes which parameters a type says choose the listener moves every such

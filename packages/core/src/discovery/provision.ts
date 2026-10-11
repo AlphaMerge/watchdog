@@ -1,7 +1,14 @@
 import type { Fingerprint, Logger } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { SensorSpec } from '../device-templates/definition.js';
-import type { AccessPrincipal, AccessRight, Reach, Visibility } from '../auth/access.js';
+import {
+  atLeast,
+  Reach,
+  Visibility,
+  type AccessPrincipal,
+  type AccessRight,
+} from '../auth/access.js';
+import type { AccountRole } from '../auth/accounts.js';
 import type { Queryable } from '../db/pool.js';
 import type { Actor } from '../objects/audit.js';
 import { storedAccountWrites } from '../objects/credential-vouching.js';
@@ -161,8 +168,9 @@ function createdNothing(runId: number, reason: string): DiscoveryError {
  * address would be the duplicate `D-04` exists to prevent — but it reports it without its id and
  * creates nothing under it, and it adds nothing to a device its caller may see and not write.
  *
- * A pass nobody asked for, a schedule's, has nobody to answer and passes `Visibility.EVERYTHING`
- * and `Reach.EVERYTHING`, as every internal caller does.
+ * **A pass a schedule fires answers as its rule's writer** (`A-82`): `scheduledSight`. It has no
+ * caller, and seeing the installation whole it worded its stored problems for the installation,
+ * which every reader of the group read. The writer already stands behind its addresses (`A-41`).
  */
 export interface ProvisionSight {
   /** What the caller can see: what the report may name, and the words of a refusal. */
@@ -171,12 +179,80 @@ export interface ProvisionSight {
   readonly writes: Reach;
 }
 
+/** Sees nothing and may change nothing: a rule whose writer is gone or cannot sign in. */
+const NO_SIGHT: ProvisionSight = {
+  visibility: Visibility.nothing(null),
+  writes: new Reach(() => Promise.resolve(new Set<number>())),
+};
+
+const WHOLE_SIGHT: ProvisionSight = {
+  visibility: Visibility.EVERYTHING,
+  writes: Reach.EVERYTHING,
+};
+
+export interface ScheduledSightOptions {
+  /** Off, every bar is cleared and the pass sees the installation, as it always did. */
+  readonly authRequired: boolean;
+  readonly ruleWriter: (ruleId: number) => Promise<StoredVoucher | null>;
+  readonly db: Queryable;
+  readonly visibilityFor: (principal: AccessPrincipal) => Promise<Visibility>;
+  readonly rights: (
+    principal: AccessPrincipal,
+    objectIds: readonly number[],
+    q: Queryable,
+  ) => Promise<ReadonlyMap<number, AccessRight>>;
+}
+
+/**
+ * What a pass a schedule fired sees and may change (`A-82`): the sight of the account that last
+ * wrote its rule, which already stands behind the rule's addresses (`A-41`).
+ *
+ * Before, it saw the installation, so its stored problems could name an owner or an object above
+ * the group to anybody who reads the group, and the words are text that cannot be re-worded per
+ * reader. Now a problem says only what the writer could see, and reading them takes write on the
+ * group (`GET /discovery/:id/problems`), the bar the writer cleared to write the rule.
+ *
+ * - **The layer off**, or **a rule the installation wrote**: the installation's sight, as before.
+ * - **A writer deleted, disabled, or never recorded**, or a rule since deleted: no sight. Every
+ *   device already in the group is one it cannot see, and it may create under nothing, so the
+ *   pass creates nothing and says so per host, as `runVoucher` vouches for nothing for it.
+ * - **Otherwise** the writer's grants, resolved now, as a request of theirs would resolve them.
+ */
+export async function scheduledSight(
+  scheduleId: number | null,
+  options: ScheduledSightOptions,
+): Promise<ProvisionSight> {
+  if (!options.authRequired) return WHOLE_SIGHT;
+  if (scheduleId === null) return NO_SIGHT;
+  const writer = await options.ruleWriter(scheduleId);
+  if (writer === null) return NO_SIGHT;
+  if (writer.kind === 'installation') return WHOLE_SIGHT;
+  if (writer.userId === null) return NO_SIGHT;
+  const [account] = await options.db.query<{ role: AccountRole; disabled: boolean }>(
+    'SELECT role, disabled FROM user_account WHERE id = $1',
+    [writer.userId],
+  );
+  if (account === undefined || account.disabled) return NO_SIGHT;
+  const principal: AccessPrincipal = { userId: writer.userId, role: account.role };
+  return {
+    visibility: await options.visibilityFor(principal),
+    writes: new Reach(async (q, objectIds) => {
+      const held = await options.rights(principal, objectIds, q);
+      return new Set(objectIds.filter((id) => atLeast(held.get(id) ?? 'none', 'write')));
+    }),
+  };
+}
+
 /** What a pass reports for a host whose device its caller cannot see (`A-77`). */
 export const HIDDEN_DEVICE_AT_ADDRESS = 'a device outside your view already has this address';
 /** The same, for a device that matched on its name rather than the address. */
 export const HIDDEN_DEVICE_BY_NAME = 'a device outside your view already has this name';
 /** A sensor a template names that is already there, under a device the caller can see. */
 export const HIDDEN_SENSOR_THERE = 'a sensor outside your view is already there';
+/** What a pass reports for a host it would make a device for, without write on the group. */
+export const NO_WRITE_ON_GROUP =
+  'no device was created: creating one in this group needs write on it, and the account the ' +
+  'rule runs as does not have it';
 
 export interface ProvisionOptions {
   /** For asking which of a group's devices and sensors the caller can see (`A-77`). */
@@ -350,6 +426,11 @@ export class ProvisionService {
       ).reached,
     );
 
+    // And whether it may create in the group at all. A route asked already, since it holds the
+    // caller to write on the group; a schedule's pass has no route, and its rule's writer may have
+    // lost write on the group, or been deleted, since writing the rule (`A-82`).
+    const writesGroup = (await writes.split(this.#db, [input.run.groupId])).reached.length === 1;
+
     const credentials = await this.#credentialsFor(input.run.groupId);
     // What a template names, the installation stands behind: the template is a file somebody with
     // the server's file system put there (`A-29`). The audit still says who started the run. Where
@@ -405,6 +486,9 @@ export class ProvisionService {
         if (found !== null) {
           deviceId = found.device.id;
           report.matched += 1;
+        } else if (!writesGroup) {
+          report.problems.push({ address: host.address, problem: NO_WRITE_ON_GROUP });
+          continue;
         } else {
           const device = await this.#objects.create(writer, {
             kind: 'device',

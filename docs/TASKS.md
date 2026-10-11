@@ -24802,7 +24802,7 @@ because each is a decision rather than a defect:
         (fails 2), a `PATCH` asked only about a changed probe (fails 1), no group under an unseen
         probe (fails 3), and the probe above sent as an id (fails 3).
 
-- [ ] **A-82 — whose view a scheduled rediscovery's provisioning pass is worded for** · S ·
+- [x] **A-82 — whose view a scheduled rediscovery's provisioning pass is worded for** · S ·
       A-80 · Found 2026-10-11 in `A-80`. A pass a schedule fires has no caller and runs with
       `Visibility.EVERYTHING` and `Reach.EVERYTHING`, so its stored problems (`GET
       /discovery/:id/problems`) and its matches are worded for the installation, and any reader
@@ -24818,6 +24818,27 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** option 1. A scheduled pass runs with the sight of
       the rule's writer (`written_by_user`), and reading its problems needs write on the
       group.
+
+      **A-82 outcome. `scheduledSight` gives a schedule's pass its rule writer's visibility and
+      write reach, and the problems route needs write on the group.**
+      - **`scheduledSight`** (`discovery/provision.ts`), which `main.ts`'s rediscovery callback
+        now passes instead of `Visibility.EVERYTHING`/`Reach.EVERYTHING`. The writer's grants are
+        resolved when the pass runs, by `AccessService.visibilityFor` and `resolveManyFor`, as a
+        request of theirs would be. The layer off, or a rule the installation wrote: the
+        installation's sight, as before. A writer deleted, disabled or never recorded, or a rule
+        deleted: no sight at all, the way `runVoucher` vouches for nothing for them.
+      - **Write on the group, asked by the pass itself.** A route holds its caller to it before
+        provisioning; a schedule's pass has no route, so the provisioner now asks its sight once
+        whether it writes the group, and makes no device where it does not, reporting
+        `NO_WRITE_ON_GROUP` per host. Without this the no-sight case above still created devices.
+      - **`GET /discovery/:id/problems` needs write on the run's group** (was read), for every
+        run: a hand-started pass is worded for its caller, who held write to provision. The run's
+        stored matches are counts only, and stay readable.
+      - **Tests.** `object-visibility.test.ts`: an operator's rule over a room with a device
+        carved out of their view; the pass reports it as outside their view and creates the new
+        host; the operator and an administrator read the problems, a reader of the room is
+        refused 403; with the operator down to read, the next pass creates nothing.
+        `scheduled-sight.test.ts`: the sight for each kind of writer.
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found
       2026-09-28 by the round-three review of the API's browser boundary. Three findings, each

@@ -648,10 +648,19 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
   app.get(
     '/discovery/:id/problems',
     {
-      config: toReadRun,
+      // **Write on the group, not read** (`A-82`). A problem is worded for whoever the pass
+      // answered: the caller who provisioned, holding write on the group, or the account that
+      // wrote the schedule's rule, likewise. Their words can name what they could see and a
+      // reader of the group cannot, and they are stored as text, so the bar to read them is
+      // the bar their author cleared.
+      config: onObjectOf('write', 'this run', groupOfRun, runNotFound),
       schema: {
         tags: ['discovery'],
         summary: 'What a run could not create, and why',
+        description:
+          'Needs write on the run’s group: each problem is worded for the account the pass ' +
+          'answered, the caller who provisioned or the account that last wrote the schedule’s ' +
+          'rule, and may name what only it could see.',
         params: idParams,
         response: {
           200: {

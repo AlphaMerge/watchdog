@@ -780,6 +780,8 @@ Create the devices and sensors this run found
 
 What a run could not create, and why
 
+Needs write on the run’s group: each problem is worded for the account the pass answered, the caller who provisioned or the account that last wrote the schedule’s rule, and may name what only it could see.
+
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `id` | path | integer, at least 1 | **required** |

@@ -114,6 +114,7 @@ import {
   existingInGroup,
   ProvisionService,
   provisionRun,
+  scheduledSight,
   type ProvisionReport,
   type ProvisionSight,
 } from './discovery/provision.js';
@@ -121,7 +122,7 @@ import { RediscoveryService } from './discovery/rediscovery.js';
 import { ProbeRegistry } from './probes/registry.js';
 import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
-import { AccessService, Reach, Visibility } from './auth/access.js';
+import { AccessService } from './auth/access.js';
 import { coreCatalogue, startV2Subsystems, v2ApiOptions } from './profile.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
@@ -1163,12 +1164,17 @@ async function serve(): Promise<void> {
     },
     provision: async (runId) => {
       // The same actor an unattended job always is. `A-01` will give this a real one.
-      // Nobody asked, so nobody is answered: the pass sees the group whole, as it always did.
-      await provision(
-        runId,
-        { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' },
-        { visibility: Visibility.EVERYTHING, writes: Reach.EVERYTHING },
-      );
+      // Nobody asked, so it answers as its rule's writer, who stands behind its addresses: its
+      // problems are worded for what they could see (`A-82`).
+      const run = await discovery.get(runId);
+      const sight = await scheduledSight(run?.scheduleId ?? null, {
+        authRequired: config.api.requireAuthentication,
+        ruleWriter: async (ruleId) => (await rediscoveryRef?.writerOf(ruleId)) ?? null,
+        db,
+        visibilityFor: (principal) => objectAccess.visibilityFor(principal),
+        rights: (principal, objectIds, q) => objectAccess.resolveManyFor(principal, objectIds, q),
+      });
+      await provision(runId, { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' }, sight);
     },
   });
   rediscoveryRef = rediscovery;
