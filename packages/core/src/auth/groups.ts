@@ -70,10 +70,7 @@ export class GroupService {
     },
     actor: Actor,
   ): Promise<UserGroup> {
-    const name = request.name.trim();
-    if (name === '' || name.length > 100) {
-      throw new AuthError('GROUP_INVALID', 'a group name must be between 1 and 100 characters');
-    }
+    const name = checkedGroupName(request.name);
     try {
       const group = await this.#db.tx(async (q) => {
         const rows = await q.query<GroupRow>(
@@ -156,12 +153,13 @@ export class GroupService {
     // on `UPDATE OF is_admin`, which Postgres decides from the SET list and not from whether the
     // value moved — so writing it back unchanged made every rename and every description edit a
     // grant change, and every open stream in the installation resolved its view again for it.
-    const values: unknown[] = [id, request.name ?? null, request.description ?? null];
+    const rename = request.name === undefined ? undefined : checkedGroupName(request.name);
+    const values: unknown[] = [id, rename ?? null, request.description ?? null];
     const setAdmin =
       request.isAdmin === undefined ? '' : `is_admin = $${String(values.push(request.isAdmin))},`;
     // A rename onto another group's name (`P-391`) is refused as a create onto it is, where it
-    // reached `user_group_name_idx` and went out as PostgreSQL's sentence.
-    const rename = request.name;
+    // reached `user_group_name_idx` and went out as PostgreSQL's sentence. The name is the one
+    // `checkedGroupName` gave back, so it is compared as it is stored.
     const write = (inner: Queryable): Promise<GroupRow[]> =>
       inner.query<GroupRow>(
         `UPDATE user_group g
@@ -658,6 +656,19 @@ async function lockPrimaries(q: Queryable, userIds: readonly number[]): Promise<
 }
 
 /** A group name another group has, as `user_group_name_idx` compares them: ignoring case. */
+/**
+ * A group's name as it is stored, from create and rename alike (`A-81`): trimmed, and refused when
+ * that leaves nothing or more than 100 characters. Only a create trimmed before, so a rename could
+ * store " On call" beside "On call" as a different name, or a name of spaces.
+ */
+export function checkedGroupName(raw: string): string {
+  const name = raw.trim();
+  if (name === '' || name.length > 100) {
+    throw new AuthError('GROUP_INVALID', 'a group name must be between 1 and 100 characters');
+  }
+  return name;
+}
+
 function groupExists(name: string): AuthError {
   return new AuthError('GROUP_EXISTS', `a group named ${name} already exists`);
 }

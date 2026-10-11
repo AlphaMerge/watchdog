@@ -14827,11 +14827,21 @@ because each is a decision rather than a defect:
       - `waits-for-lock.test.ts` has three cases for `sessionsWait`: the count, the event it asks
         for, and the failure's words.
 
-- [ ] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
+- [x] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
       2026-10-10 in `P-391`. `GroupService.create` trims the name and refuses a blank one;
       `update` stores what it is sent, so `" On call"` is a different group name from `"On call"`
       only when it came in through a rename. **Done when** both go through one check, with a
       test.
+
+      **A-81 outcome. Both go through `checkedGroupName` in `auth/groups.ts`:** trimmed, then
+      refused as `GROUP_INVALID` when nothing is left or more than 100 characters are. The rename
+      is checked for a name another group holds as it will be stored, so `" On call"` is refused
+      as `GROUP_EXISTS` naming `On call`. The routes' schema still allows 1 to 100 characters
+      before trimming; the service is where every caller meets the same rule.
+      - `groups.test.ts`: a padded create and rename are stored trimmed; a padded rename onto
+        another group's name is refused; a rename of only spaces is refused and writes nothing;
+        the length boundary is the trimmed length. With the rename left unchecked, the padded
+        rename was let through.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

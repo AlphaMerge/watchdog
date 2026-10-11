@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import { AccountService } from '../src/auth/accounts.js';
-import { GroupService } from '../src/auth/groups.js';
+import { checkedGroupName, GroupService } from '../src/auth/groups.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -317,6 +317,36 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
         'NIGHT SHIFT',
       );
     });
+
+    it('trims a rename as it trims a create, and refuses one of only spaces (A-81)', async () => {
+      // Only a create trimmed. A rename stored what it was sent, so " On call" was a second
+      // group beside "On call" whenever it came in through a rename, and a name of spaces was
+      // stored as a name.
+      await groups.create({ name: 'On call' }, testActor);
+      const other = await groups.create({ name: '  Night shift ' }, testActor);
+      assert.equal(other.name, 'Night shift');
+
+      await assert.rejects(
+        () => groups.update(other.id, { name: ' On call' }, testActor),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, 'GROUP_EXISTS');
+          assert.equal((error as Error).message, 'a group named On call already exists');
+          return true;
+        },
+      );
+      assert.equal(
+        (await groups.update(other.id, { name: ' Day shift  ' }, testActor)).name,
+        'Day shift',
+      );
+      await assert.rejects(
+        () => groups.update(other.id, { name: '   ' }, testActor),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, 'GROUP_INVALID');
+          return true;
+        },
+      );
+      assert.equal((await groups.get(other.id))?.name, 'Day shift', 'and nothing was written');
+    });
   });
 
   describe('a primary group written by two at once (P-391)', () => {
@@ -386,5 +416,14 @@ describe('user groups', { skip: available ? false : 'no database' }, () => {
       assert.equal(memberships[0]?.name, 'Administrators');
       assert.equal(memberships[0].isPrimary, true);
     });
+  });
+});
+
+describe('a group name, as create and rename both store it (A-81)', () => {
+  it('is trimmed, and its length is what is left', () => {
+    assert.equal(checkedGroupName('  On call '), 'On call');
+    assert.equal(checkedGroupName(` ${'x'.repeat(100)} `), 'x'.repeat(100));
+    assert.throws(() => checkedGroupName('x'.repeat(101)), /between 1 and 100/);
+    assert.throws(() => checkedGroupName(' \t\n '), /between 1 and 100/);
   });
 });
