@@ -32,6 +32,17 @@ import { connectBudgetMs, tdsConnector } from './socket.js';
  * any certificate: Node reads it as a name. The one way round is to turn the driver's own
  * rejection off and check afterwards, which is verification that holds only while our own
  * handler runs, and is not done.
+ *
+ * **Weighed again, and still not done** (`A-74`). `tedious` emits `secure` with the TLS socket
+ * before it writes the login, and the connector's socket could refuse every write that is not
+ * a PRELOGIN packet until a check had passed, so the login could not leave unchecked. What
+ * cannot be had is the chain. With the driver's rejection off, Node verifies the chain and
+ * says only `authorized` and one `authorizationError`, and for an IPv6 address its own identity
+ * check always fails: whether the chain passed would be read off which error Node reports,
+ * which is its order of checks and nowhere documented. If that order changed, a certificate
+ * from nobody the probe trusts would read as passing. So the refusal stays: it fails closed,
+ * and the sentence says to give the device a name or its IPv4 address. `mysql2`'s upgrade has
+ * no such problem, because there the chain stays Node's to refuse (`checkAddressOnSecure`).
  */
 export const mssqlDriver: DbDriver = {
   id: 'mssql',
@@ -42,7 +53,13 @@ export const mssqlDriver: DbDriver = {
     // **Handed its socket when the device's name was checked** (`A-62`): `tedious` takes no
     // `lookup`, and takes a `connector`. The server stays the name, which is what it names in
     // the TLS it runs inside TDS.
-    const connector = tdsConnector(options);
+    // Where the login went, which after a redirect is not the device (`A-74`). Known when the
+    // connector is handed over, which is whenever anything is checked; with nothing checked,
+    // `tedious` follows a redirect itself and a query's failure names the device.
+    let connectedTo: string | undefined;
+    const connector = tdsConnector(options, (where) => {
+      connectedTo = where;
+    });
     const connection = new Connection({
       server: options.host,
       options: {
@@ -102,7 +119,7 @@ export const mssqlDriver: DbDriver = {
               );
               return;
             }
-            reject(describeDbError(error, options, 'Microsoft SQL Server', 'query'));
+            reject(describeDbError(error, options, 'Microsoft SQL Server', 'query', connectedTo));
             return;
           }
           resolve({ rows, columns });

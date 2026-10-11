@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { Duplex } from 'node:stream';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
+import { Connection as MysqlConnection } from 'mysql2';
 import { Worker } from 'node:worker_threads';
 import type { TargetPolicy } from '@ms/shared';
 import { SensorCatalogue } from '../src/catalogue.js';
@@ -244,6 +245,12 @@ interface Fake {
   readonly serverNames: string[];
   /** The password or query each connection got as far as sending. */
   readonly said: string[];
+  /**
+   * Logins the server received, where it counts them (`A-74`): a MySQL handshake response,
+   * which carries the password. What "nothing was sent" means for a driver whose fake records
+   * queries and not the login.
+   */
+  logins: number;
   /** The remote address of each connection, as the server saw it. */
   close(): Promise<void>;
 }
@@ -268,6 +275,7 @@ function listen(
       connections: 0,
       serverNames: [],
       said: [],
+      logins: 0,
       close: () =>
         new Promise<void>((closed) => {
           for (const socket of sockets) socket.destroy();
@@ -470,6 +478,7 @@ async function mysqlServer(certificate?: Certificate, address?: string): Promise
             return;
           }
           authorised = true;
+          self.logins += 1;
           stream.write(myPacket(sequence + 1, MY_OK));
           continue;
         }
@@ -538,6 +547,13 @@ function routingReply(server: string, port: number): Buffer {
     Buffer.from(server, 'ucs2'),
   ]);
   const change = Buffer.concat([Buffer.from([20]), uint16(route.length), route, uint16(0)]);
+  return tdsReply(
+    Buffer.concat([Buffer.from([0xe3]), uint16(change.length), change, loginAck(), DONE]),
+  );
+}
+
+/** LOGINACK: the login is accepted, at TDS 7.4, by a program called `fake`. */
+function loginAck(): Buffer {
   const program = 'fake';
   const ack = Buffer.concat([
     Buffer.from([1]),
@@ -547,18 +563,29 @@ function routingReply(server: string, port: number): Buffer {
     Buffer.from(program, 'ucs2'),
     Buffer.from([15, 0, 0, 0]),
   ]);
-  return tdsReply(
+  return Buffer.concat([Buffer.from([0xad]), uint16(ack.length), ack]);
+}
+
+/** DONE, final, with no rows and no error. */
+const DONE = Buffer.concat([Buffer.from([0xfd]), Buffer.alloc(12)]);
+
+/** ERROR with `message`, number 208 class 16, and DONE marked as the error it ends (`A-74`). */
+function errorReply(message: string): Buffer {
+  const varchar = (text: string, width: 1 | 2): Buffer =>
     Buffer.concat([
-      Buffer.from([0xe3]),
-      uint16(change.length),
-      change,
-      Buffer.from([0xad]),
-      uint16(ack.length),
-      ack,
-      Buffer.from([0xfd]),
-      Buffer.alloc(12),
-    ]),
-  );
+      width === 1 ? Buffer.from([text.length]) : uint16(text.length),
+      Buffer.from(text, 'ucs2'),
+    ]);
+  const error = Buffer.concat([
+    Buffer.from([208, 0, 0, 0]),
+    Buffer.from([1, 16]),
+    varchar(message, 2),
+    varchar('fake', 1),
+    varchar('', 1),
+    Buffer.from([1, 0, 0, 0]),
+  ]);
+  const done = Buffer.concat([Buffer.from([0xfd]), uint16(0x0002), Buffer.alloc(10)]);
+  return tdsReply(Buffer.concat([Buffer.from([0xaa]), uint16(error.length), error, done]));
 }
 
 /** A PRELOGIN answer: version 15.0.0.0, and whether the server encrypts (1) or cannot (2). */
@@ -601,9 +628,14 @@ async function tdsServer(
     answer?: Buffer;
     /** Bytes written the moment a connection is accepted, before the client has asked. */
     early?: Buffer;
+    /**
+     * Takes the login, answers the batches `tedious` and the driver send before the check's
+     * own with DONE, and the check's query with this error (`A-74`).
+     */
+    answers?: { error: string };
   } = {},
 ): Promise<Fake> {
-  const plain = mode.route !== undefined || mode.login === true;
+  const plain = mode.route !== undefined || mode.login === true || mode.answers !== undefined;
   const { fake } = await listen((socket, self) => {
     let pending = Buffer.alloc(0);
     let packets = 0;
@@ -676,10 +708,22 @@ async function tdsServer(
           continue;
         }
         if (plain) {
+          // Once logged in: 0x01 is a SQL batch, `tedious`'s own set-up, and 0x03 an RPC, which
+          // is how `execSql` sends a query, the driver's and then the check's.
+          if (mode.answers !== undefined && (type === 0x01 || type === 0x03)) {
+            const asked = payload.includes(Buffer.from('select 1 as n', 'ucs2'));
+            if (asked) self.said.push('select 1 as n');
+            socket.write(asked ? errorReply(mode.answers.error) : tdsReply(DONE));
+            continue;
+          }
           // 0x10 is LOGIN7: the user name and the password are in it.
           self.said.push(type === 0x10 ? 'login7' : `packet 0x${type.toString(16)}`);
           if (mode.route !== undefined && type === 0x10) {
             socket.write(routingReply(mode.route.server, mode.route.port));
+            continue;
+          }
+          if (mode.answers !== undefined && type === 0x10) {
+            socket.write(tdsReply(Buffer.concat([loginAck(), DONE])));
             continue;
           }
           socket.destroy();
@@ -1109,14 +1153,16 @@ describe('db.mysql verifies who the certificate is for, where it verifies at all
  *   bound to the device's host: both families pass under a certificate that lists them.
  * - `mysql2` 3.24 (`lib/base/connection.js` `startTLS`) picks named fields out of `ssl` and
  *   hands Node `tls.checkServerIdentity` or nothing: no check of ours can be given. It names
- *   no server for an address, so that was `localhost` too. The socket it is handed says which
- *   address it went to: IPv4 passes, and IPv6 is refused by Node's own check (`A-60`).
+ *   no server for an address, so that was `localhost` too. Since `A-74` the callback its
+ *   upgrade is handed, the one that sends the login, checks the address first with the shared
+ *   check: both families pass under a certificate that lists them, and nothing is logged in
+ *   to otherwise.
  * - `tedious` 20 (`lib/message-io.js` `startTls`) calls `tls.connect` with `servername`, a
  *   secure context and `rejectUnauthorized`: no check of ours either. It names the address as
  *   the server name, so IPv4 is checked as an address and passes; IPv6 is refused by Node.
  *
- * **The two IPv6 refusals are pinned as refusals**, not skipped: they are what happens, they
- * fail on the side of refusing, and the day either driver or Node changes them these cases say.
+ * **The IPv6 refusal is pinned as a refusal**, not skipped: it is what happens, it fails on the
+ * side of refusing, and the day the driver or Node changes it this case says.
  */
 describe('TLS to a database given as an address is about the address (A-70)', () => {
   type Pair = { key: string; cert: string };
@@ -1150,10 +1196,15 @@ describe('TLS to a database given as an address is about the address (A-70)', ()
       name: 'db.mysql',
       type: dbMysql,
       server: (certificate, address) => mysqlServer(certificate, address),
-      verifiesV6: false,
-      accepted: answered,
+      // Checked by us in `mysql2`'s TLS upgrade, for either family (`A-74`).
+      verifiesV6: true,
+      accepted: async (run, fake) => {
+        await answered(run, fake);
+        assert.equal(fake.logins, 1);
+      },
       nothingSaid: (fake) => {
         assert.deepEqual(fake.said, []);
+        assert.equal(fake.logins, 0, 'the login was sent to a server whose certificate failed');
       },
     },
     {
@@ -1277,6 +1328,44 @@ describe('TLS to a database given as an address is about the address (A-70)', ()
       });
     }
   }
+
+  it('db.mysql at an address refuses, and sends nothing, on a driver with no TLS upgrade to check in (A-74)', async (t) => {
+    // The address is checked in `mysql2`'s `startTLS`, the only way to its login. A driver
+    // without one would be told to check the chain and not the name, so it is not used.
+    const pairs = ready(t, 4);
+    if (pairs === null) return;
+    let owner: object | null = MysqlConnection.prototype;
+    while (owner !== null && !Object.hasOwn(owner, 'startTLS')) {
+      owner = Object.getPrototypeOf(owner) as object | null;
+    }
+    if (owner === null) return assert.fail('mysql2 has no startTLS to take away');
+    const held = Object.getOwnPropertyDescriptor(owner, 'startTLS');
+    Object.defineProperty(owner, 'startTLS', { value: undefined, configurable: true });
+    const fake = await mysqlServer(pairs.listed, '127.0.0.1');
+    try {
+      const error = await failure(
+        execute(dbMysql, rebinding(), {
+          host: '127.0.0.1',
+          port: fake.port,
+          params: { encrypt: 'require', verifyTls: true },
+        }),
+      );
+      // **Refused before a connection was made** (`A-74`'s review): the fallback in the
+      // upgrade throws the same words after one is, which the driver then wraps in its own.
+      assert.match(
+        error.message,
+        /^MySQL at 127\.0\.0\.1: this build of the MySQL driver has no TLS upgrade to check the certificate in, so nothing was sent/,
+      );
+      // An I/O turn for a connection that was made to be accepted, before saying none was.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(fake.connections, 0, 'a connection was made');
+      assert.equal(fake.logins, 0);
+      assert.deepEqual(fake.said, []);
+    } finally {
+      if (held !== undefined) Object.defineProperty(owner, 'startTLS', held);
+      await fake.close();
+    }
+  });
 
   it('db.postgresql by name is still checked against the name, by the same check', async (t) => {
     // The check `pg` is handed is bound to the device's host, whatever Node passes it: a
@@ -1816,6 +1905,57 @@ describe('what a database driver is handed', () => {
       }
     });
 
+    it('is refused on a Windows probe, whatever the core decided, and the driver is not asked (A-74)', async () => {
+      // Node opens a path there as a named pipe, and `//host/…` as one on another machine: the
+      // core may have sent a set bounded to loopback with no pin, so the probe must not follow.
+      const unbounded = { username: 'monitor', password: 'secret' };
+      const bounded = { ...unbounded, allowedTargets: ['127.0.0.1'] };
+      for (const host of [SOCKETS, '//10.0.0.66/pipe', '/\\10.0.0.66\\pipe']) {
+        for (const [credential, target] of [
+          [unbounded, { policy: 'none' }],
+          [bounded, { policy: 'link-local' }],
+          [bounded, { pinned: { address: '127.0.0.1', family: 4 } }],
+        ] as const) {
+          const seen: DbConnectOptions[] = [];
+          const { context, lookups } = never();
+          const error = await failure(
+            runDbCheck(
+              recording(seen),
+              {
+                ...context,
+                target: { ...context.target, host, ...target },
+                credentials: { database: credential },
+              },
+              'win32',
+            ),
+          );
+          assert.ok(error instanceof DbError, String(error));
+          assert.equal(
+            error.message,
+            `PostgreSQL at ${host}: a host that begins with / is a socket directory, and this ` +
+              'probe runs on Windows, where such a path is opened as a named pipe, which may ' +
+              'be on another machine, so nothing was sent. Give the device the server’s name ' +
+              'or address.',
+          );
+          assert.deepEqual(failedIn(error), { phase: 'connect', target: host });
+          assert.equal(lookups(), 0, host);
+          assert.deepEqual(seen, [], `${host}: no login was sent`);
+        }
+      }
+      // Anywhere else the path is the probe's own machine, as before.
+      for (const platform of ['linux', 'darwin'] as const) {
+        const seen: DbConnectOptions[] = [];
+        const { context } = never();
+        const execution = await runDbCheck(recording(seen), context, platform);
+        assert.equal(valueOf(execution, 'value'), 1, platform);
+        assert.deepEqual(
+          seen.map((options) => options.host),
+          [SOCKETS],
+          platform,
+        );
+      }
+    });
+
     it('a path that only contains a slash is a name like any other', async () => {
       const seen: DbConnectOptions[] = [];
       const { context, lookups } = never();
@@ -1959,6 +2099,32 @@ describe('a SQL Server that routes the login to another server', () => {
     assert.ok(!(error instanceof TargetRefusedError), String(error));
     assert.ok(!isCredentialsWithheld(error), String(error));
   };
+
+  it('a query that fails after a redirect names the server the login went to, and the device that sent it (A-74)', async () => {
+    // The routed server takes the login and refuses the query. It is the one the query was
+    // waiting on; naming the device sent an operator to the machine that had answered.
+    const answering = await tdsServer({
+      answers: { error: 'Invalid object name' },
+      address: '127.0.0.2',
+    });
+    const device = await tdsServer({ route: { server: '127.0.0.2', port: answering.port } });
+    try {
+      const error = await failure(
+        execute(dbMssql, rebinding(), { port: device.port, host: '127.0.0.1' }),
+      );
+      loggedIn(device);
+      assert.deepEqual(answering.said, ['packet 0x12', 'login7', 'select 1 as n']);
+      assert.equal(
+        error.message,
+        `Microsoft SQL Server at 127.0.0.2:${String(answering.port)}, where ` +
+          `127.0.0.1:${String(device.port)} routed the login: Invalid object name`,
+      );
+      ordinary(error);
+    } finally {
+      await answering.close();
+      await device.close();
+    }
+  });
 
   it('an address-literal device routed to a metadata address is refused, with nothing sent there', async () => {
     reset();
@@ -3157,7 +3323,7 @@ describe('what a database failure reads as', () => {
         code: 'ERR_TLS_CERT_ALTNAME_INVALID',
       });
     const at = (host: string): DbConnectOptions => ({ ...options, host });
-    for (const engine of ['MySQL', 'Microsoft SQL Server']) {
+    for (const engine of ['Microsoft SQL Server']) {
       const described = describeDbError(altname(), at('::1'), engine);
       assert.match(described.message, /could not be checked against an IPv6 address/, engine);
       assert.match(described.message, /this driver cannot verify one/, engine);
@@ -3170,16 +3336,167 @@ describe('what a database failure reads as', () => {
         );
       }
     }
-    // PostgreSQL is handed the shared check, which reads an IPv6 address.
-    assert.doesNotMatch(
-      describeDbError(altname(), at('::1'), 'PostgreSQL').message,
-      /could not be checked/,
+    // PostgreSQL is handed the shared check, and MySQL's upgrade is checked by it since
+    // `A-74`: both read an IPv6 address, so theirs is the certificate's own failure too.
+    for (const engine of ['PostgreSQL', 'MySQL']) {
+      assert.doesNotMatch(
+        describeDbError(altname(), at('::1'), engine).message,
+        /could not be checked/,
+        engine,
+      );
+    }
+    // Either way a certificate's failure, of the handshake, at the device's address (`P-406`).
+    for (const engine of ['Microsoft SQL Server', 'MySQL', 'PostgreSQL']) {
+      assert.deepEqual(
+        failedIn(describeDbError(altname(), at('::1'), engine)),
+        { phase: 'handshake', target: '::1' },
+        engine,
+      );
+    }
+  });
+});
+
+describe('a database failure says what each address said, and where the login went (A-74)', () => {
+  const options: DbConnectOptions = {
+    host: NAME,
+    port: 1433,
+    database: '',
+    username: 'monitor',
+    password: 'secret',
+    encrypt: 'prefer',
+    verifyTls: false,
+    connectTimeoutMs: 2_000,
+    statementTimeoutMs: 2_000,
+  };
+  const HERE = `${NAME}:1433`;
+  /** One socket's failure, as Node gives it: its code, and the address it went to. */
+  const socket = (address: string, code: string): Error =>
+    Object.assign(new Error(`connect ${code} ${address}:1433`), { code, address, port: 1433 });
+  /** As `tedious` reports a name whose addresses it tried in turn. */
+  const tried = (...failures: Error[]): Error =>
+    Object.assign(
+      new Error(`Failed to connect to ${HERE} - Could not connect (sequence)`, {
+        cause: new AggregateError(failures, 'Could not connect (sequence)'),
+      }),
+      { code: 'ESOCKET' },
     );
-    // A certificate's failure, of the handshake, at the device's address (`P-406`).
-    assert.deepEqual(failedIn(describeDbError(altname(), at('::1'), 'MySQL')), {
-      phase: 'handshake',
-      target: '::1',
-    });
+  const read = (error: Error): string =>
+    describeDbError(error, options, 'Microsoft SQL Server').message;
+
+  it('is diagnosed by the address that got furthest, in whichever order they were tried', () => {
+    const unreachable = socket('::1', 'ENETUNREACH');
+    const refused = socket('127.0.0.1', 'ECONNREFUSED');
+    // Before, the first coded failure decided: `ENETUNREACH`, which no sentence reads.
+    assert.equal(
+      read(tried(unreachable, refused)),
+      `nothing is listening at ${HERE} — every address it has was tried: ::1 ENETUNREACH, ` +
+        '127.0.0.1 ECONNREFUSED',
+    );
+    assert.equal(
+      read(tried(refused, unreachable)),
+      `nothing is listening at ${HERE} — every address it has was tried: 127.0.0.1 ` +
+        'ECONNREFUSED, ::1 ENETUNREACH',
+    );
+    // A timeout got further than no route, and is read as one. **With no "within"** (`A-74`'s
+    // review): one address's timeout among several is Node's 250 ms walk giving up on it for
+    // the next, or the kernel's, and never the 2000 ms budget.
+    const timedOut = socket('10.0.0.5', 'ETIMEDOUT');
+    const noRoute = socket('2001:db8::5', 'ENETUNREACH');
+    assert.equal(
+      read(tried(timedOut, noRoute)),
+      `${HERE} accepted no connection — a firewall dropping the packets looks exactly like ` +
+        'this — every address it has was tried: 10.0.0.5 ETIMEDOUT, 2001:db8::5 ENETUNREACH',
+    );
+    assert.equal(
+      read(tried(noRoute, timedOut, socket('2001:db8::6', 'ENETUNREACH'))),
+      `${HERE} accepted no connection — a firewall dropping the packets looks exactly like ` +
+        'this — every address it has was tried: 2001:db8::5 ENETUNREACH, 10.0.0.5 ETIMEDOUT, ' +
+        '2001:db8::6 ENETUNREACH',
+    );
+    // Nothing got anywhere: the driver's own words, and each address's.
+    assert.equal(
+      read(tried(socket('::1', 'ENETUNREACH'), socket('10.0.0.5', 'EHOSTUNREACH'))),
+      `Microsoft SQL Server at ${HERE}: Failed to connect to ${HERE} - Could not connect ` +
+        '(sequence) — every address it has was tried: ::1 ENETUNREACH, 10.0.0.5 EHOSTUNREACH',
+    );
+    // **Where it failed, and the device's host, are the failure's it extends** (`P-406`), the
+    // phase it was given among them: not one of the sentence's own.
+    for (const [error, phase] of [
+      [tried(unreachable, refused), 'connect'],
+      [tried(socket('::1', 'EHOSTUNREACH'), socket('127.0.0.1', 'ETIMEDOUT')), 'connect'],
+      [tried(socket('::1', 'ENETUNREACH'), socket('10.0.0.5', 'EHOSTUNREACH')), 'connect'],
+      [tried(socket('::1', 'EHOSTUNREACH'), socket('127.0.0.1', 'ETIMEDOUT')), 'query'],
+    ] as const) {
+      const described = describeDbError(error, options, 'Microsoft SQL Server', phase);
+      assert.match(described.message, /every address it has was tried/, phase);
+      assert.deepEqual(failedIn(described), { phase, target: NAME }, described.message);
+    }
+  });
+
+  it('says how long only where the budget is what ran out', () => {
+    // One address's own timeout, alone or gathered alone, is the connect timeout's.
+    for (const error of [
+      tried(socket('127.0.0.1', 'ETIMEDOUT')),
+      socket('127.0.0.1', 'ETIMEDOUT'),
+    ]) {
+      assert.equal(
+        read(error),
+        `${HERE} accepted no connection within 2000 ms — a firewall dropping the packets looks ` +
+          'exactly like this',
+      );
+    }
+  });
+
+  it('says nothing more of one address, and keeps a refusal of ours as it is', () => {
+    assert.equal(
+      read(tried(socket('127.0.0.1', 'ECONNREFUSED'))),
+      `nothing is listening at ${HERE}`,
+    );
+    // Beside two coded attempts, so that there are several to name and the refusal's class is
+    // what decides it: one would say nothing more whatever its class.
+    const refusal = new DbRedirectRefusedError(NAME, OTHER);
+    const wrapped = Object.assign(
+      new Error('Failed to connect', {
+        cause: new AggregateError(
+          [refusal, socket('::1', 'ENETUNREACH'), socket('127.0.0.1', 'ECONNREFUSED')],
+          'x',
+        ),
+      }),
+      { code: 'ESOCKET' },
+    );
+    const described = describeDbError(wrapped, options, 'Microsoft SQL Server');
+    assert.ok(described instanceof DbRedirectRefusedError, described.message);
+    assert.equal(described, refusal);
+    assert.doesNotMatch(described.message, /every address/);
+  });
+
+  it('names the server a redirect sent the login to, once the query is what failed', () => {
+    const ROUTED = 'replica.policy.invalid:11000';
+    const timedOut = Object.assign(new Error('read ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    assert.match(
+      describeDbError(timedOut, options, 'Microsoft SQL Server', 'query', ROUTED).message,
+      new RegExp(
+        `^Microsoft SQL Server at ${ROUTED}, where ${HERE} routed the login: the ` +
+          'connection was made and the query got no answer',
+      ),
+    );
+    const refused = new Error('Invalid object name');
+    assert.equal(
+      describeDbError(refused, options, 'Microsoft SQL Server', 'query', ROUTED).message,
+      `Microsoft SQL Server at ${ROUTED}, where ${HERE} routed the login: Invalid object name`,
+    );
+    // Connected to the device itself, or nobody said where: the device.
+    for (const connectedTo of [HERE, undefined]) {
+      assert.equal(
+        describeDbError(refused, options, 'Microsoft SQL Server', 'query', connectedTo).message,
+        `Microsoft SQL Server at ${HERE}: Invalid object name`,
+      );
+    }
+    // While connecting it is the connect's own rule, which reads the connector's error.
+    assert.doesNotMatch(
+      describeDbError(refused, options, 'Microsoft SQL Server', 'connect', ROUTED).message,
+      /routed/,
+    );
   });
 
   it('says where each failure was, and the device’s host (P-406)', () => {

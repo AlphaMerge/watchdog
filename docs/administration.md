@@ -882,6 +882,29 @@ can turn a sensor that was Up to Down, and each is the fix and not a fault:
   TLS, `prefer` is the setting that says so, and it behaves as before. PostgreSQL and MySQL
   already refused.
 
+**Three more change at the upgrade that brings `A-74`:**
+
+- **`db.mysql` verifies a device given as an IPv6 address.** It refused every one, whatever the
+  certificate listed. A MySQL or MariaDB sensor on such a device with verification on, Down
+  for that reason, comes Up where the certificate lists the address. An IPv4 address is
+  checked as it was, and now by the same check the other TLS clients use rather than through
+  something Node does not document. `db.mssql` still cannot verify an IPv6 address: give the
+  device a name the certificate is for, or its IPv4 address.
+- **A PostgreSQL socket path facing a bounded credential set is decided by the core.** It was
+  sent to the probe to resolve and pin, which a path cannot be, and read Unknown as a name that
+  does not resolve. Now the set is sent where its targets cover `127.0.0.1`, `::1` or
+  `localhost`, and withheld otherwise, with the `outside` sentence: the sensor reads that
+  instead. A path that begins with `//` or holds a `\` is not decided so: Windows reads it as a
+  pipe on another machine, so it is left to a pin, which a path cannot have, and withheld. A
+  probe on Windows refuses every socket path, bounded or not, and sends nothing.
+- **A SQL Server failure names every address a name was tried at, and the server a query went
+  to.** A name with several addresses was diagnosed by the first one tried: `ENETUNREACH` on
+  its IPv6 address before `ECONNREFUSED` on its IPv4 one read as neither. The address that got
+  furthest is the diagnosis now, and the sentence ends with what each said. Where that is one
+  address's timeout, it says no `within N ms`: Node gives up on an address after 250 ms for the
+  next, and that is not the connect timeout. After a redirect, a query that fails names the
+  routed server, and the device that sent the login there.
+
 A connect that ran out of time also reads the same on all three engines now: `… accepted no
 connection within N ms`, where PostgreSQL said `timeout expired` and SQL Server `Failed to
 connect to … in Nms`. When SQL Server had routed the login on and it is the routed server
@@ -904,7 +927,7 @@ as it stands and nothing is resolved, on every one of them.
 | SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: each scan resolves the name once, checks every address, and asks the agent at a checked address. The session it has is kept while its address is still among the answers, so a name whose answers rotate keeps one session; it is replaced only when the name no longer has that address. Over IPv4 unless the device is set to IPv6, as before. |
 | TCP: `port.tcp`, `port.range` | Yes | The socket's lookup is answered with the checked addresses. A range is resolved once for all its ports. |
 | TLS: `tls.certificate`, `tls.security` | Yes | As TCP. Every handshake of a security check goes to the same checked addresses. |
-| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). Whichever address family the name has, as before. **A PostgreSQL host that begins with `/`** is a Unix socket directory on the probe's own machine: nothing is resolved, and it is refused wherever the policy refuses `127.0.0.1` (`private`) and handed to `pg` as it stands wherever it does not (`A-70`). **`db.mssql` under `require`** reads the server's PRELOGIN answer on the socket and ends the connection, before any login, when it says the server will not encrypt (`A-70`). **TLS for a device given as an address** (`A-70`): with verification on, the certificate is checked against the address, and must list it as an address. `pg` is handed the same identity check the other TLS clients use, so both families work. `mysql2` and `tedious` take no check of ours: IPv4 works, and an IPv6 address is refused whatever the certificate lists. |
+| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). Whichever address family the name has, as before. **A PostgreSQL host that begins with `/`** is a Unix socket directory on the probe's own machine: nothing is resolved, and it is refused wherever the policy refuses `127.0.0.1` (`private`) and handed to `pg` as it stands wherever it does not (`A-70`). **`db.mssql` under `require`** reads the server's PRELOGIN answer on the socket and ends the connection, before any login, when it says the server will not encrypt (`A-70`). **TLS for a device given as an address** (`A-70`): with verification on, the certificate is checked against the address, and must list it as an address. `pg` is handed the same identity check the other TLS clients use, so both families work. `mysql2` takes no check of ours, and its upgrade is checked by that same check before it can log in (`A-74`), so both families work. `tedious` takes none either and offers nowhere to put one: IPv4 works, and an IPv6 address is refused whatever the certificate lists. **A PostgreSQL socket path under a bounded set** is judged as the probe's own machine: inside where the targets cover `127.0.0.1`, `::1` or `localhost`, outside otherwise (`A-74`); a path that begins with `//` or holds a `\` is not, and a probe on Windows refuses every socket path, where Node would open it as a named pipe. |
 | Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | **An address only: a name is outside the policy** | A device given as a refused address is refused, and the sensor's own `host` parameter is checked as the device's is. **A name is not resolved or checked.** The probe starts PowerShell and hands it the name; PowerShell's `New-CimSession -ComputerName` resolves it inside that process, WinRM takes no address in its place without breaking Kerberos, which authenticates the *name*, and there is no socket or lookup the probe can hand a child process. A check made here would be of an answer the connection never uses. If a Windows device must not be able to point a probe at a link-local address, give the device its address. |
 | ICMP: `icmp.ping`, `icmp.jitter` | No | An echo carries no credential and brings back no content, so the guard would buy nothing. `ping` resolves the name in its own process, as before. Resolving it in the probe instead would put the largest sensor population on the probe's shared lookup threads, where a lookup cannot be cancelled and abandoned ones pile up uncounted while a resolver is down, and it would lose `ping`'s own choice of address family. |
 | DNS: `dns.record`, `dns.blocklist` | No | They ask a resolver about a name and connect to no device. The resolver is the probe's own or an address in the sensor's parameters, and on a cloud machine the provider's resolver is itself link-local. |
@@ -2276,6 +2299,14 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   did before `A-71`; since `A-71` it had gone direct. A receiver that answers it with
   `101 Switching Protocols` is logged as phase `refused` with status 101, where it was phase
   `request` with a sentence; it was and is one failure in `heartbeatFailures`.
+- **The core's own database, given as an address with `database.ssl` on, is checked against
+  that address** (`A-74`). Its certificate was checked against the name `localhost`, which no
+  configuration said: one that lists the address was refused, and any trusted certificate for
+  `localhost` accepted. Measured before the fix, for `127.0.0.1` and `::1` alike. **Before
+  upgrading such a core, make sure the database's certificate lists the address the core is
+  given**, as an IP subject alternative name, or give the core the name the certificate is for:
+  one that only passed as `localhost` is refused, and the core cannot start. A database given by
+  name, or with `ssl` off, is as it was.
 - **Two readings move on a device given by address** (`A-71`), once its probe runs this build.
   `tls.certificate`'s *Host name matches* channel read 0 for every such device and now reads 1
   where the certificate lists the address as an IP subject alternative name, so a limit set on

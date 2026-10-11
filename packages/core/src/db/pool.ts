@@ -1,5 +1,12 @@
+import type { PeerCertificate } from 'node:tls';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
-import { AppError, describeError, type DatabaseConfig, type Logger } from '@ms/shared';
+import {
+  AppError,
+  describeError,
+  serverIdentity,
+  type DatabaseConfig,
+  type Logger,
+} from '@ms/shared';
 
 export interface DatabaseOptions {
   config: DatabaseConfig;
@@ -267,7 +274,18 @@ export class Database implements Queryable {
       database,
       user: config.user,
       password: config.password,
-      ssl: config.ssl ? { rejectUnauthorized: true } : false,
+      // **Checked against the host the configuration names, of either kind** (`A-74`). `pg`
+      // spreads this into `tls.connect`, and names a server only for a host that is not an
+      // address, so a database given as `10.0.0.5` had its certificate checked against
+      // `localhost` by Node. The shared check is bound to the configured host, as the
+      // database sensors' is, whatever Node passes it.
+      ssl: config.ssl
+        ? {
+            rejectUnauthorized: true,
+            checkServerIdentity: (_given: string, certificate: PeerCertificate) =>
+              serverIdentity(config.host, certificate),
+          }
+        : false,
       max: config.poolSize,
       connectionTimeoutMillis: config.connectTimeoutMs,
       application_name: this.#application,

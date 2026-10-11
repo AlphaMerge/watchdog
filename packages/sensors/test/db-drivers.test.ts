@@ -1,12 +1,16 @@
 import { strict as assert } from 'node:assert';
+import { once } from 'node:events';
+import { connect as netConnect } from 'node:net';
 import { before, describe, it } from 'node:test';
 import { runDbCheck } from '../src/types/db-shared.js';
+import { preloginEncryption } from '../src/support/db/socket.js';
 import { mssqlDriver } from '../src/support/db/mssql.js';
 import { mysqlDriver } from '../src/support/db/mysql.js';
 import { postgresqlDriver } from '../src/support/db/postgresql.js';
 import type { DbConnectOptions, DbDriver } from '../src/support/db/driver.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 import { failedIn, rejectionOf } from './support/failed-in.js';
+import { within } from './support/within.js';
 
 /**
  * The three drivers against three real servers.
@@ -287,3 +291,86 @@ for (const engine of ENGINES) {
     });
   });
 }
+
+/**
+ * SQL Server's own answers to what `A-70` built against a fake (`A-74`): the PRELOGIN guard
+ * under `require`, and the TLS that `tedious` runs inside TDS.
+ *
+ * The server here is Azure SQL Edge, SQL Server's engine built for arm64 (`docker-compose.dev.yml`
+ * says why the full image does not run on this machine). What it cannot show, and is written
+ * down instead: a redirect, which only Azure SQL's gateway sends, and TDS 8 `strict`, which is
+ * SQL Server 2022's and which this driver does not ask for.
+ */
+describe('Microsoft SQL Server, a real one, under `require` (A-74)', () => {
+  const engine = ENGINES.find((one) => one.name === 'Microsoft SQL Server');
+  /** The engine, or a skip saying it is not running. */
+  const running = (t: { skip(reason: string): void }): Engine | null => {
+    if (engine?.available !== true) {
+      t.skip('Microsoft SQL Server is not running');
+      return null;
+    }
+    return engine;
+  };
+
+  it('answers a PRELOGIN asking for encryption in a few bytes, which the guard reads as on', async (t) => {
+    const server = running(t);
+    if (server === null) return;
+    // VERSION at 11 for 6 bytes, ENCRYPTION at 17 for 1 saying ON, the terminator.
+    const payload = Buffer.from([
+      0x00, 0x00, 0x0b, 0x00, 0x06, 0x01, 0x00, 0x11, 0x00, 0x01, 0xff, 0x0f, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x01,
+    ]);
+    const header = Buffer.from([0x12, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]);
+    header.writeUInt16BE(8 + payload.length, 2);
+    const socket = netConnect({ host: server.options.host, port: server.options.port });
+    socket.on('error', () => undefined);
+    try {
+      const answer = await within(
+        5_000,
+        'the PRELOGIN answer',
+        (async () => {
+          await once(socket, 'connect');
+          socket.write(Buffer.concat([header, payload]));
+          let received = Buffer.alloc(0);
+          for await (const chunk of socket) {
+            received = Buffer.concat([received, chunk as Buffer]);
+            if (preloginEncryption(received) !== 'incomplete') return received;
+          }
+          return received;
+        })(),
+      );
+      // ON (1) or REQ (3): what `tedious` starts TLS for, and what `require` lets through.
+      assert.ok(
+        [0x01, 0x03].includes(preloginEncryption(answer) as number),
+        answer.toString('hex'),
+      );
+      // The guard gives up at 64 KiB: a server's real answer is two orders of magnitude short.
+      assert.ok(answer.length < 1_024, `${String(answer.length)} bytes`);
+    } finally {
+      socket.destroy();
+    }
+  });
+
+  it('logs in through the TLS the server negotiates, past the guard', async (t) => {
+    const server = running(t);
+    if (server === null) return;
+    const execution = await runDbCheck(
+      server.driver,
+      context(server, { query: server.one, encrypt: 'require', verifyTls: false }),
+    );
+    assert.equal(valueOf(execution, 'value'), 1);
+  });
+
+  it('with verification on, refuses the certificate the server made for itself, and says so', async (t) => {
+    const server = running(t);
+    if (server === null) return;
+    await assert.rejects(
+      () =>
+        runDbCheck(
+          server.driver,
+          context(server, { query: server.one, encrypt: 'require', verifyTls: true }),
+        ),
+      /self-signed and this sensor verifies certificates/,
+    );
+  });
+});

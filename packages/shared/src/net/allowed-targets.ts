@@ -146,6 +146,25 @@ export function allowedTargetProblems(
  * about**: a set with none is unrestricted, which the caller decides before it asks.
  */
 export function targetVerdict(host: string, entries: readonly string[]): TargetVerdict {
+  // **A host that begins with `/` is a PostgreSQL socket directory on the probe's own machine**
+  // (`A-74`), and is judged as that machine is: inside where the targets cover a loopback
+  // address or `localhost`, and outside otherwise. As an address-free name it was undecided
+  // against address targets, so the core sent the set to the probe to resolve and pin, and a
+  // path resolves to nothing: the sensor read Unknown, as a name that does not resolve. The
+  // probe holds the same path to its target policy's word on loopback (`A-70`).
+  //
+  // **Not a path that begins `//` or holds a `\`** (`A-74`'s review). Windows reads `//host/…`
+  // and `/\host\…` as a pipe on another machine, so the premise holds only on POSIX, and this
+  // is asked with no platform. Such a host is a name like any other here: undecided against
+  // address targets, left to a pin that cannot resolve it, and so withheld. A probe on Windows
+  // refuses every socket path besides (`runDbCheck`).
+  if (host.startsWith('/') && !host.startsWith('//') && !host.includes('\\')) {
+    const local =
+      targetVerdict('127.0.0.1', entries) === 'inside' ||
+      targetVerdict('::1', entries) === 'inside' ||
+      targetVerdict('localhost', entries) === 'inside';
+    return local ? 'inside' : 'outside';
+  }
   const parsed = entries
     .map(parseAllowedTarget)
     .filter((entry): entry is AllowedTarget => typeof entry !== 'string');

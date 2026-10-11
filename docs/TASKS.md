@@ -32937,7 +32937,7 @@ because each is a decision rather than a defect:
       - **Mutation: 15/15.** After the last, the rebuilt `dist` matched its hashes from before
         the first.
 
-- [ ] **A-74 — what is left of a database sensor's address, certificate and wording**
+- [x] **A-74 — what is left of a database sensor's address, certificate and wording**
       · M · A-70 ·
       Found 2026-10-02 by `A-70` and its three reviews. (1) `db.mysql` and `db.mssql` refuse a
       device given as an IPv6 address once verification is on, because neither driver takes a
@@ -32955,6 +32955,159 @@ because each is a decision rather than a defect:
       against a real SQL Server: the PRELOGIN guard's 64 KiB bound, a redirect followed
       through a login with TLS on, and TDS 8 `strict`. **Done when** each is fixed with a
       test or written down as accepted, and (7) is run once against a real server.
+
+      **A-74 outcome. Five fixed with tests, one written down, and (7) run against SQL Server's
+      engine for what it can show.** No migration, no protocol number. The generated references
+      are untouched.
+      - **(1) and (2), `db.mysql`: an address of either family is checked by us, before the
+        login.** `mysql2` sends credentials only from the callback its `startTLS` is handed
+        (`lib/commands/client_handshake.js` 318-329). The driver now makes the core connection
+        itself, wraps that method on it, and checks `serverIdentity(device, certificate)` in
+        the callback before calling the driver's own.
+        - **The chain** stays Node's to refuse under `rejectUnauthorized`. `verifyIdentity` is
+          off for an address only.
+        - **On a failed check** the socket is destroyed and the driver is handed the error, so
+          nothing is sent.
+        - **`socket._host` is gone**, and with it the reliance on something Node does not
+          document. The reliance is now on `mysql2`'s `startTLS(onSecure)`, which the lockfile
+          pins. It is looked for on the class before a connection is made, and a driver without
+          it is refused with a sentence.
+        - **IPv6 works**: `db.mysql` at `::1` passes under a certificate listing it.
+        - **The fake now counts logins**, so the refusals are shown to send no password. Before,
+          it recorded queries only.
+      - **(1), `db.mssql` and IPv6: written down as accepted.** The reasons are in `mssql.ts`.
+        - **What would be possible.** `tedious` emits `secure` before LOGIN7, and the connector
+          could block non-PRELOGIN writes until a check passed, so the login could not leave
+          unchecked.
+        - **What blocks it.** With the driver's rejection off, whether the chain passed would be
+          read off which `authorizationError` Node reports. That is its order of checks, and it
+          is not documented. If the order changed, an untrusted certificate would pass.
+        - **So** the refusal stays: it fails closed and says what to do. The sentence is now
+          SQL Server's only.
+      - **(3) The core's pool**: measured, then fixed.
+        - **Measured.** `database-tls-identity.test.ts` runs a PostgreSQL of its own that
+          answers `S` and counts startup messages. Against the old setting it failed 4 of 6: at
+          `127.0.0.1` and `::1` alike, a certificate listing the address was refused and one for
+          `localhost` accepted.
+        - **Fixed.** `pool.ts` now passes `checkServerIdentity` bound to `config.host`, through
+          the shared `serverIdentity`. 6 of 6 pass.
+        - **An upgrade note** says that such a core must have a certificate for its address
+          before upgrading, or it cannot start.
+      - **(4) A socket path facing a bounded set is decided, as the probe's own machine.**
+        `targetVerdict` in `@ms/shared` reads a host starting with `/` as inside exactly when
+        the targets cover `127.0.0.1`, `::1` or `localhost`, and outside otherwise. It was
+        undecided against address targets, so the core sent the set to be pinned and the path
+        read Unknown as an unresolvable name. This matches the probe's own rule for the path
+        (`A-70` F1).
+        - **Not a path that begins `//` or holds a `\`** (the re-review): Windows reads those as
+          a pipe on another machine. They stay names, undecided against address targets, and
+          the pin that cannot resolve them withholds the set. A probe on Windows refuses every
+          socket path, whatever the core decided.
+        - **Tests.** Twelve rows in `allowed-targets.test.ts`, and a `boundRefusal` case in
+          `credential-pinning.test.ts`: `outside` against address targets, null against
+          `127.0.0.1` at any probe version, and `//10.0.0.66/pipe` left to a pin.
+          `credential-vouching.ts` was not touched; it reads the verdict.
+      - **(5) After a redirect, a query's failure names the routed server.** The connector
+        reports where it connected (`tdsConnector`'s `connected`). `describeDbError` takes it in
+        the query phase: `Microsoft SQL Server at R, where D routed the login: …`.
+        - **The TDS fake** now takes a login, answers `tedious`'s batches and RPCs, and fails
+          the check's query. End to end, through a redirect from `127.0.0.1` to `127.0.0.2`, the
+          sentence names `127.0.0.2`.
+        - **Not covered.** With nothing checked (policy `none`, no bounds, not `require`),
+          `tedious` follows the redirect itself, and the device is named, as before.
+      - **(6) Several addresses: the furthest attempt is the diagnosis, and every attempt is
+        named.**
+        - **The ranking**: refused, reset, timed out, then the unreachables. So
+          `ENETUNREACH` on `::1` and then `ECONNREFUSED` on `127.0.0.1` reads `nothing is
+          listening at …`, in either order.
+        - **An attempt's timeout says no `within N ms`** (the re-review): among several it is
+          Node giving up on one address after 250 ms for the next, or the kernel's, and never
+          the connect timeout, whose timer gathers nothing.
+        - **The sentence ends** with `every address it has was tried: ::1 ENETUNREACH,
+          127.0.0.1 ECONNREFUSED`.
+        - **Unchanged**: one attempt, and a refusal of ours, keep their class and their words.
+      - **(7) Against Azure SQL Edge 15.0.2000**, the dev stack's SQL Server engine. The full
+        image segfaults under emulation here, and there is no amd64 host. Three cases in
+        `db-drivers.test.ts`:
+        - its PRELOGIN answer to a request for encryption is 26 bytes and reads ON to the guard,
+          so the 64 KiB bound is about 2,500 times what a real server sends;
+        - `require` with verification off logs in through the TLS it negotiates inside TDS,
+          past the guard;
+        - with verification on, its self-signed certificate is refused with the self-signed
+          sentence.
+
+        **Not run, and written down:**
+        - **A redirect through a TLS login.** Only Azure SQL's gateway routes.
+        - **TDS 8 `strict`.** It is SQL Server 2022's, and this driver passes `tedious` a
+          boolean and never asks for it.
+        - **Both need** an amd64 host with SQL Server 2022, or an Azure SQL database.
+      - **Found in passing.** The dev `mssql` service always reads unhealthy: its healthcheck
+        uses `/dev/tcp`, and the image's `/bin/sh` is dash. The server answers.
+      - **Mutations**, each restored byte for byte with the file compared after:
+        - skipping our identity check fails the four MySQL refusals;
+        - `verifyIdentity` left on for an address fails both MySQL acceptances;
+        - first-coded for furthest, and no attempts suffix, each fail the ordering test;
+        - the connector not reporting fails the end-to-end redirect test;
+        - the path rule removed fails 8 shared rows and the core case;
+        - the old pool setting fails 4 of 6.
+      - **Suites**, on `bba1177e`: this commit, rebased onto `ebce8652` with the re-review's
+        fixes, before these counts were written in.
+        - `@ms/sensors` 2,034 of 2,035. The one skip is `P-406`'s PostgreSQL TLS case: the dev
+          PostgreSQL offers no TLS.
+        - The database target file 163 of 163. The live driver file 23 of 24, with that skip;
+          MariaDB and SQL Server ran.
+        - `@ms/shared`'s `allowed-targets.test.ts` 46 of 46.
+        - `@ms/core`'s `credential-pinning.test.ts` and `database-tls-identity.test.ts` 229 of
+          229, against a PostgreSQL the run found, with no skipped `describe`.
+        - Not re-run whole since the rebase: `@ms/shared` 574 of 574 and `@ms/core` 5,280 of
+          5,280 (on `6205d460`) were before it.
+      - **Docs.** `administration.md`:
+        - the per-transport table;
+        - three notes after `A-70`'s;
+        - an upgrade note for the core's database.
+      - **Landed over `P-406`**, rebased by the orchestrator 2026-10-17:
+        - the several-addresses sentence keeps the phase and the device's host of the failure
+          it extends;
+        - a query's failure after a redirect names the routed server and keeps `P-406`'s phase
+          and host;
+        - `P-406`'s handshake assertion for an IPv6 address now covers all three engines,
+          SQL Server's refusal and the other two engines' certificate failures alike.
+      - **Review (re-review after the rebase).** Seven minor findings, all fixed in this commit:
+        1. **A host beginning `/` was inside for every platform.** On a Windows probe Node opens
+           such a path as a named pipe, and `//host/…` as one on another machine, so a set
+           bounded to loopback went there unpinned. Latent, since a Windows probe is 1.1's.
+           - `targetVerdict` keeps the rule for a path that does not begin `//` and holds no
+             `\`, as (4) says. Four rows and the `boundRefusal` case show it.
+           - `runDbCheck` refuses every socket path on a Windows probe, whatever the core
+             decided, as `connect` with the device's host and a sentence, before anything is
+             resolved or the driver asked. The platform is a defaulted parameter, as
+             `endedHow`'s is, which the test names.
+        2. **Nothing tested that the several-addresses sentence keeps `P-406`'s phase and
+           host** (and 4, the same gap from the tests' side). `failedIn` is now asserted on four
+           such failures, one in the query phase, so that the phase is shown to be the
+           failure's own and not one the wrapper chose.
+        3. **An attempt's `ETIMEDOUT` among several said `within 2000 ms`**, which no run spends.
+           `connectTimedOut` takes whether the budget ran out, as (6) says. The test that pinned
+           the false duration now expects none, in two orders, and a new test keeps it for a
+           lone timeout and for one gathered alone.
+        4. Covered by 2.
+        5. **The refusal test passed without the prototype guard**: with one coded attempt
+           beside the refusal, the wrapper was never reached. It now has two, and asserts the
+           class and that no address list was added.
+        6. **The no-upgrade test passed without the up-front check**: the fallback in the
+           upgrade says the same words after connecting, and the driver wraps them. The message
+           is anchored, and no connection is asserted after an I/O turn.
+        7. **The suite counts predated the rebase.** Replaced above with runs of the rebased
+           commit.
+        - **Mutants, 7 of 7 killed**, each restored with the file compared after, and rebuilt:
+          - the `//` and `\` guard removed fails the four new shared rows and the core case;
+          - the Windows refusal never taken fails the new Windows test;
+          - the wrapper dropping the host, and dropping phase and host, each fail the ordering
+            test on its `failedIn`;
+          - the budget always read as run out fails the ordering test on `within 2000 ms`;
+          - the prototype guard removed fails the refusal test;
+          - the up-front check never taken fails the no-upgrade test on its anchored message,
+            which read `MySQL at 127.0.0.1:<port>: MySQL at 127.0.0.1: this build …`.
 
 - [x] **A-75 — three small things the heartbeat and the certificate sensor still say
       wrongly** · S · A-71 ·

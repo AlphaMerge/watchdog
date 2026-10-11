@@ -146,18 +146,24 @@ const PG_TIMED_OUT = 'timeout expired';
  * **It names the server that did not answer**, which after a SQL Server redirect is not the
  * device: the device answered, and routed the login to one that then said nothing. Naming the
  * device there sends an operator to the machine that is working.
+ *
+ * **It says how long only where the budget is what ran out** (`A-74`'s review). One address's
+ * `ETIMEDOUT` among several is never the connect timeout: it is Node giving up on an address
+ * after 250 ms for the next (`autoSelectFamily`), or the kernel's own for a SYN, and once the
+ * budget runs out the driver's or connector's timer ends the connect and gathers nothing.
  */
 function connectTimedOut(
   where: string,
   options: DbConnectOptions,
   routedTo: string | undefined,
+  budget: boolean,
 ): DbError {
-  const within = `within ${String(options.connectTimeoutMs)} ms`;
+  const within = budget ? ` within ${String(options.connectTimeoutMs)} ms` : '';
   const firewall = 'a firewall dropping the packets looks exactly like this';
   return new DbError(
     routedTo === undefined
-      ? `${where} accepted no connection ${within} — ${firewall}`
-      : `${where} routed the login to ${routedTo}, which accepted no connection ${within} — ` +
+      ? `${where} accepted no connection${within} — ${firewall}`
+      : `${where} routed the login to ${routedTo}, which accepted no connection${within} — ` +
           firewall,
     'connect',
     options.host,
@@ -248,14 +254,108 @@ const WRAPPERS = new Set(['', 'ESOCKET']);
 /** A certificate or TLS failure's code: Node's and OpenSSL's, or `mysql2`'s for all of them. */
 const TLS_CODE = /^(?:HANDSHAKE_SSL_ERROR$|CERT_|UNABLE_TO_|ERR_TLS_|ERR_SSL_)/;
 
+/**
+ * How far a connect got, furthest first: a refusal is a host that answered, a timeout is one
+ * that may be there, and the rest never left this machine (`A-74`). What a name with several
+ * addresses is diagnosed by, whichever order they were tried in. A code not here comes last.
+ */
+const REACHED = [
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ESOCKETTIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EADDRNOTAVAIL',
+  'EAFNOSUPPORT',
+];
+
+interface Attempt {
+  readonly address: string;
+  readonly code: string;
+}
+
+/**
+ * One failure per address `tedious` tried, from the `AggregateError` it gathers them in
+ * ("Could not connect (sequence)"), when it tried more than one. Each socket's error carries
+ * the address it went to.
+ */
+function attemptsOf(chain: readonly unknown[]): Attempt[] {
+  for (const one of chain) {
+    if (!(one instanceof AggregateError)) continue;
+    const attempts = (one.errors as unknown[]).flatMap((failed): Attempt[] => {
+      const code = codeOf(failed ?? {});
+      if (WRAPPERS.has(code)) return [];
+      const address = (failed as { address?: unknown } | null)?.address;
+      return [{ address: typeof address === 'string' ? address : '', code }];
+    });
+    if (attempts.length > 1) return attempts;
+  }
+  return [];
+}
+
+/** The code of the attempt that got furthest. */
+function furthest(attempts: readonly Attempt[]): string {
+  const rank = (code: string): number => {
+    const at = REACHED.indexOf(code);
+    return at < 0 ? REACHED.length : at;
+  };
+  return [...attempts].sort((a, b) => rank(a.code) - rank(b.code))[0]?.code ?? '';
+}
+
+/**
+ * A driver failure, with the part an operator can act on (`describeOne`), and, where a name
+ * had several addresses and each failed, what each said (`A-74`).
+ *
+ * **The furthest attempt is the diagnosis.** `tedious` tries a name's addresses one after
+ * another and keeps every failure, and this took the first coded one: a name whose IPv6 address
+ * had no route and whose IPv4 address refused read as the generic sentence, `ENETUNREACH`
+ * being one nothing reads, and never said that a server was there with nothing listening. The
+ * code of the attempt that got furthest is read now, and every attempt is named after the
+ * sentence, so the one that was not chosen is not lost.
+ */
 export function describeDbError(
   error: unknown,
   options: DbConnectOptions,
   engine: string,
   /** What the check was doing: a driver's connect timer is read as one only while connecting. */
   phase: DbPhase = 'connect',
+  /**
+   * In the query phase, the server the connection is to, where a redirect made it another than
+   * the device (`A-74`): `host:port`, as the connector last connected.
+   */
+  connectedTo?: string,
+): Error {
+  const described = describeOne(error, options, engine, phase, connectedTo);
+  const attempts = attemptsOf(chainOf(error));
+  // A refusal of ours keeps its class and its sentence, which is the whole diagnosis.
+  if (attempts.length < 2 || Object.getPrototypeOf(described) !== DbError.prototype) {
+    return described;
+  }
+  const tried = attempts
+    .map((one) => `${one.address === '' ? 'an address' : one.address} ${one.code}`)
+    .join(', ');
+  return new DbError(
+    `${described.message} — every address it has was tried: ${tried}`,
+    (described as DbError).phase,
+    (described as DbError).host,
+  );
+}
+
+function describeOne(
+  error: unknown,
+  options: DbConnectOptions,
+  engine: string,
+  phase: DbPhase,
+  connectedTo: string | undefined,
 ): Error {
   const where = `${options.host}:${String(options.port)}`;
+  // **Once connected, the server is the one the login went to** (`A-74`): after a redirect,
+  // the routed server, which is where a query that gets no answer is waiting.
+  const server =
+    phase === 'query' && connectedTo !== undefined && connectedTo !== where
+      ? `${connectedTo}, where ${where} routed the login`
+      : where;
   const chain = chainOf(error);
   // **A refusal is not a database's failure, and keeps its class** (`A-62`): the runner reads a
   // set that was withheld as Unknown, and the policy's refusal says the address and the policy.
@@ -267,7 +367,11 @@ export function describeDbError(
     }
     if (one instanceof DbRoutedUnresolvedError) return one;
   }
-  const code = chain.map(codeOf).find((one) => !WRAPPERS.has(one)) ?? '';
+  const attempts = attemptsOf(chain);
+  const code =
+    attempts.length > 1
+      ? furthest(attempts)
+      : (chain.map(codeOf).find((one) => !WRAPPERS.has(one)) ?? '');
   const message = error instanceof Error ? error.message : String(error);
 
   // **Named for the server that failed**, which after a redirect is the routed one: the
@@ -300,7 +404,7 @@ export function describeDbError(
   // phase, is a server that stopped answering, and "accepted no connection" would be false.
   if (socketTimedOut && phase === 'query') {
     return new DbError(
-      `${engine} at ${where}: the connection was made and the query got no answer before the ` +
+      `${engine} at ${server}: the connection was made and the query got no answer before the ` +
         'socket timed out — the server stopped answering, or something between dropped the ' +
         'connection without closing it',
       'query',
@@ -319,7 +423,8 @@ export function describeDbError(
       code === 'ETIMEOUT' ||
       (code === '' && chain.some((one) => one instanceof Error && one.message === PG_TIMED_OUT)))
   ) {
-    return connectTimedOut(where, options, routedTo);
+    // An attempt's code among several, which is not the budget's.
+    return connectTimedOut(where, options, routedTo, attempts.length < 2);
   }
   // 28P01 and 28000 are "invalid authorisation" in PostgreSQL and MySQL; 18456 is SQL Server's.
   if (
@@ -359,15 +464,14 @@ export function describeDbError(
       host,
     );
   }
-  // **`mysql2` and `tedious` take no identity check of ours** (`A-70`), and Node's own reads an
-  // IPv6 address as a name no certificate has (`serverIdentity` in `@ms/shared`). So a device
-  // given as an IPv6 address cannot be verified through either, and is refused, whatever its
-  // certificate lists. Said, because Node's sentence blames the certificate.
-  // By Node's code where the driver keeps it (`tedious`), and by Node's words where it does
-  // not: `mysql2` copies the message onto an error coded `HANDSHAKE_SSL_ERROR`.
+  // **`tedious` takes no identity check of ours** (`A-70`), and Node's own reads an IPv6
+  // address as a name no certificate has (`serverIdentity` in `@ms/shared`). So a device given
+  // as an IPv6 address cannot be verified through it, and is refused, whatever its certificate
+  // lists. Said, because Node's sentence blames the certificate. `mysql2`'s upgrade is checked
+  // by us since `A-74` (`checkAddressOnSecure`), so a MySQL refusal here is the certificate's.
   if (
     isIP(options.host) === 6 &&
-    engine !== 'PostgreSQL' &&
+    engine === 'Microsoft SQL Server' &&
     (chain.some((one) => codeOf(one) === 'ERR_TLS_CERT_ALTNAME_INVALID') ||
       message.includes("does not match certificate's altnames"))
   ) {
@@ -386,6 +490,6 @@ export function describeDbError(
   if (phase === 'connect' && chain.some((one) => TLS_CODE.test(codeOf(one)))) {
     return new DbError(`${engine} at ${where}: ${message}`, 'handshake', host);
   }
-  // The driver's own words, in the phase the check was in.
-  return new DbError(`${engine} at ${where}: ${message}`, phase, host);
+  // The driver's own words, in the phase the check was in, at the server it was talking to.
+  return new DbError(`${engine} at ${server}: ${message}`, phase, host);
 }

@@ -53,6 +53,22 @@ describe('whether a host is inside a set’s targets (A-41b)', () => {
     // An entry that means nothing allows nothing.
     ['10.20.1.5', ['10.20.0.0/99'], 'outside'],
     ['db1.example.com', ['*'], 'outside'],
+    // A PostgreSQL socket directory is the probe's own machine (`A-74`): decided, never left to
+    // a probe to resolve, as loopback is.
+    ['/var/run/postgresql', ['10.20.0.0/16'], 'outside'],
+    ['/var/run/postgresql', ['10.20.1.5', '*.example.com'], 'outside'],
+    ['/var/run/postgresql', ['127.0.0.1'], 'inside'],
+    ['/var/run/postgresql', ['127.0.0.0/8'], 'inside'],
+    ['/var/run/postgresql', ['::1'], 'inside'],
+    ['/var/run/postgresql', ['localhost'], 'inside'],
+    ['/tmp', ['0.0.0.0/0'], 'inside'],
+    ['/var/run/postgresql', ['127.0.0.2'], 'outside'],
+    // ...on POSIX. Windows reads these as a pipe on another machine, so they are names here:
+    // undecided against addresses, and left to a pin that cannot resolve them.
+    ['//10.0.0.66/pipe', ['127.0.0.1'], 'undecided'],
+    ['/\\host\\pipe', ['127.0.0.1'], 'undecided'],
+    ['/var/run\\postgresql', ['127.0.0.1'], 'undecided'],
+    ['//10.0.0.66/pipe', ['localhost'], 'outside'],
   ];
   for (const [host, entries, expected] of cases) {
     it(`${host} against ${entries.join(', ')} is ${expected}`, () => {

@@ -222,6 +222,22 @@ describe('protocol 24 is what a probe must speak to be sent such a set (A-41c)',
     assert.equal(boundRefusal(both, 'sw.dc.test', 21, true), WITHHELD_CREDENTIALS.probeCannotPin);
   });
 
+  it('decides a PostgreSQL socket directory as the probe’s own machine, and leaves nothing to pin (A-74)', () => {
+    // As a name facing address targets it was undecided, and the set went to the probe to
+    // resolve and pin: a path resolves to nothing, and the sensor read Unknown.
+    const path = '/var/run/postgresql';
+    assert.equal(boundRefusal(ranges, path, 27, true, 'database'), WITHHELD_CREDENTIALS.outside);
+    // Inside where the targets cover loopback, with no pin made and so no probe version asked.
+    const local = { targets: ['127.0.0.1'], hostKeys: null };
+    assert.equal(boundRefusal(local, path, 0, true, 'database'), null);
+    // Not one Windows would open as a pipe on another machine: that is left to a pin, which
+    // cannot resolve it, and a probe that cannot pin is not sent the set at all.
+    assert.equal(
+      boundRefusal(local, '//10.0.0.66/pipe', 0, true, 'database'),
+      WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+    );
+  });
+
   describe('a database set needs a probe at 27: its drivers pin from there (A-62)', () => {
     const DATABASE = versionFor('databaseAddressPinning');
     const rows: [string, string, number, boolean, string, string | null][] = [

@@ -1,4 +1,4 @@
-import { connect as netConnect, isIP, Socket, type LookupFunction } from 'node:net';
+import { connect as netConnect, Socket, type LookupFunction } from 'node:net';
 import { pinnedPeerRefusal, type PinnedAddress } from '../pinned-target.js';
 import { DbEncryptionRefusedError, type DbConnectOptions } from './driver.js';
 
@@ -87,46 +87,12 @@ export function unconnectedSocket(options: DbConnectOptions): (() => Socket) | u
   };
 }
 
-/**
- * Whether `mysql2` is about to verify a certificate for a device given as an address (`A-70`).
- *
- * `mysql2` upgrades the socket it has with `tls.connect({ socket, servername })`, and gives a
- * server name only for a name (`lib/base/connection.js` `startTLS`). It takes no identity check
- * of ours: under `verifyIdentity` it hands Node `tls.checkServerIdentity` and nothing else. With
- * no server name and no host, what Node checks the certificate against is, in order, the
- * socket's own record of the host it was told to connect to, and then the literal `localhost`
- * (`onConnectSecure` in Node's `lib/_tls_wrap.js`). A socket connected to an address keeps no
- * such record, so the certificate of a server at `10.0.0.5` was checked against `localhost`.
- */
-function verifiesAnAddress(options: DbConnectOptions): boolean {
-  return options.verifyTls && options.encrypt !== 'disable' && isIP(options.host) !== 0;
-}
-
-/**
- * Tells Node which host a socket was connected to, where it was an address: the record a
- * socket connected by name already has, and the one Node reads when a TLS upgrade names nobody.
- *
- * **The one place here that leans on something Node does not document**, because `mysql2`
- * leaves no other: without it the choice is between `localhost` and no verification. The
- * tests are what hold it: a certificate that lists the address passes, and one for `localhost`
- * or for another address is refused. The day Node stops reading it they fail, on the side of
- * refusing.
- */
-function recordHost(socket: Socket, host: string): void {
-  Object.defineProperty(socket, '_host', { value: host, writable: true, configurable: true });
-}
-
 /** For `mysql2`'s `stream`: already connecting, as the one it makes itself is. */
 export function connectingSocket(options: DbConnectOptions): (() => Socket) | undefined {
   const lookup = options.lookup;
-  const address = verifiesAnAddress(options);
-  if (lookup === undefined && !address) return undefined;
+  if (lookup === undefined) return undefined;
   return () => {
-    const socket =
-      lookup === undefined
-        ? netConnect({ host: options.host, port: options.port })
-        : netConnect(destination(options, lookup));
-    if (address) recordHost(socket, options.host);
+    const socket = netConnect(destination(options, lookup));
     holdToPin(socket, options.host, options.pinned);
     // What `mysql2` sets on a socket of its own, and not on one it is handed.
     socket.setNoDelay(true);
@@ -297,6 +263,11 @@ function nameOf(host: string): string {
  */
 export function tdsConnector(
   options: DbConnectOptions,
+  /**
+   * Told `host:port` each time a socket is handed over (`A-74`): where the login goes, which
+   * after a redirect is the routed server, so that a query's failure can name it.
+   */
+  connected?: (where: string) => void,
 ): ((...asked: readonly unknown[]) => Promise<Socket>) | undefined {
   // **Handed over whenever a redirect has to be asked about**, which is not only when the
   // device's name was resolved: a device given as an address has no lookup, and left to itself
@@ -356,6 +327,7 @@ export function tdsConnector(
         }
         settle(() => {
           if (required) holdToEncryption(socket, `${host}:${String(port)}`);
+          connected?.(`${host}:${String(port)}`);
           resolve(socket);
         });
       };

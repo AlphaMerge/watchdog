@@ -19,6 +19,7 @@ import {
 import { CredentialsWithheldError, PIN_REFUSALS, pinnedLookup } from '../support/pinned-target.js';
 import {
   codeOf,
+  DbError,
   DbRedirectRefusedError,
   DbRoutedUnresolvedError,
   type DbConnectOptions,
@@ -276,8 +277,15 @@ function cellAt(result: DbResult, row: number, column: string, position: number)
   return name === undefined ? undefined : record[name];
 }
 
-/** The whole check, given a driver. The three types are this plus an id and a default port. */
-export async function runDbCheck(driver: DbDriver, context: CheckContext): Promise<CheckExecution> {
+/**
+ * The whole check, given a driver. The three types are this plus an id and a default port.
+ * `platform` is the probe's, and a test's to name.
+ */
+export async function runDbCheck(
+  driver: DbDriver,
+  context: CheckContext,
+  platform: NodeJS.Platform = process.platform,
+): Promise<CheckExecution> {
   const host = context.target.host;
   if (host === '') throw new Error('the device has no host to connect to');
   const query = typeof context.params['query'] === 'string' ? context.params['query'].trim() : '';
@@ -316,7 +324,20 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   // which failed it as a name with no address. **It is the probe's own machine, and is held
   // to what the policy says of that**: refused wherever loopback is, since the same server
   // at 127.0.0.1 would be, and handed to the driver as it stands wherever loopback is allowed.
-  const local = driver.id === 'postgresql' && host.startsWith('/') && pinned === undefined;
+  const socketPath = driver.id === 'postgresql' && host.startsWith('/');
+  // **Except on Windows, whatever the core decided** (`A-74`'s review). Node opens a path there
+  // as a named pipe, and one that begins `//` or `/\` as a pipe on another machine: the
+  // premise that it is this machine does not hold, and a set bounded to loopback would go out.
+  if (socketPath && platform === 'win32') {
+    throw new DbError(
+      `${driver.name} at ${host}: a host that begins with / is a socket directory, and this ` +
+        'probe runs on Windows, where such a path is opened as a named pipe, which may be on ' +
+        'another machine, so nothing was sent. Give the device the server’s name or address.',
+      'connect',
+      host,
+    );
+  }
+  const local = socketPath && pinned === undefined;
   if (local) {
     refuseLocalSocket(host, context.target.policy, 'connect to', context.target.policyException);
   }
