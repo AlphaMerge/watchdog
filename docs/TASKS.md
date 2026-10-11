@@ -12663,9 +12663,25 @@ because each is a decision rather than a defect:
         `P-397` fixes), not this file, whose three tests are in the total either way. Its log was
         lost with the container. The rerun read 5,258, none skipped.
 
-- [ ] **P-332 — the declared-primary repair's per-start cost is unmeasured** · XS · P-323 · Found
+- [x] **P-332 — the declared-primary repair's per-start cost is unmeasured** · XS · P-323 · Found
       2026-10-08 in `P-323`. **Done when** measured at the v1 target (5,000 sensors / 15,000
       channels) on a quiet machine and committed to `docs/findings/`.
+
+      **P-332 outcome. About 30 ms a start, of which the types' code is 4 ms; nothing to change**
+      (`docs/findings/2026-10-11-declared-primary-repair.md`).
+      - **Measured** by `test/perf/declared-primary-performance.test.ts`: 5,000 sensors of five
+        shipped types and their 15,000 declared channels, the shipped catalogue declaring, the
+        database audit sink recording. Four runs with `ms-server` stopped, at 0.10 load per CPU,
+        1.01× delivered CPU and nothing else on the database.
+      - **Every start after the first**: 28 to 41 ms (medians of 5), all 10 pages read and nothing
+        moved, locked or audited. Per sweep, the SQL took 20 to 23 ms and the types'
+        declarations 4 to 5 ms.
+      - **The first start after an upgrade**, with a tenth of the primaries misplaced: 185 to 445 ms
+        for 500 moves and 1,000 audit entries.
+      - **Asserted**, not timed: every sensor read, the misplaced ones all moved and audited, every
+        primary the declared one after, and nothing moved on a second pass.
+      - Parameters other than `{}` and a cold cache were not measured; the finding says why the
+        first is unlikely to matter. `P-333` can take this as the pass's cost.
 
 - [ ] **P-333 — start-up passes each read the whole tree on every start** · S · P-323 · Found
       2026-10-08 in `P-323`. S-18's declared limits, P-177's alarm reconciliation and P-323's
