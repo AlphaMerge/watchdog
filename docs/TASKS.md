@@ -12439,11 +12439,46 @@ because each is a decision rather than a defect:
         `vi.waitFor`), which gives up at its timeout and clears its interval and observer; the
         rest are fixed sleeps, not polls.
 
-- [ ] **P-331 — no test boots the core's start-up path** · S · P-323 · Found 2026-10-08 in
+- [x] **P-331 — no test boots the core's start-up path** · S · P-323 · Found 2026-10-08 in
       `P-323`. The declared-primary repair is started unawaited from `main.ts`, with a shutdown
       hook that waits for the page in flight and a failure that is logged; none of that wiring is
       exercised, only typechecked. **Done when** a test (or smoke run) starts the core and shows
       the pass running, stopping at shutdown, and a failure logged without crashing.
+
+      **P-331 outcome. A test that starts `ms-core serve` as a process; `main.ts` unchanged.**
+      - **The harness** (`test/support/core-process.ts`, `startCore`): `dist/src/main.js serve`
+        with a configuration file, a scratch database, a fresh data directory, openssl-made
+        certificates for the probe endpoint, free ports, and every `MS_*` variable removed from
+        the environment but the test's own overrides. Lines are parsed as they arrive; `stop`
+        sends SIGTERM and waits for both pipes to close, each wait bounded. The probe's
+        `probe-process.ts` is the model.
+      - **The tests** (`core-startup.test.ts`, skipped without PostgreSQL or openssl), on ping
+        sensors whose primary an earlier build left on `loss` where `icmp.ping` declares `rtt`:
+        - *Running*: the core comes up, the repair's report says `moved: 3, complete: true`,
+          each sensor's primary is `rtt`, six `channel.redeclared` entries are by
+          `declared-primary-startup-repair`, the API answers 401, and SIGTERM exits 0.
+        - *Stopping at shutdown*: the test holds the sensor's `loss` channel row, which only the
+          repair writes at start-up once the declared limits are settled, so the repair stops
+          inside its first page while the core reaches `ready`. SIGTERM, then the row released:
+          the page's move finishes (`moved: 1`), the pass stops there (`complete: false`), the
+          report comes before its shutdown hook completes, and that hook completes before the
+          database's. Exit 0.
+        - *A failure*: the same row held past a one-second `lock_timeout`. The page is logged at
+          `warn` with `phase: 'move-page'`, counted in `failedPages`, its sensor left on `loss`,
+          and the core comes up, answers 401, logs nothing fatal and exits 0.
+      - **Mutations of `main.ts`** (each restored byte for byte, `dist` rebuilt): the signal not
+        passed fails the shutdown test (`complete: true`); a hook that does not wait for the
+        repair fails it on the log order (closing the pool waits for a client still checked out,
+        so the page finished either way, and the order is what the hook adds); the repair awaited
+        fails it at `ready`.
+      - **Not reached**: the `.then(…, logger.error)` arm in `main.ts`. `repairDeclaredPrimaries`
+        catches every failure itself and never rejects, so the arm is a guard against a later
+        change, and only an injected repair could reach it.
+      - Five runs in a row pass, 13–22 s each.
+      - **One unexplained skip.** The first full core run with this test read 5,229 and one
+        skipped suite: a file whose database check failed and whose suite was skipped (the shape
+        `P-397` fixes), not this file, whose three tests are in the total either way. Its log was
+        lost with the container. The rerun read 5,258, none skipped.
 
 - [ ] **P-332 — the declared-primary repair's per-start cost is unmeasured** · XS · P-323 · Found
       2026-10-08 in `P-323`. **Done when** measured at the v1 target (5,000 sensors / 15,000
@@ -13677,11 +13712,23 @@ because each is a decision rather than a defect:
       **Mutation**: no cap fails it. **Not done**: the sensors past the cap are named nowhere; an
       operator finds them by editing (the 400 names the path) until something lists the set.
 
-- [ ] **P-369 — the stored-params pass is outside the start-up tests and policy** · XS · P-358 ·
+- [x] **P-369 — the stored-params pass is outside the start-up tests and policy** · XS · P-358 ·
       Found 2026-10-09 in `P-358`. Its `main.ts` wiring is typechecked but nothing boots it
       (`P-331`), and it is a third pass that reads every sensor on every start (`P-333`). **Done
       when** `P-331`'s boot test and `P-333`'s policy, whichever lands first, cover it too, or
       this is closed by one of them with a line in its outcome.
+
+      **P-369 outcome. The boot test, in part; the policy is `P-333`'s.** `core-startup.test.ts`
+      (`P-331`) gives a started core a ping sensor whose stored `count` is `"lots"`. The pass,
+      started unawaited, names it at `warn` with `phase: 'validate-stored-params'` and reports
+      `invalid: 1, complete: true`. At shutdown its hook completes before the database's.
+      **Not in the boot test**: the pass stopping between pages and failing to read a page.
+      Neither can be staged in a started core. The pass only reads `sensor_config`, and every
+      reader of that table before it (credential vouching, then the declared-limits clearing and
+      its candidates) is awaited by the start, so a lock that held the pass would hold the start.
+      Both stay proven in-process by `stored-params-check.test.ts` ("stops between pages at
+      shutdown", "stops at a page it cannot read"). That `main.ts` hands it `lifecycle.signal`
+      is typechecked and no more. `P-333` still owes the policy for all four start-up passes.
 
 - [x] **P-370 — the audit of a map background keeps its media type as a string** · XS · P-361 ·
       Found 2026-10-09 in `P-361`. `MapBackgroundAudit.mediaType` in `objects/audit.ts` is
