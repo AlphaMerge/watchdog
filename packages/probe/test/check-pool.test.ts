@@ -15,7 +15,7 @@ import {
   WORKER_YOUNG_GENERATION_MB,
   type ResultMeta,
 } from '../src/runner/index.js';
-import { typicalOf } from '../src/runner/pool.js';
+import { MAX_CONSECUTIVE_START_HANGS, typicalOf } from '../src/runner/pool.js';
 import { STARTUP_TIMEOUT_MS } from '../src/runner/process-runner.js';
 import { pollWithin, within } from './support/within.js';
 import { assertFits } from './support/fits.js';
@@ -758,7 +758,7 @@ describe('a worker that hangs while loading (P-263)', () => {
     }
   });
 
-  it('backs off between the starts of a registry that always hangs, and never gives up on it', async () => {
+  it('backs off between the starts of a registry that always hangs, and does not give up on five', async () => {
     const BOUND = 1_000;
     const hangs = await hangLoads(1_000);
     const lines: Record<string, unknown>[] = [];
@@ -782,8 +782,9 @@ describe('a worker that hangs while loading (P-263)', () => {
       const stats = pool.stats();
       assert.ok(stats.startupFailed >= 4, `${String(stats.startupFailed)} counted`);
       assert.equal(stats.workerCrashes, 0);
-      // A hang is retried for as long as it lasts: the latch is for a registry that cannot load.
-      assert.equal(stats.disabled, false, 'a pool whose workers hang has not given up');
+      // A hang is retried until a long streak of them (`P-272`, thirty by default): one may be
+      // the machine rather than the registry.
+      assert.equal(stats.disabled, false, 'a pool whose workers hang has not given up yet');
       assert.equal(pool.submit(request(730, 'test.ok')), 'accepted');
 
       // Only one at a time: every start but the newest has ended.
@@ -887,6 +888,95 @@ describe('a worker that hangs while loading (P-263)', () => {
         await pool.stop();
         hangs.close();
       }
+    }
+  });
+
+  it('gives up after a streak of hangs with no worker ever ready, and answers its queue at once', async () => {
+    // **`P-272`, decided by the user.** A registry that always hangs used to be retried for ever,
+    // and an accepted check waited in the queue until it filled, then the rest were refused. Now a
+    // streak of hangs with nothing ever ready latches the pool as three deaths do, and what it had
+    // accepted is answered `pool-disabled`, never started. Three here, so the test is seconds long;
+    // the default is thirty.
+    assert.equal(MAX_CONSECUTIVE_START_HANGS, 30);
+    const hangs = await hangLoads(1_000);
+    const lines: Record<string, unknown>[] = [];
+    const logger = pino(
+      { level: 'debug' },
+      { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+    );
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger,
+      size: 1,
+      minSize: 1,
+      startupTimeoutMs: 1_000,
+      startHangLimit: 3,
+      registryModule: STALLED,
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    try {
+      await within(60_000, 'start to resolve after the bound', pool.start());
+      assert.equal(pool.submit(request(760, 'test.ok')), 'accepted', 'before the streak');
+      await until(() => pool.stats().disabled, 'the latch', 120_000);
+
+      const stats = pool.stats();
+      assert.equal(stats.startupFailed, 3, 'the third hang latched it, and nothing started after');
+      assert.equal(stats.workerCrashes, 0, 'on hangs, not deaths');
+      assert.equal(stats.queued, 0, 'the queue was answered when it latched');
+      const answered = seen.find((one) => one.result.sensorId === 760);
+      assert.ok(answered !== undefined, 'the accepted check was answered, not left queued');
+      assert.equal(answered.meta.phase, 'pool-disabled');
+      assert.equal(answered.result.notStarted, true);
+      assert.equal(pool.submit(request(761, 'test.ok')), 'disabled', 'and the next is refused');
+
+      const latched = lines.filter((line) =>
+        String(line['msg']).includes('disabled until the probe restarts'),
+      );
+      assert.equal(latched.length, 1);
+      const [said] = latched;
+      assert.ok(said !== undefined);
+      assert.equal(said['level'], 50);
+      assert.equal(said['gaveUpOn'], 'hangs');
+      assert.equal(said['hangs'], 3);
+      assert.equal(said['abandoned'], 1);
+      await until(() => hangs.quiet(2_000), 'the last hung worker’s thread to end', 30_000);
+      assert.equal(hangs.beats.size, 3, 'no start after the latch');
+    } finally {
+      await pool.stop();
+      hangs.close();
+    }
+  });
+
+  it('never gives up on hangs once a worker of the pool has been ready', async () => {
+    // A pool that has had a worker ready has loaded this registry, so its hangs are the machine
+    // (`P-272`), and a latch would outlast them. The first load is ready and then dies with its
+    // check; every start after it hangs, past the streak that latches a pool that never loaded.
+    const hangs = await scriptLoads(['load', 'hang', 'hang', 'hang', 'hang', 'hang']);
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger: silent,
+      size: 1,
+      minSize: 1,
+      startupTimeoutMs: 1_000,
+      startHangLimit: 3,
+      registryModule: STALLED,
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    try {
+      await within(60_000, 'start', pool.start());
+      assert.equal(pool.submit(request(770, 'test.crash')), 'accepted');
+      await until(() => seen.length === 1, 'the check its worker died running', 60_000);
+      await until(() => hangs.claimed() === 6, 'five hangs after the ready worker', 180_000);
+      await until(() => pool.stats().startupFailed >= 5, 'the fifth hang counted', 60_000);
+      assert.equal(pool.stats().disabled, false, 'five hangs, and the registry had loaded');
+      assert.equal(pool.submit(request(771, 'test.ok')), 'accepted');
+      await until(() => seen.length === 2, 'a check once a start loads again', 120_000);
+      assert.equal(seen[1]?.result.outcome, 'ok');
+    } finally {
+      await pool.stop();
+      hangs.close();
     }
   });
 

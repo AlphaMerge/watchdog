@@ -9858,7 +9858,7 @@ because each is a decision rather than a defect:
         recycle's terminate (seconds, for a thread in native code) counts that worker's memory
         as taken by something else.
 
-- [ ] **P-272 — should a pool whose registry always hangs give up?** · S · P-263 · Found
+- [x] **P-272 — should a pool whose registry always hangs give up?** · S · P-263 · Found
       2026-10-07 in `P-263`. **Needs the user.** Since `P-263` a hang never latches the pool: a
       hang may be load, and a latch lasts until a restart. So a registry that always hangs retries
       once a minute per slot for ever, and accepted checks wait in the queue until it fills and
@@ -9869,6 +9869,26 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** give up after a long streak (about 30 hangs in a
       row with nothing ever ready). The pool latches as disabled until a restart and settles
       its queue at once as `pool-disabled`, with a test and the administration note.
+
+      **P-272 outcome. Thirty hangs in a row, in a pool where no worker was ever ready, latch it
+      as three deaths do.**
+      - **How.** `CheckPool` counts hangs since a worker last said ready (`#startHangs`) beside
+        the deaths it already counted, and remembers whether any worker has ever said ready
+        (`#everReady`). At `MAX_CONSECUTIVE_START_HANGS` (30; `startHangLimit` for tests) with
+        none ever ready, `#startFailed` takes the same path as the death latch: disabled until a
+        restart, the queue answered at once `pool-disabled` (so `P-265` holds the sensors Unknown
+        behind `sensorsNotStarted`), and one error line, now with `gaveUpOn: 'deaths' | 'hangs'`.
+      - **"Nothing ever ready" is read as never, not since the last ready.** A pool that has had
+        a worker ready has loaded this registry, so later hangs are the machine, and `P-263`'s
+        reason not to latch on them stands however long they last. Deaths keep their own rule
+        (three, with nothing working).
+      - **How long.** On one slot, 30 starts each given the 30 s bound and a delay doubling to
+        30 s: about half an hour. On eight, under five minutes.
+      - **Tests** (`check-pool.test.ts`): a registry that always hangs, limit 3, latches on the
+        third with no crash, answers its one accepted check `pool-disabled` and `notStarted`,
+        refuses the next, starts nothing more, and logs once with `gaveUpOn: 'hangs'`; a pool
+        whose first worker was ready and died takes five hangs past the limit without latching,
+        and runs a check when a start loads again.
 - [x] **P-273 — a parked sensor resuming inside its window can overcount Probe Health** · S ·
       P-254 · Found 2026-10-07 in review of `P-254`. `NotificationRing.#countLostFrom` draws from
       the running total of overwrites not counted at push time whenever the read starts below the

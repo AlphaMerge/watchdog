@@ -26,6 +26,18 @@ const LATENCY_WINDOW = 1_024;
 const MAX_CONSECUTIVE_START_FAILURES = 3;
 
 /**
+ * Hangs in a row, with no worker ever ready, before the pool gives up as it does on deaths
+ * (`P-272`, decided by the user 2026-10-11).
+ *
+ * A hang is not proof that the registry cannot load (`P-263`): it may be the machine. Thirty in a
+ * row at the start of a pool's life, with not one worker ever ready, is: on one slot it is half an
+ * hour of starts each given the full bound and a delay of up to thirty seconds, and on eight it is
+ * every slot hanging four times over. A pool that has had a worker ready has loaded this registry,
+ * so its hangs are load, and it never latches on them.
+ */
+export const MAX_CONSECUTIVE_START_HANGS = 30;
+
+/**
  * How long a failed worker start waits before the next attempt, doubling with each consecutive
  * failure up to the ceiling (`P-227`).
  *
@@ -277,6 +289,11 @@ export interface CheckPoolOptions {
    */
   startupTimeoutMs?: number;
   /**
+   * Hangs in a row, with no worker ever ready, before the pool latches (`P-272`).
+   * `MAX_CONSECUTIVE_START_HANGS` unless a test sets it.
+   */
+  startHangLimit?: number;
+  /**
    * How often an idle worker reports a change in its session pools (`P-256`).
    * `SESSION_REPORT_MS` unless a test sets it.
    */
@@ -467,6 +484,7 @@ export class CheckPool {
   readonly #queueMax: number;
   readonly #abortGraceMs: number;
   readonly #startupTimeoutMs: number;
+  readonly #startHangLimit: number;
   readonly #sessionReportMs: number;
   readonly #registryModule: string;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
@@ -547,6 +565,10 @@ export class CheckPool {
    * the registry loads, and a hang proves nothing either way, so the deaths before it still stand.
    */
   #startDeaths = 0;
+  /** Hangs since a worker last said ready: the second latch's count (`P-272`). */
+  #startHangs = 0;
+  /** Whether any worker of this pool has ever said ready: the registry loads here (`P-272`). */
+  #everReady = false;
   #stopped = false;
   #disabled = false;
   /** Set only while `stop` is waiting for running checks to settle. */
@@ -578,6 +600,7 @@ export class CheckPool {
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
     this.#startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS);
+    this.#startHangLimit = Math.max(1, options.startHangLimit ?? MAX_CONSECUTIVE_START_HANGS);
     this.#sessionReportMs = Math.max(1, options.sessionReportMs ?? SESSION_REPORT_MS);
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
@@ -1231,6 +1254,8 @@ export class CheckPool {
       }
       this.#startFailures = 0;
       this.#startDeaths = 0;
+      this.#startHangs = 0;
+      this.#everReady = true;
       this.#pump();
       return;
     }
@@ -1368,19 +1393,23 @@ export class CheckPool {
   /**
    * A worker never said ready: counted, then replaced after a growing delay, or the pool gives up.
    *
-   * **A hang never latches the pool off**, and that is a choice. The latch is for a pool that
-   * cannot run checks at all (`P-62`, `P-80`): a registry that throws throws again on every
-   * attempt, and three such deaths with nothing working is proof. A worker that misses the bound
-   * may be the machine and not the registry — `P-258` measured the catalogue's import at up to
-   * 14.8 s on an overloaded VM — and a latch lasts until somebody restarts the probe, long after
-   * the load has gone. So a hang is retried for as long as it lasts, at most one start per slot per
-   * bound plus delay, and `startupFailed` climbing on Probe Health is how it shows. Hangs and
-   * deaths together set the delay; deaths alone, `#startDeaths`, decide the latch.
+   * **A hang latches the pool off only after a long streak, and only in a pool where no worker
+   * was ever ready.** The latch is for a pool that cannot run checks at all (`P-62`, `P-80`): a
+   * registry that throws throws again on every attempt, and three such deaths with nothing working
+   * is proof. A worker that misses the bound may be the machine and not the registry — `P-258`
+   * measured the catalogue's import at up to 14.8 s on an overloaded VM — and a latch lasts until
+   * somebody restarts the probe, long after the load has gone. So a hang is retried, at most one
+   * start per slot per bound plus delay, and `startupFailed` climbing on Probe Health is how it
+   * shows. Hangs and deaths together set the delay; deaths, `#startDeaths`, decide the latch, and
+   * so do hangs, `#startHangs`, once `MAX_CONSECUTIVE_START_HANGS` of them have come with no worker
+   * ever ready (`P-272`): until then a registry that always hangs held every accepted check in the
+   * queue until it filled, and refused the rest, rather than answering them.
    */
   #startFailed(reason: string, how: { hung: boolean; workerId?: number }): void {
     this.#startupFailed += 1;
     this.#startFailures += 1;
-    if (!how.hung) this.#startDeaths += 1;
+    if (how.hung) this.#startHangs += 1;
+    else this.#startDeaths += 1;
     // **Already given up: counted, and nothing more** (`P-227`, one error per streak). A worker
     // still loading when the pool latched reaches its bound, or dies, afterwards; it was terminated
     // or is gone, and latching and logging again for each one was a second error line per
@@ -1398,7 +1427,11 @@ export class CheckPool {
     // `P-62`'s broken registry: there every worker dies, so nothing is ready and this still
     // fires. Holding ready workers is exactly the difference between the two.
     const working = this.#slots.some((held) => held.ready);
-    if (this.#startDeaths >= MAX_CONSECUTIVE_START_FAILURES && !working) {
+    const dying = this.#startDeaths >= MAX_CONSECUTIVE_START_FAILURES && !working;
+    // **Hangs, but only where nothing was ever ready** (`P-272`): a pool that has had a worker
+    // ready has loaded this registry, so its hangs are the machine, however long they go on.
+    const hanging = this.#startHangs >= this.#startHangLimit && !this.#everReady;
+    if (dying || hanging) {
       this.#disabled = true;
       // **And answer what was already accepted.** A queued job carries no timeout — the timer is
       // armed in `#dispatch`, when it *leaves* the queue — so returning here left every accepted
@@ -1413,7 +1446,9 @@ export class CheckPool {
       this.#logger.error(
         {
           failures: this.#startDeaths,
-          hangs: this.#startFailures - this.#startDeaths,
+          hangs: this.#startHangs,
+          gaveUpOn: dying ? 'deaths' : 'hangs',
+          startupTimeoutMs: this.#startupTimeoutMs,
           registry: this.#registryModule,
           abandoned: abandoned.length,
         },
