@@ -28,6 +28,7 @@ import { ActorLink, MoreButton } from './LogsView';
 import { usePaged } from './logs-model';
 import { RELIST_MIN_MS, channelListIsStale, heldReadings, tabsFor } from './detail/model';
 import { ParamsForm } from './detail/ParamsForm';
+import { TargetPolicyException } from './detail/TargetPolicyException';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';
 
@@ -366,6 +367,11 @@ export function ObjectDetailView(): React.JSX.Element {
             <Card title="Configuration">
               <Configuration detail={detail} />
             </Card>
+            {detail.kind === 'device' && (
+              <Card title="Target policy exception">
+                <TargetPolicyException detail={detail} onSaved={object.reload} />
+              </Card>
+            )}
             {detail.kind === 'sensor' && (
               <Card title="Parameters">
                 {types.status === 'loading' && <Loading what="the sensor type" />}

@@ -70,6 +70,11 @@ export interface ObjectDetail extends ObjectSummary {
   /** Names of `writeOnly` parameters that hold a value. Never the values (P-05). */
   redactedParams?: string[];
   /**
+   * A device's own addresses its probe may connect to although its target policy refuses them
+   * (`A-64`). Absent when it has none, and on everything but a device.
+   */
+  targetPolicyException?: string[];
+  /**
    * On an edit's reply only (`U-36`): the channels whose lookup the edit left as it was, because
    * the sensor's type could not say what its stored parameters declared (`P-311`). Absent when
    * there were none, and on every read.

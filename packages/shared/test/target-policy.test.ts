@@ -144,6 +144,23 @@ describe('a metadata address that is not link-local', () => {
     }
   });
 
+  it('Alibaba Cloud’s, inside carrier-grade NAT, is refused under the default as well (A-79)', () => {
+    // `private` always refused it, as carrier-grade NAT; `link-local`, the default, did not.
+    for (const address of ['100.100.100.200', '::ffff:100.100.100.200', '::ffff:6464:64c8']) {
+      assert.equal(isLinkLocal(address), false, address);
+      assert.equal(isMetadataAddress(address), true, address);
+      assert.match(refuses('link-local', address) ?? '', /instance-metadata/, address);
+      assert.match(refuses('private', address) ?? '', /instance-metadata/, address);
+      assert.equal(refuses('none', address), null, address);
+    }
+    // The rest of the range is somebody’s network: an ISP's, or a tailnet's.
+    for (const address of ['100.100.100.100', '100.100.100.201', '100.100.101.200', '100.64.0.1']) {
+      assert.equal(isMetadataAddress(address), false, address);
+      assert.equal(refuses('link-local', address), null, address);
+      assert.match(refuses('private', address) ?? '', /private/, address);
+    }
+  });
+
   it('every link-local address is one', () => {
     assert.equal(isMetadataAddress('169.254.169.254'), true);
     assert.equal(isMetadataAddress('fe80::1'), true);
@@ -199,12 +216,20 @@ describe('a device’s exception', () => {
       '::ffff:169.254.170.2',
       'fd00:ec2::254',
       'FD00:0EC2:0:0:0:0:0:254',
+      '100.100.100.200',
+      '::ffff:6464:64c8',
     ]) {
       assert.match(exceptionProblem(entry) ?? '', /instance-metadata service/, entry);
       assert.equal(isMetadataService(entry), true, entry);
     }
     // The rest of the range, and the provider's other services in it, are ordinary devices.
-    for (const entry of ['169.254.169.253', '169.254.169.123', '169.254.170.3', 'fe80::a9fe']) {
+    for (const entry of [
+      '169.254.169.253',
+      '169.254.169.123',
+      '169.254.170.3',
+      'fe80::a9fe',
+      '100.100.100.201',
+    ]) {
       assert.equal(exceptionProblem(entry), null, entry);
       assert.equal(isMetadataService(entry), false, entry);
     }
@@ -245,6 +270,7 @@ describe('a device’s exception', () => {
       '::ffff:a9fe:a9fe',
       'fd00:ec2::254',
       '169.254.170.2',
+      '100.100.100.200',
       '224.0.0.1',
       '0.0.0.0',
       '169.254.10.0/24',
@@ -255,6 +281,7 @@ describe('a device’s exception', () => {
       '::ffff:169.254.169.254',
       'fd00:ec2::254',
       '169.254.170.2',
+      '100.100.100.200',
       '224.0.0.1',
       '0.0.0.0',
       '169.254.10.5',

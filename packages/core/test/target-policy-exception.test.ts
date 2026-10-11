@@ -341,6 +341,9 @@ describe(
           ['::ffff:a9fe:a9fe'],
           ['fd00:ec2::254'],
           ['169.254.170.2'],
+          // Alibaba Cloud's, outside link-local (`A-79`).
+          ['100.100.100.200'],
+          ['::ffff:6464:64c8'],
           ['224.0.0.1'],
           ['0.0.0.0'],
           ['169.254.10.5', 'not-an-address'],
@@ -351,11 +354,14 @@ describe(
           const response = await put(deviceId, addresses);
           assert.equal(response.statusCode, 400, `${JSON.stringify(addresses)}: ${response.body}`);
         }
-        const metadata = await put(deviceId, ['169.254.169.254']);
-        assert.match(
-          metadata.json<{ error: { message: string } }>().error.message,
-          /instance-metadata service/,
-        );
+        for (const address of ['169.254.169.254', '100.100.100.200']) {
+          const metadata = await put(deviceId, [address]);
+          assert.match(
+            metadata.json<{ error: { message: string } }>().error.message,
+            /instance-metadata service/,
+            address,
+          );
+        }
         assert.deepEqual(await stored(deviceId), []);
       });
 

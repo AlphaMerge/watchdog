@@ -103,21 +103,25 @@ export function isLinkLocal(address: string): boolean {
 }
 
 /**
- * Metadata addresses that are not link-local, as groups. One today: `fd00:ec2::254`, where AWS
- * answers instance metadata over IPv6. It is a unique-local address, so "link-local" alone never
- * covered it, though the comment here said for a long time that it mattered.
+ * Metadata addresses that are not link-local. `fd00:ec2::254`, where AWS answers instance
+ * metadata over IPv6: a unique-local address, so "link-local" alone never covered it, though the
+ * comment here said for a long time that it mattered. And `100.100.100.200`, where Alibaba Cloud
+ * does, RAM role credentials included (`A-79`): inside carrier-grade NAT, which `private` refused
+ * and `link-local`, the default, did not. Tailscale keeps `100.100.100.0/24` for its own services,
+ * so no tailnet device is there.
  */
-const METADATA: readonly (readonly number[])[] = [[0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254]];
+const METADATA: readonly string[] = ['fd00:ec2::254', '100.100.100.200'];
 
 /**
  * Whether an address is a cloud instance-metadata service's: anything link-local, and the
  * addresses outside that range that are known to be one. Compared as numbers, so that
- * `fd00:0ec2:0:0:0:0:0:254` is the address `fd00:ec2::254` is.
+ * `fd00:0ec2:0:0:0:0:0:254` is the address `fd00:ec2::254` is, and `::ffff:6464:64c8` is
+ * `100.100.100.200`.
  */
 export function isMetadataAddress(address: string): boolean {
   if (isLinkLocal(address)) return true;
-  const wide = groups(unmapped(address));
-  return wide !== null && METADATA.some((known) => known.every((group, at) => group === wide[at]));
+  const key = addressKey(address);
+  return key !== null && METADATA.some((known) => addressKey(known) === key);
 }
 
 /** Loopback, RFC1918, carrier-grade NAT, unique-local, and the IPv6 equivalents. */
@@ -179,10 +183,16 @@ export const MAX_EXCEPTION_ADDRESSES = 16;
 /**
  * The cloud instance-metadata services that hand out credentials to whoever asks, which **no
  * exception reaches** (`A-64`): the address every major provider answers on, AWS's task-role
- * endpoint for containers, and AWS's IPv6 one. Other link-local addresses a provider answers on
- * (its DNS and time servers) are ordinary devices, and may be excepted.
+ * endpoint for containers, AWS's IPv6 one, and Alibaba Cloud's (`A-79`). Other link-local
+ * addresses a provider answers on (its DNS and time servers) are ordinary devices, and may be
+ * excepted.
  */
-const METADATA_SERVICES: readonly string[] = ['169.254.169.254', '169.254.170.2', 'fd00:ec2::254'];
+const METADATA_SERVICES: readonly string[] = [
+  '169.254.169.254',
+  '169.254.170.2',
+  'fd00:ec2::254',
+  '100.100.100.200',
+];
 
 /**
  * An address as it is compared: an IPv4 address as its four numbers, an IPv6 address as its eight

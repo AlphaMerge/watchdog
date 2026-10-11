@@ -25,7 +25,12 @@ export default defineConfig({
       // `ws` because `/api/v1/stream` upgrades (`U-02`). Without it the socket 400s here and
       // works in production, which is the worst way round: the feature would look broken only
       // to the people building it.
-      '/api': { target: coreUrl, changeOrigin: true, ws: true },
+      //
+      // **The browser's own `Host`, not the core's name** (`P-399`). `changeOrigin` rewrote it to
+      // `ms-server:8080`, which the core's host check refuses (421, `api.allowedHosts`), and which
+      // its Origin check would set against the browser's `127.0.0.1:5173` and refuse every write.
+      // Kept as the browser sent it, both see `127.0.0.1:5173`: an address, and the same origin.
+      '/api': { target: coreUrl, changeOrigin: false, ws: true },
     },
   },
   build: {

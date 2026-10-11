@@ -30081,7 +30081,7 @@ because each is a decision rather than a defect:
         Alibaba's metadata address `100.100.100.200` is outside link-local and not refused
         by `link-local` at all; not looked at further here.
 
-- [ ] **A-79 — what is left of a device's exception to the target policy** · S · A-64 ·
+- [x] **A-79 — what is left of a device's exception to the target policy** · S · A-64 ·
       Found 2026-10-04 by `A-64`. (1) The device page neither shows nor edits
       `targetPolicyException`, so it is API-only. (2) Alibaba Cloud's metadata address
       `100.100.100.200` is outside link-local, so the default `link-local` policy does not
@@ -30089,6 +30089,49 @@ because each is a decision rather than a defect:
       under every policy but `none`. (3) The policy section says a restart closes kept SSH
       connections; true for a policy change, not needed for an exception change: say so.
       **Done when** each is fixed with a test or written down.
+
+      **A-79 outcome.** All three fixed. No migration, no protocol number.
+      - **The device page shows and edits it.** A **Target policy exception** card on a device's
+        overview (`TargetPolicyException`, `exception-model.ts`). Whoever may read the device
+        sees the list, or that there is none. The editor is offered on the bar the core holds
+        (`mayExcept`): a signed-in administrator, or anybody on a core with sign-in off, where
+        every bar is cleared. It is a field of addresses, one per line, sent as typed with
+        `If-Match`, with **Save exception** and **Clear exception**. The status and alert regions
+        are always there and empty until they speak, and a refusal shows the core's words and
+        correlation id. The session is read from its context and not through `useSession`, so
+        a page drawn without one offers nothing instead of throwing.
+      - **Alibaba Cloud's metadata address is refused under the default.** `100.100.100.200`
+        is in carrier-grade NAT, so `private` refused it and `link-local` did not. It serves
+        instance metadata, RAM role credentials included. It is now in both lists:
+        `isMetadataAddress`, refused under every policy but `none`, and `METADATA_SERVICES`,
+        which no exception reaches. Compared as an address, so `::ffff:6464:64c8` is the same.
+        The rest of `100.64.0.0/10` is unchanged. Tailscale keeps `100.100.100.0/24` for
+        itself. An upgrade note in `administration.md` says a sensor pointed there reads Down,
+        and that `none` is the only way back.
+      - **The policy section says an exception needs no restart**: it comes with the
+        configuration, and the SSH pool keys a kept connection on it (`A-64`).
+      - **Tests.** Shared: Alibaba's address in three spellings refused under `link-local` and
+        `private`, and its neighbours not; never excepted, and never let through whatever the
+        list says. Core: the route refuses it, and `::ffff:6464:64c8`, with 400 in the
+        metadata words. Web (`target-policy-exception.test.tsx`, 7): who is offered the
+        editor; parsing; read-only list; none with no session; a save with `If-Match` and the
+        re-read; a clear on a core with sign-in off; a refusal with its correlation id.
+        `api-reference.md` regenerated. Shared 567, sensors 1,974, core 5,275, web 1,151.
+      - **Mutation:** 5 of 5 killed (Alibaba's address out of either list, the editor not
+        offered on a core with sign-in off, offered to any account that may write, the save
+        sent without `If-Match`).
+      - **Not seen in a browser.** The preview runs from the main checkout, not this worktree,
+        and the dev UI could not reach `ms-server` at all (`P-399`).
+
+- [x] **P-399 — the dev UI cannot reach `ms-server`** · XS · — · Found 2026-10-11 by
+      `A-79`. Since the host check (2026-09-29), the `ui` profile's Vite proxy rewrote `Host`
+      to `ms-server:8080` (`changeOrigin: true`). The core answers that name with 421
+      `HOST_NOT_ALLOWED`, so the page read "Cannot reach the core". Even allowed, the Origin
+      check would have set `ms-server:8080` against the browser's `127.0.0.1:5173` and
+      refused every write. The proxy now keeps the browser's `Host`, which is an address the
+      core answers and the same origin as the page. Measured with curl against `ms-server`:
+      `Host: ms-server:8080` gets 421, and `Host: 127.0.0.1:5173` gets 200. Not yet seen
+      through Vite: the running container reads the main checkout.
 
 - [x] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
       Found 2026-10-02 by `A-57` and its review. Sensors that join one connection being opened

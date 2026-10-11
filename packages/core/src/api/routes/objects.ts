@@ -1964,7 +1964,8 @@ export async function objectRoutes(
           'until one is set here: a clone or a template starts without one. **Addresses, one at ' +
           'a time**: not a name, a range or a zone, not multicast or the unspecified address, ' +
           'and never a cloud instance-metadata service (`169.254.169.254`, `169.254.170.2`, ' +
-          '`fd00:ec2::254`), each refused with 400. A sensor on the device whose host is a ' +
+          '`fd00:ec2::254`, `100.100.100.200`), each refused with 400. A sensor on the device ' +
+          'whose host is a ' +
           'name connects only when every address the name resolves to is allowed by the ' +
           'policy or named here. Takes `If-Match`. Audited as an update of the device. Reaches ' +
           'a probe at protocol 28 or later; an older probe refuses those addresses as before.',

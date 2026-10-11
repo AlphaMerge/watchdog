@@ -739,7 +739,8 @@ An HTTP sensor requests whatever device it is put on, and what it reads is store
 no HTTP sensor (`http.request`, `http.advanced`, `http.content`, `http.transaction`, `rest.custom`)
 requests a **link-local** address, `169.254.0.0/16` or `fe80::/10`: that is where a cloud
 provider's instance-metadata service answers, with credentials, to anything that asks (`A-09`).
-Nor `fd00:ec2::254`, the one such service that answers outside that range. An address is read
+Nor the two such services that answer outside that range: `fd00:ec2::254` (AWS, over IPv6) and
+`100.100.100.200` (Alibaba Cloud, inside carrier-grade NAT; `A-79`). An address is read
 for what it is and not how it is written: `::ffff:169.254.169.254` and `::ffff:a9fe:a9fe` are
 169.254.169.254 inside an IPv6 address, and are refused as it is (`A-54`). Webhooks are held to
 the same rule by the same code. Other private addresses are not refused. Monitoring them is the
@@ -780,11 +781,14 @@ next section.
 **`probe.targetPolicy`**, in the probe's configuration file, says which addresses that probe's
 sensors will not connect to (`A-57`). It is read at start, so changing it means restarting the
 probe, and each probe has its own. The restart is also what makes a change take hold on SSH: a
-kept SSH connection is used as it stands, and a restart is what closes them all.
+kept SSH connection is used as it stands, and a restart is what closes them all. **A device's
+exception (below) needs no restart**, of the probe or of anything else: it arrives with the
+probe's configuration, and a kept SSH connection opened under one is not reused once it changes
+(`A-79`).
 
 | Value | Refuses |
 | --- | --- |
-| `link-local` (the default) | `169.254.0.0/16`, `fe80::/10` and `fd00:ec2::254`, in any spelling: the addresses above. |
+| `link-local` (the default) | `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254` and `100.100.100.200`, in any spelling: the addresses above. |
 | `private` | Those, and loopback, the RFC 1918 ranges, carrier-grade NAT and unique-local. Nearly every device a probe inside a network watches. |
 | `none` | Nothing. |
 
@@ -806,6 +810,15 @@ as its DNS and time servers, are the cases to look for. **If those are yours to 
 `probe.targetPolicy` to `none` on that probe and restart it**: the sensors are Up at their next
 scan. **Or, for one device, an administrator excepts its address** (`A-64`, below), which
 leaves the policy in force for every other device on the probe and is the narrower of the two.
+
+**Alibaba Cloud's metadata address joined the default later** (`A-79`). `100.100.100.200` is
+inside carrier-grade NAT, so `private` always refused it and `link-local` did not: a sensor
+pointed at it under the default policy read what Alibaba's metadata service hands out, RAM role
+credentials included. From the upgrade that brings `A-79`, a sensor on a device at that address,
+or named by a name that resolves to it, fails its next scan in the policy's words, as above.
+Nothing else in `100.64.0.0/10` changes. If a device of yours really is at that address on a
+carrier-grade NAT network, `probe.targetPolicy: none` on its probe is the way back: no exception
+reaches it, as none reaches `169.254.169.254`.
 
 **The database sensors joined this later** (`A-62`), so the same holds for them at the upgrade
 that brings it: a PostgreSQL, MySQL or SQL Server sensor on a device given as a *name* that
@@ -991,7 +1004,8 @@ site, without turning the policy off for every other sensor on the probe.
   anywhere; not a range, which exempts more than the device; not an address with a zone. Not
   multicast, broadcast or the unspecified address. **Never a cloud instance-metadata
   service**, whatever the policy: `169.254.169.254`, `169.254.170.2` (container task
-  credentials) and `fd00:ec2::254`, in any spelling. Each is refused with 400, and the probe
+  credentials), `fd00:ec2::254` and `100.100.100.200` (Alibaba Cloud), in any spelling. Each is
+  refused with 400, and the probe
   ignores such an entry if one reaches it. The rest of `169.254.0.0/16`, a provider's DNS and
   time servers included, may be excepted.
 - **It is matched against the address the lookup answered.** A device given as an address is
@@ -1018,8 +1032,10 @@ site, without turning the policy off for every other sensor on the probe.
 - **It reaches a probe at protocol 28 or later.** An older probe is sent the device's sensors
   without it and refuses those addresses as its policy says, as it did before: it fails closed.
   Upgrade the probe for the exception to take effect.
-- **The web interface has no control for it yet**: set and clear it through the API, and read
-  it on the device there.
+- **On the device's page**, under **Target policy exception** on its overview (`A-79`): the
+  list, to whoever may read the device, and to an administrator (or anybody, on a core with
+  sign-in off) a field of addresses, one per line, with **Save exception** and **Clear
+  exception**. A refused entry is named in the core's words under the field.
 
 ---
 
