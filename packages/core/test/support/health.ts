@@ -53,6 +53,8 @@ export function fixedCoreHealth(
         edgesUnvetted: 0,
         withheld: 0,
         edgesCoalesced: 0,
+        unplaced: 0,
+        resyncsOwed: 0,
       }),
       probes: () => ({ probesDown: 1, probesSilent: 2 }),
       alarms: () => ({ fired: 6, overdueMs: 0 }),

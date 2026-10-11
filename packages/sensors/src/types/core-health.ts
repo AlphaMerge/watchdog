@@ -308,13 +308,34 @@ const CHANNELS: readonly ChannelDef[] = [
     counter: { bits: 64 },
   },
   // **Changes that shared one sign-in check** (`U-27`). One question is out at a time; a change
-  // arriving meanwhile waits for the next, which every such change shares. Nothing is lost or
-  // sent unchecked by it: a rate is changes arriving faster than the database answers.
+  // arriving meanwhile waits for the next, which every such change shares. Nothing is lost by it:
+  // a rate is changes arriving faster than the database answers. When the check before the
+  // shared one, or the shared one, takes longer than two seconds, the changes waiting for it go
+  // out as the line above says, and count there as well as here (`U-28`).
   {
     key: 'streamEdgesCoalesced',
     name: 'Live changes sharing a sign-in check',
     unit: 'changes',
     counter: { bits: 64 },
+  },
+  // **Changes committed that no open page was sent** (`U-28`), because where their sensors sit
+  // in the tree could not be read. Every page open then is sent back to subscribe again, on the
+  // five-second check, so it shows them after one snapshot. No limit: it happens when the
+  // database is failing, which the ingestion queue's limits above already alarm on, and a second
+  // alarm for the same outage is what `CLAUDE.md` forbids.
+  {
+    key: 'streamUnplaced',
+    name: 'Live changes that could not be placed',
+    unit: 'changes',
+    counter: { bits: 64 },
+  },
+  // **Pages owed a 'subscribe again' and not yet sent it** (`U-28`): held back while sign-ins
+  // could not be checked, or open when a change could not be placed. Sent ten a second, so that
+  // the end of an outage is not every page reading a snapshot at once. Zero once they have gone.
+  {
+    key: 'streamResyncsOwed',
+    name: 'Live pages waiting to subscribe again',
+    unit: 'subscriptions',
   },
   // A count that climbs steadily means a master is flapping — the alarm storm dependencies exist
   // to prevent, showing up as churn instead (`M-11`).

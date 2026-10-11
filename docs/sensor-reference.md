@@ -1000,6 +1000,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `streamEdgesUnvetted` | Live changes sent without a sign-in check | changes | 64-bit counter → rate |
 | `streamWithheld` | Live sockets held back for a sign-in check | sockets | 64-bit counter → rate |
 | `streamEdgesCoalesced` | Live changes sharing a sign-in check | changes | 64-bit counter → rate |
+| `streamUnplaced` | Live changes that could not be placed | changes | 64-bit counter → rate |
+| `streamResyncsOwed` | Live pages waiting to subscribe again | subscriptions | — |
 | `dependencyPauses` | Dependency pauses | sensors | 64-bit counter → rate |
 | `probesDown` | Probes not connected | probes | — |
 | `probesSilent` | Probes not delivering | probes | — |

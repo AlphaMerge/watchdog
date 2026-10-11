@@ -61,6 +61,10 @@ export interface CoreHealthSources {
     withheld: number;
     /** Edges that shared one credential question asked as soon as the last came back (`U-27`). */
     edgesCoalesced: number;
+    /** State changes that could not be placed in the tree, and so reached nobody (`U-28`). */
+    unplaced: number;
+    /** Subscriptions owed an `overflow` the sweep has not yet sent (`U-28`). */
+    resyncsOwed: number;
   };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number; probesSilent: number };
@@ -495,6 +499,9 @@ export class CoreHealthService {
       streamEdgesUnvetted: stream.edgesUnvetted,
       streamWithheld: stream.withheld,
       streamEdgesCoalesced: stream.edgesCoalesced,
+      // A change no tree was sent, and the pages waiting to be sent back for it (`U-28`).
+      streamUnplaced: stream.unplaced,
+      streamResyncsOwed: stream.resyncsOwed,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
       probesSilent: probes.probesSilent,

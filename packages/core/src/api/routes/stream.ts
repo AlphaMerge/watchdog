@@ -422,7 +422,12 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           '\n\nA change is not held for that answer longer than two seconds. While the core ' +
           'cannot get it, a change goes only to a socket the core has found signed in within ' +
           'the last five seconds; any other socket is sent nothing from that change on, and is ' +
-          'sent `overflow` — subscribe again — once the core can say it is still signed in.',
+          'sent `overflow` — subscribe again — once the core can say it is still signed in.' +
+          '\n\nA change whose place in the tree the core cannot read is sent to nobody, and ' +
+          'every socket subscribed to a tree at that moment is sent `overflow` on the same timer ' +
+          'of the core’s own, whether or not the change was in its view. These `overflow`s go ' +
+          'out a tenth of a second apart, oldest first, so after an outage a socket may wait ' +
+          'some seconds for its own.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},

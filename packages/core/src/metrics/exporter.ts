@@ -258,6 +258,17 @@ const CORE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'streamUnplaced',
+    name: 'ms_core_stream_changes_unplaced_total',
+    help: 'Live-state changes no subscriber was sent, because their place in the tree could not be read.',
+    counter: true,
+  },
+  {
+    key: 'streamResyncsOwed',
+    name: 'ms_core_stream_resyncs_owed',
+    help: 'Live-state subscriptions owed a resubscribe that the sweep has not yet sent.',
+  },
+  {
     key: 'dependencyPauses',
     name: 'ms_core_dependency_pauses_total',
     help: 'Sensors paused or released because a master sensor moved.',

@@ -156,11 +156,30 @@ export interface StreamStats {
   readonly withheld: number;
   /**
    * Edges that arrived while another edge's question was out, and were answered together by one
-   * question asked as soon as it came back (`U-27`). Not lost and not unvetted: each still waits
-   * for a question asked after it arrived. A rate is published batches arriving faster than the
+   * question asked as soon as it came back (`U-27`). Not lost: each waits for a question asked
+   * after it arrived, and is vetted by it. A rate is published batches arriving faster than the
    * database answers about who is signed in.
+   *
+   * **Unless that question is never asked, or never answers** (`U-28`). When the one out goes
+   * past its wait, nothing is asked for the edges waiting on the next, and they are sent at once
+   * by the unvetted rule; when the shared question itself goes past its own wait, likewise. Such
+   * an edge is counted here and in `edgesUnvetted` both.
    */
   readonly edgesCoalesced: number;
+  /**
+   * State changes committed and published to nobody, because where their sensors sit in the tree
+   * could not be read (`U-28`). Every tree subscription open at that moment has missed them, and
+   * is owed an `overflow` — subscribe again — on the sweep's clock: see `publish`. Zero on a
+   * healthy core.
+   */
+  readonly unplaced: number;
+  /**
+   * Subscriptions owed an `overflow` and not yet sent it (`U-28`): sockets an unvetted edge held
+   * back that a sweep has since vouched for, and tree subscriptions that missed a change that could
+   * not be placed. Each is a snapshot read once it is sent, so they go out
+   * `resumeSpacingMs` apart, and not all on the sweep that ends an outage. Zero once they have.
+   */
+  readonly resyncsOwed: number;
 }
 
 export interface StateBroadcasterOptions {
@@ -192,6 +211,12 @@ export interface StateBroadcasterOptions {
    * (`U-27`). `performance.now` unless a test moves it.
    */
   clock?: () => number;
+  /**
+   * How far apart the `overflow`s a sweep owes are sent (`U-28`). Each sends a page back to read
+   * a snapshot, and after an outage every open page is owed one. Zero sends them all at once;
+   * otherwise a sweep sends at most as many as fit in its interval and leaves the rest to the next.
+   */
+  resumeSpacingMs?: number;
   /**
    * The access epoch, read now (`U-24`). What the sweep compares every probe watcher's view
    * with, so a watcher whose access moved is told on the sweep's clock and on no other. Absent,
@@ -246,6 +271,17 @@ const DEFAULT_CREDENTIAL_SWEEP_MS = 5_000;
  * ask the same database again.
  */
 const DEFAULT_CREDENTIAL_WAIT_MS = 2_000;
+
+/**
+ * A tenth of a second between the `overflow`s a sweep owes (`U-28`): ten pages a second, fifty a
+ * five-second sweep.
+ *
+ * Each sends a page back to read a snapshot, which took 24 to 182 ms at the median and 236 ms at
+ * the worst 90th percentile measured (`docs/findings/2026-09-28-object-visibility.md`). So at
+ * this spacing one to three are being read at a time, not every open page at once on a database
+ * that has only just come back. A few hundred pages are all back inside half a minute.
+ */
+const DEFAULT_RESUME_SPACING_MS = 100;
 
 /** What a sweep's query that outlived `credentialWaitMs` is failed with. */
 class CredentialCheckTimeout extends Error {
@@ -520,6 +556,16 @@ export class StateBroadcaster {
   #edgesUnvetted = 0;
   #withheldCount = 0;
   #edgesCoalesced = 0;
+  #unplaced = 0;
+  /**
+   * Who is owed an `overflow` the sweep sends (`U-28`), oldest first: a socket an edge held back,
+   * once a sweep has vouched for it, or a tree subscription that missed a change that could not
+   * be placed. Keyed by what is owed, so owing twice is owing once.
+   */
+  readonly #owed = new Map<StreamSocket | Attached, () => void>();
+  /** Taken from `#owed` by a sweep, and waiting for its turn to be sent (`U-28`). */
+  #releasing = 0;
+  readonly #resumeSpacingMs: number;
   readonly #clock: () => number;
 
   constructor(options: StateBroadcasterOptions) {
@@ -530,6 +576,7 @@ export class StateBroadcaster {
     this.#waitMs = options.credentialWaitMs ?? DEFAULT_CREDENTIAL_WAIT_MS;
     this.#accessEpoch = options.accessEpoch;
     this.#clock = options.clock ?? (() => performance.now());
+    this.#resumeSpacingMs = options.resumeSpacingMs ?? DEFAULT_RESUME_SPACING_MS;
   }
 
   /**
@@ -539,11 +586,13 @@ export class StateBroadcaster {
    *
    * **Its ticks are its own.** The interval starts when the first socket or watcher arrives and
    * runs on the wall clock from there, so what it tells a watcher is timed by nothing a probe
-   * does.
+   * does. And while anybody is owed an `overflow` (`U-28`), since the sweep is what sends it.
    */
   #arm(): void {
     const wanted =
-      this.#admitted.size > 0 || (this.#accessEpoch !== undefined && this.#watchers.size > 0);
+      this.#admitted.size > 0 ||
+      (this.#accessEpoch !== undefined && this.#watchers.size > 0) ||
+      this.#owed.size > 0;
     if (wanted) {
       this.#sweeper ??= setInterval(() => {
         void this.sweep();
@@ -574,6 +623,8 @@ export class StateBroadcaster {
       edgesUnvetted: this.#edgesUnvetted,
       withheld: this.#withheldCount,
       edgesCoalesced: this.#edgesCoalesced,
+      unplaced: this.#unplaced,
+      resyncsOwed: this.#owed.size + this.#releasing,
     };
   }
 
@@ -633,6 +684,7 @@ export class StateBroadcaster {
     this.#silenced.delete(socket);
     this.#vouched.delete(socket);
     this.#withheld.delete(socket);
+    this.#owed.delete(socket);
   }
 
   /**
@@ -672,6 +724,8 @@ export class StateBroadcaster {
    * **The review of probe watchers is bounded the same way** — the read of the access epoch, and
    * each view asked for again — so a watcher attached does not put the sweep back at the mercy
    * of one query.
+   *
+   * **And what is owed goes out paced** (`U-28`): see `#release`.
    */
   async sweep(): Promise<void> {
     // One at a time: a sweep still waiting on a slow database is not joined by another.
@@ -679,9 +733,58 @@ export class StateBroadcaster {
     this.#sweeping = true;
     try {
       await this.#vet('sweep');
+      // Before the review, so when the first goes is timed by the credential check and nothing
+      // else, as it was when the check sent it.
+      this.#release();
       await this.#review();
+      this.#arm();
     } finally {
       this.#sweeping = false;
+    }
+  }
+
+  /**
+   * Owes `whom` an `overflow`, sent by a sweep (`U-28`). Owing it again changes nothing, its place
+   * in the line included.
+   */
+  #owe(whom: StreamSocket | Attached, send: () => void): void {
+    if (!this.#owed.has(whom)) this.#owed.set(whom, send);
+    this.#arm();
+  }
+
+  /**
+   * Sends what is owed, oldest first, `resumeSpacingMs` apart: the first now, on the sweep's clock,
+   * and no more than fit in one sweep interval, so that the next sweep picks up about where these
+   * end (`U-28`).
+   *
+   * **Why apart.** Each `overflow` is a page that reads a snapshot straight back. A long outage
+   * ends with every open page owed one — held back by edges nobody could vet, or missing a change
+   * that could not be placed — and sent on one sweep they were that many snapshot reads at once,
+   * on a database that had only just come back. Spaced, the same pages are back within seconds of
+   * one another, one or two reads at a time.
+   *
+   * **What it says.** Only that grants, a sign-in or a placement were in doubt within the last
+   * intervals, which the account learns from the `overflow` anyway. Its place in the line is how
+   * many were owed before it, so a page sent back late after an outage can tell that other pages
+   * were — not whose, nor what they were sent.
+   */
+  #release(): void {
+    const spacing = this.#resumeSpacingMs;
+    const room = spacing <= 0 ? Infinity : Math.max(1, Math.floor(this.#sweepMs / spacing));
+    let turn = 0;
+    for (const [whom, send] of this.#owed) {
+      if (turn >= room) break;
+      this.#owed.delete(whom);
+      if (turn === 0 || spacing <= 0) {
+        send();
+      } else {
+        this.#releasing += 1;
+        setTimeout(() => {
+          this.#releasing -= 1;
+          send();
+        }, turn * spacing).unref();
+      }
+      turn += 1;
     }
   }
 
@@ -819,8 +922,8 @@ export class StateBroadcaster {
    *
    * **How long each waits.** A client's frame waits for its answer however long. The sweep waits
    * `credentialWaitMs`, and asks a check nothing while that check's last question from a sweep is
-   * still out. An edge waits `credentialWaitMs` from when it arrived, and shares its question as
-   * `#askAtEdge` says.
+   * still out. An edge waits `credentialWaitMs` from when its own question is asked, and shares
+   * that question as `#askAtEdge` says (`U-28`).
    */
   async #examine(sockets: readonly StreamSocket[], by: 'edge' | 'sweep' | 'frame'): Promise<void> {
     const asking = new Map<CredentialCheck, Map<string, Credential>>();
@@ -870,8 +973,8 @@ export class StateBroadcaster {
     credentials: ReadonlyMap<string, Credential>,
     by: 'edge' | 'sweep' | 'frame',
   ): Promise<Answered> {
-    if (by === 'edge')
-      return this.#within(this.#askAtEdge(check, credentials), 'the credential check');
+    // Bounded inside, from when its own question is asked (`U-28`): see `#askAtEdge`.
+    if (by === 'edge') return this.#askAtEdge(check, credentials);
     const asked = this.#clock();
     if (by === 'frame') return { asked, lapsed: await check.lapsed([...credentials.values()]) };
     if (this.#pending.has(check)) throw new CredentialCheckOutstanding();
@@ -899,8 +1002,14 @@ export class StateBroadcaster {
    * a database that is not answering; asking it again for every edge is a pool full of questions
    * nobody waits for, which is the sweep's rule too (`U-26`). Edges arriving then are decided by
    * `#atEdge` straight away, and the edges that were waiting for the next question are decided
-   * with them, so none of them waits past its own bound. When the late one does answer, the next
-   * edge asks afresh.
+   * with them. When the late one does answer, the next edge asks afresh.
+   *
+   * **How long each waits** (`U-28`). The edge that asks waits `credentialWaitMs` from asking. One
+   * that joins waits what is left of the one out, and then `credentialWaitMs` from when its own
+   * question is asked — so at most twice the wait, and never less than its own question was
+   * given. Bounded from its arrival, as it was, an edge that joined at a database answering in
+   * 1.2 s was failed at 2 s, while the question it waited for still had 0.4 s to go: a third of
+   * edges counted as failed checks, though every query answered inside its own wait.
    */
   #askAtEdge(
     check: CredentialCheck,
@@ -938,8 +1047,14 @@ export class StateBroadcaster {
       round.next = undefined;
       if (next !== undefined) then(next);
     };
+    let giveUp: (error: unknown) => void = () => undefined;
+    const late = new Promise<never>((_, reject) => {
+      giveUp = reject;
+    });
+    // One timer for the round: this question's bound, from when it was asked (`U-28`).
     const timer = setTimeout(() => {
       round.late = true;
+      giveUp(new CredentialCheckTimeout('the credential check', this.#waitMs));
       // Nothing will be asked for them while this is out: decided now, by what was said before.
       handOn((next) => {
         next.reject(new CredentialCheckOutstanding());
@@ -954,7 +1069,8 @@ export class StateBroadcaster {
       });
     };
     lapsed.then(settle, settle);
-    return lapsed.then((answer) => ({ asked, lapsed: answer }));
+    // What it says after its wait is dropped, as `#within` drops it.
+    return Promise.race([lapsed.then((answer) => ({ asked, lapsed: answer })), late]);
   }
 
   /**
@@ -1038,8 +1154,13 @@ export class StateBroadcaster {
       // which has still missed frames, and is closed for that.
       const lapse = now ?? decided;
       if (lapse === undefined) {
-        // Signed in, and held back by an edge that could not say so: told now, on this clock.
-        if (by === 'sweep' && this.#withheld.delete(socket)) socket.resume();
+        // Signed in, and held back by an edge that could not say so: told on this clock, in its
+        // turn (`U-28`). Signed out before its turn comes, it is forgotten and told nothing.
+        if (by === 'sweep' && this.#withheld.delete(socket)) {
+          this.#owe(socket, () => {
+            if (this.#admitted.has(socket)) socket.resume();
+          });
+        }
         continue;
       }
       this.#forget(socket);
@@ -1048,8 +1169,8 @@ export class StateBroadcaster {
   }
 
   /**
-   * The answer to one of the sweep's queries, or an edge's, or a rejection once `credentialWaitMs`
-   * has passed (`U-26`, `U-27`).
+   * The answer to one of the sweep's queries, or a rejection once `credentialWaitMs` has passed
+   * (`U-26`). An edge's question carries its own bound, from when it is asked (`U-28`).
    *
    * The query itself is not stopped — there is nothing to stop it with — and what a credential
    * check says after the wait is dropped: acting on it would close a socket at an instant that
@@ -1093,7 +1214,11 @@ export class StateBroadcaster {
     this.#attachments += 1;
     const attached: Attached = { subscriber, objectId, sight, order: this.#attachments };
     this.#attached.add(attached);
-    return () => this.#attached.delete(attached);
+    return () => {
+      // Nothing is owed to a subscription that has gone (`U-28`).
+      this.#owed.delete(attached);
+      return this.#attached.delete(attached);
+    };
   }
 
   /**
@@ -1341,7 +1466,8 @@ export class StateBroadcaster {
    *
    * The guarantee lives here rather than in the caller's `.catch` because there is nothing a
    * caller could usefully do with the error, and a second hook added later would have to
-   * remember. What it costs is the live stream being behind until the next change.
+   * remember. What it costs is every open tree reading a fresh snapshot, sent back by the next
+   * sweep (`U-28`). Before that, the live stream stayed behind until the sensor next changed.
    */
   async publish(
     q: Queryable,
@@ -1381,9 +1507,28 @@ export class StateBroadcaster {
         changes.map((change) => change.sensorId),
       ));
     } catch (error) {
+      // **Every tree open now has missed these changes** (`U-28`): without their paths nobody can
+      // say whose subtree and view they fall in, so each is owed an `overflow` — subscribe again,
+      // which reads a snapshot that holds them. Before, the batch went to nobody, logged and not
+      // counted, and every open tree showed the old state until that sensor next changed.
+      //
+      // **Owed, and sent by the sweep, not here.** Most of these subscriptions would never have
+      // been sent the change at all; an `overflow` at this instant would tell each of them that
+      // something committed now, somewhere it may not see — the instant `A-21` keeps from a
+      // subscriber, and `U-25` from a signed-out one. On the sweep's clock it says only that some
+      // change in the last interval could not be placed. Until then each is sent the changes
+      // that can be, as before; the snapshot it reads afterwards supersedes them.
+      this.#unplaced += changes.length;
+      for (const attached of this.#attached) {
+        this.#owe(attached, () => {
+          if (!this.#attached.delete(attached)) return;
+          attached.subscriber.overflow('a change could not be placed in the tree; subscribe again');
+        });
+      }
       this.#logger.error(
-        { states: changes.length, err: describeError(error) },
-        'could not read the ancestry of committed state changes; the live stream is behind',
+        { states: changes.length, subscribers: this.#attached.size, err: describeError(error) },
+        'could not read the ancestry of committed state changes; every open tree is sent back ' +
+          'to subscribe again on the next sweep',
       );
       await vetting;
       return 0;

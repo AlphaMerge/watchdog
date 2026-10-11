@@ -207,6 +207,8 @@ describe(
         edgesUnvetted: 0,
         withheld: 0,
         edgesCoalesced: 0,
+        unplaced: 0,
+        resyncsOwed: 0,
       }),
       probes: () => ({ probesDown: 0, probesSilent: 0 }),
       alarms: () => ({ fired: 0, overdueMs: 0 }),

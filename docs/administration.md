@@ -184,17 +184,35 @@ not one per tick; `streamChecksOutstanding` is how many are out, and is 0 on a h
 **A change is not held for the check either.** The question asked before a change goes out
 waits two seconds as well, and one is out at a time: a change that arrives while it is out waits
 for the next question, which every change arriving meanwhile shares, and which is asked as soon
-as the one out comes back (`streamEdgesCoalesced` counts them; nothing is lost or sent unchecked
-by it). When the question fails, or is still out after two seconds, the change goes only to the
-pages the core has found signed in within the last five seconds; while it stays out, later
-changes ask nothing and are decided the same way at once, and it counts in
-`streamChecksOutstanding`. `streamEdgesUnvetted` counts changes sent like that. Any other page is
+as the one out comes back (`streamEdgesCoalesced` counts them; nothing is lost by it). Each such
+question gets its own two seconds from when it is asked, so a change that waited for one may wait
+up to four in all. When the question fails, or is still out after two seconds, the change goes
+only to the pages the core has found signed in within the last five seconds; while it stays out,
+later changes ask nothing and are decided the same way at once, and it counts in
+`streamChecksOutstanding`. `streamEdgesUnvetted` counts changes sent like that, and **that
+includes the changes waiting to share the next question**: it is never asked while the one before
+is out past its two seconds, so they go out the same way, and count in both. Any other page is
 **held back**: sent nothing from that change on, which is exactly what a signed-out page is sent,
-and told to subscribe again — it reloads its view by itself — on the first five-second check that
-says it is still signed in; `streamWithheld` counts them. So a database that blinks costs
-nobody their tree, a page signed out in the last five seconds can be sent changes for at most
-those five seconds (as it can when a sign-out is undone inside one check), and a long outage
-ends with every open page reloading its view once.
+and told to subscribe again — it reloads its view by itself — once a five-second check says it is
+still signed in; `streamWithheld` counts them. So a database that blinks costs nobody their tree,
+a page signed out in the last five seconds can be sent changes for at most those five seconds (as
+it can when a sign-out is undone inside one check), and a long outage ends with every open page
+reloading its view once.
+
+**Those reloads are paced.** Each is a snapshot read, and after a long outage every open page is
+owed one at the same moment, on a database that has only just come back. So the core sends them
+a tenth of a second apart, oldest first, fifty to a five-second check, and the rest on the checks
+after; a few hundred pages are all back inside half a minute. `streamResyncsOwed` is how many are
+still waiting, and is 0 once they have gone.
+
+**A change the core cannot place is not dropped silently.** Sending a change means first reading
+where its sensor sits in the tree, so that it goes only to the pages whose subtree and access
+include it. When that read fails, nobody can be sent the change, so every page open at that moment
+is told to subscribe again, on the next five-second check and in the same paced line, and its
+snapshot shows the change. Not at the moment of the failure: most of those pages would never have
+been sent the change, and being told then would tell them that something changed somewhere they
+may not see. `streamUnplaced` counts the changes. It has no limit, because it only happens while
+the database is failing, which the ingestion queue's limits already alarm on.
 
 **A slow database closes nobody.** When a page asks the core for something, the core waits for
 the answer about that page's sign-in however long it takes, and the page gets what it asked for

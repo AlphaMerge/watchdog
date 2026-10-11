@@ -60,6 +60,8 @@ function sources(
     edgesUnvetted: number;
     withheld: number;
     edgesCoalesced: number;
+    unplaced: number;
+    resyncsOwed: number;
     probesDown: number;
     probesSilent: number;
     pending: number;
@@ -123,6 +125,8 @@ function sources(
       edgesUnvetted: overrides.edgesUnvetted ?? 0,
       withheld: overrides.withheld ?? 0,
       edgesCoalesced: overrides.edgesCoalesced ?? 0,
+      unplaced: overrides.unplaced ?? 0,
+      resyncsOwed: overrides.resyncsOwed ?? 0,
     }),
     alarms: () => ({
       fired: overrides.alarmsFired ?? 0,
@@ -455,6 +459,16 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       for (const key of ['streamEdgesUnvetted', 'streamWithheld', 'streamEdgesCoalesced']) {
         assert.equal(signedOut[key], 0, key);
       }
+      // A change that could not be placed, and the pages still owed a resubscribe (`U-28`):
+      // each its own number, and neither a cut-off nor a sign-in check that failed.
+      const unplaced = await build({ unplaced: 4, resyncsOwed: 37 }).read();
+      assert.equal(unplaced['streamUnplaced'], 4);
+      assert.equal(unplaced['streamResyncsOwed'], 37);
+      assert.equal(unplaced['streamCutoffs'], 0);
+      assert.equal(unplaced['streamCheckFailures'], 0);
+      assert.equal(unplaced['streamEdgesUnvetted'], 0);
+      assert.equal(signedOut['streamUnplaced'], 0);
+      assert.equal(signedOut['streamResyncsOwed'], 0);
       // Probe changes folded into one frame (`U-24`): counted, and not as a cut-off — nothing was
       // lost and nobody was detached.
       const folded = await build({ probeCoalesced: 9, overflowed: 1 }).read();
@@ -1155,6 +1169,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         streamEdgesUnvetted: 4,
         streamWithheld: 2,
         streamEdgesCoalesced: 9,
+        streamUnplaced: 3,
+        streamResyncsOwed: 12,
         dependencyPauses: 4,
         alarmsFired: 217,
         queriesRefused: 5,
@@ -1174,7 +1190,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 23);
+      assert.equal(readings.length, 25);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -1197,6 +1213,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           'streamEdgesUnvetted',
           'streamWithheld',
           'streamEdgesCoalesced',
+          // `U-28`: changes no page was sent. `streamResyncsOwed` is a level, and is not here.
+          'streamUnplaced',
           'dependencyPauses',
           'alarmsFired',
           'queriesRefused',

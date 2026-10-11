@@ -25945,7 +25945,7 @@ because each is a decision rather than a defect:
         and not resynced, so every open tree silently misses that change. It goes against
         "never drop without counting", and is the same failure (1) now handles for the check.
 
-- [ ] **U-28 — what is left of the stream's edge checks** · S · U-27 · Found 2026-10-04 by
+- [x] **U-28 — what is left of the stream's edge checks** · S · U-27 · Found 2026-10-04 by
       `U-27` and its review. (1) An edge that shares a question waits for the one already out
       and then a whole second one, but its bound runs from its arrival: with a database that
       answers in 1.2 s about a third of edges are counted as failed checks and logged, though
@@ -25959,6 +25959,74 @@ because each is a decision rather than a defect:
       long outage every held-back page resumes on the same sweep, N snapshot reads at once on
       a database that has just come back; spread them. **Done when** each is fixed with a
       test.
+
+      **U-28 outcome. A shared question gets its own wait, an unplaced change is owed to every
+      open tree, and what a sweep owes goes out paced.** All in `packages/core/src/state/stream.ts`.
+      - **(1) The joiner's bound.** An edge's question now carries its own bound, from when it is
+        asked: one timer per round, which also marks the round late. It is no longer
+        `#within` from the edge's arrival. So the edge that asks waits `credentialWaitMs`. One
+        that joins waits what is left of the question out, then `credentialWaitMs` from its own
+        question, so at most twice the wait. When the question out goes late, the joiners are
+        still released at once, as before.
+      - **(2) The docs.** They now say that a coalesced edge released because the question before
+        it went late, or because its own did, goes out by the unvetted rule and counts in
+        `edgesUnvetted` as well as `edgesCoalesced`. Updated: `StreamStats.edgesCoalesced`, the
+        `streamEdgesCoalesced` channel comment, and `administration.md`, which also says a
+        change that waited may take up to four seconds in all.
+      - **(3) A change that cannot be placed.** When `publish`'s ancestry read fails, the changes
+        are counted in `StreamStats.unplaced` (Core Health `streamUnplaced`, a 64-bit counter,
+        and `ms_core_stream_changes_unplaced_total`).
+        - **Who is told.** Without the paths nobody can say which subscriptions the change was
+          for, so every tree subscription attached at that moment is owed an `overflow`.
+        - **When.** On the sweep's clock, not at the failure. Most of those subscriptions would
+          never have been sent the change, and an `overflow` at that instant would tell them that
+          something committed somewhere they may not see (`A-21`'s instant).
+        - **Until then**, they are sent what can be placed. A subscription made after the
+          failure, or detached before the sweep, is owed nothing.
+        - **No limit on the channel.** It happens only while the database is failing, which the
+          ingestion queue's limits already alarm on (one outage, one alarm).
+        - **Probe watchers are not covered.** `publishProbe`'s own failed read, which loses a
+          frame that carries no value, is left as it was.
+      - **(4) Paced.** What a sweep owes now goes through one queue, `#owed`, oldest first:
+        held-back sockets the sweep has vouched for, and subscriptions owed for an unplaced
+        change.
+        - **The pace.** The first goes on the sweep, the rest `resumeSpacingMs` apart (default
+          100 ms), and at most as many as fit in one sweep interval (50 at 5 s). The rest wait
+          for the next sweep.
+        - **The reasoning.** A snapshot took 24–182 ms at the median and 236 ms at the worst
+          90th percentile in `2026-09-28-object-visibility.md`, so one to three are read at a
+          time, and a few hundred pages are back inside half a minute.
+        - **Skipped when it no longer applies.** A socket signed out before its turn is closed
+          by that sweep and never told. Owing twice is owing once.
+        - **Counted.** The queue is counted in `StreamStats.resyncsOwed` (Core Health
+          `streamResyncsOwed`, a level, and `ms_core_stream_resyncs_owed`), since CLAUDE.md
+          wants a metric for every queue.
+        - **What it discloses.** A page's place in the line says that other pages were owed
+          before it, not whose. The stream route's API description says all of this.
+      - **Tests** (`state-stream.test.ts`):
+        - a joiner at a database answering in 0.6 s against a 1 s wait is vetted, with no
+          failure and no unvetted edge;
+        - an unplaced batch is counted and tells nobody at the edge. The sweep sends back the
+          whole-tree and the other-device subscriptions, and not one made after or one
+          detached. Owed once;
+        - with mock timers, six held-back pages go out one at a time, a spacing apart and not
+          a millisecond sooner, three to an interval, oldest first. One signed out before its
+          turn is closed and never resumed;
+        - `core-health.test.ts` reads both channels, and the counter list names
+          `streamUnplaced`.
+
+        The U-27 helper sends what is owed at once (`resumeSpacingMs: 0`), so its tests are
+        unchanged.
+      - **Mutations**, each restored byte for byte (sha checked):
+        - bounding a joiner from its arrival again fails the joiner test;
+        - owing nobody on a failed read fails the unplaced test;
+        - sending the `overflow` at the edge fails it too;
+        - sending everything owed at once fails the pacing test.
+
+        Each fails only its own test, 73 of 74 in the file.
+      - **Suites.** `@ms/core` 5,272 of 5,272 on `c3a68e43`, none skipped and no skipped `describe`.
+        `@ms/sensors` 1,974 of 1,974. `sensor-reference.md` and `api-reference.md` regenerated:
+        two channel rows, two API fields and the route's new paragraph.
 
 - [x] **U-29 — the add-sensor form guesses why a probe has no numbers** · S · P-255 · Found
       2026-10-07 in `P-255`. `GET /probes/{id}/health` now says why a probe's numbers are missing

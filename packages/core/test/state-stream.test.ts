@@ -1903,7 +1903,7 @@ describe(
     const SWEEP = 3_600_000;
 
     /** A broadcaster whose sockets' answers are aged by a clock the test moves. */
-    function clocked(waitMs = 40) {
+    function clocked(waitMs = 40, resumeSpacingMs = 0) {
       const clock = { now: 1_000 };
       const broadcaster = new StateBroadcaster({
         logger: silent,
@@ -1912,6 +1912,8 @@ describe(
         credentialSweepMs: SWEEP,
         credentialWaitMs: waitMs,
         clock: () => clock.now,
+        // Everything a sweep owes sent at once, unless the test is about the spacing (`U-28`).
+        resumeSpacingMs,
       });
       return { clock, broadcaster };
     }
@@ -2354,6 +2356,168 @@ describe(
       assert.equal(arrived.changes, 0, 'a watcher nobody judged was told by a read in flight');
       arriving.stand();
       assert.equal(arrived.changes, 0, 'and it has nothing to hear when it stands');
+    });
+
+    // ---------------------------------------------------------------------------------------
+    // What `U-27` left: a shared question's bound, a change that cannot be placed, and the
+    // resubscribes an outage ends with (`U-28`).
+    // ---------------------------------------------------------------------------------------
+
+    it('bounds an edge that shares a question from when that question is asked, not from when it arrived', async () => {
+      // A database answering every question in 0.6 s, held to a wait of 1 s. A asks at 0 and
+      // is answered at 0.6. B arrives at 0.05 and waits for the next question, asked at 0.6 and
+      // answered at 1.2: 1.15 s after B arrived, and 0.6 s after its own question was asked.
+      // Bounded from its arrival, B was failed at 1.05 s by a query that answered in time.
+      const { broadcaster } = clocked(1_000);
+      let questions = 0;
+      const check: CredentialCheck = {
+        lapsed: async () => {
+          questions += 1;
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          return new Map<string, Lapse>();
+        },
+      };
+      const socket = admitted(broadcaster, 'socket', check);
+      const before = broadcaster.stats;
+
+      const a = broadcaster.publish(db, [stateChange()]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const b = broadcaster.publishProbe(db, probeId);
+      await within(5_000, 'both edges', Promise.all([a, b]));
+
+      assert.equal(questions, 2, 'B did not wait for a question asked after it arrived');
+      const after = broadcaster.stats;
+      assert.equal(after.edgesCoalesced - before.edgesCoalesced, 1);
+      assert.equal(
+        after.credentialCheckFailures - before.credentialCheckFailures,
+        0,
+        'a question that answered inside its own wait was counted as a failed check',
+      );
+      assert.equal(after.edgesUnvetted - before.edgesUnvetted, 0, 'B went out unvetted');
+      assert.equal(after.checksOutstanding, 0);
+      assert.equal(socket.tree.events.length, 1);
+      assert.equal(socket.watch.changes, 1);
+      assert.deepEqual(socket.log, []);
+      socket.admission.release();
+    });
+
+    it('owes every open tree an overflow for a change it cannot place, and sends it on the sweep', async () => {
+      const { broadcaster } = clocked();
+      /** A tree subscription that records why it was sent back. */
+      const tree = (objectId: number | null) => {
+        const reasons: (string | undefined)[] = [];
+        const events: StateEvent[] = [];
+        const detach = broadcaster.subscribe(
+          {
+            send: (event) => {
+              events.push(event);
+            },
+            overflow: (reason) => {
+              reasons.push(reason);
+            },
+          },
+          objectId,
+          EVERYONE,
+        );
+        return { reasons, events, detach };
+      };
+      // The whole tree, and a device the change is not under: which of them the change was
+      // for cannot be said without the read that failed.
+      const whole = tree(null);
+      const elsewhere = tree(otherDeviceId);
+      const gone = tree(null);
+      const failing: Queryable = {
+        query: () => Promise.reject(new Error('the database went away')),
+      };
+      const before = broadcaster.stats;
+
+      const sent = await within(
+        2_000,
+        'a publish that cannot place its changes',
+        broadcaster.publish(failing, [stateChange(), stateChange()]),
+      );
+      assert.equal(sent, 0);
+      assert.equal(broadcaster.stats.unplaced - before.unplaced, 2, 'not counted');
+      assert.equal(broadcaster.stats.resyncsOwed, 3);
+      // **Nobody is told at the instant of the commit**, not even the subscription it was for.
+      assert.deepEqual([whole.reasons, elsewhere.reasons, gone.reasons], [[], [], []]);
+
+      // Until the sweep, what can be placed is sent as before.
+      await within(2_000, 'a change that can be placed', broadcaster.publish(db, [stateChange()]));
+      assert.equal(whole.events.length, 1);
+      assert.equal(elsewhere.events.length, 0);
+      // One that subscribed after the failure read a snapshot after it, and is owed nothing; one
+      // that has gone is told nothing.
+      const later = tree(null);
+      gone.detach();
+      assert.equal(broadcaster.stats.resyncsOwed, 2);
+
+      await within(2_000, 'the sweep', broadcaster.sweep());
+      const why = 'a change could not be placed in the tree; subscribe again';
+      assert.deepEqual(whole.reasons, [why]);
+      assert.deepEqual(elsewhere.reasons, [why]);
+      assert.deepEqual(gone.reasons, []);
+      assert.deepEqual(later.reasons, []);
+      assert.equal(broadcaster.stats.resyncsOwed, 0);
+      assert.equal(broadcaster.stats.subscribers, 1, 'the two sent back are still attached');
+
+      // Owed once: the next sweep says nothing more, and the next change reaches who is left.
+      await within(2_000, 'the next sweep', broadcaster.sweep());
+      assert.deepEqual(whole.reasons, [why]);
+      await within(2_000, 'the next change', broadcaster.publish(db, [stateChange()]));
+      assert.equal(later.events.length, 1);
+      assert.equal(whole.events.length, 1);
+      later.detach();
+    });
+
+    it('sends what a sweep owes a spacing apart, oldest first, and no more than fit in its interval', async (t) => {
+      t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+      // A spacing of a million milliseconds in an interval of an hour: three a sweep.
+      const SPACING = 1_000_000;
+      const { clock, broadcaster } = clocked(40, SPACING);
+      const held = credentials();
+      const pages = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) =>
+        admitted(broadcaster, id, held.check),
+      );
+      // An outage: an edge nobody could vet, with every page last heard from an hour and more
+      // ago, holds all six back.
+      clock.now += 2 * SWEEP;
+      held.fail(true);
+      await broadcaster.publish(db, [stateChange()]);
+      assert.equal(broadcaster.stats.withheld, 6);
+      held.fail(false);
+      const resumed = (): string[] =>
+        pages.flatMap((page, index) => (page.log.includes('resume') ? [String(index)] : []));
+
+      // The database is back, and one sweep vouches for all six. The oldest goes now…
+      await broadcaster.sweep();
+      assert.deepEqual(resumed(), ['0']);
+      assert.equal(broadcaster.stats.resyncsOwed, 5);
+      // …and the next a spacing later, not a moment sooner.
+      t.mock.timers.tick(SPACING - 1);
+      assert.deepEqual(resumed(), ['0']);
+      t.mock.timers.tick(1);
+      assert.deepEqual(resumed(), ['0', '1']);
+      t.mock.timers.tick(SPACING);
+      assert.deepEqual(resumed(), ['0', '1', '2']);
+      // Three fit in the interval; the rest wait for the next sweep, however long that is.
+      t.mock.timers.tick(SPACING / 2);
+      assert.deepEqual(resumed(), ['0', '1', '2']);
+      assert.equal(broadcaster.stats.resyncsOwed, 3);
+
+      await broadcaster.sweep();
+      assert.deepEqual(resumed(), ['0', '1', '2', '3']);
+      // One signed out before its turn is closed by that sweep's check, and never told to
+      // subscribe again.
+      held.lapse('e');
+      await broadcaster.sweep();
+      assert.deepEqual(pages[4]?.log, ['withhold', 'signOut:ended']);
+      t.mock.timers.tick(2 * SPACING);
+      assert.deepEqual(resumed(), ['0', '1', '2', '3', '5']);
+      assert.equal(broadcaster.stats.resyncsOwed, 0);
+      // And nobody was told twice.
+      for (const page of pages) assert.ok(page.log.filter((one) => one === 'resume').length <= 1);
+      for (const page of pages) page.admission.release();
     });
 
     // ---------------------------------------------------------------------------------------
