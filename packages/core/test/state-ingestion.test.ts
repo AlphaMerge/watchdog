@@ -29,6 +29,8 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { sessionsWait } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 import { Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
@@ -834,6 +836,77 @@ describe(
           rows.at(-1)?.cause,
           'dependency',
           'and the history agrees, instead of stopping at the first',
+        );
+      });
+
+      it('keeps a result measured at the instant a route is writing, in the other transaction', async () => {
+        // **`P-394`.** The finding above, across two transactions. A route that re-decides a
+        // sensor locks its runtime row (here, by writing the acknowledgement) and then writes
+        // history at the core's `now`. Ingestion wrote history at the probe's instant before it
+        // touched the runtime row, so it looked for an occupied instant, found none — the
+        // route's row was not committed — and inserted at the same one. That insert waited for
+        // the route, met its row when it committed and was dropped by `ON CONFLICT DO NOTHING`,
+        // while the runtime write after it went through: the runtime said Up and the history
+        // stopped at Down (Acknowledged).
+        const first = build();
+        await deliver(first.service, first.ingestor, [failedResult(1), failedResult(2)]);
+        assert.equal((await runtime()).state, 'down');
+
+        const instant = new Date(at(5));
+        const resolved = resolveAcknowledgement(
+          { kind: 'duration', minutes: 30 },
+          'ticket 394',
+          instant,
+        );
+        assert.ok('acknowledgement' in resolved);
+
+        // The route, holding its transaction open once it has written.
+        let held = (): void => undefined;
+        let release = (): void => undefined;
+        const holds = new Promise<void>((resolve) => {
+          held = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const route = db.tx(async (q) => {
+          await build().states.acknowledge(
+            q,
+            [sensorId],
+            resolved.acknowledgement,
+            { kind: 'user', label: 'tester' },
+            instant,
+          );
+          held();
+          await released;
+        });
+
+        // The probe's recovery, measured at the same millisecond. Not awaited before the release:
+        // delivering it waits for its write, and its write waits for the route.
+        const racing = build();
+        let delivered: Promise<unknown> = Promise.resolve();
+        try {
+          await within(10_000, 'the acknowledgement to be written', Promise.race([holds, route]));
+          delivered = racing.service
+            .acceptResults('probe-state', {
+              type: 'results',
+              batchId: 'p394',
+              results: [result({ at: instant.toISOString() })],
+            })
+            .then(() => racing.ingestor.stop());
+          await sessionsWait(db, 1, 'the result to wait on the acknowledgement');
+        } finally {
+          release();
+        }
+        await within(10_000, 'the acknowledgement to commit', route);
+        await within(10_000, 'the result to be written', delivered);
+
+        const now = await runtime();
+        assert.equal(now.state, 'up', 'the recovery reached the runtime');
+        assert.deepEqual(
+          (await history()).slice(-2).map((row) => row.state),
+          ['down_acknowledged', 'up'],
+          'and the history, after the acknowledgement rather than instead of nothing',
         );
       });
 

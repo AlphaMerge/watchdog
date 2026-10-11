@@ -14739,13 +14739,38 @@ because each is a decision rather than a defect:
         survived, so it was removed.
       - `UNIQUE_CONSTRAINTS` names the seed as a writer of `schedule_name_key`.
 
-- [ ] **P-394 — a state row lost when ingestion and a route write one sensor in the same
+- [x] **P-394 — a state row lost when ingestion and a route write one sensor in the same
       millisecond** · S · P-108 · Found 2026-10-10 in `P-391`'s sweep, not reproduced.
       `writeStateHistory` inserts `sensor_state` with `ON CONFLICT (sensor_id, time) DO
       NOTHING`. Ingestion writes it before it takes the runtime row's lock, so a route that
       re-evaluates the same sensor in the same millisecond can have its row dropped while
       `sensor_runtime` still moves: the divergence `runtime.ts` describes for `P-108`. **Done
       when** it is reproduced or shown unreachable, and fixed if it is reachable.
+
+      **P-394 outcome. Reproduced, and fixed: `writeStateHistory` locks the runtime row of each
+      sensor it writes, in id order, before it looks for an occupied instant.** Every writer of a
+      sensor's history now holds that sensor's runtime row first. The second writer therefore
+      sees the first's row and moves to the next millisecond, as `P-108` intended, instead of
+      inserting into an instant it could not see was taken.
+      - **The reproduction**, `state-ingestion.test.ts`, through the real paths. A sensor is Down.
+        An acknowledgement at T is written and its transaction held: `acknowledge` locks the
+        runtime row first. A recovery measured at exactly T is then delivered, and the test waits
+        until it is blocked (`sessionsWait`) before releasing. Without the lock, the runtime said
+        Up while the history ended at `down_acknowledged`: the recovery's row was dropped by
+        `ON CONFLICT DO NOTHING`. With it, the history is `down_acknowledged`, `up`.
+      - **Why only ingestion raced.** Each route that re-decides a sensor writes its runtime row
+        before its history: a pause recompute, an acknowledgement, a simulated error. Ingestion
+        wrote history first and the runtime after, so it was the one writer that looked for an
+        occupied instant without holding anything.
+      - **The other order deadlocked rather than lost a row** (reasoned, not reproduced).
+        Ingestion inserted at T first. A route then locked the runtime row and inserted at T,
+        waiting on ingestion, whose runtime write waited on the route. With the lock taken first,
+        the two queue instead.
+      - `FOR NO KEY UPDATE`, which is what the `UPDATE`s after it take anyway. A sensor with no
+        runtime row (deleted) locks nothing, as before.
+      - The one other insert into `sensor_state`, retention's carried-forward anchor
+        (`timeseries/store.ts`), writes at the retention horizon and only for a sensor with no
+        rows left, so it cannot meet a live write.
 
 - [x] **P-395 — `target-policy-exception`'s two-administrators test races its own lock** · XS ·
       A-64 · Found 2026-10-10 in `P-393`'s full core run: 5,248 of 5,249 passed, and the file alone

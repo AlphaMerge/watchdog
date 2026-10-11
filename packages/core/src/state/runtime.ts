@@ -248,6 +248,20 @@ export async function writeStateHistory(
   stamping: Stamping = 'after-the-newest',
 ): Promise<number> {
   if (changes.length === 0) return 0;
+  // **Each sensor's runtime row first, in id order** (`P-394`). Both stampings read the rows
+  // already stored and move a transition off an occupied instant, and a row another transaction
+  // has written but not committed is not one they can see. A route that re-decides a sensor
+  // holds its runtime row from the write that caused it; ingestion did not touch that row until
+  // after this insert. So a result measured at the instant a route was writing found the instant
+  // free, inserted into it, waited for the route, and was dropped by the guard below once the
+  // route committed, while its runtime write went through. With every writer of a sensor's
+  // history holding that sensor's runtime row first, the second sees the first's row and moves.
+  // Id order, so two writers of the same sensors take them in the same order.
+  await q.query(
+    `SELECT 1 FROM sensor_runtime WHERE object_id = ANY($1::bigint[])
+     ORDER BY object_id FOR NO KEY UPDATE`,
+    [[...new Set(changes.map((change) => change.sensorId))]],
+  );
   const ordered =
     stamping === 'as-measured' ? await asMeasured(q, changes) : await orderedAfterLast(q, changes);
   const rows = await q.query<{ sensor_id: string; time: Date }>(
