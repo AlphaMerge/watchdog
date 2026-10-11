@@ -104,9 +104,21 @@ const templateSchema = {
      * the defence: a field the schema does not name cannot reach the wire even if the service
      * somehow put it in the object.
      */
-    settings: { type: 'object', additionalProperties: true },
+    settings: {
+      type: 'object',
+      additionalProperties: true,
+      description:
+        'The method’s settings, shaped by its `settingsSchema` (`GET /notification-methods`), ' +
+        'with every setting that schema marks `writeOnly` removed on every read (P-344).',
+    },
     /** The dotted paths that were removed, so a form can say "set, not shown". */
-    redactedSettings: { type: 'array', items: { type: 'string' } },
+    redactedSettings: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'The dotted paths of the `writeOnly` settings that hold a value and were removed from ' +
+        '`settings`, so a form can say "set, not shown". Never the values.',
+    },
     subject: { type: 'string' },
     body: { type: 'string' },
     recipients: { type: 'array', items: recipientSchema },

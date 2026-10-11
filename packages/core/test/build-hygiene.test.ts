@@ -4,7 +4,9 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
-import { coreHealth, probeHealth } from '@ms/sensors';
+import { coreHealth, CREDENTIAL_KINDS, probeHealth } from '@ms/sensors';
+import { notificationMethods } from '../src/notifications/methods.js';
+import { coreCatalogue } from '../src/profile.js';
 import { sortedAliases, templateLiterals } from './support/sql-order-aliases.js';
 
 /**
@@ -255,7 +257,7 @@ describe('credential-shaped fields', () => {
   ]);
 
   const SHAPE =
-    /(community|password|secret|auth_?key|priv_?key|passphrase|token|api_?key|credential|recovery_?codes?)/i;
+    /(community|password|secret|auth_?key|priv(ate)?_?key|passphrase|token|api_?key|credential|recovery_?codes?)/i;
 
   /**
    * A one-time code in a request body: TOTP's six digits, or a recovery code typed in their place
@@ -328,6 +330,118 @@ describe('credential-shaped fields', () => {
         `${fields.join('\n  ')}\n` +
         'Mark it writeOnly: true, or add it to NOT_SECRET with the reason it is not a secret.',
     );
+  });
+
+  /**
+   * The schemas the document cannot see into (`P-344`). A sensor's `params`, a credential set's
+   * `values` and a notification template's `settings` are free-form objects in the OpenAPI
+   * document: their shape is each sensor type's `paramsSchema`, each credential kind's `schema`
+   * and each notification method's `settingsSchema`, and `writeOnly` there is what decides what
+   * is returned. `ObjectService.#redact` strips a sensor's `writeOnly` parameters from every
+   * read, the template routes strip a method's, and a kind's `writeOnly` fields are the half the
+   * vault encrypts while the rest is stored and served in the clear as `publicParams`. So a field
+   * named like a secret and not marked `writeOnly` would be answered to every reader, and the
+   * walk above would never see it. These are walked as request bodies, with the same rule, for
+   * every type the full build registers, every kind and every method.
+   */
+  function parameterDocument(
+    types: readonly { readonly id: string; readonly paramsSchema: Schema }[],
+    kinds: readonly { readonly id: string; readonly schema: Schema }[],
+    methods: readonly { readonly id: string; readonly settingsSchema: Schema }[] = [],
+  ): OpenApi {
+    const body = (schema: Schema): Operation => ({
+      requestBody: { content: { 'application/json': { schema } } },
+    });
+    const paths: Record<string, Record<string, Operation>> = {};
+    for (const type of types) paths[`sensor type ${type.id}`] = { params: body(type.paramsSchema) };
+    for (const kind of kinds) paths[`credential kind ${kind.id}`] = { values: body(kind.schema) };
+    for (const method of methods) {
+      paths[`notification method ${method.id}`] = { settings: body(method.settingsSchema) };
+    }
+    return { paths };
+  }
+
+  it('in sensor parameters, credential kinds and notification settings are all writeOnly (P-344)', () => {
+    const fields = readable(
+      parameterDocument(
+        coreCatalogue('full').summaries(),
+        CREDENTIAL_KINDS,
+        notificationMethods.all(),
+      ),
+    );
+    assert.deepEqual(
+      fields,
+      [],
+      'a sensor type, credential kind or notification method takes a field named like a ' +
+        'secret that is not writeOnly, ' +
+        'so every read would return it:\n  ' +
+        `${fields.join('\n  ')}\n` +
+        'Mark it writeOnly: true, or add it to NOT_SECRET with the reason it is not a secret.',
+    );
+  });
+
+  it('finds a parameter, credential or method field named like a secret, nested too (P-344)', () => {
+    const fields = readable(
+      parameterDocument(
+        [
+          {
+            id: 'test.nested',
+            paramsSchema: {
+              type: 'object',
+              properties: {
+                host: { type: 'string' },
+                auth: {
+                  type: 'object',
+                  properties: {
+                    user: { type: 'string' },
+                    password: { type: 'string' },
+                    authKey: { type: 'string', writeOnly: true },
+                  },
+                },
+              },
+            },
+          },
+        ],
+        [
+          {
+            id: 'test.kind',
+            schema: {
+              type: 'object',
+              properties: {
+                community: { type: 'string', writeOnly: true },
+                privateKey: { type: 'string' },
+              },
+            },
+          },
+        ],
+        [
+          {
+            id: 'test.method',
+            settingsSchema: {
+              type: 'object',
+              properties: {
+                url: { type: 'string' },
+                headers: {
+                  type: 'array',
+                  items: { type: 'object', properties: { apiKey: { type: 'string' } } },
+                },
+                // Write-only as a whole, so what is inside it is too: not reported.
+                signing: {
+                  type: 'object',
+                  writeOnly: true,
+                  properties: { secret: { type: 'string' } },
+                },
+              },
+            },
+          },
+        ],
+      ),
+    );
+    assert.deepEqual(fields, [
+      'PARAMS sensor type test.nested body auth.password',
+      'VALUES credential kind test.kind body privateKey',
+      'SETTINGS notification method test.method body headers[].apiKey',
+    ]);
   });
 
   /**
@@ -519,40 +633,48 @@ function fieldsOf(doc: OpenApi, side: 'request' | 'response'): Field[] {
     return { schema: target, key };
   };
 
-  const walk = (raw: Schema, where: string, path: string, seen: ReadonlySet<string>): void => {
+  // `hidden`: the field is inside one marked `writeOnly`, and so is write-only itself — a
+  // notification method's `secretHeaders` is one `writeOnly` object, and every header in it is
+  // stripped with it (`P-344`).
+  const walk = (
+    raw: Schema,
+    where: string,
+    path: string,
+    seen: ReadonlySet<string>,
+    hidden = false,
+  ): void => {
     const { schema, key } = resolve(raw);
     if (key !== undefined && seen.has(key)) return;
     const inside = key === undefined ? seen : new Set([...seen, key]);
     const at = (name: string): string => (path === '' ? name : `${path}.${name}`);
+    const under = hidden || schema['writeOnly'] === true;
 
     for (const [name, property] of Object.entries(objectAt(schema, 'properties'))) {
       if (!isSchema(property)) continue;
-      fields.push({
-        name,
-        where: `${where} ${at(name)}`,
-        writeOnly: property['writeOnly'] === true || resolve(property).schema['writeOnly'] === true,
-      });
-      walk(property, where, at(name), inside);
+      const writeOnly =
+        under || property['writeOnly'] === true || resolve(property).schema['writeOnly'] === true;
+      fields.push({ name, where: `${where} ${at(name)}`, writeOnly });
+      walk(property, where, at(name), inside, writeOnly);
     }
     for (const property of Object.values(objectAt(schema, 'patternProperties'))) {
-      if (isSchema(property)) walk(property, where, at('*'), inside);
+      if (isSchema(property)) walk(property, where, at('*'), inside, under);
     }
     const map = schema['additionalProperties'];
-    if (isSchema(map)) walk(map, where, at('*'), inside);
+    if (isSchema(map)) walk(map, where, at('*'), inside, under);
     const items = schema['items'];
     for (const item of Array.isArray(items) ? items : [items]) {
-      if (isSchema(item)) walk(item, where, `${path}[]`, inside);
+      if (isSchema(item)) walk(item, where, `${path}[]`, inside, under);
     }
     for (const keyword of ['oneOf', 'anyOf', 'allOf', 'prefixItems']) {
       const alternatives = schema[keyword];
       if (!Array.isArray(alternatives)) continue;
       for (const alternative of alternatives) {
-        if (isSchema(alternative)) walk(alternative, where, path, inside);
+        if (isSchema(alternative)) walk(alternative, where, path, inside, under);
       }
     }
     for (const keyword of ['then', 'else']) {
       const branch = schema[keyword];
-      if (isSchema(branch)) walk(branch, where, path, inside);
+      if (isSchema(branch)) walk(branch, where, path, inside, under);
     }
   };
 

@@ -189,8 +189,23 @@ export const objectDetailSchema = {
      * before a detail reaches a route. `fast-json-stringify` cannot help here: `params` is
      * free-form by design, so the serialiser has no list of keys to omit.
      */
-    params: { type: 'object', additionalProperties: true },
-    redactedParams: { type: 'array', items: { type: 'string' } },
+    params: {
+      type: 'object',
+      additionalProperties: true,
+      description:
+        'A sensor’s parameters, shaped by its type’s `paramsSchema` (`GET /sensor-types`), with ' +
+        'every parameter that schema marks `writeOnly` removed on every read, for every caller ' +
+        '(P-05). The removal is made at run time from the type’s schema, which this document ' +
+        'does not carry; build-hygiene checks that every parameter named like a secret is marked ' +
+        '(P-344).',
+    },
+    redactedParams: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'The dotted paths of the `writeOnly` parameters that hold a value and were removed from ' +
+        '`params`. Never the values.',
+    },
     /**
      * On the reply to an edit of a sensor's parameters only (`U-36`): the channels whose lookup
      * the new parameters declare differently and that were left as they are, because the sensor
@@ -396,7 +411,14 @@ export const credentialViewSchema = {
   required: ['kind', 'publicParams', 'source', 'updatedAt', 'bounded'],
   properties: {
     kind: { enum: CREDENTIAL_SET_KINDS },
-    publicParams: { type: 'object', additionalProperties: true },
+    publicParams: {
+      type: 'object',
+      additionalProperties: true,
+      description:
+        'The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in ' +
+        'the clear. The `writeOnly` fields are encrypted at rest and served to nobody; ' +
+        '`secretsSet` names the ones that hold a value (P-344).',
+    },
     source: { $ref: 'ms:settingSource' },
     updatedAt: { type: 'string' },
     bounded: {

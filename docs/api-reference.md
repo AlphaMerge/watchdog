@@ -4152,7 +4152,7 @@ one of 4 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
-| `publicParams` | object | **required** |  |
+| `publicParams` | object | **required** | The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in the clear. The `writeOnly` fields are encrypted at rest and served to nobody; `secretsSet` names the ones that hold a value (P-344). |
 | `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
 | `updatedAt` | string | **required** |  |
 | `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
@@ -4165,7 +4165,7 @@ one of 4 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
-| `publicParams` | object | **required** |  |
+| `publicParams` | object | **required** | The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in the clear. The `writeOnly` fields are encrypted at rest and served to nobody; `secretsSet` names the ones that hold a value (P-344). |
 | `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
 | `updatedAt` | string | **required** |  |
 | `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
@@ -4457,8 +4457,8 @@ one of 4 shapes, by `kind`
 | `targetPolicyException` | string[] |  |  |
 | `gid` | string | nullable |  |
 | `sensorType` | string |  |  |
-| `params` | object |  |  |
-| `redactedParams` | string[] |  |  |
+| `params` | object |  | A sensor’s parameters, shaped by its type’s `paramsSchema` (`GET /sensor-types`), with every parameter that schema marks `writeOnly` removed on every read, for every caller (P-05). The removal is made at run time from the type’s schema, which this document does not carry; build-hygiene checks that every parameter named like a secret is marked (P-344). |
+| `redactedParams` | string[] |  | The dotted paths of the `writeOnly` parameters that hold a value and were removed from `params`. Never the values. |
 | `lookupsKept` | string[] |  | On an edit’s reply only: the channels whose lookup the new parameters declare differently and that were kept, because the sensor type could not say what the stored parameters declared (U-36, P-311). Absent when there were none. |
 | `settings` | [ms:settingView](#schema-ms-settingview)[] |  |  |
 | `channels` | [ms:channelRecord](#schema-ms-channelrecord)[] |  |  |
@@ -4753,8 +4753,8 @@ one of 3 shapes, by `kind`
 | `description` | string | **required** |  |
 | `method` | string | **required** |  |
 | `methodName` | string | **required** |  |
-| `settings` | object | **required** |  |
-| `redactedSettings` | string[] | **required** |  |
+| `settings` | object | **required** | The method’s settings, shaped by its `settingsSchema` (`GET /notification-methods`), with every setting that schema marks `writeOnly` removed on every read (P-344). |
+| `redactedSettings` | string[] | **required** | The dotted paths of the `writeOnly` settings that hold a value and were removed from `settings`, so a form can say "set, not shown". Never the values. |
 | `subject` | string | **required** |  |
 | `body` | string | **required** |  |
 | `recipients` | object[] | **required** |  |

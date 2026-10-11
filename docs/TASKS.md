@@ -12530,10 +12530,44 @@ because each is a decision rather than a defect:
       on the shared enrolment key may rename it or move its address. **Done when** decided:
       per-enrolment tokens, or rely on `P-326`'s binding, written down, with a test.
 
-- [ ] **P-328 — `last_seen_at` and `protocol_accepted_at` now nearly coincide** · XS · P-319 ·
+- [x] **P-328 — `last_seen_at` and `protocol_accepted_at` now nearly coincide** · XS · P-319 ·
       Found 2026-10-08 in `P-319`. Only a proven version refusal moves last seen without setting
       accepted. **Done when** U-32/U-33's reasons for keeping both are re-read and either one is
       dropped or the outcome says why both stay.
+
+      **P-328 outcome. Both stay.** No migration, no API change; one stale comment corrected.
+      - **What each now is.** Since `P-319` both are written only by a hello that proved it is
+        the probe. `last_seen_at` (`#touch`) is the last such hello, accepted or refused over its
+        version. `protocol_accepted_at` (`#speaks`) is the last accepted one, and is cleared by a
+        refusal over the version, which writes `protocol_refused_at` instead. An enrolment
+        writes all three of `first_seen_at`, `last_seen_at` and `protocol_accepted_at` at once.
+        So for a row written since `P-319`, `last_seen_at` is `coalesce(protocol_accepted_at,
+        protocol_refused_at)` to within the two clocks (below).
+      - **Why not drop `protocol_accepted_at`.** `U-32`'s reason stands: "when it last connected
+        it spoke protocol 12" needs the time of an *accepted* handshake, and `last_seen_at` is
+        not that on the one path that matters, the refusal over the version. Deriving it as
+        "`last_seen_at` when nothing was refused" would also read a pre-`P-319` row's
+        `last_seen_at`, which an unproven hello could have written, and a pre-072 row's, which
+        `U-32` deliberately left `null` as the one guess known to be wrong.
+      - **Why not drop `last_seen_at`.** It is a published field (`GET /probes`' `lastSeenAt`,
+        which `U-33` described beside the other two), and it carries the history of rows
+        written before 072 and before `P-319`, which neither protocol column can. Deriving it
+        from the protocol pair would tie a "last seen" time to the version bookkeeping, so a
+        later change to either — `last_seen_at` moving with the session, say, as its name
+        invites — would quietly change the other's meaning. Each keeps one writer and one
+        meaning; the cost is one `timestamptz` written in statements the hello already runs.
+      - **The two clocks.** `#touch` writes `now()`, the database's clock; `#speaks` and the
+        enrolment write the registry's `#now()`. So on an accepted hello they can differ by the
+        core's offset from the database. Nothing compares them; noted so nobody starts to.
+      - **Corrected.** `ProbeHealthService.lastProtocol`'s comment still said every hello moves
+        `last_seen_at` before it is decided, which `P-319` ended. The route descriptions and
+        `api-reference.md` already said it right, and two test comments are brought up to date.
+      - **Test.** `P-319`'s table already pins that a refusal for anything but the version moves
+        neither. The other half — a refusal over the version moves `last_seen_at` and clears the
+        accepted time — was asserted only as "`lastSeenAt` is a string", which it already was
+        from the enrolment. `probe-registry.test.ts`'s `GET /probes` test now asserts it is not
+        the enrolment's time. Mutation: a version refusal that skips `#touch` fails 2 (restored
+        byte for byte, `dist` rebuilt).
 
 - [x] **P-329 — the testing rule names `within` but not `pollWithin`** · XS · P-325 · Found
       2026-10-08 in `P-325`. `within` alone does not stop a polling loop; CLAUDE.md's testing rule
@@ -12971,12 +13005,47 @@ because each is a decision rather than a defect:
         - `ALLOWED_ONLY_AT` ignored failed its fixture test;
         - `recoveryCodes` taken out of `ALLOWED` failed 2: the real document and the fixture.
 
-- [ ] **P-344 — secrets inside free-form objects are checked only at run time** · XS · P-336 ·
+- [x] **P-344 — secrets inside free-form objects are checked only at run time** · XS · P-336 ·
       Found 2026-10-09 in `P-336`. Credential-set `values`, template `settings` and sensor `params`
       are free-form in the OpenAPI document, so the walk cannot see a secret in them; redaction
       happens at run time (`ObjectService.#redact`). **Done when** decided whether the document
       should say so (a description naming the run-time rule) or the check should read the sensor
       types' `paramsSchema`, written down.
+
+      **P-344 outcome. Both: the check reads the three schema families, and the document says
+      the rule.**
+      - **Why the check.** In all three families `writeOnly` is the whole defence. A sensor's
+        `writeOnly` parameters are stripped from every read (`ObjectService.#redact`), a
+        notification method's from every template answer, and a credential kind's are the half
+        the vault encrypts while the rest is served in the clear as `publicParams`. So a field
+        named `password` that a type, kind or method author forgot to mark is served to every
+        reader, and nothing failed. A description cannot catch that; a check can, and it costs
+        one walk.
+      - **`build-hygiene.test.ts`.** Every type `coreCatalogue('full')` registers, every
+        `CREDENTIAL_KINDS` entry and every `notificationMethods` method is wrapped as a request
+        body of a pseudo-route (`PARAMS sensor type <id> body <path>`) and walked by the
+        same `fieldsOf` and judged by the same `readable` rule as the API's request bodies:
+        named like a secret or a one-time code, not in `NOT_SECRET`, and not `writeOnly` is a
+        failure. Nested objects, arrays, `$ref`s and unions are followed as for the document.
+      - **A field inside a `writeOnly` one is write-only.** `fieldsOf` judged each field by its
+        own flag, so a secret-named field nested in a `writeOnly` object — a method's
+        `secretHeaders` is one, stripped whole — would have been reported. The walk now carries
+        the flag down to every descendant, for the document's request bodies too; it can only
+        report less, and only what is stripped.
+      - **`SHAPE` gains `private_?key`.** `priv_?key` did not match `privateKey`, the SSH kind's
+        key field, so a `privateKey` left unmarked would have passed both halves of the check.
+      - **The document.** `params` and `redactedParams` on the object detail, `publicParams` on a
+        credential view, and `settings` and `redactedSettings` on a notification template now
+        say what they are shaped by and that `writeOnly` fields are removed at run time.
+        `api-reference.md` is regenerated.
+      - **Tests.** A fixture with an unmarked nested `auth.password` in a type, an unmarked
+        `privateKey` in a kind and an unmarked `apiKey` in an array of a method's settings, each
+        beside a marked one, and a `secret` inside a `writeOnly` object: exactly the three
+        unmarked ones are reported.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): the flag not carried down
+        fails 1; `SHAPE` without `private` fails 1. `secretHeaders` unmarked in the webhook
+        method is refused before the check runs — the method registry will not load it — so the
+        real-schema half is shown by the fixture, not by that mutant.
 
 - [ ] **P-345 — a Down sensor's stored message drops the check's own sentence** · S · P-338 ·
       Found 2026-10-09 in `P-338`. For a `lookup` or `limit` cause, `state/service.ts` stores the
@@ -13919,11 +13988,32 @@ because each is a decision rather than a defect:
         - `image/gif`, which this build never writes, is served as recorded and validates too.
       - **Mutation.** The field widened back to `string` fails to compile, at the check.
 
-- [ ] **P-371 — should a trigger's kind be refused at validation?** · XS · P-352 · Found
+- [x] **P-371 — should a trigger's kind be refused at validation?** · XS · P-352 · Found
       2026-10-09 in `P-352`. `ms:triggerInput.kind` is a free string the service refuses with
       `TRIGGER_INVALID`; an enum of the registry's ids would refuse it at `validate-request` and
       put those ids in the OpenAPI document. **Done when** decided and, if adopted, done as a
       validation change with a route test.
+
+      **P-371 outcome. Not adopted: the kind stays a bounded string, refused by the registry.**
+      - **One refusal, in one code.** An unknown kind and settings the kind refuses are both
+        `400 TRIGGER_INVALID` from `TriggerKindRegistry`, and the unknown kind's answer already
+        names what it would take (`no trigger kind "telepathy"`, problems `known kinds: state,
+        threshold`). An enum would move the first to request validation's code and Ajv's
+        "must be equal to one of the allowed values": a client would handle two codes for one
+        form, and be told less.
+      - **As the API's other registry ids are.** A sensor type on create is checked for its shape
+        (`sensorTypeIdSchema`, `P-372`) and refused by the catalogue when unknown; a notification
+        template's `method` is a bounded string the method registry refuses. Each registry is
+        the one place that knows its ids, and `GET /trigger-kinds`, like `GET /sensor-types` and
+        `GET /notification-methods`, is where a client reads them. `kind`'s description already
+        points there.
+      - **Not a second rule beside `P-352`.** The view's `kind` is deliberately not an enum, so
+        that a newer build's kind is still served after a downgrade (`P-139`, `P-313`). An enum on
+        the input only would be the same ids from the same registry, so it is not wrong, but it
+        buys a list the document already points to at the cost above.
+      - **Test.** `triggers.test.ts`'s unknown-kind route test now asserts the message and the
+        problems naming the known kinds, which the decision rests on, beside the code. Mutation:
+        the problem without "known" fails 1.
 
 - [x] **P-372 — the core's own schemas answer a pattern with the expression** · XS · U-53 · Found
       2026-10-09 in `U-53`. `scaleMul` and `scaleDiv` in `api/schemas/objects.ts`, the audit

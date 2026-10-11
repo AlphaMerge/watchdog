@@ -757,9 +757,11 @@ export class ProbeHealthService {
    * it was served as nothing recorded, and the form said "This updates when it connects" of a
    * probe that is refused at every hello.
    *
-   * **The time is `protocol_accepted_at`, never `last_seen_at`**, which every hello moves before
-   * it is decided. It is `null` beside a version a hello was refused over (`R-06`), and for a
-   * row recorded before migration 072: the version stands, and when is not known.
+   * **The time is `protocol_accepted_at`, never `last_seen_at`**, which a hello refused over its
+   * version moves too (and, before `P-319`, every hello did, whatever it was refused for). It is
+   * `null` beside a version a hello was refused over (`R-06`), and for a row recorded before
+   * migration 072: the version stands, and when is not known. The two now coincide for every
+   * accepted hello, and both are kept (`P-328`).
    *
    * **A database that cannot be asked is `null` too**, logged, rather than a refused answer: the
    * rest of the health answer needs no database, and a probe that is down is the moment it is

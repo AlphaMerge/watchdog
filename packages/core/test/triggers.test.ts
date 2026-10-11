@@ -768,7 +768,15 @@ describe('triggers', { skip: available ? false : 'no database' }, () => {
       payload: { kind: 'telepathy', settings: {} },
     });
     assert.equal(response.statusCode, 400);
-    assert.equal(response.json<{ error: { code: string } }>().error.code, 'TRIGGER_INVALID');
+    // The service's refusal, not request validation's (`P-371`): the same code as bad settings,
+    // and the kinds it would take named, which an enum's "must be equal to one of the allowed
+    // values" would not do in the code a client already handles.
+    const body = response.json<{
+      error: { code: string; message: string; details: { problems: string[] } };
+    }>();
+    assert.equal(body.error.code, 'TRIGGER_INVALID');
+    assert.match(body.error.message, /no trigger kind "telepathy"/u);
+    assert.deepEqual(body.error.details.problems, [`known kinds: ${triggerKinds.ids.join(', ')}`]);
   });
 
   it('still lists and still deletes a trigger of a kind this build does not know', async () => {

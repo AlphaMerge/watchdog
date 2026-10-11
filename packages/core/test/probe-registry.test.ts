@@ -1166,8 +1166,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
    * When the recorded version was accepted (`U-32`).
    *
    * The add-sensor form says a probe that is down was too old "when it last connected", and says
-   * when from `protocol_accepted_at`. `last_seen_at` cannot: every hello moves it before it is
-   * decided. So the time is written with the version on an accepted handshake only, and a
+   * when from `protocol_accepted_at`. `last_seen_at` cannot: a hello refused over its version
+   * moves it too (and, before `P-319`, every hello did). So the time is written with the version on an accepted handshake only, and a
    * refusal over the version clears it, so the pair is never a version beside another's time.
    */
   describe('when the recorded version was accepted', () => {
@@ -1416,7 +1416,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
 
     /**
      * `GET /probes` carries the time beside the version (`U-33`). It showed `protocolVersion`
-     * beside `lastSeenAt` only, and every hello moves that, so a probe refused at one time read as
+     * beside `lastSeenAt` only, and every hello moved that, so a probe refused at one time read as
      * having spoken its version then. Through the route's own schema, which drops a field it does
      * not declare, so the registration having the field is not enough.
      */
@@ -1452,6 +1452,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         assert.ok('protocolAcceptedAt' in refused, JSON.stringify(refused));
         assert.equal(refused['protocolAcceptedAt'], null);
         assert.equal(typeof refused['lastSeenAt'], 'string');
+        // Moved: the one place the two times part (`P-328`). `#touch` writes the database's
+        // clock and enrolment this test's, so it is a different time and not a later one.
+        assert.notEqual(refused['lastSeenAt'], enrolled['lastSeenAt']);
         // And when it was refused, so the 0 is not the upgrade's "nothing recorded" (`U-35`).
         assert.equal(refused['protocolRefusedAt'], '2026-01-02T10:00:00.000Z');
         const refusedSkew = refused['skew'] as Record<string, unknown>;
