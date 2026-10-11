@@ -1310,6 +1310,98 @@ describe(
       }
     });
 
+    it('gives the window’s immediate Up back when the recovery that took it is dropped at send (`N-26`)', async () => {
+      // `first-down-and-up` sends one Up of a window at once. Ping's recovery took it and failed
+      // its first try; then a newer alarm of its trigger was delivered first, so the recovery was
+      // dropped and sent nothing. HTTP's recovery, queued after, is the window's first Up to be
+      // sent, and goes at once rather than waiting for the digest. A second Up after it is held:
+      // there is still one slot.
+      const ups = await template({ summarisation: 'first-down-and-up' });
+      const pages = await template({ summarisation: 'always-immediate' });
+      const pingTrigger = await triggerRow();
+      const recovery = await queue(ups, {
+        sensor: sensorAt(0),
+        reason: 'recovery',
+        state: 'up',
+        triggerId: pingTrigger,
+      });
+      let calls = 0;
+      const { seen, transport } = recorder(() => {
+        calls += 1;
+        return calls === 1 ? { ok: false, retryable: true } : { ok: true };
+      });
+      const dispatcher = dispatcherWith(transport);
+      await dispatcher.dispatch();
+      const [window] = await openWindows();
+      assert.ok(window !== undefined, 'the recovery opened its template’s window');
+      const slot = async (): Promise<string[]> => {
+        const [row] = await db.query<{ released: string[] }>(
+          'SELECT released FROM notification_summary WHERE id = $1',
+          [window.id],
+        );
+        return row?.released ?? [];
+      };
+      assert.deepEqual(await slot(), ['up'], 'and took its Up');
+
+      await queue(pages, { sensor: sensorAt(0), triggerId: pingTrigger });
+      await dispatcher.dispatch();
+      const [dropped] = await db.query<{ status: string }>(
+        'SELECT status FROM notification_request WHERE id = $1',
+        [recovery],
+      );
+      assert.equal(dropped?.status, 'discarded', 'the recovery was superseded at send');
+      assert.deepEqual(await slot(), [], 'and its slot is free again');
+
+      await queue(ups, { sensor: sensorAt(1), reason: 'recovery', state: 'up' });
+      await queue(ups, { sensor: sensorAt(2), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        seen.slice(2).map((message) => message.subject),
+        ['HTTP on edge-router is up'],
+        'HTTP at once, and SSH held',
+      );
+      assert.deepEqual(
+        (await dispositions()).slice(-2).map((row) => `${row.disposition}/${row.status}`),
+        ['immediate/sent', 'held/pending'],
+      );
+      assert.deepEqual(await slot(), ['up']);
+    });
+
+    it('gives back nothing once the window that released the Up has closed (`N-26`)', async () => {
+      const ups = await template({ summarisation: 'first-down-and-up' });
+      const pages = await template({ summarisation: 'always-immediate' });
+      const pingTrigger = await triggerRow();
+      const recovery = await queue(ups, {
+        sensor: sensorAt(0),
+        reason: 'recovery',
+        state: 'up',
+        triggerId: pingTrigger,
+      });
+      let calls = 0;
+      const { transport } = recorder(() => {
+        calls += 1;
+        return calls === 1 ? { ok: false, retryable: true } : { ok: true };
+      });
+      const dispatcher = dispatcherWith(transport);
+      await dispatcher.dispatch();
+      const [first] = await openWindows();
+      assert.ok(first !== undefined);
+      // The window closes with nothing in it to send; the next Up opens another.
+      await elapse();
+      await queue(pages, { sensor: sensorAt(0), triggerId: pingTrigger });
+      await dispatcher.dispatch();
+      const [closed] = await db.query<{ released: string[]; closed: boolean }>(
+        'SELECT released, closed_at IS NOT NULL AS closed FROM notification_summary WHERE id = $1',
+        [first.id],
+      );
+      assert.deepEqual({ ...closed }, { released: ['up'], closed: true });
+      const [dropped] = await db.query<{ status: string }>(
+        'SELECT status FROM notification_request WHERE id = $1',
+        [recovery],
+      );
+      assert.equal(dropped?.status, 'discarded', 'the recovery was dropped all the same');
+    });
+
     it('sends a claimed batch in the claim’s order whatever plan the claim gets', async () => {
       // `N-31`: the same batch as above, under the plan round 17's suite once got — a hash join
       // whose `RETURNING` comes back in heap order, which puts the recovery, written first,

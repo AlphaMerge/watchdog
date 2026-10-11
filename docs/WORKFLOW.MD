@@ -278,6 +278,9 @@ Behaviours that must be right:
   at all (`N-22`): its recipients' last word stays the alarm before it, which is true again, and
   the next outage's own recovery tells them when that one is over. It is kept while a newer alarm
   of its own template is still waiting behind it, so those recipients hear Down, Up, Down.
+  One that had taken its window's single immediate Up gives it back when it is dropped, while
+  that window is open (`N-26`): it sent nothing, so the next Up in the window goes at once as the
+  first would have. An Up already held in the same pass stays in the digest.
 - **Immediate-only channels.** Slack, Teams, HTTP action, script execution and ticket
   assignment are never summarised — they are cheap and often machine-consumed.
 - **Template schedules.** A template can be active only during business hours, with a choice

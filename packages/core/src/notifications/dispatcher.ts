@@ -474,7 +474,7 @@ export class NotificationDispatcher {
           // Recorded before the message goes, so the *second* Down of a storm is held even if
           // the first one is still being delivered.
           await this.#summaries.release(q, window.id, kind);
-          await this.#summaries.decide(q, request.id, 'immediate', null);
+          await this.#summaries.decideReleased(q, request.id, window.id);
           continue;
         }
         await this.#summaries.decide(q, request.id, 'held', window.id);
@@ -524,6 +524,7 @@ export class NotificationDispatcher {
           sensorId: request.sensorId,
           templateId: request.templateId,
           supersededBy: request.by,
+          ...(request.gaveBack === null ? {} : { immediateUpFreedIn: request.gaveBack }),
         },
         'a recovery was not sent: a newer alarm of its trigger was delivered first',
       );

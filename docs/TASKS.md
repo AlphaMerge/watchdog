@@ -3623,7 +3623,7 @@ because each is a decision rather than a defect:
       Comments and a description only, so there is no behaviour to test. Changing the
       description without regenerating fails `--check` and `build-hygiene.test.ts`.
 
-- [ ] **N-26 — a recovery dropped at send uses up its window's immediate Up** · S · N-22 · Found
+- [x] **N-26 — a recovery dropped at send uses up its window's immediate Up** · S · N-22 · Found
       2026-10-07 in `N-22`. A recovery decided as immediate on the pass its newer alarm is sent,
       then dropped at send, has spent the summarisation window's single immediate Up, so another
       sensor's first Up in that window waits for the digest. One message fewer, never one more.
@@ -3631,6 +3631,26 @@ because each is a decision rather than a defect:
 
       **Decided 2026-10-11 by the user:** give the slot back. A recovery dropped at send
       frees the window's immediate Up, with a scenario test.
+
+      **N-26 outcome. An immediate decision that takes its window's slot says which window, and
+      a recovery dropped at send gives that window its Up back while the window is open.**
+      - **Migration 076** adds `notification_request.released_in`, the window whose immediate
+        slot the request took (`ON DELETE SET NULL`, dropped on rollback). `summary_id` could not
+        carry it: every reader takes it for membership of that window's digest.
+      - **`SummaryRepository.decideReleased`** writes it where the dispatcher sends a request at
+        once because the mode said first-of-its-kind. **`supersede`** (`N-22`'s drop) returns it,
+        and removes `up` from that window's `released` when the window is still open and holds
+        it; a recovery is always an Up. The log line of the drop names the window as
+        `immediateUpFreedIn`.
+      - **Not done: an Up already decided held in the same pass stays in the digest.** A pass
+        decides every queued request before it sends any, so an Up queued beside the dropped
+        recovery was held while the slot was spent. Moving it out of the digest again would
+        re-decide a recorded decision, which `#decide` refuses on purpose. Only Ups decided after
+        the drop gain.
+      - **Tests** (`notification-summaries.test.ts`). A `first-down-and-up` window: Ping's recovery
+        takes the Up and fails its first try, a newer alarm of its trigger goes first and the
+        recovery is dropped; the slot is free, HTTP's recovery queued after goes at once and
+        SSH's is held. And a window that closed before the drop keeps its record.
 - [x] **N-27 — a test send's error is not made legible, and invisible format characters are kept**
       · XS · N-24 · Found 2026-10-08 in `N-24`. `test-send.ts` returns the transport's error to the
       template form as it came, without `legible()`. Zero-width and other format characters

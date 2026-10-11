@@ -43,6 +43,11 @@ export interface SupersededRequest {
   readonly templateId: number | null;
   /** The newer alarm that was delivered, which is what made it out of date. */
   readonly by: number;
+  /**
+   * The open window it had taken the immediate Up of, which is free again (`N-26`); null when
+   * it took none, or its window has closed.
+   */
+  readonly gaveBack: number | null;
 }
 
 /** A window whose time is up and whose contents are owed as a digest. */
@@ -245,6 +250,7 @@ export class SummaryRepository {
       sensor_id: string;
       template_id: string | null;
       by: string;
+      released_in: string | null;
     }>(
       `
       WITH stale AS (
@@ -289,15 +295,37 @@ export class SummaryRepository {
       FROM stale
       WHERE r.id = stale.id
       RETURNING r.id::text AS id, r.sensor_id::text AS sensor_id,
-                r.template_id::text AS template_id, stale.by::text AS by
+                r.template_id::text AS template_id, stale.by::text AS by,
+                r.released_in::text AS released_in
       `,
       [now, only === null ? null : [...only], only !== null],
     );
+    // **And the slot it took is given back** (`N-26`). A recovery decided immediate had spent its
+    // window's one immediate Up; dropped, it sent nothing, so the next Up in that window goes at
+    // once as the first would have. Only while that window is open: a closed one releases
+    // nothing more. A recovery is always an Up (`kindOf`), so that is the kind it took.
+    const taken = rows.flatMap((row) => (row.released_in === null ? [] : [row.released_in]));
+    const freed =
+      taken.length === 0
+        ? new Set<string>()
+        : new Set(
+            (
+              await q.query<{ id: string }>(
+                `UPDATE notification_summary
+                 SET released = array_remove(released, 'up')
+                 WHERE id = ANY($1::bigint[]) AND closed_at IS NULL AND 'up' = ANY(released)
+                 RETURNING id::text AS id`,
+                [taken],
+              )
+            ).map((row) => row.id),
+          );
     return rows.map((row) => ({
       id: Number(row.id),
       sensorId: Number(row.sensor_id),
       templateId: row.template_id === null ? null : Number(row.template_id),
       by: Number(row.by),
+      gaveBack:
+        row.released_in !== null && freed.has(row.released_in) ? Number(row.released_in) : null,
     }));
   }
 
@@ -380,6 +408,19 @@ export class SummaryRepository {
        SET released = array_append(released, $2)
        WHERE id = $1 AND NOT ($2 = ANY(released))`,
       [windowId, kind],
+    );
+  }
+
+  /**
+   * Writes an immediate decision that took its window's slot for that kind, and which window it
+   * took it from, so a drop at send can give it back (`N-26`).
+   */
+  async decideReleased(q: Queryable, requestId: number, windowId: number): Promise<void> {
+    await q.query(
+      `UPDATE notification_request
+       SET disposition = 'immediate', summary_id = NULL, released_in = $2
+       WHERE id = $1`,
+      [requestId, windowId],
     );
   }
 
