@@ -14778,7 +14778,7 @@ because each is a decision rather than a defect:
         second half is what the flake was.
       - The same shape is in `objects-concurrency.test.ts` twice: `P-396`.
 
-- [ ] **P-396 — `objects-concurrency` gives a lock 100 ms to be taken** · XS · P-395 · Found
+- [x] **P-396 — `objects-concurrency` gives a lock 100 ms to be taken** · XS · P-395 · Found
       2026-10-11 in `P-395`. Two tests there (around lines 93 and 161) start a transaction that
       takes the tree lock and then sleep 100 ms ("Give client 1 time to take the lock") before the
       other client is sent. Under the load of a full run the other client can get the lock first,
@@ -14786,6 +14786,21 @@ because each is a decision rather than a defect:
       proof the other client is blocked, which a request that is only slow also passes. **Done
       when** each holder says when it holds, and the other client is known to be waiting on the
       lock (`sessionsWait`) rather than still pending after a sleep.
+
+      **P-396 outcome. Client 1 says when it holds the tree lock (`heldOpen`), and client 2 is
+      sent only then. The test asks `pg_stat_activity` until client 2 waits on the tree lock
+      itself, not on any lock.** `sessionsWait` now takes `{ ms, intervalMs, event }`, and
+      `event: 'advisory'` is the tree lock. `stillPending` and both sleeps are gone. Every wait has
+      its own bound, and client 1 is released in a `finally`.
+      - **Why the event.** Without the tree lock the delete still blocks, on the device row that
+        the new sensor's foreign key holds. A wait on any lock passes for that, and says nothing
+        about the lock the test is about.
+      - **Mutations, each caught.** Without the exclusive lock, both tests time out waiting for
+        client 2 on the tree lock ("0 seen last"). Without the shared lock, the delete test does
+        the same. Without the shared lock and with `event` left out, the wait passed, on the row
+        lock, and only the result caught it: the delete succeeded with the receipt that undercounts.
+      - `waits-for-lock.test.ts` has three cases for `sessionsWait`: the count, the event it asks
+        for, and the failure's words.
 
 - [ ] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
       2026-10-10 in `P-391`. `GroupService.create` trims the name and refuses a blank one;

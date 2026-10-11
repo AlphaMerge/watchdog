@@ -8,36 +8,38 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor, type Harness } from './support/tree.js';
+import { sessionsWait } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 
 const available = await databaseAvailable();
 
-/** Resolves only when the test says so, so one transaction can be held open deliberately. */
-function deferred(): { promise: Promise<void>; release: () => void } {
+/**
+ * Client 1's side of a race: `holds` settles once its work has run inside the tree lock, and the
+ * transaction stays open until `release`. `holds` rejects if the work fails before then, rather
+ * than leaving the test waiting for a signal that will not come.
+ */
+function heldOpen<T>(run: (work: () => Promise<void>) => Promise<T>): {
+  holds: Promise<void>;
+  done: Promise<T>;
+  release: () => void;
+} {
+  let held = (): void => undefined;
   let release = (): void => undefined;
-  const promise = new Promise<void>((resolve) => {
+  const holds = new Promise<void>((resolve) => {
+    held = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
     release = resolve;
   });
-  return { promise, release };
+  const done = run(async () => {
+    held();
+    await released;
+  });
+  return { holds: Promise.race([holds, done.then(() => undefined)]), done, release };
 }
 
-/** True when `promise` has not settled within `ms` — i.e. it is genuinely blocked. */
-async function stillPending(promise: Promise<unknown>, ms: number): Promise<boolean> {
-  const marker = Symbol('pending');
-  const timer = new Promise<typeof marker>((resolve) => {
-    setTimeout(() => {
-      resolve(marker);
-    }, ms).unref();
-  });
-  return (
-    (await Promise.race([
-      promise.then(
-        () => null,
-        () => null,
-      ),
-      timer,
-    ])) === marker
-  );
-}
+/** How long client 2 is given to reach the tree lock, and client 1 to take it. */
+const REACHED_MS = 10_000;
 
 /**
  * The advisory lock, under test.
@@ -80,37 +82,44 @@ describe(
       const b = (await h.service.create(testActor, { kind: 'group', parentId: probeId, name: 'B' }))
         .id;
 
-      const gate = deferred();
-
       // Client 1 takes the exclusive lock, moves A under B, and holds the transaction open.
-      const client1 = h.service.batch('exclusive', async (q, repo) => {
-        await repo.reparent(q, a, b, { kind: 'none' });
-        await gate.promise;
-        return 'committed';
-      });
-
-      // Give client 1 time to take the lock before client 2 tries.
-      await new Promise<void>((resolve) => setTimeout(resolve, 100).unref());
-
-      // Client 2 attempts the mirror move. Without the lock its cycle pre-check reads the
-      // pre-move tree, sees nothing wrong, and commits — leaving A and B pointing at each
-      // other, unreachable from the root and impossible to delete.
-      const client2 = h.service.move(testActor, b, a, { kind: 'none' });
-
-      assert.equal(
-        await stillPending(client2, 300),
-        true,
-        'client 2 must block on the tree lock, not race past its pre-check',
+      const client1 = heldOpen((holdOpen) =>
+        h.service.batch('exclusive', async (q, repo) => {
+          await repo.reparent(q, a, b, { kind: 'none' });
+          await holdOpen();
+          return 'committed';
+        }),
       );
 
-      gate.release();
-      await client1;
+      // Client 2 attempts the mirror move once client 1 holds the lock (`P-396`: a 100 ms sleep
+      // stood in for that). Without the lock its cycle pre-check reads the pre-move tree, sees
+      // nothing wrong, and commits — leaving A and B pointing at each other, unreachable from
+      // the root and impossible to delete.
+      let client2: Promise<unknown> = Promise.resolve();
+      try {
+        await within(REACHED_MS, 'client 1 to hold the tree lock', client1.holds);
+        client2 = h.service.move(testActor, b, a, { kind: 'none' });
+        // Waiting on the tree lock itself, not merely not finished yet.
+        await sessionsWait(
+          scratch.db,
+          1,
+          'client 2 to block on the tree lock, not race past its pre-check',
+          { ms: REACHED_MS, event: 'advisory' },
+        );
+      } finally {
+        client1.release();
+      }
+      await within(REACHED_MS, 'client 1 to commit', client1.done);
 
-      const error = await client2.then(
-        () => null,
-        (e: unknown) => e,
+      const error = await within(
+        REACHED_MS,
+        'client 2 to be answered',
+        client2.then(
+          () => null,
+          (e: unknown) => e,
+        ),
       );
-      assert.ok(error instanceof ObjectError);
+      assert.ok(error instanceof ObjectError, String(error));
       assert.equal(error.code, 'OBJECT_CYCLE');
 
       // And the tree is still walkable: every object reaches the root.
@@ -143,47 +152,54 @@ describe(
         })
       ).id;
 
-      const gate = deferred();
-
       // Client 1 creates a sensor inside the target subtree and holds it open, under the
       // shared lock that `create` takes.
-      const client1 = h.service.batch('shared', async (q, repo) => {
-        await repo.insert(q, {
-          kind: 'sensor',
-          parentId: d,
-          name: 'Late arrival',
-          sensorType: 'icmp.ping',
-        });
-        await gate.promise;
-        return 'committed';
-      });
-
-      await new Promise<void>((resolve) => setTimeout(resolve, 100).unref());
+      const client1 = heldOpen((holdOpen) =>
+        h.service.batch('shared', async (q, repo) => {
+          await repo.insert(q, {
+            kind: 'sensor',
+            parentId: d,
+            name: 'Late arrival',
+            sensorType: 'icmp.ping',
+          });
+          await holdOpen();
+          return 'committed';
+        }),
+      );
 
       // The operator counted 1 descendant. Without the shared/exclusive pairing, the delete
       // enumerates before the sensor commits, destroys it via the FK cascade anyway, and hands
-      // back a receipt that never mentions it.
-      const client2 = h.service.delete(
-        testActor,
-        g,
-        { kind: 'exact', descendants: 1 },
-        { kind: 'none' },
-      );
+      // back a receipt that never mentions it. It would block then too, on the device row the
+      // sensor's foreign key holds: so the wait asked for is on the tree lock (`P-396`).
+      let client2: Promise<unknown> = Promise.resolve();
+      try {
+        await within(REACHED_MS, 'client 1 to hold the tree lock', client1.holds);
+        client2 = h.service.delete(
+          testActor,
+          g,
+          { kind: 'exact', descendants: 1 },
+          { kind: 'none' },
+        );
+        await sessionsWait(
+          scratch.db,
+          1,
+          'the delete to wait for in-flight creates rather than enumerate around them',
+          { ms: REACHED_MS, event: 'advisory' },
+        );
+      } finally {
+        client1.release();
+      }
+      await within(REACHED_MS, 'client 1 to commit', client1.done);
 
-      assert.equal(
-        await stillPending(client2, 300),
-        true,
-        'the delete must wait for in-flight creates rather than enumerate around them',
+      const error = await within(
+        REACHED_MS,
+        'the delete to be answered',
+        client2.then(
+          () => null,
+          (e: unknown) => e,
+        ),
       );
-
-      gate.release();
-      await client1;
-
-      const error = await client2.then(
-        () => null,
-        (e: unknown) => e,
-      );
-      assert.ok(error instanceof ObjectError);
+      assert.ok(error instanceof ObjectError, String(error));
       assert.equal(
         error.code,
         'OBJECT_SUBTREE_CHANGED',

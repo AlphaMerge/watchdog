@@ -14,7 +14,7 @@ export function somebodyWaits(
   ms = 10_000,
   intervalMs = 20,
 ): Promise<void> {
-  return sessionsWait(db, 1, what, ms, intervalMs);
+  return sessionsWait(db, 1, what, { ms, intervalMs });
 }
 
 /**
@@ -24,22 +24,29 @@ export function somebodyWaits(
  * For a test that races more than one session against a lock it holds: every one of them has to
  * be waiting before it lets go, or the last to arrive is not in the race at all. The database
  * should be the test's own scratch one, so no other file's sessions are counted.
+ *
+ * `event` narrows it to one kind of lock, as `pg_stat_activity.wait_event` names it: `advisory`
+ * for the tree lock (`P-396`). A session blocked on a row it would have waited on anyway is then
+ * not taken for one blocked on the lock the test is about.
  */
 export function sessionsWait(
   db: Pick<Queryable, 'query'>,
   count: number,
   what: string,
-  ms = 10_000,
-  intervalMs = 20,
+  options: { ms?: number; intervalMs?: number; event?: string } = {},
 ): Promise<void> {
+  const { ms = 10_000, intervalMs = 20, event } = options;
+  const on = event === undefined ? 'a lock' : `a lock (${event})`;
   let seen = 0;
   return pollWithin(
     ms,
-    () => `${what} (${String(count)} waiting on a lock; ${String(seen)} seen last)`,
+    () => `${what} (${String(count)} waiting on ${on}; ${String(seen)} seen last)`,
     async () => {
       const waiting = await db.query<{ n: number }>(
         `SELECT count(*)::int AS n FROM pg_stat_activity
-         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+         WHERE datname = current_database() AND wait_event_type = 'Lock'
+           AND ($1::text IS NULL OR wait_event = $1)`,
+        [event ?? null],
       );
       seen = waiting[0]?.n ?? 0;
       return seen >= count;

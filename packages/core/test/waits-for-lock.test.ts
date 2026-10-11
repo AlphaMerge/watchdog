@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { QueryResultRow } from 'pg';
 import type { Queryable } from '../src/db/pool.js';
-import { somebodyWaits } from './support/waits-for-lock.js';
+import { sessionsWait, somebodyWaits } from './support/waits-for-lock.js';
 import { pollWithin } from './support/within.js';
 
 // `P-325`: a poll handed to `within` went on polling after `within` gave up on it — into the
@@ -131,6 +131,50 @@ describe('somebodyWaits', () => {
       assert.ok(atTheBound > 1, `it asked ${String(atTheBound)} times before its bound`);
       await sleep(250);
       assert.equal(asked.length, atTheBound, 'it went on asking after its bound');
+    } finally {
+      settle = true;
+    }
+  });
+});
+
+describe('sessionsWait', () => {
+  /** A database that reports `waiting(i)` sessions on the i-th ask, and keeps what it was asked. */
+  const reporting = (
+    waiting: (ask: number) => number,
+  ): { db: Pick<Queryable, 'query'>; asked: unknown[][] } => {
+    const asked: unknown[][] = [];
+    return {
+      asked,
+      db: {
+        query: <T extends QueryResultRow>(_text: string, values: unknown[] = []): Promise<T[]> => {
+          asked.push(values);
+          return Promise.resolve([{ n: waiting(asked.length) } as unknown as T]);
+        },
+      },
+    };
+  };
+
+  it('answers only once as many sessions as it was asked for wait (P-395)', async () => {
+    const { db, asked } = reporting((ask) => Math.min(ask - 1, 2));
+    await sessionsWait(db, 2, 'both requests', { intervalMs: 5 });
+    assert.equal(asked.length, 3, 'it answered before the second session waited');
+    assert.deepEqual(asked[0], [null], 'any lock, when no event is named');
+  });
+
+  it('asks for the one wait event it is given (P-396)', async () => {
+    const { db, asked } = reporting(() => 1);
+    await sessionsWait(db, 1, 'the tree lock', { event: 'advisory', intervalMs: 5 });
+    assert.deepEqual(asked, [['advisory']]);
+  });
+
+  it('says at its bound how many it wanted, on what, and how many it saw', async () => {
+    let settle = false;
+    const { db } = reporting(() => (settle ? 2 : 1));
+    try {
+      await assert.rejects(
+        sessionsWait(db, 2, 'both requests', { ms: 100, intervalMs: 5, event: 'advisory' }),
+        /timed out after 100 ms waiting for both requests \(2 waiting on a lock \(advisory\); 1 seen last\)/,
+      );
     } finally {
       settle = true;
     }
