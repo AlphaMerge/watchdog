@@ -14594,7 +14594,7 @@ because each is a decision rather than a defect:
       - **Not done.** Fastify's validator still runs Ajv's default, which logs and accepts a
         keyword with no type.
 
-- [ ] **P-380 — should a read-only user learn that a secret's rule failed?** · XS · P-375 ·
+- [x] **P-380 — should a read-only user learn that a secret's rule failed?** · XS · P-375 ·
       Found 2026-10-09 in `P-375`. `?invalidParams=true` lists a sensor to anyone who can read
       it; if the path its type now refuses is `writeOnly`, that is one bit about a secret for a
       reader without write access. **Done when** decided (the filter requires write, the set
@@ -14603,6 +14603,22 @@ because each is a decision rather than a defect:
 
       **Decided 2026-10-11 by the user:** the `?invalidParams=true` filter requires write on
       the sensor.
+
+      **P-380 outcome. The filter lists only the sensors the caller can write.**
+      - **Where.** `GET /objects?invalidParams=true` narrows the failing ids to the caller's
+        write reach (`ObjectService.reachedAmong`, `reachOf(request, 'write')`, token scope
+        included) before the listing reads them, so visibility, the limit and the cursor still
+        apply as on any listing. A read-only account is answered an empty list, not a refusal:
+        the filter is a narrowing, and an empty answer says nothing a refusal would not.
+      - **Not changed.** Core Health's `sensorsWithInvalidParams` still counts every sensor; it
+        is behind read on the root, and a count names no sensor. The core log names them, as
+        before, to whoever reads the log.
+      - **The tree says "you can edit"** where it said "you can see", so a read-only account's
+        empty list is read as what it is.
+      - **Tests.** `object-visibility.test.ts`: the team's read-write account is listed a-ping,
+        which it writes, and not a-regranted beside it, which it only reads; the read-only branch
+        account is listed nothing, though it sees both; an administrator all six. The web
+        sentences in `invalid-params.test.tsx`.
 - [x] **P-381 — two more `UPDATE … RETURNING` whose order was not checked** · XS · N-31 · Found
       2026-10-09 in `N-31`. `N-31` found the dispatcher sending in whatever order `RETURNING`
       gave; `objects/repository.ts` and `notifications/templates.ts` also use `RETURNING` and were

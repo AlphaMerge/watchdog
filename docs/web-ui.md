@@ -108,9 +108,11 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
   so try again shortly (with a **Try again** button, which keeps focus while it asks again), or
   not checked since the last start and checked again at the next. That is not shown as an error.
   The line is a polite live region, on the page and empty from the start, so the answer is
-  announced when it arrives. The list is of the sensors you can see. Core Health counts every
-  sensor in the installation, so its number can be higher than the list is long. Below the `sm`
-  breakpoint the box has a line of its own under the search and tag.
+  announced when it arrives. The list is of the sensors you can edit (`P-380`): which parameter
+  a type refuses can be a secret one, so a read-only account is listed none, and the line says
+  that no sensor you can edit fails. Core Health counts every sensor in the installation, so its
+  number can be higher than the list is long. Below the `sm` breakpoint the box has a line of
+  its own under the search and tag.
 - **Full keyboard navigation**, to the ARIA tree pattern: arrows move and expand, `Home`/`End`
   jump to the ends, `Enter` or `Space` opens the row. Collapsing a branch you were inside keeps
   focus somewhere real rather than dropping it.

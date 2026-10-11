@@ -1534,7 +1534,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       );
     });
 
-    it('lists only the sensors it can see among those whose parameters fail (P-375)', async () => {
+    it('lists only the sensors it can write among those whose parameters fail (P-375, P-380)', async () => {
       const listed = async (login: string): Promise<number[]> => {
         const response = await app.inject({
           method: 'GET',
@@ -1545,12 +1545,39 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         assert.equal(response.body.includes(MARK), login === 'overseer');
         return response.json<{ items: { id: number }[] }>().items.map((item) => item.id);
       };
-      assert.deepEqual(
-        await listed('watcher'),
-        [pingId, regrantedId].sort((a, b) => a - b),
-        'the carved, the hidden and the other branch’s are not the branch account’s',
-      );
-      assert.deepEqual(await listed('overseer'), failingParams(), 'an administrator sees all six');
+      // Write on a-ping, read on a-regranted beside it, as the fixture has them: earlier tests
+      // move the grant on a-ping, so it is set here and put back as it was found.
+      const before = (await access.grantsOn(pingId)).find((one) => one.groupId === teamId);
+      await access.grant(pingId, teamId, 'write', actorNamed('visibility'));
+      try {
+        // **Write, not sight** (`P-380`). A-regranted is the branch account's to see and not to
+        // change, and the path its type refuses can be a `writeOnly` one: one bit about a secret
+        // for a caller who could never mend it.
+        assert.deepEqual(
+          await listed('operator'),
+          [pingId],
+          'a-ping, which it can write; not a-regranted, which it can only read, nor the carved, ' +
+            'the hidden or the other branch’s',
+        );
+        assert.deepEqual(
+          await listed('watcher'),
+          [],
+          'a read-only account writes nothing, so is told of nothing, though it sees two',
+        );
+        // Nor when it may acknowledge, which reaches what it reads: acknowledging an alarm is
+        // not mending a sensor's parameters.
+        await db.query(`UPDATE user_account SET may_acknowledge = true WHERE login = 'watcher'`);
+        assert.deepEqual(await listed('watcher'), [], 'acknowledging is not writing');
+        assert.deepEqual(
+          await listed('overseer'),
+          failingParams(),
+          'an administrator sees all six',
+        );
+      } finally {
+        await db.query(`UPDATE user_account SET may_acknowledge = false WHERE login = 'watcher'`);
+        if (before === undefined) await access.revoke(pingId, teamId, actorNamed('visibility'));
+        else await access.grant(pingId, teamId, before.right, actorNamed('visibility'));
+      }
     });
 
     it('counts a subtree without its holes', async () => {

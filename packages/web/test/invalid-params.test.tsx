@@ -340,7 +340,7 @@ describe('the tree’s invalid-parameters filter', () => {
     renderTree('/tree?invalidParams=true');
     await screen.findByRole('link', { name: 'Disk C' });
     expect(region().textContent).toBe(
-      '2 sensors have parameters their type now refuses, among those you can see.',
+      '2 sensors have parameters their type now refuses, among those you can edit.',
     );
     expect(screen.getByRole('link', { name: 'Disk C' }).getAttribute('href')).toBe('/objects/10');
   });
@@ -393,7 +393,7 @@ describe('the tree’s invalid-parameters filter', () => {
     await screen.findByRole('link', { name: 'Uplink' });
     expect(filterAsks(asked)).toHaveLength(2);
     expect(region().textContent).toBe(
-      '2 sensors have parameters their type now refuses, among those you can see.',
+      '2 sensors have parameters their type now refuses, among those you can edit.',
     );
     // The list took the button away, and focus went to the filter's own box, not the page.
     expect(button.isConnected).toBe(false);
@@ -442,7 +442,7 @@ describe('the tree’s invalid-parameters filter', () => {
     renderTree('/tree?invalidParams=true');
     await waitFor(() => {
       expect(region().textContent).toBe(
-        'No sensor you can see has parameters its type now refuses.',
+        'No sensor you can edit has parameters its type now refuses.',
       );
     });
     expect(screen.queryByText('Nothing matches.')).toBeNull();
@@ -471,7 +471,7 @@ describe('the tree’s invalid-parameters filter', () => {
     });
     await screen.findByRole('link', { name: 'Disk C' });
     expect(region().textContent).toBe(
-      '2 sensors have parameters their type now refuses, among those you can see.',
+      '2 sensors have parameters their type now refuses, among those you can edit.',
     );
   });
 
@@ -491,7 +491,7 @@ describe('the tree’s invalid-parameters filter', () => {
       fireEvent.change(screen.getByLabelText('Search objects'), { target: { value: '' } });
       await screen.findByText('Loading matching objects…');
     });
-    // The sentence it held, taken away, and nothing else: not `No sensor you can see…`.
+    // The sentence it held, taken away, and nothing else: not `No sensor you can edit…`.
     expect(said.filter((text) => text !== '' && text !== MATCHING_NONE)).toEqual([]);
     expect(region().textContent).toBe('');
 
@@ -501,7 +501,7 @@ describe('the tree’s invalid-parameters filter', () => {
     });
     await screen.findByRole('link', { name: 'Fan tray' });
     expect(region().textContent).toBe(
-      '1 sensor has parameters its type now refuses, among those you can see.',
+      '1 sensor has parameters its type now refuses, among those you can edit.',
     );
     expect(filterAsks(asked).map((params) => params.get('q'))).toEqual(['Disk', null]);
     await waitFor(() => {
@@ -537,7 +537,7 @@ describe('the tree’s invalid-parameters filter', () => {
     });
     await screen.findByRole('link', { name: 'Fan tray' });
     expect(region().textContent).toBe(
-      '1 sensor has parameters its type now refuses, among those you can see.',
+      '1 sensor has parameters its type now refuses, among those you can edit.',
     );
   });
 
@@ -545,7 +545,7 @@ describe('the tree’s invalid-parameters filter', () => {
     [
       'a list',
       LISTED,
-      '2 sensors have parameters their type now refuses, among those you can see.',
+      '2 sensors have parameters their type now refuses, among those you can edit.',
     ],
     ['a check still running', notChecked('checking'), CHECKING],
   ])(
@@ -576,7 +576,7 @@ describe('the tree’s invalid-parameters filter', () => {
       });
       await screen.findByRole('link', { name: 'Fan tray' });
       expect(region().textContent).toBe(
-        '1 sensor has parameters its type now refuses, among those you can see.',
+        '1 sensor has parameters its type now refuses, among those you can edit.',
       );
     },
   );

@@ -395,9 +395,10 @@ const listQuery = {
       enum: ['true'],
       description:
         'Only the sensors whose stored parameters their type now refuses — what Core Health ' +
-        'counts as `sensorsWithInvalidParams` — among what the caller can see, beside any other ' +
-        'filter. Each is a sensor still running as stored; an edit sending its parameters is ' +
-        'refused until they are mended, and the 400 names the paths. 503 ' +
+        'counts as `sensorsWithInvalidParams` — among those the caller can write, beside any ' +
+        'other filter: a read-only caller is answered an empty list, since which path a type ' +
+        'refuses can be a secret one. Each is a sensor still running as stored; an edit sending ' +
+        'its parameters is refused until they are mended, and the 400 names the paths. 503 ' +
         '`OBJECT_PARAMS_NOT_CHECKED` until the start-up check has read every sensor, with ' +
         '`Retry-After` while it is reading, and without when it stopped short: the next start ' +
         'checks again.',
@@ -675,8 +676,16 @@ export async function objectRoutes(
       assertKnownSettingKeys(effective);
       const include = parseTokens(query.include, LIST_INCLUDE_TOKENS);
       const kinds = distinct(query.kind) as ObjectKind[];
+      // **Only the sensors the caller can write** (`P-380`). Which path a type refuses can be a
+      // `writeOnly` one, so a sensor in this list told a reader one bit about a secret. The
+      // filter is for whoever will mend the parameters, and that takes write on the sensor.
       const failing =
-        query.invalidParams === 'true' ? failingSensors(options.invalidParams) : undefined;
+        query.invalidParams === 'true'
+          ? await service.reachedAmong(
+              failingSensors(options.invalidParams),
+              reachOf(request, 'write'),
+            )
+          : undefined;
 
       const page = await service.list(
         {

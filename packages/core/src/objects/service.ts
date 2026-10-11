@@ -307,6 +307,11 @@ export class ObjectService {
     return this.#redact(await this.#repo.getRoot(this.#db));
   }
 
+  /** The ids `reach` may act on, in the order given: a filter's, before the listing reads it. */
+  async reachedAmong(objectIds: readonly number[], reach: Reach): Promise<number[]> {
+    return (await reach.split(this.#db, objectIds)).reached;
+  }
+
   /**
    * Effective values are resolved for the whole page in one query per key. A route that looped
    * the single-object resolver would issue `rows × keys` round trips; `resolveForObjects`

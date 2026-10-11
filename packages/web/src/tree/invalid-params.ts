@@ -45,15 +45,16 @@ export function notCheckedSentence(pass: 'checking' | 'stopped'): string {
  *
  * `more` is a page with another after it, so the count is the first page's and said as a floor.
  * `narrowed` is a search or a tag beside the filter, so an empty answer is about the matches and
- * not every sensor.
+ * not every sensor. "Edit", not "see": the core lists only the sensors the caller can write
+ * (`P-380`), so a read-only account's list is always empty, and says so truthfully.
  */
 export function knownSentence(count: number, more: boolean, narrowed: boolean): string {
   if (count === 0) {
     return narrowed
       ? 'No sensor matching the search has parameters its type now refuses.'
-      : 'No sensor you can see has parameters its type now refuses.';
+      : 'No sensor you can edit has parameters its type now refuses.';
   }
-  const among = 'among those you can see.';
+  const among = 'among those you can edit.';
   if (more) {
     return `At least ${String(count)} sensors have parameters their type now refuses, ${among}`;
   }
