@@ -660,6 +660,165 @@ describe(
       });
     }
 
+    // `P-339`: a key created from a reading inside the minute after an edit is created uncounted,
+    // since that reading may have run under the parameters before it. Its first reading after the
+    // minute is evidence, and counts it, once. Not when an edit came between (`forget`), which
+    // may have declared it, and not across a restart, which forgets what was waiting.
+    const laterCases: readonly {
+      name: string;
+      type: string;
+      params?: Record<string, unknown>;
+      stored?: Record<string, unknown>;
+      key: string;
+      /** When the reading that creates the channel was taken, from the last change. */
+      createdAtMs: number;
+      /** What happens between the create and the later readings. */
+      between?: 'edit' | 'restart';
+      /** The later readings, from the last change, and how many each counts. */
+      later: readonly { atMs: number; counts: number }[];
+    }[] = [
+      {
+        name: 'a key a promising type does not declare, first read in the minute after a change',
+        type: 'test.promised',
+        key: 'newer',
+        createdAtMs: DECLARATION_SETTLE_MS / 2,
+        later: [
+          { atMs: DECLARATION_SETTLE_MS - 1_000, counts: 0 },
+          { atMs: 2 * DECLARATION_SETTLE_MS, counts: 1 },
+          { atMs: 3 * DECLARATION_SETTLE_MS, counts: 0 },
+        ],
+      },
+      {
+        name: 'a key an edit took out, created from a spooled reading taken before the edit',
+        type: 'test.promised',
+        params: { columns: [{ key: 'a' }, { key: 'x' }] },
+        stored: { columns: [{ key: 'a' }] },
+        key: 'x',
+        createdAtMs: -1_000,
+        later: [{ atMs: 2 * DECLARATION_SETTLE_MS, counts: 1 }],
+      },
+      {
+        name: 'the same, with an edit between that may have declared it',
+        type: 'test.promised',
+        key: 'newer',
+        createdAtMs: DECLARATION_SETTLE_MS / 2,
+        between: 'edit',
+        later: [{ atMs: 2 * DECLARATION_SETTLE_MS, counts: 0 }],
+      },
+      {
+        name: 'the same, with a restart between, which forgets what was waiting',
+        type: 'test.promised',
+        key: 'newer',
+        createdAtMs: DECLARATION_SETTLE_MS / 2,
+        between: 'restart',
+        later: [{ atMs: 2 * DECLARATION_SETTLE_MS, counts: 0 }],
+      },
+      {
+        name: 'a key a promising type declares, first read in the minute',
+        type: 'test.promised',
+        key: 'a',
+        createdAtMs: DECLARATION_SETTLE_MS / 2,
+        later: [{ atMs: 2 * DECLARATION_SETTLE_MS, counts: 0 }],
+      },
+      {
+        name: 'a key a type making no promise does not declare, first read in the minute',
+        type: 'test.columns',
+        key: 'printed',
+        createdAtMs: DECLARATION_SETTLE_MS / 2,
+        later: [{ atMs: 2 * DECLARATION_SETTLE_MS, counts: 0 }],
+      },
+    ];
+    for (const one of laterCases) {
+      it(`counts a channel created in the minute after a change at its first reading after it (P-339): ${one.name}`, async () => {
+        const sensor = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: `later-${one.key}-${String(process.hrtime.bigint())}`,
+          sensorType: one.type,
+          params: one.params ?? { columns: [{ key: 'a' }] },
+        });
+        if (one.stored !== undefined) {
+          await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+            sensor.id,
+            JSON.stringify(one.stored),
+          ]);
+        }
+        await db.query('DELETE FROM channel WHERE sensor_id = $1 AND key = $2', [
+          sensor.id,
+          one.key,
+        ]);
+        const changed = await db.query<{ at: Date }>(
+          'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+          [sensor.id],
+        );
+        const changedAt = changed[0]?.at;
+        assert.ok(changedAt !== undefined);
+
+        const lines: string[] = [];
+        const catalogue = testCatalogue([columns, brittle, promised]);
+        const resolver = (): ChannelResolver =>
+          new ChannelResolver({
+            logger: pino(
+              { level: 'info', base: null },
+              { write: (line: string) => lines.push(line) },
+            ),
+            declaredLimits: declaredLimitsLookup(catalogue),
+            declaredShape: declaredChannelLookup(catalogue),
+          });
+        const readingAt = (ms: number): CheckResult => ({
+          sensorId: sensor.id,
+          at: new Date(changedAt.getTime() + ms).toISOString(),
+          outcome: 'ok',
+          message: '',
+          durationMs: 1,
+          channels: [{ key: one.key, value: 1 }],
+        });
+        const said = (): { sensorId: number; sensorType: string; channelKey: string }[] =>
+          lines
+            .map(
+              (line) =>
+                JSON.parse(line) as {
+                  level: number;
+                  phase?: string;
+                  sensorId: number;
+                  sensorType: string;
+                  channelKey: string;
+                },
+            )
+            .filter((entry) => entry.phase === 'read-channel' && entry.level === 40)
+            .map(({ sensorId, sensorType, channelKey }) => ({ sensorId, sensorType, channelKey }));
+
+        let current = resolver();
+        const created = await db.tx((q) => current.resolve(q, [readingAt(one.createdAtMs)]));
+        assert.equal(created.created, 1, 'the channel is created: the reading is kept');
+        assert.equal(created.createdOutsideDeclaration, 0, 'and not counted from that reading');
+
+        if (one.between === 'edit') current.forget(sensor.id);
+        if (one.between === 'restart') current = resolver();
+
+        let counted = 0;
+        for (const later of one.later) {
+          const again = await db.tx((q) => current.resolve(q, [readingAt(later.atMs)]));
+          assert.equal(again.created, 0);
+          assert.equal(
+            again.createdOutsideDeclaration,
+            later.counts,
+            `a reading ${String(later.atMs)} ms after the change`,
+          );
+          counted += later.counts;
+        }
+        assert.deepEqual(
+          said(),
+          Array.from({ length: counted }, () => ({
+            sensorId: sensor.id,
+            sensorType: one.type,
+            channelKey: one.key,
+          })),
+          'said once, with the sensor, its type and the key',
+        );
+      });
+    }
+
     it('reads a column an edit added from the sensor’s own parameters, not `{}` (P-297)', async () => {
       // **The case `{}` cannot answer.** An edit replaces a sensor's parameters and declares no
       // channels, so a column it adds reaches the `channel` table here, on its first reading.

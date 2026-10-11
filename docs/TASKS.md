@@ -12894,11 +12894,50 @@ because each is a decision rather than a defect:
         - reading `lastProtocol` per probe in the sweep failed 1 (the query count);
         - the query not returning refused probes failed 4.
 
-- [ ] **P-339 — a key first reported in the minute after an edit is never counted** · XS · P-321 ·
+- [x] **P-339 — a key first reported in the minute after an edit is never counted** · XS · P-321 ·
       Found 2026-10-09 in `P-321`. The count runs only when a channel is created, and the 60 s
       `DECLARATION_SETTLE_MS` skips a key created inside it; a broken type's key that already has a
       row is never counted either. **Done when** decided whether a later reading of such a key is
       counted (once per channel), with a test either way.
+
+      **P-339 outcome. The user decided: a key created in that minute is counted at its first
+      reading after it, once. A key that had a row before an edit took it out stays uncounted.**
+      - **Counted.** `#shapesFor` sets such a key aside with the end of its sensor's minute when the
+        reading that creates it is too close to the change, or before it (a spool). `#create`
+        keeps the rows its INSERT returned in `#outsideLater` with their type. `resolve()` reads
+        every result against that map, but only while it holds anything, so the batch path pays
+        one size check otherwise. The first reading past the minute counts the channel into
+        `createdOutsideDeclaration`, the same Core Health channel and `/metrics` series, and logs
+        it at `warn` with `phase: 'read-channel'`. The entry is then dropped, so it counts once.
+        The log text is `P-321`'s, held in one constant, `OUTSIDE_DECLARATION`, plus a sentence
+        saying why it comes late.
+      - **Not counted.** A key an edit re-declared: `forget`, which every edit runs, drops the
+        sensor's waiting keys and the next creation decides. A key waiting when the core
+        restarts, which forgets it. The map is bounded by the channels there are, since an
+        entry is one channel's and goes when counted or edited.
+      - **Left uncounted, by the decision.** A key with a row already, which an edit took out of the
+        declaration and the probe goes on reporting. The row was made inside the declaration,
+        so it does not fit a counter of channels *created* outside it, and renaming the Core
+        Health channel would break its metric. Its likeliest cause is a probe that has not yet
+        applied the edit. Counting it would cost a read of the edited sensor's configuration on
+        its next batch. The edited sensor shows the channel live (`P-322`).
+        `administration.md` and `adding-a-sensor-type.md` say both.
+      - **Tests.** `channel-provisioning.test.ts`, a table of six through a real resolver and
+        database:
+        - a key outside a promising type's declaration first read in the minute: created uncounted,
+          not counted at 59 s, counted and said at 2 min, not again at 3;
+        - a key an edit took out, created from a spooled reading taken before the edit: counted at
+          2 min;
+        - the same with an edit (`forget`) between: not counted;
+        - with a restart between: not counted;
+        - a declared key, and an unflagged type's printed key, in the minute: never.
+      - **Mutations: 6/6 killed.**
+        - Nothing remembered: 2 fail. Counted at every later reading: 1. An edit not dropping the
+          waiting key: 1.
+        - No time condition: 3, among them two of `P-321`'s, whose cached second reading would
+          count. Any type, promising or not: 3. Declared keys set aside too: 2.
+      - **Runs.** `channel-provisioning`'s `P-321` and `P-339` cases 12/12. `@ms/core` whole,
+        rebased onto `2aac7a75`: 5,265/5,265, none skipped.
 
 - [ ] **P-340 — the retired window grows with a voucher write and with a probe clock behind** · S ·
       P-322 · Found 2026-10-09 in `P-322`. `retired` compares readings with

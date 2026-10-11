@@ -55,6 +55,11 @@ export interface ResolvedChannels {
    * change): a probe running a different build of the type (newer, or older and still reporting a
    * key this build renamed), or the type breaking its promise. Kept, since the reading is real;
    * each is logged once, naming the sensor, the type and the key.
+   *
+   * **And those created on an earlier call from a reading inside that minute, at their first
+   * reading after it** (`P-339`): created uncounted, since such a reading is no evidence, and
+   * counted once a reading is. Not one an edit has since re-declared (`forget` drops it), nor one
+   * the core restarted on before its reading came, which a restart inside that minute costs.
    */
   createdOutsideDeclaration: number;
   /** Readings whose sensor no longer exists. Dropped — but counted, never silently. */
@@ -144,6 +149,14 @@ export const DECLARATION_SETTLE_MS = 60_000;
 
 const NO_SHAPE: ChannelShape = { lookup: null, counterBits: null };
 
+/** What a channel outside its type's promised declaration is likely to mean (`P-321`). */
+const OUTSIDE_DECLARATION =
+  'a reading taken under the sensor’s current parameters named a channel its sensor ' +
+  'type does not declare for them, though the type promises to declare every channel ' +
+  'it reports: a probe running a different build of the type than this core (a newer ' +
+  'one that added the key, or an older one still reporting a key this build renamed or ' +
+  'dropped), or the type breaking its promise.';
+
 /** A `channel` row as the resolver reads it. */
 interface ChannelRow {
   id: number;
@@ -193,6 +206,14 @@ export class ChannelResolver {
   readonly #declaredShape: ChannelResolverOptions['declaredShape'];
   readonly #audit: AuditSink | undefined;
   readonly #cache = new Map<string, ResolvedChannel>();
+  /**
+   * `sensorId:key` of each channel created outside its promising type's declaration from a
+   * reading inside `DECLARATION_SETTLE_MS` of its sensor's last change, with when that minute ends
+   * and the type, until a later reading counts it (`P-339`). One entry a channel at most, removed
+   * when counted or when its sensor is edited, so it is bounded by the channels there are; in
+   * practice it holds the keys of the minute after an edit and nothing else.
+   */
+  readonly #outsideLater = new Map<string, { after: number; sensorType: string }>();
   /** Lookup ids already complained about, so a missing one is one log line and not one a scan. */
   readonly #missingLookups = new Set<string>();
   /**
@@ -249,6 +270,10 @@ export class ChannelResolver {
         dropped += 1;
       }
     }
+    // An edit may declare a key it had been waiting to count (`P-339`); the next creation decides.
+    for (const key of this.#outsideLater.keys()) {
+      if (key.startsWith(prefix)) this.#outsideLater.delete(key);
+    }
     return dropped;
   }
 
@@ -296,13 +321,19 @@ export class ChannelResolver {
      * to declare every key it reports (`P-321`).
      */
     outside: ReadonlySet<string>;
+    /**
+     * The same, for a key whose reading is too close to the last change to count, with when a
+     * reading starts to (`P-339`).
+     */
+    later: ReadonlyMap<string, number>;
   } {
     const declared = this.#declaredShape;
     const undeclared = new Set<string>();
     const primaries = new Map<string, string>();
     const outside = new Set<string>();
+    const later = new Map<string, number>();
     if (declared === undefined) {
-      return { shapes: wanted.map(() => NO_SHAPE), undeclared, primaries, outside };
+      return { shapes: wanted.map(() => NO_SHAPE), undeclared, primaries, outside, later };
     }
     // Once a sensor, however many of its channels are new: a table sensor's first scan is all of
     // them at once.
@@ -328,16 +359,16 @@ export class ChannelResolver {
       // that named the key — a spool replayed after an edit took out a column an earlier edit
       // added — and is no evidence against the promise. `NaN` compares false, so an unreadable
       // time is not counted either.
-      if (
-        shape === undefined &&
-        answer.everyKey &&
-        one.at > sensor.changedAt + DECLARATION_SETTLE_MS
-      ) {
-        outside.add(`${id}:${one.key}`);
+      if (shape === undefined && answer.everyKey) {
+        const after = sensor.changedAt + DECLARATION_SETTLE_MS;
+        if (one.at > after) outside.add(`${id}:${one.key}`);
+        // Not yet evidence, but a reading after `after` will be (`P-339`). An unreadable time is
+        // set aside too: the next reading's time decides.
+        else if (Number.isFinite(after)) later.set(`${id}:${one.key}`, after);
       }
       return shape ?? NO_SHAPE;
     });
-    return { shapes, undeclared, primaries, outside };
+    return { shapes, undeclared, primaries, outside, later };
   }
 
   async #sensorsFor(
@@ -372,8 +403,11 @@ export class ChannelResolver {
   async resolve(q: Queryable, results: readonly CheckResult[]): Promise<ResolvedChannels> {
     const ids = new Map<string, ResolvedChannel>();
     const missing = new Map<string, WantedChannel>();
+    let outsideLater = 0;
 
     for (const result of results) {
+      // Only while a channel is waiting to be counted, which is rarely (`P-339`).
+      if (this.#outsideLater.size > 0) outsideLater += this.#countLater(result);
       for (const reading of result.channels) {
         const cacheKey = `${String(result.sensorId)}:${reading.key}`;
         const cached = this.#cache.get(cacheKey);
@@ -401,7 +435,7 @@ export class ChannelResolver {
         ids,
         created: 0,
         createdUndeclared: 0,
-        createdOutsideDeclaration: 0,
+        createdOutsideDeclaration: outsideLater,
         droppedReadings: 0,
         droppedSensors: 0,
       };
@@ -458,10 +492,38 @@ export class ChannelResolver {
       ids,
       created,
       createdUndeclared,
-      createdOutsideDeclaration,
+      createdOutsideDeclaration: createdOutsideDeclaration + outsideLater,
       droppedReadings,
       droppedSensors: droppedSensors.size,
     };
+  }
+
+  /**
+   * Counts and logs each channel of this result that was created outside its type's declaration
+   * inside the minute after an edit and is now read after it, once a channel (`P-339`).
+   */
+  #countLater(result: CheckResult): number {
+    const at = Date.parse(result.at);
+    if (Number.isNaN(at)) return 0;
+    let counted = 0;
+    for (const reading of result.channels) {
+      const cacheKey = `${String(result.sensorId)}:${reading.key}`;
+      const waiting = this.#outsideLater.get(cacheKey);
+      if (waiting === undefined || !(at > waiting.after)) continue;
+      this.#outsideLater.delete(cacheKey);
+      counted += 1;
+      this.#logger.warn(
+        {
+          sensorId: result.sensorId,
+          sensorType: waiting.sensorType,
+          channelKey: reading.key,
+          phase: 'read-channel',
+        },
+        `${OUTSIDE_DECLARATION} The channel was created from a reading in the minute after the ` +
+          'sensor’s last change, which could not tell, and this is the first reading after it',
+      );
+    }
+    return counted;
   }
 
   /** The rows that exist for these `(sensor, key)` pairs, with everything judging needs. */
@@ -526,7 +588,7 @@ export class ChannelResolver {
       ? await this.#sensorsFor(q, absent)
       : new Map<string, SensorDeclaring>();
     const limits = this.#declaredFor(sensors, absent);
-    const { shapes, undeclared, primaries, outside } = this.#shapesFor(sensors, absent);
+    const { shapes, undeclared, primaries, outside, later } = this.#shapesFor(sensors, absent);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
@@ -566,13 +628,17 @@ export class ChannelResolver {
           channelKey: row.key,
           phase: 'create-channel',
         },
-        'a reading taken under the sensor’s current parameters named a channel its sensor ' +
-          'type does not declare for them, though the type promises to declare every channel ' +
-          'it reports: a probe running a different build of the type than this core (a newer ' +
-          'one that added the key, or an older one still reporting a key this build renamed or ' +
-          'dropped), or the type breaking its promise. The channel was created and its ' +
-          'readings are kept',
+        `${OUTSIDE_DECLARATION} The channel was created and its readings are kept`,
       );
+    }
+    // Only rows this INSERT returned, as above: a key another batch created was that batch's.
+    for (const row of created) {
+      const cacheKey = `${row.sensor_id}:${row.key}`;
+      const after = later.get(cacheKey);
+      const sensorType = sensors.get(row.sensor_id)?.type;
+      if (after !== undefined && sensorType !== undefined) {
+        this.#outsideLater.set(cacheKey, { after, sensorType });
+      }
     }
     return {
       created: created.length,

@@ -335,7 +335,10 @@ refusing it would lose a reading the probe took. If the reading was taken under 
 — more than a minute after they last changed — the core logs it at `warn` naming the sensor, your
 type and the key, and counts it on Core Health's `channelsCreatedOutsideDeclaration`. One taken
 earlier is not counted: the parameters it ran under may have named the key (a spool replayed after
-an edit took out a column an earlier edit added). A counted one has three causes. A probe on a
+an edit took out a column an earlier edit added). A channel created from such a reading is counted
+at its first reading after that minute instead, once (`P-339`), unless an edit to the sensor comes
+first or the core restarts. A key that already had a channel when an edit took it out of your
+declaration is not checked at all. A counted one has three causes. A probe on a
 different build than the core: a newer one whose build of your type added the key, or an older
 one still reporting a key the core's build renamed or dropped. Or a path in your `execute` that
 breaks the promise. A rise that follows a core or probe upgrade is the first, and goes once every
