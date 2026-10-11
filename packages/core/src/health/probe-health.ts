@@ -104,6 +104,11 @@ export interface ProbeHealthSources {
    */
   frozenSensors?: (probeObjectId: number) => number;
   /**
+   * How many of this probe's sensors are held because it could not start their checks
+   * (`P-265`), from `NotStarted.heldOn`. Absent, the channel gaps.
+   */
+  notStartedSensors?: (probeObjectId: number) => number;
+  /**
    * The memory lows every probe at protocol 20 reported since the last call, by probe, from the
    * endpoint's `drainMemory` (`P-219`). Drained by the sweep, once a sweep, and by nothing else
    * (`P-245`). Absent on a build without it, and then every probe is recorded by its latest
@@ -699,6 +704,7 @@ export class ProbeHealthService {
           ? null
           : round(link.clockOffsetMs / 1000, 1),
       sensorsFrozen: this.#sources.frozenSensors?.(probeObjectId) ?? null,
+      sensorsNotStarted: this.#sources.notStartedSensors?.(probeObjectId) ?? null,
       cpu: health?.cpuPercent ?? null,
       memory: health?.memoryMb ?? null,
       uptime: health?.uptimeSeconds ?? null,

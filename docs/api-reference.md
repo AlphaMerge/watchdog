@@ -1533,6 +1533,7 @@ How one probe is doing, right now
 | `channels.resultsPastDated` | number | nullable |  |
 | `channels.clockOffset` | number | nullable |  |
 | `channels.sensorsFrozen` | number | nullable |  |
+| `channels.sensorsNotStarted` | number | nullable |  |
 | `channels.cpu` | number | nullable |  |
 | `channels.memory` | number | nullable |  |
 | `channels.memoryAvailable` | number | nullable |  |

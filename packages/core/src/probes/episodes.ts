@@ -8,7 +8,7 @@ export interface LostProbe {
   readonly since: Date;
 }
 
-/** What `ClockFreeze` holds for one probe. */
+/** What `ClockFreeze` holds for one probe, and `NotStarted` (`P-265`). */
 export interface FrozenProbe {
   readonly sensorIds: ReadonlySet<number>;
   readonly since: Date;
@@ -26,6 +26,16 @@ export interface EpisodeSources {
   readonly frozen: () =>
     | {
         frozenBy(probeObjectId: number): FrozenProbe | undefined;
+        carrierOf(sensorId: number): number | undefined;
+      }
+    | undefined;
+  /**
+   * `NotStarted`: the sensors whose checks the probe could not start (`P-265`). Absent where no
+   * sensor is ever held for it.
+   */
+  readonly unstarted?: () =>
+    | {
+        heldBy(probeObjectId: number): FrozenProbe | undefined;
         carrierOf(sensorId: number): number | undefined;
       }
     | undefined;
@@ -138,27 +148,37 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
 
   /** The probe whose loss or clock holds a probe-scanned sensor, while one does. */
   #carrierOfScanned(sensorId: number): number | undefined {
-    return this.#sources.lost()?.carrierOf(sensorId) ?? this.#sources.frozen()?.carrierOf(sensorId);
+    return (
+      this.#sources.lost()?.carrierOf(sensorId) ??
+      this.#sources.frozen()?.carrierOf(sensorId) ??
+      this.#sources.unstarted?.()?.carrierOf(sensorId)
+    );
   }
 
-  /** What holds a probe's sensors, and which sensors: the lost set and the frozen set, joined. */
+  /**
+   * What holds a probe's sensors, and which sensors: the lost set, the frozen set and the set it
+   * could not start (`P-265`), joined.
+   */
   #held(probeObjectId: number): {
     lost: LostProbe | undefined;
     frozen: FrozenProbe | undefined;
+    unstarted: FrozenProbe | undefined;
     held: ReadonlySet<number>;
   } {
     const lost = this.#sources.lost()?.heldBy(probeObjectId);
     const frozen = this.#sources.frozen()?.frozenBy(probeObjectId);
+    const unstarted = this.#sources.unstarted?.()?.heldBy(probeObjectId);
     const held = new Set<number>(lost?.sensorIds ?? []);
     for (const id of frozen?.sensorIds ?? []) held.add(id);
-    return { lost, frozen, held };
+    for (const id of unstarted?.sensorIds ?? []) held.add(id);
+    return { lost, frozen, unstarted, held };
   }
 
   /** The probe's episode now, and what it is remembered as. */
   #episode(probeObjectId: number): ProbeEpisode | undefined {
-    const { lost, frozen, held } = this.#held(probeObjectId);
+    const { lost, frozen, unstarted, held } = this.#held(probeObjectId);
 
-    const causes = [lost?.since, frozen?.since]
+    const causes = [lost?.since, frozen?.since, unstarted?.since]
       .filter((at): at is Date => at !== undefined)
       .map((at) => at.getTime());
     const previous = this.#current.get(probeObjectId);
@@ -177,7 +197,16 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
 
     const episode: ProbeEpisode = {
       probeObjectId,
-      kind: lost === undefined ? 'frozen' : lost.reason === 'silence' ? 'silent' : 'lost',
+      // The cause that says most: a lost probe starts nothing, and a clock behind is the fix
+      // whatever else is wrong.
+      kind:
+        lost !== undefined
+          ? lost.reason === 'silence'
+            ? 'silent'
+            : 'lost'
+          : frozen !== undefined
+            ? 'frozen'
+            : 'unstarted',
       // Still the same episode: its alarm was armed from where it began.
       since: continues ? previous.episode.since : new Date(Math.min(...causes)),
       held: held.size,

@@ -80,6 +80,21 @@ export interface IngestionServiceOptions {
     }>;
   };
   /**
+   * Where a check the probe could not start is taken out of its batch and its sensor held
+   * Unknown, carried by the probe's one alarm (`P-265`): `NotStarted`. Absent, such a result is
+   * the failed scan it otherwise reads as.
+   */
+  notStarted?: {
+    hold(
+      probeObjectId: number,
+      results: readonly CheckResult[],
+    ): Promise<{ readonly results: readonly CheckResult[]; readonly dropped: number }>;
+    release(
+      probeObjectId: number,
+      results: readonly CheckResult[],
+    ): { readonly released: number; stored(landed: boolean): void };
+  };
+  /**
    * The state machine (`M-02`). Absent stores readings and decides nothing, which is what a
    * throughput benchmark wants and no running system does.
    */
@@ -279,6 +294,7 @@ export class IngestionService {
   readonly #ownership: SensorOwnership;
   readonly #refusals: ProbeRefusals | undefined;
   readonly #credentialRefusals: IngestionServiceOptions['credentialRefusals'];
+  readonly #notStarted: IngestionServiceOptions['notStarted'];
   readonly #states: SensorStateService | undefined;
   readonly #maxFutureSkewMs: number;
   readonly #maxResultAgeMs: number;
@@ -328,6 +344,7 @@ export class IngestionService {
     this.#ownership = options.ownership ?? new SensorOwnership();
     this.#refusals = options.refusals;
     this.#credentialRefusals = options.credentialRefusals;
+    this.#notStarted = options.notStarted;
     this.#states = options.states;
     this.#maxFutureSkewMs = options.maxFutureSkewMs ?? DEFAULT_MAX_FUTURE_SKEW_MS;
     this.#maxResultAgeMs = options.maxResultAgeMs ?? DEFAULT_MAX_RESULT_AGE_MS;
@@ -448,12 +465,40 @@ export class IngestionService {
     // with the probe's sentence. A sensor that was held and has a real result in this batch is
     // let go first, without being re-decided, so the result decides its state in one step.
     let results: readonly CheckResult[] = admitted.results;
+    // **And before the refusals** (`P-265`): a check the probe could not start never reached the
+    // question of where its credentials may go, so it neither holds nor lets go a refusal. Its
+    // sensor is held Unknown with the probe's sentence, carried by Probe Health's one alarm.
+    if (this.#notStarted !== undefined && origin.probeObjectId !== null) {
+      try {
+        const held = await this.#notStarted.hold(origin.probeObjectId, results);
+        results = held.results;
+        if (held.dropped > 0) {
+          this.#logger.info(
+            { source: origin.gid, probeObjectId: origin.probeObjectId, results: held.dropped },
+            'a probe sent checks it could not start that are no later than what their sensors ' +
+              'already have; dropped, as already decided',
+          );
+        }
+      } catch (error: unknown) {
+        this.#resultsReceived += message.results.length;
+        this.#logger.error(
+          { err: error, source: origin.gid },
+          'could not hold the sensors whose checks a probe could not start',
+        );
+        return {
+          type: 'results-nack',
+          batchId: message.batchId,
+          reason: 'storage-error',
+          retryAfterMs: 1_000,
+        };
+      }
+    }
     let batch: { stored(landed: boolean): Promise<void> } | undefined;
     if (this.#credentialRefusals !== undefined && origin.probeObjectId !== null) {
       try {
         const reported = await this.#credentialRefusals.reported(
           origin.probeObjectId,
-          admitted.results,
+          results,
           (sensorId) => this.#states?.peek(sensorId)?.facts.lastResultAt,
         );
         results = reported.results;
@@ -532,14 +577,22 @@ export class IngestionService {
       }
     }
     if (results.length === 0 && admitted.results.length > 0) {
-      // Every result was a refusal, and each has been taken. Nothing to store.
+      // Every result was a refusal or a check that could not start, and each has been taken.
+      // Nothing to store.
       this.#resultsReceived += message.results.length;
       await batch?.stored(true);
       return { type: 'results-ack', batchId: message.batchId, storedSamples: 0, retryAfterMs: 0 };
     }
+    // Let go last, from what is left to store, so that only a result that will be stored lets a
+    // sensor go, and it decides the sensor in one step (`P-265`).
+    const released =
+      this.#notStarted !== undefined && origin.probeObjectId !== null
+        ? this.#notStarted.release(origin.probeObjectId, results)
+        : undefined;
     const reply = await this.#accept(origin.gid, message, results);
     // A sensor let go for a result in this batch stays let go only if the result was stored: the
     // probe sends a refused batch again, and it is let go then.
+    released?.stored(reply.type === 'results-ack');
     await batch?.stored(reply.type === 'results-ack');
     return reply;
   }

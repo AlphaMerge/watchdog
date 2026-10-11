@@ -130,6 +130,7 @@ import { LoginThrottle } from './auth/throttle.js';
 import { ProbeReachability } from './probes/reachability.js';
 import { ClockFreeze } from './probes/clock-freeze.js';
 import { ClockFreezeSync } from './probes/clock-freeze-sync.js';
+import { NotStarted } from './probes/not-started.js';
 import { ProbeEpisodeIndex } from './probes/episodes.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor, AuditSink } from './objects/audit.js';
@@ -447,6 +448,7 @@ async function serve(): Promise<void> {
   const episodes = new ProbeEpisodeIndex({
     lost: () => reachabilityRef,
     frozen: () => clockFreezeRef,
+    unstarted: () => notStartedRef,
     alarms: () => probeHealthTargets,
     factories: () => factoryReach,
   });
@@ -508,6 +510,10 @@ async function serve(): Promise<void> {
   // eslint-disable-next-line prefer-const -- assigned below, once the endpoint exists.
   let clockFreezeRef: ClockFreeze | undefined;
   const noneFrozen: ReadonlySet<number> = new Set();
+  // And for the sensors whose checks their probe could not start (`P-265`), which needs the
+  // dependency recompute built below.
+  // eslint-disable-next-line prefer-const -- assigned below, once the recompute exists.
+  let notStartedRef: NotStarted | undefined;
   const states = new SensorStateService({
     db,
     logger,
@@ -520,6 +526,7 @@ async function serve(): Promise<void> {
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
     clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
+    notStartedSensors: () => notStartedRef?.heldSensors() ?? noneFrozen,
     unreachedFactories: () => factoryReach.unreached(),
     withheldSensors: () => vouchingRef?.withheld() ?? nothingWithheld,
   });
@@ -563,6 +570,16 @@ async function serve(): Promise<void> {
     states,
   });
   const dependencySync = new DependencySync({ pauses: dependencyPauses, logger });
+  // A check the probe could not start holds its sensor Unknown behind the probe's one alarm
+  // (`P-265`), moved through the same two calls a lost probe's sensors are.
+  const notStarted = new NotStarted({
+    db,
+    logger,
+    states,
+    dependencies: dependencyPauses,
+    probeAlarms: (probeObjectId) => probeHealthTargets.reportingOn(probeObjectId),
+  });
+  notStartedRef = notStarted;
   // A move onto a live probe is the obvious remediation for a dead one, and it used to leave
   // every moved sensor reading Unknown for as long as the dead probe stayed away (`P-103`).
   // Named once, so no call site can quietly compose a different set (`P-111`).
@@ -571,7 +588,11 @@ async function serve(): Promise<void> {
     logger,
   });
   // The clock-freeze overlay has the same defect for the same reason (`P-239`).
-  const clockFreezeSync = new ClockFreezeSync({ clockFreeze: () => clockFreezeRef });
+  // And the not-started one (`P-265`), on the same changes.
+  const clockFreezeSync = new ClockFreezeSync({
+    clockFreeze: () => clockFreezeRef,
+    notStarted: () => notStartedRef,
+  });
 
   // One gate, so the write that records a voucher and the sweep that re-checks it ask each type
   // the same question about what it reads (`A-29`).
@@ -1395,6 +1416,9 @@ async function serve(): Promise<void> {
     // A check a probe refused over where its credentials may go holds its sensor Unknown, and
     // never reaches the machine as a failed scan (`A-41c`).
     credentialRefusals: credentialVouching,
+    // And a check the probe could not start holds its sensor Unknown, carried by Probe Health's
+    // one alarm, rather than reaching the machine as a failed scan (`P-265`).
+    notStarted,
     // What turns an outcome into Up, Warning or Down (M-02). Its writes ride in the readings'
     // own transaction, so the two can never disagree about what happened.
     states,
@@ -1611,6 +1635,7 @@ async function serve(): Promise<void> {
       withheldResults: (probeObjectId) => refusals.withheldFor(probeObjectId),
       protocolFlap: (probeObjectId) => credentialVouching.protocolFlap(probeObjectId),
       frozenSensors: (probeObjectId) => clockFreeze.frozenOn(probeObjectId),
+      notStartedSensors: (probeObjectId) => notStarted.heldOn(probeObjectId),
       // The sweep, and only the sweep, drains the probes' folded memory lows (`P-219`, `P-245`).
       drainMemory: () => probeEndpoint.drainMemory(),
       // Every connected probe's log baseline is taken each sweep, recorded or not (`P-250`).

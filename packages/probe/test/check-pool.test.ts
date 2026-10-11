@@ -382,6 +382,9 @@ describe('check pool', () => {
     await pool.stop();
     assert.equal(seen.length, 2, 'the running one and the queued one');
     assert.ok(seen.every((entry) => entry.meta.phase === 'pool-stopped'));
+    // A stopping probe is about to be lost, and the core holds its sensors for that; these are
+    // not spooled, and are not the pool failing to start a check (`P-265`).
+    assert.ok(seen.every((entry) => entry.result.notStarted === undefined));
     assert.equal(pool.submit(request(92, 'test.ok')), 'stopped');
   });
 
@@ -443,10 +446,13 @@ describe('check pool', () => {
     // in none of completed/failed/timedOut/refused/discarded. `check-flow.ts` states the
     // guarantee this broke verbatim — 'a check accepted by a runner must settle'.
     assert.equal(pool.stats().queued, 0, 'the latch answered every check it had accepted');
-    assert.ok(
-      seen.some((entry) => entry.result.sensorId === 100),
-      'and sensor 100 got a result rather than vanishing',
-    );
+    const answered = seen.find((entry) => entry.result.sensorId === 100);
+    assert.ok(answered !== undefined, 'and sensor 100 got a result rather than vanishing');
+    // **And says the check never started** (`P-265`): the core holds the sensor behind the
+    // probe's one alarm instead of failing it with every other sensor the pool answered.
+    assert.equal(answered.meta.phase, 'pool-disabled');
+    assert.equal(answered.result.outcome, 'error');
+    assert.equal(answered.result.notStarted, true);
   });
 
   it('does not give up while it still has workers that are working', async () => {

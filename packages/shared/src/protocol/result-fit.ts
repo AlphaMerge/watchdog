@@ -97,6 +97,7 @@ export function fitResult(result: CheckResult): FittedResult {
         typeof duration === 'number' && Number.isFinite(duration) && duration >= 0 ? duration : 0,
       channels,
       ...(result.withheld === true ? { withheld: true as const } : {}),
+      ...(result.notStarted === true ? { notStarted: true as const } : {}),
     },
     problems,
     dropped,

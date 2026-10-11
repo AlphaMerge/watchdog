@@ -49,6 +49,13 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 33 adds `notStarted` on a check result, under `checkNotStarted` (`P-265`): the probe
+ * could not start the check (its process did not get as far as running it), so the device was
+ * never asked. Only `true`, only beside `outcome: 'error'` with no readings, as `withheld` is. The
+ * core holds the sensor Unknown with cause `probe` until its next result, behind the probe's one
+ * alarm, rather than counting a failed scan. A core below 33 is sent the result without it and
+ * reads it as the failed check it always did, with the reason in its message.
+ *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
@@ -179,7 +186,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 32;
+export const PROTOCOL_VERSION = 33;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -324,6 +331,14 @@ export interface CheckResult {
    * scan. Protocol 24; absent on every other result.
    */
   withheld?: true;
+  /**
+   * The probe could not start this check (`P-265`): the process that was to run it did not get as
+   * far as running it. Only ever `true`, and only beside `outcome: 'error'` with no readings.
+   * **Not a failure of the device**: nothing was asked of it. The core holds the sensor Unknown
+   * with cause `probe` and `message`, behind the probe's one alarm, until its next result.
+   * Protocol 33; never beside `withheld`.
+   */
+  notStarted?: true;
 }
 
 /**
@@ -1190,6 +1205,8 @@ const CHECK_RESULT_SCHEMA = {
     durationMs: { type: 'number', minimum: 0 },
     // Only `true` (`A-41c`): a check the probe refused over where its credentials may go.
     withheld: { const: true },
+    // Only `true` (`P-265`): a check the probe could not start.
+    notStarted: { const: true },
     channels: {
       type: 'array',
       maxItems: RESULT_LIMITS.channels,
@@ -1225,10 +1242,27 @@ const CHECK_RESULT_SCHEMA = {
   // `withheld: true` is there for strict mode (`P-379`), whose `strictRequired` looks for a
   // required property among the `properties` beside it: `true` constrains nothing, so what this
   // accepts and every error it gives are as they were.
-  if: { properties: { withheld: true }, required: ['withheld'] },
-  then: {
-    properties: { outcome: { const: 'error' }, channels: { type: 'array', maxItems: 0 } },
-  },
+  //
+  // **A check the probe could not start is the same shape** (`P-265`), and never also refused:
+  // the two marks are two different holds, and a result that carried both could not be put in
+  // either.
+  allOf: [
+    {
+      if: { properties: { withheld: true }, required: ['withheld'] },
+      then: {
+        properties: { outcome: { const: 'error' }, channels: { type: 'array', maxItems: 0 } },
+      },
+    },
+    {
+      if: { properties: { notStarted: true }, required: ['notStarted'] },
+      then: {
+        properties: { outcome: { const: 'error' }, channels: { type: 'array', maxItems: 0 } },
+        // Only of an object: of anything else `required` holds vacuously, and `not` would add an
+        // error to the one that says it is not an object.
+        not: { type: 'object', required: ['withheld'] },
+      },
+    },
+  ],
 } as const;
 
 const QUERY_FAILURES = ['offline', 'too-old', 'busy', 'timeout', 'unsupported', 'failed'] as const;

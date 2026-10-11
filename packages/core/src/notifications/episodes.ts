@@ -23,8 +23,8 @@ import type { SensorState, SensorStateCause } from '../state/tables.js';
  * UI, all of which go on reading Probe Health as Down.
  */
 
-/** Why a probe's sensors are held. */
-export type EpisodeKind = 'lost' | 'silent' | 'frozen';
+/** Why a probe's sensors are held. `unstarted` is a probe that could not start their checks. */
+export type EpisodeKind = 'lost' | 'silent' | 'frozen' | 'unstarted';
 
 export interface ProbeEpisode {
   readonly probeObjectId: number;
@@ -166,6 +166,12 @@ export function episodeMessage(episode: ProbeEpisode, probeName: string): string
         `probe ${probeName}'s clock reads earlier than results it already sent: ` +
         `${sensors(count)} ${are(count)} Unknown until it catches up, held as this one alarm`
       );
+    case 'unstarted':
+      return (
+        `probe ${probeName} could not start the checks of ${sensors(count)}: ` +
+        `${count === 1 ? 'it reads' : 'they read'} Unknown until it runs them, held as this one ` +
+        'alarm'
+      );
   }
 }
 
@@ -176,9 +182,15 @@ export function episodeMessage(episode: ProbeEpisode, probeName: string): string
  */
 export function episodeEndedMessage(episode: EndedEpisode, probeName: string): string {
   if (episode.ending === 'resolved') {
-    return episode.kind === 'frozen'
-      ? `probe ${probeName}'s clock has caught up: its sensors are no longer held`
-      : `probe ${probeName} is answering again: its sensors are no longer held`;
+    switch (episode.kind) {
+      case 'frozen':
+        return `probe ${probeName}'s clock has caught up: its sensors are no longer held`;
+      case 'unstarted':
+        return `probe ${probeName} is running its checks again: its sensors are no longer held`;
+      case 'lost':
+      case 'silent':
+        return `probe ${probeName} is answering again: its sensors are no longer held`;
+    }
   }
   const why =
     episode.ending === 'emptied'
@@ -191,5 +203,7 @@ export function episodeEndedMessage(episode: EndedEpisode, probeName: string): s
       return `probe ${probeName} is still sending no results, ${why}`;
     case 'frozen':
       return `probe ${probeName}'s clock is still behind, ${why}`;
+    case 'unstarted':
+      return `probe ${probeName} still cannot start checks, ${why}`;
   }
 }

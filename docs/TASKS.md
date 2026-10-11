@@ -9388,7 +9388,7 @@ because each is a decision rather than a defect:
         `B-09` 20.5 to 47.8 s. `@ms/probe` whole, rebased onto `U-36`: 660/660, no skipped
         suites.
 
-- [ ] **P-265 — should a check the probe could not start read Down?** · S · P-260 · Found
+- [x] **P-265 — should a check the probe could not start read Down?** · S · P-260 · Found
       2026-10-05 in `P-260`. A start-up failure is an error result, so the sensor goes Down, as
       the timeout it replaces did. But the device was never asked: the fault is the probe's,
       which Probe Health now counts, and a starved probe could turn every script sensor Down at
@@ -9400,6 +9400,45 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** Unknown. A check the probe could not start reads
       as a probe-side failure, and Probe Health raises the one alarm, with the `M-17`
       scenario test.
+
+      **P-265 outcome. The probe marks the check it could not start, and the core holds its
+      sensor Unknown behind Probe Health's one alarm until a check of its own runs.**
+      - **The mark** (protocol 33, capability `checkNotStarted`). A result whose phase is
+        `startup` (the check process never reached its ready line, `P-260`) or `pool-disabled`
+        (queued when the worker pool gave up, `P-62`) carries `notStarted: true`, beside an
+        `error` with no channels, as `withheld` does, and never beside `withheld`; the schema
+        says all three. `pool-stopped` is not marked: a stopping probe is about to be lost, and
+        those are not spooled. A crash or a timeout after the ready line is the check's own
+        failure and decides its sensor as before. Stripped for a core below 33, which takes the
+        result as the failed scan it was.
+      - **The hold** (`probes/not-started.ts`, `NotStarted`). Ingestion takes marked results out
+        of a batch before the credential refusals see it (a check that never started neither
+        holds nor lets go a refusal), and holds each sensor whose last word in the batch it is,
+        later than its last accepted result: Unknown, cause `probe`, with the probe's sentence,
+        laid over the facts by the state service as the lost and frozen sets are, with the
+        probe's alarm and the dependency recompute moved in the same transaction. A failure
+        takes the sets back and refuses the batch, so it is sent again. A resend no later than
+        what the sensor already has is dropped and logged.
+      - **The release.** A result of the sensor's that started, later than the hold, takes it out
+        of the set *before* the state machine sees the batch, without a re-evaluation, so it
+        goes from Unknown to what it measured in one transition; if the batch is not stored, it
+        is put back. A move or delete lets it go through the same sink and transaction as the
+        clock-freeze overlay (`P-239`), with *no longer under the probe that could not start its
+        check*.
+      - **One alarm.** `ProbeEpisodeIndex` joins the set (kind `unstarted`: *probe X could not
+        start the checks of N sensors: they read Unknown until it runs them, held as this one
+        alarm*, and *is running its checks again* when the last is let go), and Probe Health has
+        a channel `sensorsNotStarted` with an error limit at 0.5, as `sensorsFrozen` has.
+      - **Tests.** `not-started.test.ts` (the hold, the order a batch is read in, resends, the
+        release and its undo, the tree resync, failures taking the sets back); the `M-17`
+        scenario in `probe-episode-scenario.test.ts`: a probe whose 150 pings all fail to start
+        raises one Down and one Unknown on Probe Health and nothing per sensor, a second round
+        raises nothing, and the checks that then run let every ping go in one transition each,
+        with no wave of Ups and one recovery on Probe Health. The probe's runners assert the mark
+        on start-up and pool-disabled results and its absence on a crash, a failed check and a
+        stopping pool.
+      - **Not done.** Held in the core's memory, as the frozen set is: a core restart leaves each
+        held sensor as it was written, Unknown with the probe's words, until its next result.
 - [x] **P-266 — a check process that dies outright leaves its script running** · S · P-262 ·
       Found 2026-10-05 in `P-262`. A script runs in a process group of its own, so the runner's
       kill of the check process's group does not reach it. Since `P-262` the check process ends

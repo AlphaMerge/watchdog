@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { describeError, fitResult, runProgram, type CheckResult, type Logger } from '@ms/shared';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
-import { READY_MARKER, RESULT_MARKER } from './types.js';
+import { notStarted, READY_MARKER, RESULT_MARKER } from './types.js';
 import { linuxProcessView, ScriptGroups, type ProcessView } from './script-groups.js';
 import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './index.js';
@@ -705,6 +705,9 @@ export class ProcessRunner {
       durationMs: Number(parts.durationMs.toFixed(3)),
       channels: parts.outcome === 'ok' ? parts.channels : [],
       ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
+      // **A check whose process never got as far as running it** (`P-265`): the device was never
+      // asked, so the core holds the sensor behind the probe's one alarm instead of failing it.
+      ...(parts.outcome === 'error' && notStarted(phase) ? { notStarted: true as const } : {}),
     } satisfies CheckResult);
     if (problems.length > 0) unfit(this.#logger, job.request, problems);
     // Counted for Probe Health (`P-283`): the log names the sensor, and this says how often.

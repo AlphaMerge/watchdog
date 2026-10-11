@@ -211,6 +211,11 @@ export interface ProbeCapabilities {
    * against (`P-284` review), stripped below this together.
    */
   unsendableReadings: boolean;
+  /**
+   * Marks a check it could not start as `notStarted` on its result (`P-265`), so the core holds
+   * the sensor Unknown behind the probe's alarm instead of counting a failed scan. Stripped below.
+   */
+  checkNotStarted: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -250,6 +255,8 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'report the script process groups it ended, or refused to end, after a check process died',
   unsendableReadings:
     'report the readings it dropped because they could not be sent, and the results its spool discarded',
+  checkNotStarted:
+    'say which checks it could not start, so their sensors are held rather than failed',
 };
 
 /**
@@ -378,10 +385,20 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
  * for, with the reason still in its message.
  */
 export function resultForPeer(result: CheckResult, peerVersion: number): CheckResult {
-  if (result.withheld === undefined) return result;
-  if (capabilitiesFor(peerVersion).credentialAddressPinning) return result;
-  const { withheld: _withheld, ...older } = result;
-  return older;
+  const capabilities = capabilitiesFor(peerVersion);
+  let sent = result;
+  if (sent.withheld !== undefined && !capabilities.credentialAddressPinning) {
+    const { withheld: _withheld, ...older } = sent;
+    sent = older;
+  }
+  // **A check not started, to a core below 33** (`P-265`): the failed check it always read, with
+  // the reason in its message. Unlike `withheld`, an older core meets these for real: the probe
+  // marks them whatever it was sent.
+  if (sent.notStarted !== undefined && !capabilities.checkNotStarted) {
+    const { notStarted: _notStarted, ...older } = sent;
+    sent = older;
+  }
+  return sent;
 }
 
 /** Everything this peer cannot do, oldest capability first, in words rather than numbers. */

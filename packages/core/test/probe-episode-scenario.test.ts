@@ -22,6 +22,7 @@ import { TemplateService } from '../src/notifications/templates.js';
 import { ClockFreeze } from '../src/probes/clock-freeze.js';
 import { ProbeDeliveryWatch } from '../src/probes/delivery-watch.js';
 import { ProbeEpisodeIndex } from '../src/probes/episodes.js';
+import { NotStarted } from '../src/probes/not-started.js';
 import { ProbeReachability } from '../src/probes/reachability.js';
 import { ReachabilitySync } from '../src/probes/reachability-sync.js';
 import { AlarmService, type Alarm } from '../src/state/alarms.js';
@@ -133,6 +134,8 @@ describe(
     interface Core {
       readonly reachability: ProbeReachability;
       readonly freeze: ClockFreeze;
+      /** The sensors whose checks their probe could not start (`P-265`). */
+      readonly unstarted: NotStarted;
       readonly targets: ProbeHealthTargets;
       readonly index: ProbeEpisodeIndex;
       readonly health: ProbeHealthService;
@@ -217,10 +220,12 @@ describe(
         coreEvaluatedTypes: CORE_EVALUATED,
         probeAlarms,
       });
+      const unstarted = new NotStarted({ db, logger: silent, states, dependencies, probeAlarms });
       const reach = new FactoryReach();
       const index = new ProbeEpisodeIndex({
         lost: () => reachability,
         frozen: () => freeze,
+        unstarted: () => unstarted,
         alarms: () => targets,
         factories: () => reach,
       });
@@ -236,7 +241,11 @@ describe(
         logger: silent,
         vouching: everyVoucherHolds,
         targets,
-        sources: { link: linkOf, frozenSensors: (probe) => freeze.frozenOn(probe) },
+        sources: {
+          link: linkOf,
+          frozenSensors: (probe) => freeze.frozenOn(probe),
+          notStartedSensors: (probe) => unstarted.heldOn(probe),
+        },
         delivery: watch,
         ingest: ingestHealth,
         // As production wires it: a Probe Health moved off a probe lets go of what it held (`M-27`).
@@ -254,6 +263,7 @@ describe(
       const booted: Core = {
         reachability,
         freeze,
+        unstarted,
         targets,
         index,
         health,
@@ -263,6 +273,31 @@ describe(
         factories,
       };
       return booted;
+    }
+
+    /**
+     * A probe's batch through ingestion, as its session hands it over: what it could not start
+     * taken out and held (`P-265`), and the rest stored.
+     */
+    async function ingestProbe(probe: number, results: readonly CheckResult[]): Promise<void> {
+      const states = h.states;
+      assert.ok(states !== undefined);
+      const ingestor = new Ingestor({ db, logger: silent, config: CONFIG, alarms: engine });
+      const ingestion = new IngestionService({
+        db,
+        logger: silent,
+        ingestor,
+        states,
+        resolver: channels,
+        notStarted: now().unstarted,
+      });
+      batch += 1;
+      const reply = await ingestion.acceptProbeResults(
+        { gid: `probe-${String(probe)}`, probeObjectId: probe },
+        { type: 'results', batchId: `probe-${String(batch)}`, results: [...results] },
+      );
+      await ingestor.stop();
+      assert.equal(reply.type, 'results-ack', JSON.stringify(reply));
     }
 
     /** Pings as ingestion writes them: decide, write, react (`M-11`). */
@@ -538,6 +573,7 @@ describe(
         alarms: engine,
         unreachableSensors: () => core?.reachability.unreachableSensors() ?? none,
         clockFrozenSensors: () => core?.freeze.frozenSensors() ?? none,
+        notStartedSensors: () => core?.unstarted.heldSensors() ?? none,
         unreachedFactories: () => core?.reach.unreached() ?? none,
       });
       triggerSync = new TriggerSync({ engine, logger: silent });
@@ -827,6 +863,120 @@ describe(
       assert.ok(
         (await messages(lift, health)).includes(
           "probe frozen's clock has caught up: its sensors are no longer held",
+        ),
+      );
+    });
+
+    it('a probe that could not start its checks: one alarm per trigger, and each sensor let go by the check that runs (`P-265`, `M-17`)', async () => {
+      // A starved probe: every check's process gave up before its ready line. The device was
+      // never asked, so not one of the pings is Down for it; they are Unknown with the probe's
+      // words, held behind Probe Health, which reads Down on `sensorsNotStarted`.
+      const made = await probeWith('starved', { health: true });
+      await trigger(made.probe, 'down', 'email');
+      await trigger(made.probe, 'unknown', 'webhook');
+      await trigger(made.probe, 'up', 'email');
+      await settle(made);
+      const health = healthOf(made);
+      const failing = new Set(made.pings.filter((_, at) => at % 5 === 0));
+      const gaveUp =
+        'the probe took 10012 ms to start the check and gave up: it did not start within the ' +
+        '10000 ms it is allowed, so the check never ran';
+      const unstarted = (at: Date): CheckResult[] =>
+        made.pings.map((sensorId) => ({
+          sensorId,
+          at: at.toISOString(),
+          outcome: 'error' as const,
+          message: gaveUp,
+          durationMs: 10_012,
+          channels: [],
+          notStarted: true as const,
+        }));
+
+      const step = await mark();
+      const stepAt = new Date(Date.now() - MINUTE / 2);
+      await ingestProbe(made.probe, unstarted(stepAt));
+      assert.equal(now().unstarted.heldOn(made.probe), PINGS);
+      for (const id of made.pings) {
+        const runtime = await readSensorState(db, id);
+        assert.equal(runtime?.state, 'unknown');
+        assert.equal(runtime.cause, 'probe');
+        assert.equal(runtime.message, gaveUp);
+        const last = runtime.facts.lastResultAt?.getTime() ?? 0;
+        assert.ok(last > 0 && last < stepAt.getTime(), 'nothing of the held result was stored');
+      }
+      await healthSweep();
+      await fire();
+      assert.deepEqual(await queued(step, made.pings), {}, 'not one alarm per sensor');
+      assert.deepEqual(await queued(step, [health]), {
+        'email:down:initial': 1,
+        'webhook:unknown:initial': 1,
+      });
+      const said = await messages(step, health);
+      assert.ok(
+        said.includes(
+          `probe starved could not start the checks of ${String(PINGS)} sensors: they read ` +
+            'Unknown until it runs them, held as this one alarm',
+        ),
+        said.join(' | '),
+      );
+      assert.ok(
+        said.some((message) => /could not start the checks of some of its sensors/u.test(message)),
+        said.join(' | '),
+      );
+
+      // The next round of checks that cannot start: the same hold, and nothing more to say.
+      const again = await mark();
+      await ingestProbe(made.probe, unstarted(new Date(stepAt.getTime() + 10_000)));
+      await healthSweep();
+      await fire();
+      assert.deepEqual(await queued(again, [...made.pings, health]), {}, 'no second wave');
+
+      // The probe starts its checks again. Each ping is let go by its own result, which decides
+      // it in one step: Unknown to what it measured, and nothing in between.
+      const lift = await mark();
+      const liftAt = new Date(stepAt.getTime() + 20_000);
+      await ingestProbe(
+        made.probe,
+        made.pings.map((sensorId) => ({
+          sensorId,
+          at: liftAt.toISOString(),
+          outcome: failing.has(sensorId) ? ('error' as const) : ('ok' as const),
+          message: failing.has(sensorId) ? 'no reply' : 'reply',
+          durationMs: 12,
+          channels: [],
+        })),
+      );
+      assert.equal(now().unstarted.heldOn(made.probe), 0);
+      for (const id of made.pings) {
+        const rows = await db.query<{ state: string; previous_state: string }>(
+          `SELECT state::text AS state, previous_state::text AS previous_state
+           FROM sensor_state WHERE sensor_id = $1 AND time >= $2 ORDER BY time`,
+          [id, stepAt],
+        );
+        const went = failing.has(id) ? 'down' : 'up';
+        // As a set: the hold is stamped by the core's clock as it is made, and the result that
+        // lets it go by the probe's, at the check, which here is earlier (as for a lost probe).
+        assert.deepEqual(
+          rows.map((row) => `${row.previous_state}>${row.state}`).sort(),
+          [`${went}>unknown`, `unknown>${went}`].sort(),
+          `sensor ${String(id)}: held once and let go in one step`,
+        );
+      }
+      await healthSweep();
+      await fire();
+      assert.deepEqual(
+        await queued(lift, made.pings),
+        {},
+        'no wave of Ups, and the Down pings resume where they were',
+      );
+      assert.deepEqual(await queued(lift, [health]), {
+        'email:down:recovery': 1,
+        'email:up:initial': 1,
+        'webhook:unknown:recovery': 1,
+      });
+      assert.ok(
+        (await messages(lift, health)).includes(
+          'probe starved is running its checks again: its sensors are no longer held',
         ),
       );
     });

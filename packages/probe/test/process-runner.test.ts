@@ -122,6 +122,8 @@ describe('process runner', () => {
     assert.equal(seen[0]?.result.outcome, 'error');
     assert.match(seen[0].result.message, /ended without answering.*native crash/s);
     assert.equal(seen[0].meta.phase, 'worker-crash');
+    // A crash after the ready line is the check's own failure, and decides its sensor (`P-265`).
+    assert.equal(seen[0].result.notStarted, undefined);
     assert.equal(runner.stats().crashed, 1);
 
     // And the runner is still working, which is the whole point.
@@ -145,6 +147,7 @@ describe('process runner', () => {
     assert.equal(seen[0]?.result.outcome, 'error');
     assert.equal(seen[0].result.message, 'the check failed on purpose');
     assert.deepEqual(seen[0].result.channels, []);
+    assert.equal(seen[0].result.notStarted, undefined, 'it started, and failed');
   });
 
   it('lets a check that honours its signal report its own diagnosis', async () => {
@@ -303,6 +306,7 @@ describe('process runner', () => {
         const { result, meta } = seen[0] ?? {};
         assert.equal(result?.outcome, 'error');
         assert.equal(meta?.phase, 'startup');
+        assert.equal(result.notStarted, true, 'the core holds the sensor rather than failing it');
         assert.match(result.message, /^the probe took \d+ ms to start the check and gave up/);
         assert.match(result.message, /within the 10000 ms it is allowed, so the check never ran/);
         assert.doesNotMatch(result.message, /exceeded its timeout|did not finish within/);
@@ -370,6 +374,8 @@ describe('process runner', () => {
       assert.equal(exits.seen[0].result.message, `${prefix}it exited with code 9`);
       assert.equal(killed.seen[0]?.meta.phase, 'startup');
       assert.equal(killed.seen[0].result.message, `${prefix}it was killed by SIGKILL`);
+      assert.equal(exits.seen[0].result.notStarted, true);
+      assert.equal(killed.seen[0].result.notStarted, true);
       for (const { runner } of [exits, killed]) {
         const stats = runner.stats();
         assert.equal(stats.startupFailed, 1);
@@ -392,6 +398,7 @@ describe('process runner', () => {
         result.message,
         'this probe could not load its sensor types to run the check: the catalogue is half-copied',
       );
+      assert.equal(result.notStarted, true);
       const stats = runner.stats();
       assert.equal(stats.startupFailed, 1);
       assert.equal(stats.failed, 1);

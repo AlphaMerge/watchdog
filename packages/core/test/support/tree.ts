@@ -114,6 +114,8 @@ export async function buildHarness(
     unreachableSensors?: () => ReadonlySet<number>;
     /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.frozenSensors`. */
     clockFrozenSensors?: () => ReadonlySet<number>;
+    /** The sensors whose checks their probe could not start (`P-265`); `NotStarted.heldSensors`. */
+    notStartedSensors?: () => ReadonlySet<number>;
     /** The factories held for their inputs' probe (`M-26`); `FactoryReach.unreached`. */
     unreachedFactories?: () => ReadonlySet<number>;
     /** How long a change waits for the tree lock (`P-229`); 30 s unless a test is about it. */
@@ -152,6 +154,9 @@ export async function buildHarness(
           ...(options.clockFrozenSensors === undefined
             ? {}
             : { clockFrozenSensors: options.clockFrozenSensors }),
+          ...(options.notStartedSensors === undefined
+            ? {}
+            : { notStartedSensors: options.notStartedSensors }),
           ...(options.unreachedFactories === undefined
             ? {}
             : { unreachedFactories: options.unreachedFactories }),

@@ -64,6 +64,7 @@ describe('what a protocol version can do', () => {
       listenerEarlier: false,
       scriptGroups: false,
       unsendableReadings: false,
+      checkNotStarted: false,
     });
   });
 
@@ -132,6 +133,7 @@ describe('what a protocol version can do', () => {
       listenerEarlier: 31,
       scriptGroups: 31,
       unsendableReadings: 32,
+      checkNotStarted: 33,
     };
     const names = Object.keys(ARRIVED) as (keyof ProbeCapabilities)[];
     assert.deepEqual(
@@ -686,7 +688,7 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 32);
+    assert.equal(PROTOCOL_VERSION, 33);
     assert.deepEqual(healthForPeer(health, 32), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
@@ -775,7 +777,7 @@ describe('the health a peer can be sent', () => {
   it('names the listeners’ counters at 13, and strips them for no core it can meet (P-294)', () => {
     // Named after the fact: protocol 13 added them, and only a comment on `P-64` held the number
     // until the add-sensor form needed it. Nothing on the wire changes for the name.
-    assert.equal(PROTOCOL_VERSION, 32, 'naming an old version does not bump the protocol');
+    assert.equal(PROTOCOL_VERSION, 33, 'naming an old version does not bump the protocol');
     assert.equal(versionFor('listenerCounters'), 13);
     assert.equal(capabilitiesFor(12).listenerCounters, false);
     assert.equal(capabilitiesFor(13).listenerCounters, true);
@@ -887,6 +889,7 @@ describe('the health a peer can be sent', () => {
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
+      'say which checks it could not start, so their sensors are held rather than failed',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -920,6 +923,7 @@ describe('the child start-up counters (`P-260`)', () => {
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
+      'say which checks it could not start, so their sensors are held rather than failed',
     ]);
   });
 });
@@ -935,6 +939,7 @@ describe('the check workers not started (`P-263`)', () => {
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
+      'say which checks it could not start, so their sensors are held rather than failed',
     ]);
   });
 });
@@ -952,9 +957,11 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
+      'say which checks it could not start, so their sensors are held rather than failed',
     ]);
     assert.deepEqual(missingCapabilities(31), [
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
+      'say which checks it could not start, so their sensors are held rather than failed',
     ]);
   });
 });
@@ -965,7 +972,18 @@ describe('the readings a probe could not send (`P-283`)', () => {
     assert.equal(versionFor('unsendableReadings'), 32);
     assert.equal(capabilitiesFor(31).unsendableReadings, false);
     assert.equal(capabilitiesFor(32).unsendableReadings, true);
-    assert.deepEqual(missingCapabilities(32), []);
+    assert.deepEqual(missingCapabilities(32), [
+      'say which checks it could not start, so their sensors are held rather than failed',
+    ]);
+  });
+});
+
+describe('a check the probe could not start (`P-265`)', () => {
+  it('is marked from 33, and by nothing older', () => {
+    assert.equal(versionFor('checkNotStarted'), 33);
+    assert.equal(capabilitiesFor(32).checkNotStarted, false);
+    assert.equal(capabilitiesFor(33).checkNotStarted, true);
+    assert.deepEqual(missingCapabilities(33), []);
   });
 });
 
@@ -985,6 +1003,19 @@ describe('the check result a peer can be sent (`A-41c`)', () => {
     assert.deepEqual(resultForPeer(refused, 25), refused);
     assert.deepEqual(resultForPeer(refused, 23), plain);
     assert.equal('withheld' in resultForPeer(refused, 22), false);
+  });
+
+  it('keeps `notStarted` for a core at 33 and takes it out below (P-265)', () => {
+    const unstarted = {
+      ...plain,
+      message: 'the probe took 30000 ms to start the check and gave up',
+      notStarted: true as const,
+    };
+    assert.deepEqual(resultForPeer(unstarted, 33), unstarted);
+    const { notStarted: _notStarted, ...older } = unstarted;
+    // The failed check an older core always read, with the reason still in its message.
+    assert.deepEqual(resultForPeer(unstarted, 32), older);
+    assert.equal('notStarted' in resultForPeer(unstarted, 24), false);
   });
 
   it('hands back the very result when there is nothing to take out', () => {
@@ -1022,6 +1053,34 @@ describe('the check result a peer can be sent (`A-41c`)', () => {
       assert.equal(unfit?.refused.length, 1, String(withheld));
       assert.match(unfit.refused[0]?.reason ?? '', /^\/withheld: must be equal to constant/);
       assert.doesNotMatch(unfit.refused[0]?.reason ?? '', /additional properties/);
+    }
+  });
+
+  it('takes `notStarted` only as true, only on an error with no readings, and never beside `withheld` (P-265)', () => {
+    const batch = (result: unknown): unknown => ({
+      type: 'results',
+      batchId: 'b',
+      results: [result],
+    });
+    const told = (result: unknown) => {
+      const said: { unfit?: UnfitResults } = {};
+      const parsed = parseProbeToCore(batch(result), {
+        onUnfitResults: (unfit) => (said.unfit = unfit),
+      });
+      assert.ok(parsed.type === 'results');
+      return { kept: parsed.results, unfit: said.unfit };
+    };
+    const unstarted = { ...plain, notStarted: true as const };
+    assert.deepEqual(told(unstarted).kept, [unstarted]);
+    for (const refused of [
+      { ...plain, notStarted: false },
+      { ...plain, notStarted: 'yes' },
+      { ...unstarted, outcome: 'ok' },
+      { ...unstarted, withheld: true },
+    ]) {
+      const { kept, unfit } = told(refused);
+      assert.deepEqual(kept, [], JSON.stringify(refused));
+      assert.equal(unfit?.refused.length, 1, JSON.stringify(refused));
     }
   });
 });

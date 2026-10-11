@@ -57,6 +57,17 @@ export type CheckPhase =
   // the machine's, never the check's, and its message says which.
   | 'startup';
 
+/**
+ * Whether a check that ended in this phase never ran, for a reason of the probe's and not the
+ * device's (`P-265`): its process did not start it (`startup`), or the pool gave up before it
+ * could (`pool-disabled`). Its result is marked `notStarted`, and the core holds the sensor
+ * Unknown behind the probe's one alarm. `pool-stopped` is not here: a stopping runner's cut-off
+ * checks are never spooled.
+ */
+export function notStarted(phase: CheckPhase): boolean {
+  return phase === 'startup' || phase === 'pool-disabled';
+}
+
 export interface ResultMeta {
   phase: CheckPhase;
   /** Milliseconds the request spent queued before a worker took it. */

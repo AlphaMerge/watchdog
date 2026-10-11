@@ -355,8 +355,9 @@ const CHANNELS: readonly ChannelDef[] = [
   // **Checks whose process never got as far as running them (`P-260`), and no limit on either.**
   // A check's timeout runs from the moment its process has loaded the probe's sensor types, so a
   // slow start no longer reads as a script that ran too long; it reads here. The sensors those
-  // checks belonged to already fail with a message naming the start-up, so a limit would be a
-  // second alarm for the one event. `childStartup` is the p95 of a start, which on a probe short
+  // checks belonged to are held Unknown with a message naming the start-up, and
+  // `sensorsNotStarted` is their alarm (`P-265`), so a limit here would be a second one for the
+  // one event. `childStartup` is the p95 of a start, which on a probe short
   // of CPU climbs from tens of milliseconds to seconds before anything fails.
   {
     key: 'childStartupFailed',
@@ -593,6 +594,23 @@ const CHANNELS: readonly ChannelDef[] = [
       upperError: 0.5,
       errorMessage:
         'sensors on this probe cannot accept results until its clock passes their last one',
+    },
+  },
+  // `P-265`. The sensors whose last check this probe could not start: its check process never
+  // reached its ready line, or its worker pool gave up before running it. The device was never
+  // asked, so they read Unknown with cause `probe` until a check of theirs runs, and are held
+  // behind this sensor's alarm as a frozen probe's are. **An error**, for `sensorsFrozen`'s
+  // reason: a starved probe would otherwise turn every script sensor it carries Down at once, one
+  // alarm each, and with them held it has to be this one. A gap from a core older than `P-265`.
+  {
+    key: 'sensorsNotStarted',
+    name: 'Sensors whose checks could not start',
+    unit: 'sensors',
+    limits: {
+      upperError: 0.5,
+      errorMessage:
+        'this probe could not start the checks of some of its sensors; they are Unknown until ' +
+        'it runs them',
     },
   },
   { key: 'cpu', name: 'CPU', unit: '%' },

@@ -5,7 +5,13 @@ import { describeError, fitResult, type CheckResult, type Logger } from '@ms/sha
 import type { MemoryCapReading } from './memory-cap.js';
 import { STARTUP_TIMEOUT_MS, unfit } from './process-runner.js';
 import { RefusalLog } from './refusal-log.js';
-import type { CheckPhase, CheckRequest, ResultMeta, SessionCounters } from './types.js';
+import {
+  notStarted,
+  type CheckPhase,
+  type CheckRequest,
+  type ResultMeta,
+  type SessionCounters,
+} from './types.js';
 
 /** Latencies kept for the percentiles Probe Health reports (P-13). */
 const LATENCY_WINDOW = 1_024;
@@ -1644,6 +1650,9 @@ export class CheckPool {
       // A failed check records no channel values: the gap is the data (CLAUDE.md).
       channels: parts.outcome === 'ok' ? parts.channels : [],
       ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
+      // **A check the pool gave up on before it ran** (`P-265`): the device was never asked, so
+      // the core holds the sensor behind the probe's one alarm instead of failing it.
+      ...(parts.outcome === 'error' && notStarted(phase) ? { notStarted: true as const } : {}),
     } satisfies CheckResult);
     if (problems.length > 0) unfit(this.#logger, job.request, problems);
     // Counted for Probe Health (`P-283`): the log names the sensor, and this says how often.
