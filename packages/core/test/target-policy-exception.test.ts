@@ -24,6 +24,8 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { sessionsWait } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 
 /**
  * One device's exception to its probe's target policy, on the core (`A-64`).
@@ -216,6 +218,34 @@ describe(
           [id],
         )
       )[0]?.list ?? assert.fail('no device_config row');
+    /**
+     * Another administrator's transaction: it locks the device, stores `addresses` as its
+     * exception, and commits once released. `holds` settles once the lock is held, and `done`
+     * once it has committed; a transaction that fails before it holds rejects both.
+     */
+    const holding = (
+      addresses: readonly string[],
+    ): { holds: Promise<void>; done: Promise<void>; release: () => void } => {
+      let held = (): void => undefined;
+      let release = (): void => undefined;
+      const holds = new Promise<void>((resolve) => {
+        held = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const done = db.tx(async (q) => {
+        await q.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [deviceId]);
+        await q.query(
+          'UPDATE device_config SET target_policy_exception = $2::text[] WHERE object_id = $1',
+          [deviceId, addresses],
+        );
+        held();
+        await released;
+      });
+      return { holds: Promise.race([holds, done]), done, release };
+    };
+
     const auditRows = async (id: number) =>
       db.query<{
         action: string;
@@ -462,31 +492,24 @@ describe(
       it('the second is answered 412 on the version the first replaced, and nothing is put back', async () => {
         await put(deviceId, ['169.254.10.5', 'fe80::5']);
         const seen = (await read(deviceId)).version;
-        // Another administrator's write, committed after both requests below have begun: it
-        // holds the device, takes `fe80::5` out, and commits only once they are waiting.
-        let release = (): void => undefined;
-        const held = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        const first = db.tx(async (q) => {
-          await q.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [deviceId]);
-          await q.query(
-            `UPDATE device_config SET target_policy_exception = ARRAY['169.254.10.5']
-             WHERE object_id = $1`,
-            [deviceId],
-          );
-          await held;
-        });
+        // Another administrator's write: it holds the device, takes `fe80::5` out, and commits
+        // only once both requests below are waiting on it (`P-395`: a fixed sleep stood in for
+        // the waiting, and nothing said the holder held before the requests were sent).
+        const first = holding(['169.254.10.5']);
         const ifMatch = { ...as('admin'), 'if-match': `W/"${String(seen)}"` };
-        const racing = [
-          put(deviceId, ['169.254.10.5', 'fe80::5', '10.0.0.5'], ifMatch),
-          put(deviceId, ['169.254.10.5', 'fe80::5'], ifMatch),
-        ];
-        // Both requests are in their transactions, waiting on the device, before it commits.
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        release();
-        await first;
-        const answers = await Promise.all(racing);
+        let racing: Promise<{ statusCode: number; body: string }>[] = [];
+        try {
+          await within(10_000, 'the first administrator to hold the device', first.holds);
+          racing = [
+            put(deviceId, ['169.254.10.5', 'fe80::5', '10.0.0.5'], ifMatch),
+            put(deviceId, ['169.254.10.5', 'fe80::5'], ifMatch),
+          ];
+          await sessionsWait(db, 2, 'both requests to wait on the device');
+        } finally {
+          first.release();
+        }
+        await within(10_000, 'the first administrator to commit', first.done);
+        const answers = await within(10_000, 'both requests to be answered', Promise.all(racing));
         assert.deepEqual(
           answers.map((one) => one.statusCode),
           [412, 412],
@@ -494,25 +517,20 @@ describe(
         );
         assert.deepEqual(await stored(deviceId), ['169.254.10.5'], 'what the first left');
 
-        // Without If-Match the later write wins, and its `before` is the row it replaced.
-        let releaseAgain = (): void => undefined;
-        const heldAgain = new Promise<void>((resolve) => {
-          releaseAgain = resolve;
-        });
-        const second = db.tx(async (q) => {
-          await q.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [deviceId]);
-          await q.query(
-            `UPDATE device_config SET target_policy_exception = ARRAY['169.254.10.9']
-             WHERE object_id = $1`,
-            [deviceId],
-          );
-          await heldAgain;
-        });
-        const late = put(deviceId, ['169.254.10.5']);
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        releaseAgain();
-        await second;
-        assert.equal((await late).statusCode, 200);
+        // Without If-Match the later write wins, and its `before` is the row it replaced. The
+        // holder holds before the request is sent: a request that got there first would find
+        // what it sends already stored, change nothing and write no audit row.
+        const second = holding(['169.254.10.9']);
+        const late = second.holds.then(() => put(deviceId, ['169.254.10.5']));
+        try {
+          await within(10_000, 'the second administrator to hold the device', second.holds);
+          await sessionsWait(db, 1, 'the late request to wait on the device');
+        } finally {
+          second.release();
+        }
+        await within(10_000, 'the second administrator to commit', second.done);
+        const lateAnswer = await within(10_000, 'the late request to be answered', late);
+        assert.equal(lateAnswer.statusCode, 200, lateAnswer.body);
         const rows = await auditRows(deviceId);
         assert.deepEqual(rows.at(-1)?.diff, [
           { field: 'targetPolicyException', before: ['169.254.10.9'], after: ['169.254.10.5'] },

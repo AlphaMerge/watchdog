@@ -14747,7 +14747,7 @@ because each is a decision rather than a defect:
       `sensor_runtime` still moves: the divergence `runtime.ts` describes for `P-108`. **Done
       when** it is reproduced or shown unreachable, and fixed if it is reachable.
 
-- [ ] **P-395 — `target-policy-exception`'s two-administrators test races its own lock** · XS ·
+- [x] **P-395 — `target-policy-exception`'s two-administrators test races its own lock** · XS ·
       A-64 · Found 2026-10-10 in `P-393`'s full core run: 5,248 of 5,249 passed, and the file alone
       passed 8 reruns of 8. It failed on "Without If-Match the later write wins": the last audit
       row was the test's first write, not the late one. The test starts the transaction that
@@ -14757,6 +14757,35 @@ because each is a decision rather than a defect:
       **Done when** each holder is known to hold its lock before the racers start, and the racers
       are known to be waiting (`pg_locks` or `pg_stat_activity`, bounded with `within`) rather
       than slept for.
+
+      **P-395 outcome. Each holder now says when it holds the device, and the requests are sent
+      only then. The test asks `pg_stat_activity` until they are waiting on the lock, two and
+      then one, instead of sleeping 400 ms.** Every wait has its own bound (`within`, 10 s), and
+      each holder is released in a `finally`, so a wait that fails cannot leave a transaction
+      open and the file's process alive.
+      - `holding(addresses)` in the test file is the other administrator: `holds`, `done` and
+        `release`. A transaction that fails before it holds rejects `holds` rather than leaving
+        it pending.
+      - `support/waits-for-lock.ts` has `sessionsWait(db, count, what)`, and `somebodyWaits` is
+        that with a count of 1. Its failure says how many were seen last. It counts the whole
+        database, so it is for a test's own scratch database, which this file has.
+      - **Mutations.** The service reading the device before it locks it: the requests got 200,
+        200 instead of 412, 412, caught in the first half of the test. The same with the first
+        half's wait removed: the first half let it through, because the requests came after the
+        holder had committed. The second half failed with exactly the diff of the flaky run
+        (`before: null`), which is the late request comparing with `['169.254.10.5']` and writing
+        nothing. So the wait is what makes the first half test the lock, and the order of the
+        second half is what the flake was.
+      - The same shape is in `objects-concurrency.test.ts` twice: `P-396`.
+
+- [ ] **P-396 — `objects-concurrency` gives a lock 100 ms to be taken** · XS · P-395 · Found
+      2026-10-11 in `P-395`. Two tests there (around lines 93 and 161) start a transaction that
+      takes the tree lock and then sleep 100 ms ("Give client 1 time to take the lock") before the
+      other client is sent. Under the load of a full run the other client can get the lock first,
+      and the test fails though the code is right. Each then takes `stillPending(client2, 300)` as
+      proof the other client is blocked, which a request that is only slow also passes. **Done
+      when** each holder says when it holds, and the other client is known to be waiting on the
+      lock (`sessionsWait`) rather than still pending after a sleep.
 
 - [ ] **A-81 — a group renamed is not trimmed as a group created is** · XS · P-391 · Found
       2026-10-10 in `P-391`. `GroupService.create` trims the name and refuses a blank one;
