@@ -13,6 +13,7 @@ import {
   whyNotSavable,
   type RuleDraft,
 } from '../src/routes/rediscovery-model';
+import { PROBE_ABOVE } from '../src/routes/discovery-model';
 
 /**
  * The rediscovery form's decisions (`D-11`): how a time reads for each cadence, what an edit
@@ -169,5 +170,27 @@ describe('the line that says what a rule does next', () => {
   it('says when a rule that is on runs next, and flags one with nothing booked', () => {
     expect(ruleStatus(RULE, at).text).toBe('Next run 01:30.');
     expect(ruleStatus({ ...RULE, nextRunAt: null }, at).tone).toBe('problem');
+  });
+});
+
+describe('a rule whose probe its reader cannot see (A-80)', () => {
+  // As the core answers it to this reader: the rule, and no `probeId`.
+  const unseen: RediscoveryRule = { ...RULE };
+  delete unseen.probeId;
+
+  it('is drafted with the probe above its group, and an edit never sends a probe for it', () => {
+    const draft = draftFromRule(unseen);
+    expect(draft.probeId).toBe(PROBE_ABOVE);
+    expect(whyNotSavable(draft)).toBeNull();
+    expect(patchBody(unseen, draft)).toEqual({});
+    expect(patchBody(unseen, { ...draft, name: 'Renamed' })).toEqual({ name: 'Renamed' });
+    // Choosing a probe by id is a change, and is sent for the core to judge.
+    expect(patchBody(unseen, { ...draft, probeId: 12 })).toEqual({ probeId: 12 });
+  });
+
+  it('is created with no probe named when the probe above the group was chosen', () => {
+    const body = createBody({ ...ready, probeId: PROBE_ABOVE });
+    expect('probeId' in body).toBe(false);
+    expect(body['groupId']).toBe(ready.groupId);
   });
 });

@@ -674,7 +674,7 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 | --- | --- | --- | --- |
 | `runId` | integer | **required** |  |
 | `groupId` | integer |  |  |
-| `probeId` | integer |  |  |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
 | `scheduleId` | integer | nullable | The rediscovery schedule that started it (`D-07`), or null for a run somebody started. What tells an operator where a run they did not start came from. |
 | `range` | string | **required** |  |
 | `level` | `ping` · `standard` · `detailed` |  |  |
@@ -830,7 +830,7 @@ Empty on almost every installation, because there is no schedule until somebody 
 | `items` | object[] | **required** |  |
 | `items[].id` | integer | **required** |  |
 | `items[].groupId` | integer | **required** |  |
-| `items[].probeId` | integer |  |  |
+| `items[].probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
 | `items[].name` | string | **required** |  |
 | `items[].enabled` | boolean | **required** |  |
 | `items[].range` | string | **required** |  |
@@ -888,7 +888,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  |  |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
@@ -934,7 +934,7 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  |  |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
@@ -996,7 +996,7 @@ Change a schedule
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  |  |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
@@ -4231,7 +4231,7 @@ one of 4 shapes, by `kind`
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer | **required** |  |
+| `probeId` | integer |  | The probe the run sweeps from. Absent for a caller who cannot see that probe (A-80): the run is read with read on its group, and the probe above it is another object. |
 | `range` | string | **required** |  |
 | `total` | integer | **required** |  |
 | `cursor` | integer | **required** |  |

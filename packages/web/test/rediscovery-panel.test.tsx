@@ -402,3 +402,29 @@ describe('a refused rule change, with the core’s id (U-59)', () => {
     expectCorrelation(region, 'req-59b');
   });
 });
+
+describe('a rule whose probe its reader cannot see (A-80)', () => {
+  // The reader's lists hold no probe 10, and the core answers the rule without `probeId`.
+  const UNSEEN: RediscoveryRule = { ...RULE };
+  delete UNSEEN.probeId;
+  const ONLY_THEIRS = [object(20, 10, 'group', 'Datacentre')];
+
+  it('says it runs from the probe above its group, and an edit sends no probe', async () => {
+    const api = stubApi([UNSEEN]);
+    render(<RediscoveryPanel probes={[]} groups={ONLY_THEIRS} templates={[]} />);
+    const list = await screen.findByRole('list', { name: 'Rediscovery rules' });
+    expect(within(list).getByText(/into Datacentre, from the probe above it/u)).toBeDefined();
+    expect(list.textContent).not.toMatch(/probe 10|undefined/u);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Nightly' }));
+    const form = screen.getByRole('form', { name: 'Edit Nightly' });
+    const probe = within(form).getByLabelText<HTMLSelectElement>('Probe');
+    expect(probe.value).toBe('above');
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Nightly, later' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      expect(writes(api.calls)).toHaveLength(1);
+    });
+    expect(writes(api.calls)[0]?.body).toEqual({ name: 'Nightly, later' });
+  });
+});

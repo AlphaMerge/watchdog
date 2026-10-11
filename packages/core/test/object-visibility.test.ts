@@ -4077,11 +4077,93 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         assert.equal(hiddenEdit.status, 400, hiddenEdit.body);
         assert.match(hiddenEdit.body, /"code":"DISCOVERY_PROBE_INVALID"/);
         assert.equal(told(hiddenEdit), told(await edit({ probeId: NEVER_ISSUED })));
-        // Its own probe, unchanged, is not asked about: it is in every read of the rule.
-        const kept = await edit({ probeId, name: 'a-kept' });
+        // Its own probe, unchanged, is asked about too (`A-80`): the operator's reads leave it
+        // out, so accepting it would confirm a guess. An edit that names no probe is accepted.
+        const own = await edit({ probeId, name: 'a-kept' });
+        assert.equal(told(own), told(hiddenEdit));
+        const kept = await edit({ name: 'a-kept' });
         assert.equal(kept.status, 200, kept.body);
+        assert.equal('probeId' in kept.json, false, kept.body);
       } finally {
         await db.query(`DELETE FROM discovery_schedule WHERE name IN ('a-probe-oracle', 'a-kept')`);
+      }
+    });
+
+    it('reads a run and a rule without a probe its reader cannot see (A-80)', async () => {
+      await grant(branchId, 'write');
+      const get = async (login: string, url: string): Promise<Answer> => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/${url}`,
+          headers: as(login),
+        });
+        return {
+          status: response.statusCode,
+          body: response.body,
+          json: JSON.parse(response.body) as Record<string, unknown>,
+        };
+      };
+      /** Every probe id an answer carries, at any depth: none may be the hidden probe's. */
+      const probeIdsIn = (answer: Answer): unknown[] => {
+        const found: unknown[] = [];
+        JSON.stringify(answer.json, (key, value: unknown) => {
+          if (key === 'probeId') found.push(value);
+          return value;
+        });
+        return found;
+      };
+      try {
+        // Started with the probe left out: its own reply does not name the group's probe.
+        const started = await call('operator', 'POST', 'discovery', {
+          groupId: branchId,
+          range: '10.0.12.0/30',
+        });
+        assert.equal(started.status, 201, started.body);
+        assert.deepEqual(probeIdsIn(started), [], started.body);
+        const runId = started.json['id'] as number;
+        const rule = await call('operator', 'POST', 'discovery/schedules', {
+          groupId: branchId,
+          name: 'a-probe-read',
+          range: '10.0.12.0/30',
+          cadence: 'daily',
+        });
+        assert.equal(rule.status, 201, rule.body);
+        assert.deepEqual(probeIdsIn(rule), [], rule.body);
+        const ruleId = rule.json['id'] as number;
+        const toggled = await call(
+          'operator',
+          'POST',
+          `discovery/schedules/${String(ruleId)}/enabled`,
+          {
+            enabled: false,
+          },
+        );
+        assert.equal(toggled.status, 200, toggled.body);
+        assert.deepEqual(probeIdsIn(toggled), [], toggled.body);
+
+        const reads = [
+          `discovery/${String(runId)}`,
+          `discovery/${String(runId)}/summary`,
+          `objects/${String(branchId)}/discovery`,
+          `discovery/schedules?groupId=${String(branchId)}`,
+        ];
+        for (const url of reads) {
+          const operator = await get('operator', url);
+          assert.equal(operator.status, 200, `${url}: ${operator.body}`);
+          assert.deepEqual(probeIdsIn(operator), [], `${url}: ${operator.body}`);
+          // The control: an administrator is told the probe, as before.
+          const admin = await get('admin', url);
+          assert.ok(probeIdsIn(admin).includes(probeId), `${url}: ${admin.body}`);
+        }
+
+        // Once the operator can see the probe, they are told it (`beforeEach` takes it back).
+        await grant(probeId, 'read');
+        for (const url of reads) {
+          const operator = await get('operator', url);
+          assert.ok(probeIdsIn(operator).includes(probeId), `${url}: ${operator.body}`);
+        }
+      } finally {
+        await db.query(`DELETE FROM discovery_schedule WHERE name = 'a-probe-read'`);
       }
     });
 

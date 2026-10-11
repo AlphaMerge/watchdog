@@ -528,10 +528,13 @@ describe(
           JSON.stringify({ ...response.json<{ error: object }>().error, correlationId: undefined });
         assert.equal(answer(named), answer(wrong));
 
-        // Left out, it is the group's own, and the run is the probe's.
+        // Left out, it is the group's own, and the run is the probe's. The reply does not say
+        // which probe that is (`A-80`): this writer cannot see it.
         const response = await post('/api/v1/discovery', { groupId: groupA, range: '10.0.2.0/29' });
         assert.equal(response.statusCode, 201, response.body);
-        assert.equal(response.json<{ probeId: number }>().probeId, probeA);
+        const run = response.json<{ id: number; probeId?: number }>();
+        assert.equal(run.probeId, undefined, response.body);
+        assert.equal((await discovery.get(run.id))?.probeId, probeA);
         const rule = await post('/api/v1/discovery/schedules', {
           groupId: groupA,
           name: 'left to the group',
@@ -539,7 +542,9 @@ describe(
           cadence: 'daily',
         });
         assert.equal(rule.statusCode, 201, rule.body);
-        assert.equal(rule.json<{ probeId: number }>().probeId, probeA);
+        const made = rule.json<{ id: number; probeId?: number }>();
+        assert.equal(made.probeId, undefined, rule.body);
+        assert.equal((await rediscovery.get(made.id))?.probeId, probeA);
       });
     });
 

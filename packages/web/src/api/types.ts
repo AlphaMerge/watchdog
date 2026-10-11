@@ -798,7 +798,8 @@ export interface DiscoveryPreview {
 export interface DiscoveryRun {
   id: number;
   groupId: number;
-  probeId: number;
+  /** Absent for a reader who cannot see the probe (`A-80`). */
+  probeId?: number;
   range: string;
   total: number;
   cursor: number;
@@ -828,7 +829,8 @@ export interface DiscoveryRun {
 export interface DiscoverySummary {
   runId: number;
   groupId: number;
-  probeId: number;
+  /** Absent for a reader who cannot see the probe (`A-80`). */
+  probeId?: number;
   scheduleId: number | null;
   range: string;
   level: DiscoveryLevel;
@@ -874,7 +876,8 @@ export type RediscoveryCadence = 'hourly' | 'daily' | 'weekly';
 export interface RediscoveryRule {
   id: number;
   groupId: number;
-  probeId: number;
+  /** Absent for a reader who cannot see the probe (`A-80`). */
+  probeId?: number;
   name: string;
   enabled: boolean;
   range: string;

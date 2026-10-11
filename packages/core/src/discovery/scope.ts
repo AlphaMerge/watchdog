@@ -74,6 +74,52 @@ export async function probeFor(
   return nearest.id;
 }
 
+/**
+ * What carries the probe a discovery runs from: a run, its summary, a rediscovery rule.
+ */
+interface NamesItsProbe {
+  readonly probeId: number;
+}
+
+/** The same, without the probe when its reader cannot see it. */
+export type ProbeAsSeen<T extends NamesItsProbe> = Omit<T, 'probeId'> & { probeId?: number };
+
+/**
+ * Runs, summaries or rules as their reader may see them (`A-80`): without `probeId` where that
+ * probe is outside the reader's view.
+ *
+ * **A run is read with read on its group, and the probe above it is another object.** A writer
+ * granted one branch below a probe they cannot see reads the runs and rules of their own group,
+ * and each carried the id `requireProbeInView` refuses to confirm — so the oracle `A-77` closed
+ * at the door was open in every read. Left out rather than `null`, in every reply that carries
+ * one, so a client tells "a probe you cannot see" by the key being absent and never reads an id.
+ * An administrator, and anybody who can see the probe, is answered as before.
+ */
+export async function probesAsSeen<T extends NamesItsProbe>(
+  q: Queryable,
+  sees: Visibility,
+  items: readonly T[],
+): Promise<ProbeAsSeen<T>[]> {
+  if (sees.everything || items.length === 0) return [...items];
+  const seen = await sees.visibleAmong(q, [...new Set(items.map((item) => item.probeId))]);
+  return items.map((item) => {
+    if (seen.has(item.probeId)) return item;
+    const shown: ProbeAsSeen<T> = { ...item };
+    delete shown.probeId;
+    return shown;
+  });
+}
+
+/** `probesAsSeen` for one. */
+export async function probeAsSeen<T extends NamesItsProbe>(
+  q: Queryable,
+  sees: Visibility,
+  item: T,
+): Promise<ProbeAsSeen<T>> {
+  const [shown] = await probesAsSeen(q, sees, [item]);
+  return shown ?? item;
+}
+
 /** The one refusal for every wrong probe, so the checks above cannot come to differ. */
 function wrongProbe(groupId: number): DiscoveryError {
   return new DiscoveryError(

@@ -24623,7 +24623,7 @@ because each is a decision rather than a defect:
       - The web discovery and rediscovery forms always send a probe chosen from the visible
         tree, so a branch writer who cannot see the probe cannot yet leave it out from the UI.
 
-- [ ] **A-80 — discovery still shows a hidden probe's id, and its forms cannot leave it out** · S
+- [x] **A-80 — discovery still shows a hidden probe's id, and its forms cannot leave it out** · S
       · A-77 · Found 2026-10-04 by `A-77`. `GET /discovery/:id` and the schedules list return
       `probeId` to a group reader who cannot see that probe, the id `requireGroupProbe` no
       longer confirms. A scheduled rediscovery's provisioning pass still sees the whole group,
@@ -24631,6 +24631,55 @@ because each is a decision rather than a defect:
       discovery and rediscovery forms always send a probe picked from the visible tree, so a
       branch writer cannot use the new "leave `probeId` out" from the UI. **Done when** each
       is closed with a test in `object-visibility.test.ts` or the web suite.
+
+      **A-80 outcome. The probe id and the forms are closed; the scheduled pass's report is a
+      decision, split off as `A-82`.** No migration, no protocol change.
+      - **A hidden probe's id is left out of every reply that carried it.** `probesAsSeen` and
+        `probeAsSeen` (`discovery/scope.ts`) drop `probeId` from a run, a summary or a rule for a
+        reader who cannot see that probe, asking `Visibility.visibleAmong` once per reply; an
+        administrator and anybody who can see the probe are answered as before. Applied to
+        `POST /discovery` (whose probe, left out, is the group's), `GET /discovery/:id`,
+        `GET /discovery/:id/summary`, `GET /objects/:id/discovery`, `GET /discovery/schedules`,
+        `POST /discovery/schedules`, the enabled toggle and the `PATCH`. Left out rather than
+        `null`, so no client reads an id; `ms:discoveryRun` no longer requires it, and each
+        schema says why it may be absent. `api-reference.md` is regenerated.
+      - **And a rule's own probe is now asked about when an edit names it.** `A-77` asked only of
+        a probe that differed from the rule's, since the rule's was in every read. With reads
+        leaving it out, accepting the hidden id unchanged would confirm a guess of it, so every
+        probe a `PATCH` names goes through `requireProbeInView`.
+      - **The forms offer the probe above the group.** `groupsUnderUnseenProbe` finds the groups
+        whose way up reaches an object in neither list before a probe that is; the probe picker
+        then offers *The probe above the group (not one you can see)*, only when there is such a
+        group, and the group list under it is those groups. It is sent as no `probeId`
+        (`probeIdFor`), which the core answers with the group's own. Every group is under a
+        probe, so this is never wrong, even for a group whose parent is merely past the end of a
+        capped list. A rule read without a probe drafts with that choice, an edit never sends a
+        probe for it, and the list says *from the probe above it* where it said *probe 10*.
+      - **Tests.** `object-visibility.test.ts`: a run started and a rule created with the probe
+        left out, the toggle, and the four reads carry no `probeId` anywhere for the operator and
+        the probe for an administrator, and for the operator once granted read on the probe; an
+        edit naming the rule's own hidden probe is refused as one never issued.
+        `discovery-scope.test.ts`: the left-out start and rule answer no probe and store the
+        group's. Web: `discovery-model.test.ts` (the unseen-probe walk, the choice and what it
+        sends), `rediscovery-model.test.ts` (the draft, create and edit bodies),
+        `discovery-unseen-probe.test.tsx` (offered, and started with no probe; not offered when
+        every probe is seen), `rediscovery-panel.test.tsx` (the list's words and an edit's body).
+      - **Mutation: 4/4**, each restored byte for byte and `dist` rebuilt: every probe shown
+        (fails 2), a `PATCH` asked only about a changed probe (fails 1), no group under an unseen
+        probe (fails 3), and the probe above sent as an id (fails 3).
+
+- [ ] **A-82 — whose view a scheduled rediscovery's provisioning pass is worded for** · S ·
+      A-80 · Found 2026-10-11 in `A-80`. A pass a schedule fires has no caller and runs with
+      `Visibility.EVERYTHING` and `Reach.EVERYTHING`, so its stored problems (`GET
+      /discovery/:id/problems`) and its matches are worded for the installation, and any reader
+      of the group reads them: a sensor's creation refusal can name an owner or an object above
+      the branch. The words are stored as text, so they cannot be re-worded per reader at read
+      time without storing what they name. Options: (1) run the pass with the sight of the
+      rule's writer (`written_by_user`, who already stands behind its addresses under `A-41`),
+      and read its problems with write on the group; (2) store each problem with the object ids
+      it names and word it per reader at read time (a migration); (3) word a scheduled pass for
+      nobody, as if every object outside the group were hidden. **Done when** decided, and the
+      choice done with a test in `object-visibility.test.ts`.
 
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found

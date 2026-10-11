@@ -10,6 +10,11 @@ import {
   phaseOf,
   pollIntervalMs,
   descendantsOf,
+  groupsFor,
+  groupsUnderUnseenProbe,
+  PROBE_ABOVE,
+  probeChoiceOf,
+  probeIdFor,
   progressOf,
   whyNotStartable,
 } from '../src/routes/discovery-model';
@@ -265,5 +270,38 @@ describe('the groups under a probe', () => {
     // frozen tab with no error, which is the worst way to find out.
     const looped = [object(10, 11, 'group'), object(11, 10, 'group')];
     expect(descendantsOf(looped, 2)).toEqual([]);
+  });
+
+  describe('under a probe the reader cannot see (A-80)', () => {
+    // Probe 2 is listed; probe 3 is not, and neither is group 30 between probe 4 and group 31.
+    const probes = [object(2, 1, 'probe')];
+    const groups = [
+      object(10, 2, 'group'),
+      object(11, 10, 'group'),
+      object(20, 3, 'group'),
+      object(21, 20, 'group'),
+      object(31, 30, 'group'),
+    ];
+
+    it('finds every group whose way up reaches something unlisted before a listed probe', () => {
+      expect(groupsUnderUnseenProbe(probes, groups).map((one) => one.id)).toEqual([20, 21, 31]);
+      expect(groupsUnderUnseenProbe(probes, groups.slice(0, 2))).toEqual([]);
+      const looped = [object(10, 11, 'group'), object(11, 10, 'group')];
+      expect(groupsUnderUnseenProbe(probes, looped)).toEqual([]);
+    });
+
+    it('offers them under the probe above, and a listed probe’s own under that probe', () => {
+      expect(groupsFor(PROBE_ABOVE, probes, groups).map((one) => one.id)).toEqual([20, 21, 31]);
+      expect(groupsFor(2, probes, groups).map((one) => one.id)).toEqual([10, 11]);
+      expect(groupsFor(null, probes, groups)).toEqual([]);
+    });
+
+    it('reads a picker’s value, and sends no probe for the one above', () => {
+      expect(probeChoiceOf('')).toBeNull();
+      expect(probeChoiceOf(PROBE_ABOVE)).toBe(PROBE_ABOVE);
+      expect(probeChoiceOf('12')).toBe(12);
+      expect(probeIdFor(PROBE_ABOVE)).toEqual({});
+      expect(probeIdFor(12)).toEqual({ probeId: 12 });
+    });
   });
 });

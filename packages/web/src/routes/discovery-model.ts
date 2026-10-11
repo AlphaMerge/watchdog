@@ -121,8 +121,70 @@ export function estimateText(minSeconds: number, maxSeconds: number): string {
   return from === to ? `${from} ${noun}` : `${from}–${to} ${noun}`;
 }
 
+/**
+ * The probe above the chosen group, when it is one its reader cannot see (`A-80`).
+ *
+ * **Sent as no `probeId` at all**, which the core answers with the group's own probe (`A-77`).
+ * A writer granted a branch below a probe they cannot see has no probe to pick, and so had no
+ * group either: the group list hangs off the chosen probe. Leaving it out is never wrong — a run
+ * may only use the probe its group is under, and that is the one the core takes.
+ */
+export const PROBE_ABOVE = 'above';
+
+/** How the probe pickers offer it: where it is, and that it is not shown. */
+export const PROBE_ABOVE_LABEL = 'The probe above the group (not one you can see)';
+
+/** A probe picked by its id, the one above an unseen-probe group, or none yet. */
+export type ProbeChoice = number | typeof PROBE_ABOVE | null;
+
+/** What a probe `<select>`'s value means. */
+export function probeChoiceOf(value: string): ProbeChoice {
+  if (value === '') return null;
+  if (value === PROBE_ABOVE) return PROBE_ABOVE;
+  return Number(value);
+}
+
+/** The `probeId` a request carries for a choice: none for the probe above the group. */
+export function probeIdFor(choice: number | typeof PROBE_ABOVE): { probeId?: number } {
+  return choice === PROBE_ABOVE ? {} : { probeId: choice };
+}
+
+/**
+ * The groups whose probe their reader cannot see (`A-80`): walking up, an ancestor that is in
+ * neither list is reached before a probe that is. Every group is under a probe (a group's parent
+ * is a probe or a group), so each of these has one, outside the reader's view.
+ *
+ * A group whose parent is only off the end of a capped list is counted here too; leaving its
+ * probe out is still right, since the core takes the group's own.
+ */
+export function groupsUnderUnseenProbe(
+  probes: readonly ObjectPage['items'][number][],
+  groups: readonly ObjectPage['items'][number][],
+): ObjectPage['items'] {
+  const byId = new Map([...probes, ...groups].map((one) => [one.id, one]));
+  const unseenAbove = (id: number | null, depth = 0): boolean => {
+    if (id === null || depth > 64) return false;
+    const parent = byId.get(id);
+    if (parent === undefined) return true;
+    if (parent.kind === 'probe') return false;
+    return unseenAbove(parent.parentId, depth + 1);
+  };
+  return groups.filter((group) => unseenAbove(group.parentId));
+}
+
+/** The groups a probe choice offers. */
+export function groupsFor(
+  choice: ProbeChoice,
+  probes: readonly ObjectPage['items'][number][],
+  groups: readonly ObjectPage['items'][number][],
+): ObjectPage['items'] {
+  if (choice === null) return [];
+  if (choice === PROBE_ABOVE) return groupsUnderUnseenProbe(probes, groups);
+  return descendantsOf(groups, choice);
+}
+
 export interface DiscoveryDraft {
-  probeId: number | null;
+  probeId: ProbeChoice;
   groupId: number | null;
   range: string;
   level: DiscoveryLevel;

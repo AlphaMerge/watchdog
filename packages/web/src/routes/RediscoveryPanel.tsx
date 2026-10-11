@@ -8,7 +8,13 @@ import type {
   ScheduleSummary,
 } from '../api/types';
 import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
-import { descendantsOf } from './discovery-model';
+import {
+  PROBE_ABOVE,
+  PROBE_ABOVE_LABEL,
+  groupsFor,
+  groupsUnderUnseenProbe,
+  probeChoiceOf,
+} from './discovery-model';
 import { Field, INPUT, SELECT, TemplatePicker } from './discovery-fields';
 import {
   EMPTY_RULE,
@@ -148,9 +154,13 @@ export function RediscoveryPanel({
         <ul className="mt-3 divide-y divide-border" aria-label="Rediscovery rules">
           {rules.data.items.map((rule) => {
             const status = ruleStatus(rule);
-            const where = `${names.get(rule.groupId) ?? `group ${String(rule.groupId)}`}, from ${
-              names.get(rule.probeId) ?? `probe ${String(rule.probeId)}`
-            }`;
+            // No probe id is a probe its reader cannot see (`A-80`), said as such and not as a
+            // number nobody can look up.
+            const probe =
+              rule.probeId === undefined
+                ? 'the probe above it'
+                : (names.get(rule.probeId) ?? `probe ${String(rule.probeId)}`);
+            const where = `${names.get(rule.groupId) ?? `group ${String(rule.groupId)}`}, from ${probe}`;
             return (
               <li key={rule.id} className="py-3">
                 <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -290,8 +300,13 @@ function RuleForm({
   };
 
   const underProbe = useMemo(
-    () => (draft.probeId === null ? [] : descendantsOf(groups, draft.probeId)),
-    [groups, draft.probeId],
+    () => groupsFor(draft.probeId, probes, groups),
+    [probes, groups, draft.probeId],
+  );
+  // Offered where there is such a group, and always for a rule whose probe is one of them.
+  const unseen = useMemo(
+    () => draft.probeId === PROBE_ABOVE || groupsUnderUnseenProbe(probes, groups).length > 0,
+    [probes, groups, draft.probeId],
   );
   const blocked = whyNotSavable(draft);
   const groupName = groups.find((group) => group.id === draft.groupId)?.name;
@@ -379,7 +394,7 @@ function RuleForm({
               aria-describedby={describedBy}
               value={draft.probeId ?? ''}
               onChange={(event) => {
-                const probeId = event.target.value === '' ? null : Number(event.target.value);
+                const probeId = probeChoiceOf(event.target.value);
                 // A new rule's group is cleared with its probe, as on the form above; an edited
                 // rule keeps its group, which is the one thing an edit cannot change.
                 change(rule === null ? { probeId, groupId: null } : { probeId });
@@ -391,6 +406,7 @@ function RuleForm({
                   {probe.name}
                 </option>
               ))}
+              {unseen && <option value={PROBE_ABOVE}>{PROBE_ABOVE_LABEL}</option>}
             </select>
           )}
         </Field>

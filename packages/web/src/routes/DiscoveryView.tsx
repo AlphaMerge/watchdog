@@ -16,13 +16,18 @@ import { RediscoveryPanel } from './RediscoveryPanel';
 import { formatDuration } from './detail/model';
 import {
   EMPTY_DRAFT,
-  descendantsOf,
+  PROBE_ABOVE,
+  PROBE_ABOVE_LABEL,
   estimateText,
+  groupsFor,
+  groupsUnderUnseenProbe,
   isActive,
   isLong,
   orderedLevels,
   phaseOf,
   pollIntervalMs,
+  probeChoiceOf,
+  probeIdFor,
   progressOf,
   whyNotStartable,
   type DiscoveryDraft,
@@ -180,9 +185,11 @@ function StartPanel({
   }, [range, setPreviewError, sayAgain]);
 
   const underProbe = useMemo(
-    () => (draft.probeId === null ? [] : descendantsOf(groups, draft.probeId)),
-    [groups, draft.probeId],
+    () => groupsFor(draft.probeId, probes, groups),
+    [probes, groups, draft.probeId],
   );
+  // Offered only where there is such a group: anybody who can see every probe never sees it.
+  const unseen = useMemo(() => groupsUnderUnseenProbe(probes, groups).length > 0, [probes, groups]);
 
   const blocked = whyNotStartable(draft, preview !== null);
   const chosen = preview?.levels.find((one) => one.id === draft.level);
@@ -193,7 +200,7 @@ function StartPanel({
     onError(null);
     send<DiscoveryRun>('POST', '/discovery', {
       groupId: draft.groupId,
-      probeId: draft.probeId,
+      ...probeIdFor(draft.probeId),
       range: draft.range.trim(),
       level: draft.level,
       templates: draft.templates,
@@ -222,7 +229,7 @@ function StartPanel({
               aria-describedby={describedBy}
               value={draft.probeId ?? ''}
               onChange={(event) => {
-                const probeId = event.target.value === '' ? null : Number(event.target.value);
+                const probeId = probeChoiceOf(event.target.value);
                 // The group is cleared with the probe: a group under the old probe would be a
                 // selection that still looks valid and that the core would refuse.
                 onChange({ ...draft, probeId, groupId: null });
@@ -234,6 +241,7 @@ function StartPanel({
                   {probe.name}
                 </option>
               ))}
+              {unseen && <option value={PROBE_ABOVE}>{PROBE_ABOVE_LABEL}</option>}
             </select>
           )}
         </Field>

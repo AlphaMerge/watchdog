@@ -1,5 +1,6 @@
 import type { ApiError } from '../api/client';
 import type { DiscoveryLevel, RediscoveryCadence, RediscoveryRule } from '../api/types';
+import { PROBE_ABOVE, probeIdFor, type ProbeChoice } from './discovery-model';
 
 /**
  * The form behind a rediscovery rule, and what it sends (`D-11`).
@@ -22,7 +23,8 @@ export type CommunityChange = 'keep' | 'replace' | 'clear';
 
 export interface RuleDraft {
   name: string;
-  probeId: number | null;
+  /** `PROBE_ABOVE` for a rule whose probe its reader cannot see, which the core leaves out. */
+  probeId: ProbeChoice;
   groupId: number | null;
   range: string;
   level: DiscoveryLevel;
@@ -73,7 +75,7 @@ export const WEEKDAYS = [
 export function draftFromRule(rule: RediscoveryRule): RuleDraft {
   return {
     name: rule.name,
-    probeId: rule.probeId,
+    probeId: rule.probeId ?? PROBE_ABOVE,
     groupId: rule.groupId,
     range: rule.range,
     level: rule.level,
@@ -143,7 +145,7 @@ export function whyNotSavable(draft: RuleDraft): string | null {
 export function createBody(draft: RuleDraft): Record<string, unknown> {
   return {
     groupId: draft.groupId,
-    probeId: draft.probeId,
+    ...(draft.probeId === null ? {} : probeIdFor(draft.probeId)),
     name: draft.name.trim(),
     range: draft.range.trim(),
     level: draft.level,
@@ -170,7 +172,11 @@ export function patchBody(rule: RediscoveryRule, draft: RuleDraft): Record<strin
   const out: Record<string, unknown> = {};
   const minute = minuteOf(draft.cadence, draft.at) ?? rule.cadenceMinute;
   const timezone = draft.timezone.trim() === '' ? null : draft.timezone.trim();
-  if (draft.probeId !== null && draft.probeId !== rule.probeId) out['probeId'] = draft.probeId;
+  // A probe picked by id, and not the rule's: never the one above the group, which is no id to
+  // send and is already the rule's (`A-80`).
+  if (typeof draft.probeId === 'number' && draft.probeId !== rule.probeId) {
+    out['probeId'] = draft.probeId;
+  }
   if (draft.name.trim() !== rule.name) out['name'] = draft.name.trim();
   if (draft.range.trim() !== rule.range) out['range'] = draft.range.trim();
   if (draft.level !== rule.level) out['level'] = draft.level;

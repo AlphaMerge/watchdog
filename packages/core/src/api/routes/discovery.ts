@@ -10,7 +10,7 @@ import {
   type DiscoveryLevel,
 } from '@ms/shared';
 import { DiscoveryError, runNotFound } from '../../discovery/errors.js';
-import { probeFor, requireProbeInView } from '../../discovery/scope.js';
+import { probeAsSeen, probeFor, probesAsSeen, requireProbeInView } from '../../discovery/scope.js';
 import type { Queryable } from '../../db/pool.js';
 import { DISCOVERY_RUN_STATUSES, type DiscoveryService } from '../../discovery/service.js';
 import { SUMMARY_KINDS } from '../../discovery/summary.js';
@@ -50,11 +50,16 @@ const runSchema = {
   $id: 'ms:discoveryRun',
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'groupId', 'probeId', 'range', 'total', 'cursor', 'found', 'failed', 'status'],
+  required: ['id', 'groupId', 'range', 'total', 'cursor', 'found', 'failed', 'status'],
   properties: {
     id: { type: 'integer' },
     groupId: { type: 'integer' },
-    probeId: { type: 'integer' },
+    probeId: {
+      type: 'integer',
+      description:
+        'The probe the run sweeps from. Absent for a caller who cannot see that probe (A-80): ' +
+        'the run is read with read on its group, and the probe above it is another object.',
+    },
     range: { type: 'string' },
     total: { type: 'integer' },
     cursor: { type: 'integer' },
@@ -290,14 +295,11 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       };
       parse(body.range);
       // A probe the caller cannot see is answered as a wrong one, or the right one is an oracle.
-      const probeId = await probeFor(
-        options.db,
-        await visibilityOf(request),
-        body.groupId,
-        body.probeId,
-      );
+      const sees = await visibilityOf(request);
+      const probeId = await probeFor(options.db, sees, body.groupId, body.probeId);
       const run = await discovery.start({ ...body, probeId }, actorFor(request));
-      await reply.code(201).send(run);
+      // Left out by the caller, the probe is the group's, which they may not be able to see.
+      await reply.code(201).send(await probeAsSeen(options.db, sees, run));
       return reply;
     },
   );
@@ -317,7 +319,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       const { id } = request.params as { id: number };
       const run = await discovery.get(id);
       if (run === null) throw runNotFound(id);
-      return run;
+      return probeAsSeen(options.db, await visibilityOf(request), run);
     },
   );
 
@@ -354,7 +356,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             properties: {
               runId: { type: 'integer' },
               groupId: { type: 'integer' },
-              probeId: { type: 'integer' },
+              probeId: {
+                type: 'integer',
+                description: 'Absent for a caller who cannot see the probe (A-80).',
+              },
               scheduleId: {
                 type: ['integer', 'null'],
                 description:
@@ -460,7 +465,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       const { id } = request.params as { id: number };
       const summary = await discovery.summary(id);
       if (summary === null) throw runNotFound(id);
-      return summary;
+      return probeAsSeen(options.db, await visibilityOf(request), summary);
     },
   );
 
@@ -702,7 +707,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     async (request) => {
       const { id } = request.params as { id: number };
       const { limit } = request.query as { limit?: number };
-      return { items: await discovery.list(id, limit ?? 25) };
+      const runs = await discovery.list(id, limit ?? 25);
+      return { items: await probesAsSeen(options.db, await visibilityOf(request), runs) };
     },
   );
 
@@ -721,7 +727,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       properties: {
         id: { type: 'integer' },
         groupId: { type: 'integer' },
-        probeId: { type: 'integer' },
+        probeId: {
+          type: 'integer',
+          description: 'Absent for a caller who cannot see the probe (A-80).',
+        },
         name: { type: 'string' },
         enabled: { type: 'boolean' },
         range: { type: 'string' },
@@ -809,7 +818,9 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       },
       async (request: FastifyRequest) => {
         const { groupId } = request.query as { groupId?: number };
-        return { items: await rediscovery.list(await visibilityOf(request), groupId) };
+        const sees = await visibilityOf(request);
+        const rules = await rediscovery.list(sees, groupId);
+        return { items: await probesAsSeen(options.db, sees, rules) };
       },
     );
 
@@ -905,7 +916,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           input.probeId,
         );
         const created = await rediscovery.create({ ...input, probeId }, actorFor(request));
-        await reply.code(201).header('ETag', etagFor(created.version)).send(created);
+        await reply
+          .code(201)
+          .header('ETag', etagFor(created.version))
+          .send(await probeAsSeen(options.db, await visibilityOf(request), created));
         return reply;
       },
     );
@@ -937,7 +951,9 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         const { enabled } = request.body as { enabled: boolean };
         const updated = await rediscovery.setEnabled(id, enabled, actorFor(request));
         if (updated === null) throw noSuchRule(id);
-        await reply.header('ETag', etagFor(updated.version)).send(updated);
+        await reply
+          .header('ETag', etagFor(updated.version))
+          .send(await probeAsSeen(options.db, await visibilityOf(request), updated));
         return reply;
       },
     );
@@ -993,9 +1009,11 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       async (request: FastifyRequest, reply) => {
         const { id } = request.params as { id: number };
         const patch = request.body as SchedulePatch;
-        // Only a probe the caller names anew: the rule's own is in every read of it (`A-77`).
+        // **Every probe the caller names**, the rule's own included (`A-80`). `A-77` asked only
+        // of a new one, since the rule's own was in every read of it; reads leave it out now for
+        // a caller who cannot see it, and accepting it unchanged would confirm a guess of it.
         const current = patch.probeId === undefined ? null : await rediscovery.get(id);
-        if (current !== null && patch.probeId !== undefined && patch.probeId !== current.probeId) {
+        if (current !== null && patch.probeId !== undefined) {
           await requireProbeInView(
             options.db,
             await visibilityOf(request),
@@ -1010,7 +1028,9 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           actorFor(request),
         );
         if (updated === null) throw noSuchRule(id);
-        await reply.header('ETag', etagFor(updated.version)).send(updated);
+        await reply
+          .header('ETag', etagFor(updated.version))
+          .send(await probeAsSeen(options.db, await visibilityOf(request), updated));
         return reply;
       },
     );
