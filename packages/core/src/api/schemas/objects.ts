@@ -191,6 +191,20 @@ export const objectDetailSchema = {
      */
     params: { type: 'object', additionalProperties: true },
     redactedParams: { type: 'array', items: { type: 'string' } },
+    /**
+     * On the reply to an edit of a sensor's parameters only (`U-36`): the channels whose lookup
+     * the new parameters declare differently and that were left as they are, because the sensor
+     * type could not say what the stored parameters declared, so a lookup an operator chose could
+     * not be told from the one the type wrote (`P-311`). Absent when there were none.
+     */
+    lookupsKept: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'On an edit’s reply only: the channels whose lookup the new parameters declare ' +
+        'differently and that were kept, because the sensor type could not say what the stored ' +
+        'parameters declared (U-36, P-311). Absent when there were none.',
+    },
     // expansions
     settings: { type: 'array', items: { $ref: 'ms:settingView' } },
     channels: { type: 'array', items: { $ref: 'ms:channelRecord' } },

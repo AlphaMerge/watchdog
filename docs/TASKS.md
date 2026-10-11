@@ -26226,10 +26226,38 @@ because each is a decision rather than a defect:
         backfill: no row can tell a refused 0 from an upgrade's. A web app served by a core
         older than this is not a case, because the core serves its own web app.
 
-- [ ] **U-36 — an edit that kept a lookup does not say so** · XS · P-311 · Found 2026-10-08 in
+- [x] **U-36 — an edit that kept a lookup does not say so** · XS · P-311 · Found 2026-10-08 in
       `P-311`. When the type cannot answer for what is stored, the edit leaves every lookup and
       logs a warning, but the reply and the form say nothing. **Done when** the reply names the
       channels whose lookup was kept and the form shows it, with a test (WCAG 2.1 AA).
+
+      **U-36 outcome. The edit's reply carries `lookupsKept`, and the form says it after *Saved*,
+      naming each channel.** No migration, no protocol change.
+      - **The reply.** `ObjectService.#redeclareChannels` returns the kept channels with the
+        changes, only when the type could not answer for the stored parameters (the `P-311`
+        case; a lookup kept because the declaration did not move is not news), and `update` puts
+        them on the sensor detail it returns, after the audit entry is written, so the audit is
+        unchanged. `objectDetailSchema` declares it; it is absent when empty and on every read.
+      - **The page had to stop throwing the form away first.** A save calls the page's
+        `object.reload`, and `useApi` says `loading` for the length of the read, so the page gave
+        way to *Loading the object…*: the form unmounted, focus went to the body, and *Saved*
+        (`U-08`) was never on screen for longer than a request. `ObjectDetailView` now holds the
+        object it last read against its path, as it holds the channel list (`U-55`), and shows it
+        through a `loading`; a failed read still shows its error. `ParamsForm` starts again from
+        a new `version` (the prop-derived reset React's guide describes), so what the core now
+        holds is what the form compares against.
+      - **How it is said.** *Saved* and the kept lookups are in one `role="status"` region that is
+        in the form, empty, before the save (`U-41`), emptied by the next save and by any change.
+        The note is text ink, names each channel in a list, says why (the stored parameters can
+        no longer be read by the type, so a hand-set lookup cannot be told from the type's), and
+        where a lookup is set — no form sets one, so it names `PATCH
+        /api/v1/objects/{id}/channels/{key}`.
+      - **Tests.** `channel-redeclaration.test.ts`: the `P-311` edit's reply names `value` and a
+        read after it has no `lookupsKept`; an edit that kept an operator's lookup because the
+        declaration did not move has none. `params-form-saved.test.tsx`: the region is there and
+        quiet before, says *Saved* alone, one channel, several, and empties on a change.
+        `params-saved-page.test.tsx`: on the page, through the held re-read, the form, its input
+        and focus stay, no loading line, and the note arrives in the region that was there.
 
 - [x] **U-37 — the History tab's legend does not mark a retired channel** · XS · P-310 · Found
       2026-10-08 in `P-310`. Its line just ends at the edit. **Done when** the legend marks it in

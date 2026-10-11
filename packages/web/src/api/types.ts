@@ -69,6 +69,12 @@ export interface ObjectDetail extends ObjectSummary {
   params?: Record<string, unknown>;
   /** Names of `writeOnly` parameters that hold a value. Never the values (P-05). */
   redactedParams?: string[];
+  /**
+   * On an edit's reply only (`U-36`): the channels whose lookup the edit left as it was, because
+   * the sensor's type could not say what its stored parameters declared (`P-311`). Absent when
+   * there were none, and on every read.
+   */
+  lookupsKept?: string[];
 }
 
 export interface TreePage {

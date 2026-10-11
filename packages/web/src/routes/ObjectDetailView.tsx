@@ -58,18 +58,35 @@ const KIND_GLYPH: Record<string, string> = {
  */
 export function ObjectDetailView(): React.JSX.Element {
   const { id = '' } = useParams();
-  const object = useApi<ObjectDetail>(`/objects/${id}`);
+  const objectPath = `/objects/${id}`;
+  const object = useApi<ObjectDetail>(objectPath);
+  // The object last read, **kept while it is read again** (`U-36`), as the channel list is
+  // (`U-55`): a saved edit re-reads it, and the page used to give way to a loading line for the
+  // length of that request, which took the parameters form with it — and with the form, focus,
+  // the *Saved* line and what the core said about the save. Held against the path it was read
+  // from, so a sensor's detail is never shown at another's address. Only through a `loading`; a
+  // re-read that fails says so as it always has.
+  const heldObject = useRef<{ path: string; data: ObjectDetail } | null>(null);
+  useEffect(() => {
+    if (object.status === 'ready' && object.answered !== null) {
+      heldObject.current = { path: object.answered, data: object.data };
+    }
+  }, [object]);
+  const shownObject =
+    object.status === 'ready'
+      ? object.data
+      : object.status === 'loading' && heldObject.current?.path === objectPath
+        ? heldObject.current.data
+        : null;
   const numericId = Number(id);
-  const isSensor = object.status === 'ready' && object.data.kind === 'sensor';
+  const isSensor = shownObject?.kind === 'sensor';
 
   const [params, setParams] = useSearchParams();
-  const tabs = object.status === 'ready' ? tabsFor(object.data) : [];
+  const tabs = shownObject === null ? [] : tabsFor(shownObject);
   const requested = params.get('tab');
   const active = tabs.some((tab) => tab.id === requested) ? (requested ?? 'overview') : 'overview';
 
-  const ancestors = useApi<AncestorsView>(
-    object.status === 'ready' ? `/objects/${id}/ancestors` : null,
-  );
+  const ancestors = useApi<AncestorsView>(shownObject === null ? null : `/objects/${id}/ancestors`);
   const channelsPath = isSensor ? `/objects/${id}/channels` : null;
   const channels = useApi<{ items: ChannelRecord[] }>(channelsPath);
   // The list last read, kept while it is read again (`U-55`), so a re-read does not take the
@@ -246,9 +263,9 @@ export function ObjectDetailView(): React.JSX.Element {
     }
   }, [valuesAnswer, channelList, relist]);
   const settings = useApi<{ settings: SettingView[] }>(
-    object.status === 'ready' ? `/objects/${id}/settings` : null,
+    shownObject === null ? null : `/objects/${id}/settings`,
   );
-  const pause = useApi<PauseView>(object.status === 'ready' ? `/objects/${id}/pause` : null);
+  const pause = useApi<PauseView>(shownObject === null ? null : `/objects/${id}/pause`);
   const types = useApi<{ items: SensorTypeSummary[] }>(isSensor ? '/sensor-types' : null);
   const lookups = useApi<{ items: LookupSummary[] }>(isSensor ? '/lookups' : null);
 
@@ -256,10 +273,10 @@ export function ObjectDetailView(): React.JSX.Element {
   // header badge rolls up — the same computation the tree does, from the same source.
   const live = useStateStream(Number.isFinite(numericId) ? numericId : null);
 
-  if (object.status === 'loading') return <Loading what="the object" />;
   if (object.status === 'error') return <ErrorPanel error={object.error} retry={object.retry} />;
+  if (shownObject === null) return <Loading what="the object" />;
 
-  const detail = object.data;
+  const detail = shownObject;
   // In the URL, as the alarm list's filters are (`U-38` review): the channel table was swapped for
   // an error panel whenever a poll of its values failed (now only when no readings are held,
   // `U-71`), so a choice held inside it was dropped by one failed poll and every retired row came

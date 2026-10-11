@@ -359,6 +359,9 @@ describe(
       assert.equal(moved.statusCode, 200, moved.body);
       assert.equal((await rows(id))[0]?.lookup_id, 'ms.operator.choice');
       assert.deepEqual(await redeclaredEntries(id), [], 'an edit that changed no channel said so');
+      // Kept because the declaration did not move, which the type could answer for: nothing to
+      // say in the reply (`U-36` is only the unanswered case).
+      assert.equal('lookupsKept' in moved.json<object>(), false);
 
       // An edit that is about the lookup is the later decision.
       const relooked = await edit(id, { oid: '1.3.6.1.4.1.9.3.0', lookup: 'ms.test.newer' });
@@ -544,6 +547,11 @@ describe(
         'the operator’s lookup was replaced by an edit that could not tell it was theirs',
       );
       assert.deepEqual(await redeclaredEntries(id), []);
+      // Said in the reply too (`U-36`), and on that reply only: a read does not carry it.
+      assert.deepEqual(edited.json<{ lookupsKept?: unknown }>().lookupsKept, ['value']);
+      const read = await app.inject({ method: 'GET', url: `/api/v1/objects/${String(id)}` });
+      assert.equal(read.statusCode, 200, read.body);
+      assert.equal('lookupsKept' in read.json<object>(), false, 'a read carries lookupsKept');
 
       const said = lines
         .map((line) => JSON.parse(line) as Record<string, unknown>)

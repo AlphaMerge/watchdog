@@ -39,6 +39,20 @@ export function ParamsForm({
   const [failed, setFailed] = useState<ApiError | null>(null);
   const [serverProblems, setServerProblems] = useState<readonly FieldProblem[]>([]);
   const [saved, setSaved] = useState(false);
+  /** What the last accepted save's reply said it left alone (`U-36`). */
+  const [lookupsKept, setLookupsKept] = useState<readonly string[]>([]);
+
+  // **A saved edit is a new version of the sensor, and the form starts again from it.** The page
+  // keeps this form mounted through the re-read a save asks for (`U-36`), so what was typed has
+  // to be put back to what the core now holds — a value the core normalised, a secret now
+  // stored — or the form would call itself changed the moment it was saved. Set while rendering,
+  // as React's guide has a prop-derived reset done, so no render shows the stale values.
+  const [basis, setBasis] = useState(detail.version);
+  if (basis !== detail.version) {
+    setBasis(detail.version);
+    setValues(stored);
+    setReplacing(new Set());
+  }
 
   // Memoised on the type rather than derived inline: a fresh `{}` every render would rebuild the
   // field models, and with them the identities the form's own memos hang off.
@@ -73,6 +87,7 @@ export function ParamsForm({
     setFailed(null);
     setServerProblems([]);
     setSaved(false);
+    setLookupsKept([]);
 
     // `If-Match` is required on PATCH, and it is required for a reason: two operators with this
     // form open is the realistic collision, and under last-write-wins the second save silently
@@ -83,8 +98,9 @@ export function ParamsForm({
       { kind: 'sensor', params: values },
       { 'if-match': `W/"${String(detail.version)}"` },
     )
-      .then(() => {
+      .then((reply) => {
         setReplacing(new Set());
+        setLookupsKept(reply.lookupsKept ?? []);
         setSaved(true);
         onSaved();
       })
@@ -164,10 +180,20 @@ export function ParamsForm({
               {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'} attention
             </span>
           )}
+        </div>
+
+        {/* **An accepted save, in a region always there and empty until one** (`U-36`), for the
+          reason the refusal's is (`U-41`): the line used to be added with its text in it, which is
+          not reliably said. Polite, since nothing went wrong; said whole, by the status role's own
+          atomicity. Emptied by the next save and by any change. */}
+        <div role="status" className="mt-2 text-xs empty:mt-0">
           {saved && !dirty && (
-            <span className="text-xs text-up-fg" role="status">
-              Saved. The probe picks the change up on its next configuration push.
-            </span>
+            <>
+              <p className="text-up-fg">
+                Saved. The probe picks the change up on its next configuration push.
+              </p>
+              {lookupsKept.length > 0 && <LookupsKept channels={lookupsKept} />}
+            </>
           )}
         </div>
 
@@ -193,6 +219,44 @@ export function ParamsForm({
         </div>
       </div>
     </form>
+  );
+}
+
+/**
+ * The edit was saved, but a lookup it declares was not applied (`U-36`, `P-311`).
+ *
+ * The sensor's type cannot say what its stored parameters declared — they were written by an
+ * older build, say — so a lookup set by hand on the channel cannot be told from the one the type
+ * set, and the core leaves the lookup as it is rather than overwrite an operator's choice. Said
+ * after *Saved*, in text and not by colour alone, naming each channel, with the way forward: the
+ * operator who made the edit is the one who knows whether the kept lookup is still right. No form
+ * here sets a channel's lookup, so it says where one is set.
+ */
+function LookupsKept({ channels }: { channels: readonly string[] }): React.JSX.Element {
+  const one = channels.length === 1;
+  return (
+    <div className="mt-1 text-text">
+      <p>
+        {one
+          ? 'One channel kept its lookup'
+          : `${String(channels.length)} channels kept their lookup`}
+        : this sensor’s stored parameters can no longer be read by its type, so a lookup chosen by
+        hand could not be told from the one the type set, and the edit left {one ? 'it' : 'them'} as{' '}
+        {one ? 'it was' : 'they were'}. The Channels table shows the lookup{' '}
+        {one ? 'it has' : 'each has'}; a channel’s lookup is set through the API, at{' '}
+        <code className="font-mono">
+          PATCH /api/v1/objects/{'{id}'}/channels/{'{key}'}
+        </code>
+        .
+      </p>
+      <ul className="mt-1 list-disc pl-5">
+        {channels.map((key) => (
+          <li key={key}>
+            Channel <code className="font-mono">{key}</code>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

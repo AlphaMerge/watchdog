@@ -106,6 +106,13 @@ export type ObjectDetail =
        * established that a secret is absent from a read rather than masked in it.
        */
       readonly redactedParams: readonly string[];
+      /**
+       * On an edit's reply only (`U-36`): the channels whose lookup the edit's parameters declare
+       * differently and which were left as they are, because the type could not say what the
+       * stored parameters declared, so an operator's choice could not be told from the type's
+       * (`P-311`). Absent when there were none, and on every read.
+       */
+      readonly lookupsKept?: readonly string[];
     });
 
 export type ObjectOfKind<K extends ObjectKind> = Extract<ObjectDetail, { kind: K }>;

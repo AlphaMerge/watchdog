@@ -2198,7 +2198,7 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 
 **Body** — [ms:createObject](#schema-ms-createobject)
 
-**201** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**201** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **201** is [ms:objectDetail](#schema-ms-objectdetail)
 
@@ -2208,7 +2208,7 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 | --- | --- | --- | --- |
 | `include` | query | string, at most 200 characters |  |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **200** is [ms:objectDetail](#schema-ms-objectdetail)
 
@@ -2247,7 +2247,7 @@ One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in th
 | `include` | query | string, at most 200 characters |  |
 | `id` | path | integer, 1–9007199254740991 | **required** |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **200** is [ms:objectDetail](#schema-ms-objectdetail)
 
@@ -2261,7 +2261,7 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 
 **Body** — [ms:updateObject](#schema-ms-updateobject)
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **200** is [ms:objectDetail](#schema-ms-objectdetail)
 
@@ -2297,7 +2297,7 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 | --- | --- | --- | --- |
 | `move` | `up` · `down` · `first` · `last` | **required** |  |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **200** is [ms:objectDetail](#schema-ms-objectdetail)
 
@@ -2481,7 +2481,7 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 | --- | --- | --- | --- |
 | `addresses` | string[], at most 16 items, each 1–64 characters | **required** |  |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **200** is [ms:objectDetail](#schema-ms-objectdetail)
 
@@ -4459,6 +4459,7 @@ one of 4 shapes, by `kind`
 | `sensorType` | string |  |  |
 | `params` | object |  |  |
 | `redactedParams` | string[] |  |  |
+| `lookupsKept` | string[] |  | On an edit’s reply only: the channels whose lookup the new parameters declare differently and that were kept, because the sensor type could not say what the stored parameters declared (U-36, P-311). Absent when there were none. |
 | `settings` | [ms:settingView](#schema-ms-settingview)[] |  |  |
 | `channels` | [ms:channelRecord](#schema-ms-channelrecord)[] |  |  |
 | `credentials` | [ms:credentialView](#schema-ms-credentialview)[] |  |  |

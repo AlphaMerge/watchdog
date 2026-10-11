@@ -2446,11 +2446,14 @@ export class ObjectService {
     sensorType: string,
     storedParams: Record<string, unknown>,
     params: Record<string, unknown>,
-  ): Promise<readonly ChannelRedeclaration[]> {
+  ): Promise<{
+    readonly changes: readonly ChannelRedeclaration[];
+    readonly lookupsKept: readonly string[];
+  }> {
     const next = this.#sensorTypes.channelsFor(sensorType, params);
     const answer = this.#sensorTypes.storedChannelsFor(sensorType, storedParams);
     const stored = answer.kind === 'declared' ? answer.channels : null;
-    if (stored !== null && isDeepStrictEqual(stored, next)) return [];
+    if (stored !== null && isDeepStrictEqual(stored, next)) return { changes: [], lookupsKept: [] };
 
     const plan = planRedeclaration(stored, next, await this.#repo.declaredChannels(q, id));
     if (plan.kind === 'refused') {
@@ -2484,7 +2487,12 @@ export class ObjectService {
           'operator chose cannot be told from the one the type wrote',
       );
     }
-    return plan.changes;
+    // Said in the reply as well as the log (`U-36`): the operator who made the edit is the one
+    // who can say whether the kept lookup is still right.
+    return {
+      changes: plan.changes,
+      lookupsKept: answer.kind === 'unanswered' ? plan.lookupsKept : [],
+    };
   }
 
   /** A node's input as `create` would have normalised it, with its parent id filled in. */
@@ -2563,10 +2571,10 @@ export class ObjectService {
       // What the new parameters change about the channels the sensor has (`P-303`): written to
       // match, or the edit refused when it would turn one from a counter into a gauge or back.
       // After the precondition, so a stale writer hears 412 first.
-      const redeclared =
+      const { changes: redeclared, lookupsKept } =
         before.kind === 'sensor' && applied.kind === 'sensor' && applied.params !== undefined
           ? await this.#redeclareChannels(q, id, before.sensorType, before.params, applied.params)
-          : [];
+          : { changes: [], lookupsKept: [] };
       // Writing a channel bumps the sensor's version by trigger, so the row read before it would
       // hand the caller an ETag that 412s on its own next write (the trap `P-29` closed for a
       // create).
@@ -2634,7 +2642,11 @@ export class ObjectService {
       // After the device's own entry, so its history reads in the order it happened.
       if (repointed) await this.#clearSecretsSentElsewhere(q, actor, [id]);
 
-      return safeAfter;
+      // On the reply, never in the audit entry above: it is what this edit left, not a field of
+      // the sensor (`U-36`).
+      return safeAfter.kind === 'sensor' && lookupsKept.length > 0
+        ? { ...safeAfter, lookupsKept: [...lookupsKept] }
+        : safeAfter;
     });
   }
 
