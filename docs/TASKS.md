@@ -30887,11 +30887,42 @@ because each is a decision rather than a defect:
       the configuration pushed when the flap ends, or the cost is judged not worth it and
       said here.
 
-- [ ] **R-11 — a sensor re-decided when its probe comes back says nothing** · XS · R-05,
+- [x] **R-11 — a sensor re-decided when its probe comes back says nothing** · XS · R-05,
       A-78 · Found 2026-10-11 by `A-78`. Leaving `unknown`/`probe` for the state its last
       scan decided writes that state with an empty message until the next scan, as a
       release from `A-29`'s set did before `A-78`. **Done when** it carries a sentence of its
       own (as `RELEASED_FROM_WITHHOLDING`) with a test, or the silence is decided right.
+
+      **R-11 outcome.** Fixed. No migration, no protocol number.
+      - **The words were already there, and dropped.** Every path that lets a sensor go from
+        `unknown`/`probe` passed a sentence: the probe answering again, a move to another
+        probe, the probe's clock passing the sensor's last result. `SensorStateService
+        .reevaluate` kept a caller's words only for an operator-decided state, and a state the
+        last reading decides is not one. Now a sensor leaving `unknown`/`probe` carries the
+        words of the caller that let it go, **when that caller says it speaks for the probe**
+        (`sources: ['probe']`). Any other caller's words are about something else, and it
+        says nothing rather than the wrong thing (`releasedMessage`, beside `A-78`'s rule for
+        `access`).
+      - **The probe paths say so.** `ProbeReachability` (lost, found, the tree resync and its
+        retry) and `ClockFreeze` (freeze, thaw, the probe's alarm) pass `sources: ['probe']`,
+        and `StateReevaluator` now requires it. A side effect, and the right one: a sensor these
+        paths re-decide into a state another cause owns (a pause, a simulated error) takes that
+        cause's words and not the probe's (`P-94`). The two sentences for the way back end
+        "until its next result it stands where it stood before", as `A-78`'s does.
+      - **Tests.** `probe-offline.test.ts`: the return carries the words on the sensor and on
+        its transition, and a caller that does not speak for the probe lets go in none.
+        `clock-freeze.test.ts`: every frozen row in the table reads Up with the thaw's words
+        once thawed, on the real tables. `docs/state-machine.md` gains the row for leaving
+        `unknown`/`probe`.
+      - **Mutation:** 3 of 3 killed (a probe release silent again, any caller's words taken,
+        the probe paths speaking for no cause). Core 5,274.
+
+- [x] **P-398 — the dev SQL Server always reads unhealthy** · XS · — · Found 2026-10-11 by
+      `A-74`. The `mssql` service's healthcheck ran `</dev/tcp/127.0.0.1/1433` under
+      `/bin/sh`, which in `azure-sql-edge` is dash: dash has no `/dev/tcp`, so the check
+      failed while the server answered. It now runs under `bash`, which the image has
+      (checked in the running container: `/bin/sh` → `/bin/dash`, `bash -c` connects). A
+      running container keeps its old check until it is recreated.
 
 - [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A

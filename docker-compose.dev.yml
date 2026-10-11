@@ -163,7 +163,8 @@ services:
       - '127.0.0.1:1433:1433'
     healthcheck:
       # Edge ships no `sqlcmd`, so this is the plainest thing that proves the listener is up.
-      test: ['CMD', '/bin/sh', '-c', '</dev/tcp/127.0.0.1/1433']
+      # Under bash: the image's /bin/sh is dash, which has no /dev/tcp and always failed (P-398).
+      test: ['CMD', 'bash', '-c', '</dev/tcp/127.0.0.1/1433']
       interval: 10s
       timeout: 5s
       retries: 20

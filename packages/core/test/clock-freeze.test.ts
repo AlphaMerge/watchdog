@@ -14,6 +14,7 @@ import {
   CLOCK_FREEZE_TOLERANCE_MS,
   ClockFreeze,
   FROZEN_MESSAGE,
+  THAWED_MESSAGE,
   type ClockFreezeOptions,
 } from '../src/probes/clock-freeze.js';
 import { ClockFreezeSync } from '../src/probes/clock-freeze-sync.js';
@@ -323,6 +324,14 @@ describe(
           offsets.set(probe, -HOUR);
           await freeze.sweep();
           assert.equal(freeze.frozenSensors().size, 0);
+          if (row.frozen) {
+            // And says so until its next result (`R-11`), where it said nothing.
+            const runtime = await runtimeOf(ping);
+            assert.deepEqual(
+              { state: runtime.state, message: runtime.message },
+              { state: 'up', message: THAWED_MESSAGE },
+            );
+          }
         });
       }
 
@@ -718,7 +727,7 @@ describe('one sensor in two probes’ sets (`P-239`)', () => {
     assert.equal(freeze.carrierOf(5), undefined);
     assert.deepEqual(
       reevaluated.filter((call) => call.ids.includes(5)).map((call) => call.message),
-      ["the probe's clock has passed the last result this sensor accepted"],
+      [THAWED_MESSAGE],
       'thawed once, when the last set let it go',
     );
   });

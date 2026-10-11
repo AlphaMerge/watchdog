@@ -33,9 +33,16 @@ export interface StateReevaluator {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: { message: string },
+    /**
+     * The words, and the one cause they speak for: the probe's (`R-11`). A sensor this lets go
+     * carries them until its next result, and one it holds for the probe carries them while held.
+     */
+    cause: { message: string; sources: readonly 'probe'[] },
   ): Promise<number>;
 }
+
+/** What the probe paths speak for when they re-decide a sensor (`R-11`). */
+export const PROBE_SOURCE: readonly 'probe'[] = ['probe'];
 
 export interface ProbeReachabilityOptions {
   db: Db;
@@ -306,6 +313,7 @@ export class ProbeReachability {
       const moved = await savepoint(q, async (inner) => {
         const count = await this.#states.reevaluate(inner, redecide, this.#now(), {
           message: 'the probe carrying this sensor changed',
+          sources: PROBE_SOURCE,
         });
         // In the same transaction: a master that has just become Unknown is not Down, so anything
         // it was holding is released here rather than at whatever recomputes next (`P-135`).
@@ -338,6 +346,7 @@ export class ProbeReachability {
       const moved = await this.#db.tx(async (q) => {
         const count = await this.#states.reevaluate(q, owed, this.#now(), {
           message: 'the probe carrying this sensor changed',
+          sources: PROBE_SOURCE,
         });
         await this.#dependencies.recompute(q, this.#now());
         return count;
@@ -492,6 +501,7 @@ export class ProbeReachability {
               reason === 'link'
                 ? 'the probe carrying this sensor stopped answering'
                 : 'the probe carrying this sensor is connected but has stopped sending results',
+            sources: PROBE_SOURCE,
           },
         );
         // **The dependents of a master under this probe** (`P-135`). The master is Unknown now,
@@ -571,7 +581,10 @@ export class ProbeReachability {
     try {
       moved = await this.#db.tx(async (q) => {
         const count = await this.#states.reevaluate(q, [...sensorIds, ...alarms], this.#now(), {
-          message: 'the probe carrying this sensor is answering again',
+          message:
+            'the probe carrying this sensor is answering again; until its next result it ' +
+            'stands where it stood before the probe was lost',
+          sources: PROBE_SOURCE,
         });
         // And the other direction: a master that is Down again holds what it should.
         await this.#dependencies.recompute(q, this.#now());

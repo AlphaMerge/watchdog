@@ -205,6 +205,27 @@ const DEFAULT_MAX_CACHED = 20_000;
 export const RELEASED_FROM_WITHHOLDING =
   'No longer withheld. Until its next result it stands where it stood before it was withheld.';
 
+/**
+ * What a sensor leaving a hold for the state its facts decide says until its next result
+ * (`A-78`, `R-11`), and '' when it leaves anything else.
+ *
+ * - **`access`**: `RELEASED_FROM_WITHHOLDING`, whoever re-decided it. The words of a hold are the
+ *   voucher check's, and it lets go with none of its own.
+ * - **`probe`**: the words of the caller that let it go, when that caller says it speaks for the
+ *   probe (`sources` naming it): the probe answering again, a sensor moved to another probe, the
+ *   probe's clock passing the sensor's last result. Any other caller's words are about something
+ *   else, and nothing is said rather than the wrong thing. Before `R-11` those words were passed
+ *   and dropped.
+ */
+function releasedMessage(
+  from: SensorStateCause,
+  cause: { message: string; sources?: readonly SensorStateCause[] },
+): string {
+  if (from === 'access') return RELEASED_FROM_WITHHOLDING;
+  if (from === 'probe' && cause.sources?.includes('probe') === true) return cause.message;
+  return '';
+}
+
 export class SensorStateService {
   readonly #db: Database;
   readonly #logger: Logger;
@@ -544,13 +565,11 @@ export class SensorStateService {
       // A withheld sensor's words come from the voucher check whoever re-decided it (`A-29`):
       // they are the only ones that say what fixes it, and they are held with the fact.
       //
-      // **Let go by the voucher check, it says so** (`A-78`): its state is the one it had before
-      // it was withheld, and an Up or a Down with nothing beside it said neither that nor why.
+      // **Let go from a hold, it says so** (`A-78`, `R-11`): its state is the one it had before
+      // it was held, and an Up or a Down with nothing beside it said neither that nor why.
       const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
       const message = !operatorDecided(decision)
-        ? runtime.cause === 'access'
-          ? RELEASED_FROM_WITHHOLDING
-          : ''
+        ? releasedMessage(runtime.cause, cause)
         : (this.#withheldMessage(sensorId, decision) ??
           (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
       transitions.push({

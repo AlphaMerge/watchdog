@@ -2,7 +2,7 @@ import { describeError, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { ProbeLink } from '../transport/probe-endpoint.js';
-import type { DependencyRecomputer, StateReevaluator } from './reachability.js';
+import { PROBE_SOURCE, type DependencyRecomputer, type StateReevaluator } from './reachability.js';
 
 /**
  * How far a sensor's last result may be ahead of its probe's clock before the sensor is frozen.
@@ -19,7 +19,10 @@ export const FROZEN_MESSAGE =
   "the probe's clock reads earlier than the last result this sensor accepted, so nothing it " +
   'measures can be applied until its clock passes that; set the probe host clock';
 
-const THAWED_MESSAGE = "the probe's clock has passed the last result this sensor accepted";
+/** What a thawed sensor says until its next result (`R-11`), where it said nothing. */
+export const THAWED_MESSAGE =
+  "the probe's clock has passed the last result this sensor accepted; until its next result " +
+  'it stands where it stood before';
 
 /**
  * The sensors under a probe (`$1`), not of a core-evaluated type (`$2`), whose last result is
@@ -291,15 +294,24 @@ export class ClockFreeze {
       const at = this.#now();
       let count = 0;
       if (entered.length > 0) {
-        count += await this.#states.reevaluate(q, entered, at, { message: FROZEN_MESSAGE });
+        count += await this.#states.reevaluate(q, entered, at, {
+          message: FROZEN_MESSAGE,
+          sources: PROBE_SOURCE,
+        });
       }
       if (thawed.length > 0) {
-        count += await this.#states.reevaluate(q, thawed, at, { message: THAWED_MESSAGE });
+        count += await this.#states.reevaluate(q, thawed, at, {
+          message: THAWED_MESSAGE,
+          sources: PROBE_SOURCE,
+        });
       }
       // The probe's own alarm, so what a trigger sees on it moves with them (`M-22`).
       const alarms = this.#probeAlarms(probeObjectId);
       if (alarms.length > 0) {
-        await this.#states.reevaluate(q, alarms, at, { message: THAWED_MESSAGE });
+        await this.#states.reevaluate(q, alarms, at, {
+          message: THAWED_MESSAGE,
+          sources: PROBE_SOURCE,
+        });
       }
       // As for a lost probe (`P-135`): a master that is Unknown is not Down, so whatever it
       // held is released, and one that is thawed may hold them again.

@@ -725,6 +725,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | any                 | `paused`            | Any pause source becomes active                    | first active (§3)      |
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
+| `unknown` (`probe`) | `up` / `warning` / `down` / `unknown` | Its probe answers again, it moved to another probe, or the probe's clock passed its last result: its last reading decides until the next one, and its message says which (`R-11`) | `scan` / `limit` / `lookup` |
 | any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled; or the sensor is outside its credentials' bounds (`A-41b`) | `access` |
 | `unknown` (`access`) | `up` / `warning` / `down` / `unknown` | Vouched for again: its last reading decides, as when a probe returns, until the next one, and its message says so (`A-78`) | `scan` / `limit` / `lookup` |
 | any but `paused`    | `down`              | Simulated error set                                | `simulated`            |

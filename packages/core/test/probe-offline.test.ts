@@ -137,6 +137,24 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
     return rows[0];
   };
 
+  /** The words on the sensor now, and on its last transition. */
+  const messagesOf = async (
+    sensorId: number,
+  ): Promise<{ runtime: string | undefined; history: string | undefined }> => {
+    const [runtime] = await db.query<{ message: string }>(
+      'SELECT message FROM sensor_runtime WHERE object_id = $1',
+      [sensorId],
+    );
+    const [history] = await db.query<{ message: string }>(
+      'SELECT message FROM sensor_state WHERE sensor_id = $1 ORDER BY time DESC LIMIT 1',
+      [sensorId],
+    );
+    return { runtime: runtime?.message, history: history?.message };
+  };
+  const RETURNED =
+    'the probe carrying this sensor is answering again; until its next result it stands where ' +
+    'it stood before the probe was lost';
+
   it('turns its sensors Unknown, never Down', async () => {
     await scanned();
     assert.equal((await stateOf(sensorIds[0] ?? 0))?.state, 'up');
@@ -222,7 +240,38 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
 
     for (const sensorId of sensorIds) {
       assert.equal((await stateOf(sensorId))?.state, 'up');
+      // And says why it is Up with nothing measured since (`R-11`), where it said nothing.
+      assert.deepEqual(await messagesOf(sensorId), {
+        runtime: RETURNED,
+        history: RETURNED,
+      });
     }
+  });
+
+  it('says nothing of the probe when something else lets a sensor go from it (R-11)', async () => {
+    // Words that are about something else are not the probe's to give: a caller that does not
+    // speak for the probe lets go in none, as before.
+    await scanned();
+    await reachability.lost(probeId);
+    const [sensorId] = sensorIds;
+    assert.ok(sensorId !== undefined);
+    // The probe is back as far as this state service knows, and the first to re-decide the
+    // sensor is not the probe's path.
+    const unaware = new SensorStateService({
+      db,
+      logger: silentLogger,
+      settings: harness.resolver,
+      pauses: new PauseRepository(),
+      unreachableSensors: () => new Set<number>(),
+    });
+    await db.tx((q) =>
+      unaware.reevaluate(q, [sensorId], new Date(), {
+        message: 'resumed by somebody',
+        sources: ['user'],
+      }),
+    );
+    assert.equal((await stateOf(sensorId))?.state, 'up');
+    assert.deepEqual(await messagesOf(sensorId), { runtime: '', history: '' });
   });
 
   it('re-decides on the sensor’s own failure policy, not the default', async () => {
