@@ -1122,6 +1122,84 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
     }
   });
 
+  it('takes a batch sent after the welcome only once the first configuration is built (A-83)', async () => {
+    // What a configuration withholds is held in memory and rebuilt by the first configuration a
+    // restarted core builds for the probe (`A-72`, `A-78`). A spooled result taken before that
+    // would decide a withheld sensor out of Unknown, and the build would withhold it again: a
+    // page and its recovery for nothing. A probe drains its spool from the welcome, and the
+    // welcome and the first build are queued in the same turn, on the one chain the session's
+    // batches join: so a batch waits for the build, through the registry `main.ts` uses.
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const results: ResultReceiver = {
+      acceptProbeResults: (_origin, message) => {
+        order.push(`results ${message.batchId}`);
+        return Promise.resolve({
+          type: 'results-ack',
+          batchId: message.batchId,
+          storedSamples: message.results.length,
+          retryAfterMs: 0,
+        });
+      },
+    };
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir, { heartbeatIntervalMs: 30_000 }),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      results,
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: async () => {
+          order.push('build asked');
+          await held;
+          order.push('build done');
+          return { version: 'v1', sensors: [], stamps: new Map<number, string>() };
+        },
+        touch: () => Promise.resolve(),
+      },
+      registry: {
+        admit: () => Promise.resolve({ kind: 'approved' as const, gid: 'restarted', objectId: 7 }),
+      },
+    });
+    const address = await endpoint.start();
+    try {
+      const probe = await TestProbe.connect(dir, address.port);
+      probe.send(hello({ gid: 'restarted' }));
+      await probe.waitFor((m) => m.type === 'welcome');
+      // At once, as the drain does.
+      probe.send({
+        type: 'results',
+        batchId: 'spooled',
+        results: [
+          {
+            sensorId: 42,
+            at: '2026-08-20T10:00:00.000Z',
+            outcome: 'ok',
+            message: '',
+            durationMs: 3,
+            channels: [{ key: 'rtt', value: 12 }],
+          },
+        ],
+      });
+      // A heartbeat is answered behind nothing, so the batch has arrived once its ack is here.
+      probe.send({ type: 'heartbeat', seq: 1, sentAt: new Date().toISOString() });
+      await probe.waitFor((m) => m.type === 'heartbeat-ack');
+      assert.deepEqual(order, ['build asked'], 'the batch waits while the build is held');
+
+      release();
+      const ack = await probe.waitFor((m) => m.type === 'results-ack');
+      assert.equal(ack.type, 'results-ack');
+      assert.deepEqual(order, ['build asked', 'build done', 'results spooled']);
+      probe.close();
+    } finally {
+      release();
+      await endpoint.stop();
+    }
+  });
+
   it('ages a batch from when it arrived, not from when the probe stamped it', async () => {
     // **The trap `P-74`'s whole design turns on, tested where it can actually fail** (`P-83`).
     //

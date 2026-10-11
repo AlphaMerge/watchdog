@@ -30861,7 +30861,7 @@ because each is a decision rather than a defect:
         version. So the list of version refusals it mutated is gone, and the refusal is asked
         again at the spoken version whatever it is.
 
-- [ ] **A-83 — results that reach a restarted core before the probe's first configuration**
+- [x] **A-83 — results that reach a restarted core before the probe's first configuration**
       · S · A-78 · Found 2026-10-11 by `A-78`. What a probe's configuration withholds is held
       in memory (`#withheldByProbe`, and `SensorVouching`'s live fact) and rebuilt by the first
       configuration the restarted core builds for it. `ProbeEndpoint.#queueResults` hands a
@@ -30875,6 +30875,29 @@ because each is a decision rather than a defect:
       session's result batches behind its first configuration, under a bound, and as before
       once the bound has passed. **Done when** fixed with a scenario test on the real tables
       (stored withheld sensor, a restart, a spooled result first) or decided to keep.
+
+      **A-83 outcome.** Nothing to fix for a probe of ours: the premise, written in `A-78`, was
+      wrong, and is pinned now. No code change, no migration, no protocol number.
+      - **A batch already waits for the first build.** The probe drains its spool from the
+        `welcome` (`CoreClient`, `setState('connected')`). The core sends the welcome and queues
+        the first configuration in the same turn, on both admission branches, and on
+        `session.pending`, the chain every batch of the session joins. So a batch sent after
+        the welcome reaches ingestion only once `assignmentsFor` has returned, and with it
+        `CredentialVouching.withhold`, which rebuilds what is held. Read wrongly in `A-78` as
+        "as soon as the probe is known".
+      - **Pinned** (`probe-endpoint.test.ts`, through the registry `main.ts` uses): a build held
+        open, a batch sent the moment the welcome lands, and a heartbeat answered behind
+        nothing. The batch is not taken while the build is held, and is taken after it.
+        Mutation: 2 of 2 killed (the batch chained on `known` alone instead of the session's
+        chain; the first build queued 30 ms after the welcome).
+      - **Kept, two cases where a batch is taken without the build.**
+        - **A batch sent before the welcome**, during the admission, is chained ahead of the
+          build (`P-307`'s test sends exactly that). Our probe never sends one.
+        - **A first build that fails**: the connection stays up and results are taken, by
+          design (`could not build this probe's configuration`, at `error`). Withholding
+          results until a build succeeds would stall a probe on a database fault.
+        Both need a spooled result for a sensor the core before the restart withheld, which
+        the probe was not sent after it was withheld.
 
 - [ ] **A-84 — `main.ts`'s flap-over wiring has not been run** · S · A-78 · Found
       2026-10-11 by `A-78`. `onProtocolFlapOver` → `configNotifier.flush()` is asserted on
