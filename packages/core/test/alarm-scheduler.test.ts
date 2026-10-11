@@ -17,6 +17,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { pollWithin } from './support/within.js';
+import { otherTimers, watchNotifierTimers } from './support/notifier-timers.js';
 import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
@@ -508,21 +509,32 @@ describe(
         );
       }
       await downTrigger({ initialLatencySeconds: 30 });
-      scheduler.start();
-      await sleep(50);
-      const idle = timerCount();
+      // The notification code's own timers, `unref`'d included: the scheduler's is, and a count
+      // of the timers holding the process open never saw it (`P-252`).
+      const notifier = watchNotifierTimers();
+      try {
+        scheduler.start();
+        // Seen before it is relied on, or a count that cannot see it passes whatever happens.
+        await until(() => notifier.live() === 1, 'the scheduler’s timer to be seen');
+        await sleep(50);
+        const others = otherTimers(db);
 
-      await scan(sensors, false);
-      await scan(sensors, false);
-      assert.equal((await alarmsStanding()).length, sensors.length, 'all of them are pending');
-      await sleep(100);
-      // Never *more*, rather than exactly the same: between cycles the scheduler is momentarily
-      // holding no timer at all, so equality would assert when the sample was taken.
-      assert.ok(timerCount() <= idle, 'the process holds no more timers than when idle');
+        await scan(sensors, false);
+        await scan(sensors, false);
+        assert.equal((await alarmsStanding()).length, sensors.length, 'all of them are pending');
+        await sleep(100);
+        // At most one, rather than exactly one: between cycles the scheduler is momentarily
+        // holding no timer at all, so equality would assert when the sample was taken.
+        assert.ok(notifier.live() <= 1, `${String(notifier.live())} timers with alarms pending`);
+        assert.ok(otherTimers(db) <= others, 'and nothing else took a timer per alarm');
 
-      await scan(sensors, true);
-      assert.deepEqual(await alarmsStanding(), [], 'and all of them cancel together');
-      assert.ok(timerCount() <= idle);
+        await scan(sensors, true);
+        assert.deepEqual(await alarmsStanding(), [], 'and all of them cancel together');
+        assert.ok(notifier.live() <= 1);
+        assert.ok(otherTimers(db) <= others);
+      } finally {
+        notifier.stop();
+      }
     });
 
     it('counts what it did, for Core Health', async () => {
@@ -627,18 +639,7 @@ describe(
   },
 );
 
-/**
- * How many timers this process is holding.
- *
- * `process.getActiveResourcesInfo()` names every handle the event loop knows about; counting the
- * `Timeout`s is the only way to assert "one timer, not one per sensor" without reaching into
- * Node's internals.
- */
 /** A moment far enough ahead that anything still armed would be overdue. */
 function hence(ms: number): Date {
   return new Date(Date.now() + ms);
-}
-
-function timerCount(): number {
-  return process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
 }

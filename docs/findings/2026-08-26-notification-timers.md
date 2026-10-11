@@ -49,6 +49,19 @@ the alarms — the same sequence and the same order that ingestion uses.
 | Recovery — **cancelling all 2,000**             | 74 ms  |
 | Firing 4,000 due steps after an hour            | 189 ms |
 
+> **Corrected by `P-252` (2026-10-11).** The timer counts in the next paragraph measured the
+> wrong timers. `process.getActiveResourcesInfo()` names only the handles keeping the process
+> alive, and the scheduler `unref`s its timer, so the count never included it: the 2 were the
+> database pool's idle clients, each of which holds a timer of its own, and the test failed under
+> load when the pool held one more client at one sample than at another. The test now counts the
+> timers started from `src/notifications/`, `unref`'d included, and separately everything else
+> holding the process net of the pool's idle clients. Re-measured on 2026-10-11, twelve runs
+> beside another toolchain container at load 4–8: **notifier timers 1 idle, 1 with 2,000 chains
+> pending (0 once, sampled between cycles), 1 after they all cancelled; other timers 0, 0, 0.**
+> With an `unref`'d timer per sensor added to the engine, it reads 10,001 with 2,000 pending and
+> fails. The original count read 0 throughout for that mutant. The paragraph
+> below is kept as it was written.
+
 **Timers held by the process: 2 idle, 2 with 2,000 chains pending, 1–2 after they all
 cancelled.** (Two, not one, because the test runner holds one of its own. The count sometimes
 reads one lower after the fact, because between cycles the scheduler is momentarily holding no

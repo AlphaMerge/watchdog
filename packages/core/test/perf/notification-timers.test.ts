@@ -14,6 +14,12 @@ import {
   type ScratchDatabase,
 } from '../support/database.js';
 import { buildHarness, silent, testActor, type Harness } from '../support/tree.js';
+import { pollWithin } from '../support/within.js';
+import {
+  otherTimers,
+  watchNotifierTimers,
+  type NotifierTimers,
+} from '../support/notifier-timers.js';
 
 const available = await databaseAvailable();
 
@@ -55,6 +61,7 @@ describe(
     let engine: AlarmEngine;
     let scheduler: AlarmScheduler;
     const sensorIds: number[] = [];
+    let notifier: NotifierTimers;
     /**
      * A clock that only ever moves forward, shared by both measurements.
      *
@@ -71,6 +78,9 @@ describe(
     };
 
     before(async () => {
+      // Installed here and not where the suite is declared, so a skipped suite leaves
+      // `setTimeout` as it found it.
+      notifier = watchNotifierTimers();
       scratch = await createScratchDatabase('alarmperf');
       db = scratch.db;
       engine = new AlarmEngine({
@@ -121,6 +131,7 @@ describe(
     });
 
     after(async () => {
+      notifier.stop();
       scheduler.stop();
       await scratch.drop();
     });
@@ -154,8 +165,12 @@ describe(
 
     it(`arms, holds and cancels ${String(SENSORS)} chains with one timer`, async () => {
       scheduler.start();
+      // **Seen before it is relied on**: a count that could not see the scheduler's timer would
+      // read 0 everywhere and pass whatever the design did. The old count was exactly that.
+      await pollWithin(2_000, 'the scheduler’s timer to be seen', () => notifier.live() === 1);
+      const idleTimers = notifier.live();
       await sleep(50);
-      const idleTimers = timerCount();
+      const idleOthers = otherTimers(db);
 
       // Warning, then Down: the two-step rule (docs/state-machine.md §2.1).
       const first = await scanAll(false, tick());
@@ -169,10 +184,20 @@ describe(
         holds.push(await scanAll(false, tick()));
       }
 
-      const armedTimers = timerCount();
+      // **The database pool grown on purpose before the sample** (`P-252`). Each idle client
+      // holds a timer of its own, so a pool that happened to be holding one more client than at
+      // the idle sample — the scheduler's sweep, woken by the arming, took one while the scan
+      // held another — read as a timer per pending notification, and failed twice under load.
+      // Four at once makes that certain, so both counts are shown to be immune to it every run.
+      await Promise.all(Array.from({ length: 4 }, () => db.query('SELECT pg_sleep(0.05)')));
+      // Its size, not its idle clients: the scheduler's sweep may have one of them out now.
+      assert.ok(db.stats().total >= 4, 'the pool is holding more clients than at the start');
+      const armedTimers = notifier.live();
+      const armedOthers = otherTimers(db);
       const recoverAt = await scanAll(true, tick());
       assert.equal(await standing(), 0, 'and every one of them cancels');
-      const clearedTimers = timerCount();
+      const clearedTimers = notifier.live();
+      const clearedOthers = otherTimers(db);
 
       const worstHold = Math.max(...holds);
       // eslint-disable-next-line no-console -- the measurement is the point of this file
@@ -182,14 +207,16 @@ describe(
           `    arming ${String(SENSORS)} chains:      ${armAt.toFixed(0)} ms\n` +
           `    holding them (worst of 3):    ${worstHold.toFixed(0)} ms\n` +
           `    cancelling all of them:       ${recoverAt.toFixed(0)} ms\n` +
-          `    timers: ${String(idleTimers)} idle, ${String(armedTimers)} with ` +
-          `${String(SENSORS)} pending, ${String(clearedTimers)} after\n`,
+          `    notifier timers: ${String(idleTimers)} idle, ${String(armedTimers)} with ` +
+          `${String(SENSORS)} pending, ${String(clearedTimers)} after\n` +
+          `    other timers holding the process: ${String(idleOthers)} idle, ` +
+          `${String(armedOthers)} pending, ${String(clearedOthers)} after\n`,
       );
 
-      // The claim: the count never *grows* with the number of pending notifications. Not
-      // equality — between cycles the scheduler is momentarily holding no timer at all, so a
-      // sample taken then legitimately reads one fewer, and asserting equality would be
-      // asserting when the sample was taken rather than what the design does.
+      // The claim: one timer, never one per pending notification. At most rather than exactly —
+      // between cycles the scheduler is momentarily holding no timer at all, so a sample taken
+      // then legitimately reads none, and asserting equality would be asserting when the sample
+      // was taken rather than what the design does.
       assert.ok(
         armedTimers <= idleTimers,
         `${String(armedTimers)} timers with ${String(SENSORS)} pending, ${String(idleTimers)} idle`,
@@ -197,6 +224,15 @@ describe(
       assert.ok(
         clearedTimers <= idleTimers,
         `${String(clearedTimers)} timers after cancelling, ${String(idleTimers)} idle`,
+      );
+      // And nothing else in the process took a timer per notification either.
+      assert.ok(
+        armedOthers <= idleOthers,
+        `${String(armedOthers)} other timers with ${String(SENSORS)} pending, ${String(idleOthers)} idle`,
+      );
+      assert.ok(
+        clearedOthers <= idleOthers,
+        `${String(clearedOthers)} other timers after cancelling, ${String(idleOthers)} idle`,
       );
       for (const [label, ms] of [
         ['arming', armAt],
@@ -246,14 +282,3 @@ describe(
     });
   },
 );
-
-/**
- * How many timers this process is holding.
- *
- * `process.getActiveResourcesInfo()` names every handle the event loop knows about. Counting the
- * `Timeout`s is the only way to assert "one timer, not one per sensor" without reaching into
- * Node's internals — and it is the assertion the whole design rests on.
- */
-function timerCount(): number {
-  return process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
-}

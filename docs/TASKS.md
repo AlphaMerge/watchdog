@@ -8295,13 +8295,34 @@ because each is a decision rather than a defect:
       - reported as "max" and budgeted as a maximum.
       The entry says which, and why.
 
-- [ ] **P-252 — `notification-timers` reads an idle sample the database pool can spoil** ·
+- [x] **P-252 — `notification-timers` reads an idle sample the database pool can spoil** ·
       S · P-229 · Found 2026-10-04 by `P-229`. Its "2 timers with 2000 pending, 1 idle" case
       failed twice under load and passed on `main` and on `P-229` alike with nothing else
       running: whether it passes depends on whether the pool's idle-client timers are still
       pending when the idle sample is taken. **Done when** the sample counts only the
       notifier's own timers, or waits for the pool to be idle, and passes ten runs in a row
       beside one other container.
+
+      **P-252 outcome.** Worse than the ticket said: **the count never saw the notifier's timer at
+      all.** `process.getActiveResourcesInfo()` names only the handles keeping the process alive,
+      and the scheduler `unref`s its timer, so every sample counted the database pool's idle
+      clients, each of which holds a 10 s idle timer in `pg-pool`, and nothing else. The arming
+      wakes the scheduler, whose sweep takes a second client while the scan holds one, so the
+      pool sometimes held one more client at the armed sample than at the idle one: the
+      failure. A design with an `unref`'d timer per notification would have passed. The same
+      count was in `alarm-scheduler.test.ts`.
+      - **Fix**: `test/support/notifier-timers.ts`. `watchNotifierTimers` wraps `setTimeout`
+        and `clearTimeout` for the test and counts the live timers started from
+        `src/notifications/`, `unref`'d included; `otherTimers` keeps the old process-wide
+        count, less the pool's idle clients read in the same turn. Both tests use them and wait
+        to see the scheduler's timer before relying on the count. The perf test grows the pool
+        to four clients before the armed sample, so the old spoil happens on every run.
+      - **Measured**: twelve runs in a row beside another toolchain container, load 4–8: notifier
+        timers 1, 1 (0 once, between cycles), 1; other timers 0, 0, 0. With an `unref`'d timer
+        per sensor in the engine it reads 10,001 and fails, where the old count read 0. The old
+        count fails every run once the pool is grown (5 against 2).
+        `docs/findings/2026-08-26-notification-timers.md` carries a correction: its "2 idle, 2
+        pending" were pool timers.
 
 - [x] **P-250 — a log baseline taken only at a record counts a stall long over** · S · P-216,
       P-245 · Found 2026-09-29 by bc8184 while landing `P-245`, in `P-216` part 3. Probe Health
