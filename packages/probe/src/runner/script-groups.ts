@@ -199,6 +199,9 @@ function read(line: string): GroupEvent | null {
  */
 export const MAX_GROUPS_PER_CHECK = 16;
 
+/** The leader `starttime` of a group recorded after its leader was reaped: not a number, so no match. */
+const LEADER_GONE = 'reaped';
+
 /** What ending the left-behind groups came to. */
 export interface LeftBehind {
   /** Groups sent `SIGKILL`. */
@@ -222,8 +225,17 @@ export interface LeftBehind {
  * a process cannot choose to be another's child — and the only children of a check process are
  * what it spawned. A named process that fails any of these is refused and counted: that is a
  * forgery, or a check process killed so soon after its spawn that the script was orphaned before
- * its line was read. A named process that is not there at all is passed over, uncounted: a script
- * that ended at once, whose `ended` follows.
+ * its line was read.
+ *
+ * **A leader already reaped when its line is read** (`P-278`). The check process reaps its script
+ * the moment it exits, and the runner reads the line when its own loop gets to it, so a script
+ * that starts something and exits at once can be gone first, and its parent with it. What it left
+ * is still in group `N`, which keeps `N` allocated. So the members are read, as at the end: the
+ * group is recorded when every one is in session `N`, has the runner's uid when one is set, and
+ * started no earlier than the check process did. Then the most a forged line can have killed is
+ * what the check's own uid could kill, started while this check ran. A member that fails is a
+ * refusal, counted. No members: the script and all it started have gone, and nothing is
+ * recorded; nor is anything when the check process's own start could not be read.
  *
  * **At the end**, for each recorded group still open:
  * - `/proc/<N>` there with the recorded `starttime`: the same leader, alive or a zombie not yet
@@ -245,8 +257,13 @@ export class ScriptGroups {
   readonly #checkPid: number;
   readonly #uid: number | undefined;
   readonly #lines = new GroupLines();
-  /** Group id → its leader's `starttime`, as recorded at `started`. */
+  /**
+   * Group id → its leader's `starttime`, as recorded at `started`, or `LEADER_GONE` for a group
+   * recorded by its members (`P-278`), which no process at `N` can ever match.
+   */
   readonly #recorded = new Map<number, string>();
+  /** The check process's own `starttime`, read at its spawn; undefined when it could not be. */
+  readonly #checkStarted: bigint | undefined;
   #checked = 0;
   readonly refused: number[] = [];
 
@@ -254,6 +271,8 @@ export class ScriptGroups {
     this.#view = view;
     this.#checkPid = checkPid;
     this.#uid = uid;
+    const check = view.read(checkPid);
+    this.#checkStarted = check === null ? undefined : BigInt(check.starttime);
   }
 
   push(text: string): void {
@@ -276,7 +295,10 @@ export class ScriptGroups {
       return;
     }
     const entry = this.#view.read(pgid);
-    if (entry === null) return;
+    if (entry === null) {
+      this.#startedWithoutLeader(pgid);
+      return;
+    }
     const own =
       entry.pid === pgid &&
       entry.pgrp === pgid &&
@@ -284,6 +306,22 @@ export class ScriptGroups {
       entry.ppid === this.#checkPid &&
       (this.#uid === undefined || entry.uid === this.#uid);
     if (own) this.#recorded.set(pgid, entry.starttime);
+    else this.refused.push(pgid);
+  }
+
+  /** `started` for a group whose leader has been reaped, judged by its members (`P-278`). */
+  #startedWithoutLeader(pgid: number): void {
+    const since = this.#checkStarted;
+    if (since === undefined) return;
+    const members = this.#view.members(pgid);
+    if (members.length === 0) return;
+    const ours = members.every(
+      (member) =>
+        member.session === pgid &&
+        (this.#uid === undefined || member.uid === this.#uid) &&
+        BigInt(member.starttime) >= since,
+    );
+    if (ours) this.#recorded.set(pgid, LEADER_GONE);
     else this.refused.push(pgid);
   }
 

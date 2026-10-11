@@ -689,7 +689,9 @@ arguments and the variables — so treat both as untrusted input in every script
   script and what it started with `SIGKILL` as soon as that process has gone, and logs *a check
   process ended and left what it started running; this probe ended it* with the sensor's id. It
   first checks in `/proc` that the group is one the check's process started (its own session
-  leader, that process's child, of the user checks run as) and that its id has not since passed to
+  leader, that process's child, of the user checks run as; or, when the script had already gone
+  by the time the probe read its group, that every process left in it is in its session, of that
+  user, and started after the check's process) and that its id has not since passed to
   another process — once the script itself has gone, that every process left in its group is in
   its session and of that user; a group named by anything else is left alone and logged as *named
   process groups that are not its own*, or *whose id now names another process or group*. Probe

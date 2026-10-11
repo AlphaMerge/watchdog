@@ -10094,13 +10094,77 @@ because each is a decision rather than a defect:
           `probe-health-report`, 246/246; core `program-delivery`, `email-delivery`, 61/61. None
           skipped.
 
-- [ ] **P-278 — a script leader that exits before the runner reads its line is never recorded**
+- [x] **P-278 — a script leader that exits before the runner reads its line is never recorded**
       · S · P-266 · Found 2026-10-07 in `P-266`. A script whose leader exits before the runner
       reads its `started` line cannot be told from someone else's process once the leader is
       reaped, so it is not recorded. If the check process then dies outright, what the script
       left in its group keeps running. **Done when** the check process holds the leader unreaped
       (or passes a pidfd) until the runner has acknowledged the group, or the gap is measured and
       documented as accepted, with a test either way.
+
+      **P-278 outcome. The gap is closed in the runner. A group whose leader has gone by the time
+      its line is read is judged by its members, as the end already judged one.**
+      - **Neither of the first two ways.** Node reaps every child it spawns as soon as the child
+        exits, and it exposes no `pidfd_open`. So the check process can neither hold its script
+        unreaped nor pass a pidfd without a native module, which `P-266` turned down for the same
+        reason.
+      - **What still names the script's group.** `N` stays allocated while any process has it as
+        its group or session id. A script that exits at once leaves its helpers in group and
+        session `N`, and nothing outside the script can join that session.
+      - **The new rule.** In `ScriptGroups.#startedWithoutLeader`, a `started N` whose `/proc/N` is
+        gone has its members read from all of `/proc`. The group is recorded when every member:
+        - is in session `N`;
+        - has the runner's uid, when one is set;
+        - started no earlier than the check process, whose `starttime` the runner reads at its own
+          spawn of it (`onSpawn`).
+
+        A member that fails any of these makes the line a refusal, counted, as a forgery is. No
+        members means the script and all it started have gone, and nothing is recorded. A check
+        process whose own start could not be read records nothing, as before.
+      - **What a forged line can now buy.** Only a kill of processes started during this check,
+        of the uid the check's script already runs as, which that uid could kill itself.
+        Without a uid, the probe runs scripts as itself, and a root probe does not start that way
+        without `allowScriptsAsRoot` (`P-276`).
+      - **At the end.** A group recorded this way holds `LEADER_GONE`, which no real `starttime`
+        equals, so any process at `N` then is a reuse and is left alone (`scriptGroupsRecycled`).
+        `/proc/N` gone takes the members branch `P-266` already had.
+      - **Still open.** A group whose id was reused, inside the runner's lag, by a new session
+        leader that exits leaving members passes the same test. That is `P-266`'s 250 ms window,
+        from the other side. The orphan case, a check process killed between its script's spawn
+        and the line being read, is unchanged: still a refusal.
+      - **Tests.** `script-groups.test.ts` gains 9 tests on an injected `/proc`. They cover
+        recording and killing, a member started before the check, of another uid and in another
+        session (each refused and counted, nothing signalled), no uid asked when none is set, no
+        members, the check's start unreadable, a process at `N` at the end (left alone), and
+        `ended` after. The "at most 16 reads" test now leaves out the check process's own read.
+        `process-runner.test.ts` (Linux) gains 2 tests:
+        - **The ticket's case, through the real catalogue.** The script `leaves-at-once.sh` starts
+          `sleep 60 &` and exits. The runner reads `/proc` through a view that holds each script's
+          read until the check process has reaped it, so the line is read late every time. The
+          test asserts the read was late, `SIGKILL`s the check process, and the helper is gone
+          within 5 s, `scriptGroupsEnded` 1.
+        - **A forged line naming a leaderless group begun before the check.** The test's own
+          `sh -c 'sleep 60 &'`, its `sh` reaped, then a check 50 ms later (two clock ticks). The
+          line is refused and counted, and the `sleep` survives.
+
+        `leaves.sh`'s comment no longer says such a leader cannot be recorded.
+        `administration.md` says what is checked when the script had gone.
+      - **Mutation: 8/8 killed.**
+        - The old behaviour, a leader gone at `started` passed over: 8 tests fail, among them the
+          end-to-end one, whose helper survives the check process.
+        - The `starttime` check dropped: 2 fail. The session check: 1. The uid check: 1.
+        - No members refused instead of passed over: 1. An unknown check start read as 0: 1.
+        - `LEADER_GONE` matching any process at the end: 1.
+        - A refused group recorded as well: 4.
+
+        In the first pass, run while the VM was shared, two tests outside the mutated paths also
+        failed once: `P-266`'s "killed mid-script" under the uid mutant, and the new end-to-end
+        test under the `LEADER_GONE` mutant. Neither path runs the mutated code. They did not
+        come back in either mutant rerun alone (46/46 each), in six full-file runs three at a
+        time, or in three runs under eight busy loops. The messages were not kept, so the cause
+        is unknown.
+      - **Runs.** `@ms/probe` 660/660, no skipped suites. Prettier and eslint pass on the changed
+        files.
 
 - [x] **P-279 — two SSH follow-ups from `P-259`** · S · P-259 · Found 2026-10-07 in `P-259`.
       `ssh-sensors.test.ts` "return promptly when the check is aborted" still asserts

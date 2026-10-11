@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { pino } from 'pino';
@@ -15,7 +16,12 @@ import {
   ReadyLine,
   STARTUP_TIMEOUT_MS,
 } from '../src/runner/process-runner.js';
-import { linuxProcessView, type ProcessView } from '../src/runner/script-groups.js';
+import {
+  linuxProcessView,
+  readGroup,
+  readProc,
+  type ProcessView,
+} from '../src/runner/script-groups.js';
 import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
 import { pollWithin } from './support/within.js';
 import { assertFits } from './support/fits.js';
@@ -895,14 +901,20 @@ describe('a script check in a process of its own (`P-262`)', () => {
           'echo "$$ $! $PPID" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nwait',
       );
       // Starts a helper that keeps its stdout, and goes: the group outlives its leader, and the
-      // pipes keep its check waiting. It stays two seconds first, because the runner records a
-      // group only while `/proc` can show its leader is the check process's child; a leader gone
-      // before its line is read cannot be told from a stranger's, and is not recorded.
+      // pipes keep its check waiting. It stays two seconds first, so that its line is read while
+      // `/proc` can still show its leader is the check process's child.
       await script(
         'leaves.sh',
         'sleep 60 &\n' +
           'echo "$$ $! $PPID" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\n' +
           'sleep 2\nexit 0',
+      );
+      // The same, gone at once, so the check process can reap it before the runner reads its line
+      // (`P-278`).
+      await script(
+        'leaves-at-once.sh',
+        'sleep 60 &\n' +
+          'echo "$$ $! $PPID" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nexit 0',
       );
       // Starts a helper that is no longer its business and answers: it ends on its own.
       await script(
@@ -965,6 +977,101 @@ describe('a script check in a process of its own (`P-262`)', () => {
       await goneWithin(5_000, [helperPid], `the helper ${String(helperPid)} to be gone`);
       assert.equal(runner.stats().scriptGroupsEnded, 1, 'and counted');
       assert.equal(runner.stats().scriptGroupsRecycled, 0);
+    });
+
+    /**
+     * The real `/proc`, behind a runner that reads a script's line only once the check process has
+     * reaped the script: a runner whose loop was busy elsewhere while the script ran (`P-278`).
+     * The check process is the runner's own child; any other process it reads is a script leader.
+     */
+    function lateReader(): { view: ProcessView; late: () => number } {
+      const real = linuxProcessView();
+      assert.ok(real !== null);
+      let late = 0;
+      const pause = new Int32Array(new SharedArrayBuffer(4));
+      return {
+        late: () => late,
+        view: {
+          read: (pid) => {
+            const entry = real.read(pid);
+            if (entry === null || entry.ppid === process.pid) return entry;
+            // Synchronous, as the runner's own read is, so its loop stands still meanwhile.
+            const deadline = Date.now() + 10_000;
+            while (real.read(pid) !== null && Date.now() < deadline) Atomics.wait(pause, 0, 0, 10);
+            const after = real.read(pid);
+            if (after === null) late += 1;
+            return after;
+          },
+          members: (pgid) => real.members(pgid),
+          signalGroup: (pgid, signal) => real.signalGroup(pgid, signal),
+        },
+      };
+    }
+
+    it('ends what a script left when its leader was reaped before its line was read (`P-278`)', async () => {
+      const { view, late } = lateReader();
+      const { runner, seen } = runnerOf({
+        registryModule: CATALOGUE,
+        childEnv: { [SCRIPT_DIR_ENV]: dir },
+        processView: view,
+      });
+      const { request: check, file } = scriptCheck(129, 'leaves-at-once.sh', 60_000);
+      runner.submit(check);
+      await until(() => existsSync(file), 'the script to start its helper', 40_000);
+      const [scriptPid = 0, helperPid = 0, checkPid = 0] = await numbersIn(file, 3);
+      try {
+        await until(() => late() === 1, 'the runner to read the line once the script was reaped');
+        assert.equal(gone(scriptPid), true, 'the script was reaped');
+        assert.equal(gone(helperPid), false, 'its helper is running');
+
+        process.kill(checkPid, 'SIGKILL');
+        await until(() => seen.length === 1, 'the killed check to be reported', 20_000);
+        assert.equal(seen[0]?.meta.phase, 'worker-crash');
+        await goneWithin(5_000, [helperPid], `the helper ${String(helperPid)} to be gone`);
+        assert.equal(runner.stats().scriptGroupsEnded, 1, 'and counted');
+        assert.equal(runner.stats().scriptGroupsRefused, 0);
+        assert.equal(runner.stats().scriptGroupsRecycled, 0);
+      } finally {
+        try {
+          process.kill(-scriptPid, 'SIGKILL');
+        } catch {
+          // Gone already, which the assertions above have said.
+        }
+      }
+    });
+
+    it('kills nothing a check process names whose leader has gone, begun before the check', async () => {
+      // A group whose leader exited, as a daemon's `setsid` child does once it has forked the
+      // daemon: the shape `P-278` records by its members. This one began before the check did.
+      const victim = spawn('sh', ['-c', 'sleep 60 &'], { detached: true, stdio: 'ignore' });
+      const pgid = victim.pid ?? 0;
+      assert.ok(pgid > 1, 'the victim started');
+      try {
+        await until(
+          () => readProc(pgid) === null && readGroup(pgid).length === 1,
+          'the victim’s leader to be reaped and its sleep left',
+        );
+        const [member] = readGroup(pgid);
+        // `/proc` counts starts in clock ticks of 10 ms: the check process must begin a tick
+        // later than the victim did, as a service started any time before it would.
+        await sleep(50);
+        const { runner, seen } = runnerOf();
+        runner.submit(request(130, 'test.forge-group', { target: pgid }));
+        await until(() => seen.length === 1, 'the check to answer', 40_000);
+        assert.equal(seen[0]?.result.message, 'forged');
+        await until(() => runner.stats().running === 0, 'its process to be ended', 10_000);
+
+        assert.equal(gone(member?.pid ?? 0), false, 'the group it named is still running');
+        assert.equal(runner.stats().scriptGroupsRefused, 1, 'and the forgery is counted');
+        assert.equal(runner.stats().scriptGroupsEnded, 0);
+      } finally {
+        try {
+          process.kill(-pgid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
+      }
+      await until(() => readGroup(pgid).length === 0, 'the test’s own group to be cleaned up');
     });
 
     it('kills nothing a check process names that it did not start, and counts it', async () => {

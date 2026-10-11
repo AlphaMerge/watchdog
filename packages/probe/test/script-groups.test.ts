@@ -148,7 +148,8 @@ describe('verifying a group at its start (`P-266`)', () => {
     const groups = new ScriptGroups(
       {
         read: (pid) => {
-          reads += 1;
+          // The check process's own start, read once at its spawn (`P-278`), is not a line's.
+          if (pid !== CHECK) reads += 1;
           return { ...own(pid), ppid: 1 };
         },
         members: () => [],
@@ -159,6 +160,100 @@ describe('verifying a group at its start (`P-266`)', () => {
     for (let pid = 10_000; pid < 10_100; pid += 1) groups.push(line('started', pid));
     assert.equal(reads, MAX_GROUPS_PER_CHECK);
     assert.equal(groups.refused.length, 100, 'every one past the bound refused as well');
+  });
+});
+
+describe('a leader reaped before its line is read (`P-278`)', () => {
+  // The check process reaps its script as soon as it exits, and the runner reads the line when its
+  // own loop gets there, so a script that starts a helper and exits at once is gone by then. Its
+  // helper is still in its group and session, which keeps the id the script's.
+
+  /** The check process as the runner's spawn made it, started at tick 700. */
+  const check: ProcessEntry = {
+    pid: CHECK,
+    ppid: 1,
+    pgrp: CHECK,
+    session: CHECK,
+    starttime: '700',
+    uid: 1000,
+  };
+
+  /** A member of the script's group, its leader gone: init's child, started after the check. */
+  const left = (pid: number, extra: Partial<ProcessEntry> = {}): ProcessEntry => ({
+    ...own(pid, '800'),
+    ppid: 1,
+    pgrp: SCRIPT,
+    session: SCRIPT,
+    ...extra,
+  });
+
+  function reaped(
+    members: ProcessEntry[],
+    uid: number | null = 1000,
+    table = new Map<number, ProcessEntry | null>([[CHECK, check]]),
+  ): ReturnType<typeof fakeView> & { groups: ScriptGroups; table: typeof table } {
+    const fake = fakeView(table, new Map([[SCRIPT, 'sent']]), members);
+    const groups = new ScriptGroups(fake.view, CHECK, uid ?? undefined);
+    groups.push(line('started', SCRIPT));
+    return { ...fake, groups, table };
+  }
+
+  it('records the group when every member is the script’s, and ends it with the check process', () => {
+    const { groups, signals } = reaped([left(6001), left(6002, { starttime: '700' })]);
+    assert.deepEqual(groups.open(), [SCRIPT]);
+    assert.deepEqual(groups.refused, []);
+    assert.deepEqual(groups.endLeftBehind(), { ended: [SCRIPT], recycled: [], failed: [] });
+    assert.deepEqual(signals, [[SCRIPT, 'SIGKILL']]);
+  });
+
+  const strangers: [string, ProcessEntry][] = [
+    // A service that has been running since before the check: a daemon whose `setsid` child
+    // forked it and exited, as most do, so its group has no leader either.
+    ['started before the check process', left(6002, { starttime: '699' })],
+    ['of another uid', left(6002, { uid: 0 })],
+    ['in another session', left(6002, { session: 7000 })],
+  ];
+  for (const [what, stranger] of strangers) {
+    it(`refuses a group with a member ${what}, and counts it`, () => {
+      const { groups, signals } = reaped([left(6001), stranger]);
+      assert.deepEqual(groups.open(), []);
+      assert.deepEqual(groups.refused, [SCRIPT]);
+      assert.deepEqual(groups.endLeftBehind(), { ended: [], recycled: [], failed: [] });
+      assert.deepEqual(signals, [], 'no signal at all');
+    });
+  }
+
+  it('does not ask the uid when the runner sets none', () => {
+    const { groups } = reaped([left(6001, { uid: 0 })], null);
+    assert.deepEqual(groups.open(), [SCRIPT]);
+  });
+
+  it('records nothing for a group with no members: the script and all it started have gone', () => {
+    const { groups } = reaped([]);
+    assert.deepEqual(groups.open(), []);
+    assert.deepEqual(groups.refused, []);
+  });
+
+  it('records nothing when the check process’s own start could not be read', () => {
+    const { groups } = reaped([left(6001)], 1000, new Map());
+    assert.deepEqual(groups.open(), []);
+    assert.deepEqual(groups.refused, [], 'and refuses nothing it could not judge');
+  });
+
+  it('leaves alone whatever has the id at the end, since the leader it was is long gone', () => {
+    // The group emptied and its id went to a new process, the only way one can be at `N` now.
+    const { groups, signals, table } = reaped([left(6001)]);
+    table.set(SCRIPT, { ...own(SCRIPT, '900'), ppid: 1 });
+    assert.deepEqual(groups.endLeftBehind(), { ended: [], recycled: [SCRIPT], failed: [] });
+    assert.deepEqual(signals, []);
+  });
+
+  it('forgets the group when its `ended` follows', () => {
+    const { groups, signals } = reaped([left(6001)]);
+    groups.push(line('ended', SCRIPT));
+    assert.deepEqual(groups.open(), []);
+    assert.deepEqual(groups.endLeftBehind(), { ended: [], recycled: [], failed: [] });
+    assert.deepEqual(signals, []);
   });
 });
 
