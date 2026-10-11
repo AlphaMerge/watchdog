@@ -10,6 +10,12 @@ release/
 
 # Hand-authored specification documents. Prettier reflows their tables and swaps emphasis
 # markers, which makes every edit a diff full of noise. They are prose, not code.
+#
+# **Listed here and in `.prettierrc.json`** (`P-357`). Prettier reads this file only from the
+# directory it runs in, so run from `packages/web` it judged `docs/TASKS.md` and flagged it,
+# while from here it skipped it. The config is found by walking up from the file, so its
+# `requirePragma` override for these paths gives the same answer from anywhere: not formatted
+# unless a file asks with `@format`, which none does.
 docs/
 CLAUDE.md
 

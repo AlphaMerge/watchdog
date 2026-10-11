@@ -13293,11 +13293,26 @@ because each is a decision rather than a defect:
         argument.
       - **`migrator`**'s three-reports wait says how many had come again: "…; got 2".
 
-- [ ] **P-357 — prettier gives two verdicts on `docs/TASKS.md`** · XS · U-50 · Found 2026-10-09
+- [x] **P-357 — prettier gives two verdicts on `docs/TASKS.md`** · XS · U-50 · Found 2026-10-09
       in `U-50`. Run from the repo root it passes the file; run from `packages/web` it flags it,
       and `--write` from the root changes nothing. **Done when** the config that applies to `docs/`
       is the same from either directory, or the web package's scripts never reach `docs/`, with
       the cause said in the outcome.
+
+      **P-357 outcome. The ignore file is read from where prettier runs, the config from where the
+      file is.** Prettier 3.9.6 reads `.prettierignore` only from its working directory, so from
+      the root `docs/` was ignored (`--file-info`: `"ignored": true`, so "passes" meant "not
+      looked at"), and from `packages/web` it was judged against the root's `.prettierrc.json`,
+      which it finds by walking up, and flagged. The web package's scripts never reach `docs/`; a
+      hand-run `npx prettier` from there did. **Fix**: `.prettierrc.json` overrides `docs/**` and
+      `CLAUDE.md` with `requirePragma`, so they are left alone from any directory unless a file
+      asks with `@format` (none does), and `.prettierignore` says why both list them.
+      **Checked**: `--check` on `docs/TASKS.md`, `docs/ADR-001-architecture.md` and `CLAUDE.md`
+      passes from the root, `packages/web` and `packages/core`; `--write` from `packages/web`
+      leaves all three byte for byte; a misformatted `.ts` in `packages/web` is still flagged;
+      `prettier --check .` from the root passes. The other ignored paths (`dist/`, `build/`)
+      have the same shape from a package directory and were left, since nothing formats them
+      from there.
 
 - [x] **P-358 — a stored sensor whose parameters no longer validate is not named** · S · P-348 ·
       Found 2026-10-09 in `P-348`. Tightening a type's `paramsSchema` (`P-348`, `P-349`) leaves

@@ -3,5 +3,11 @@
   "semi": true,
   "printWidth": 100,
   "trailingComma": "all",
-  "arrowParens": "always"
+  "arrowParens": "always",
+  "overrides": [
+    {
+      "files": ["docs/**", "CLAUDE.md"],
+      "options": { "requirePragma": true }
+    }
+  ]
 }
