@@ -30,14 +30,24 @@ import type { ReceivedBatch, ReceivedNotification } from '@ms/sensors';
  *   push leaves the scheduler holding chunk one, and `retain` is told the push is incomplete. The
  *   sensors it does not name are *parked*, not forgotten: when the whole push brings them back,
  *   each reads one interval back as a restart does, from where its cursor stood.
- * - **The sensor is new to a running probe**, in a later push and not the first. It starts at its
- *   first drain, with nothing and nothing dropped. It does not read what arrived between its
- *   assignment and that scan: starting it at its assignment would need `retain` to say which held
- *   sensors are this ring's, so that the drops before a first drain could be counted on Probe
- *   Health as they happen, and it is not told.
+ * - **The sensor is new to a running probe**, in a later push and not the first (`P-269`). It
+ *   resumes from **its assignment**: where the ring stood when a push first named it. Its first
+ *   scan reads what the listener heard from then on — the device an operator has just added is
+ *   often the one sending — and what the ring overwrote of that is its `dropped`. A first scan
+ *   comes within an interval of the assignment, so this is never further back than a restart
+ *   reads; one that came later still reads one interval back, with the rest `earlier`. What
+ *   arrived before the assignment is not its: not read, not `earlier`, not a loss.
  * - **A complete push left it out** (deleted, paused, moved away) **and it came back.** It is new
- *   again, and starts at its first drain: what arrived while the probe did not hold it is not its
+ *   again, and resumes from its return: what arrived while the probe did not hold it is not its
  *   loss, and a sensor that never drained before it left does not claim a restart on its return.
+ *
+ * A new sensor's loss before its first scan is counted on Probe Health at that scan, as a
+ * restart's is, by claiming it from the running total of uncounted overwrites (`P-273`). Only the
+ * last `size` overwrites are dated record by record, so if the ring overwrote more than twice its
+ * size between the assignment and the first scan, the part beyond that is counted by none: an
+ * undercount, never more. The assignment is not noted record by record as a parked sensor's resume
+ * point is, because `retain` names every sensor of every type: a ping sensor assigned here would
+ * never drain, and would keep the claimed ranges from ever being folded away.
  *
  * **Why one interval, and what happens to the rest.** A trap or syslog sensor's channels are
  * counts per scan, and a limit on them is set per interval. A probe that waited two hours for its
@@ -137,6 +147,12 @@ export class NotificationRing {
   #held: Set<number> | undefined;
   /** Sensors a cut push took off the wheel, and where each resumes (`P-254`). */
   readonly #parked = new Map<number, Resume>();
+  /**
+   * Sensors a push named after the first complete one, with no cursor yet, and where each resumes:
+   * the ring as it stood when it was named (`P-269`). `uncountedBefore` is left unset, and these
+   * are not parked: see the class comment.
+   */
+  readonly #assigned = new Map<number, Resume>();
   /** Parked sensors whose `uncountedBefore` waits for the ring to reach `floor`, lowest first. */
   #awaiting: Resume[] = [];
   #nextSequence = 0;
@@ -223,10 +239,10 @@ export class NotificationRing {
    * behind catches up in one scan instead of replaying the buffer for ever.
    *
    * A first call is one of the cases in the class comment. A sensor that resumes — held across a
-   * restart, or parked by a cut push — reads `windowMs` back, its interval, and no further than
-   * where it resumes from, with `since` where it began reading and `earlier` what came before; any
-   * other sensor registers its cursor here and is handed nothing, with `since` now, which is how
-   * the type tells a sensor that has only just started listening apart from a quiet network.
+   * restart, parked by a cut push, or assigned by a later push (`P-269`) — reads `windowMs` back,
+   * its interval, and no further than where it resumes from, with `since` where it began reading
+   * and `earlier` what came before. A sensor no push has named registers its cursor here and is
+   * handed nothing, with `since` now.
    */
   drain(
     sensorId: number,
@@ -241,7 +257,8 @@ export class NotificationRing {
     if (cursor === undefined) {
       const resume = this.#resumeOf(sensorId);
       if (resume === undefined) {
-        // New to a running probe, or back after a complete push left it out.
+        // A sensor no push has named since the restart set: it scans before the push that names
+        // it reaches the ring, which the scheduler does not do. It starts here.
         this.#cursors.set(sensorId, { next: this.#nextSequence, sinceMono: nowMono });
         this.#follow();
         return {
@@ -336,6 +353,11 @@ export class NotificationRing {
       this.#unpark(sensorId);
       this.#held?.delete(sensorId);
       return parked;
+    }
+    const assigned = this.#assigned.get(sensorId);
+    if (assigned !== undefined) {
+      this.#assigned.delete(sensorId);
+      return assigned;
     }
     if (this.#held === undefined || this.#held.has(sensorId)) {
       this.#held?.delete(sensorId);
@@ -531,6 +553,32 @@ export class NotificationRing {
       for (const sensorId of [...this.#parked.keys()]) {
         if (!keep.has(sensorId)) this.#unpark(sensorId);
       }
+      for (const sensorId of [...this.#assigned.keys()]) {
+        if (!keep.has(sensorId)) this.#assigned.delete(sensorId);
+      }
+    }
+    // A sensor named for the first time since the restart set was taken resumes from here
+    // (`P-269`). Before that set, every sensor is a restart candidate, so none is new; a cut push's
+    // sensors are being scanned, so they are assigned as a complete push's are.
+    if (this.#held !== undefined) {
+      const fromMono = this.#monotonic();
+      for (const sensorId of keep) {
+        if (
+          this.#cursors.has(sensorId) ||
+          this.#parked.has(sensorId) ||
+          this.#held.has(sensorId) ||
+          this.#assigned.has(sensorId)
+        ) {
+          continue;
+        }
+        this.#assigned.set(sensorId, {
+          floor: this.#nextSequence,
+          fromMono,
+          uncountedBefore: undefined,
+        });
+      }
+    }
+    if (complete) {
       if (this.#held === undefined) {
         this.#held = keep;
       } else {

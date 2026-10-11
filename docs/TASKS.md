@@ -9522,13 +9522,46 @@ because each is a decision rather than a defect:
       - **Not done:** `ssh-sensors.test.ts` *return promptly when the check is aborted* still
         asserts `Date.now() - started < 3_000`, outside this ticket's file.
 
-- [ ] **P-269 — a sensor new to a running probe misses what arrives before its first scan** ·
+- [x] **P-269 — a sensor new to a running probe misses what arrives before its first scan** ·
       S · P-254 · Found 2026-10-07 in `P-254`. A trap, syslog or flow sensor assigned to a probe
       that is already running gets a cursor at the ring's head when it is assigned, and its first
       scan comes one phase later; what the listener heard for it in between, from the device the
       operator has just added, is in no reading. **Done when** a new sensor's first scan reads one
       interval back like a restarted one (`earlier` for the rest), with a ring test and the
       listener-restart scenario extended.
+
+      **P-269 outcome. A new sensor resumes from its assignment: where the ring stood when a push
+      first named it after the restart set.** Its first scan reads everything since then through
+      the path a restart and a cut push use (`#place`, the claims of `P-273`). A first scan comes
+      within an interval of the assignment, so this is never further back than one interval, and
+      a first scan that came later reads one interval back with the rest `earlier`. The ticket
+      asked for one interval back; from the assignment is that, less what arrived before the
+      sensor existed, which is not its to read, name or lose.
+      - **A sensor back after a complete push left it out** (paused, moved, deleted and added
+        again) resumes from its return in the same way, not from what arrived while it was gone.
+      - **Assignments are kept apart from parked sensors** (`#assigned`), and not noted against the
+        running total of uncounted overwrites. `retain` names every sensor of every type, and a
+        ping sensor parked in a trap ring would never drain and would stop the claimed ranges ever
+        being folded away. The cost: if the ring overflowed more than twice its size between
+        assignment and first scan, Probe Health counts less than the sensor's `dropped`, never
+        more. The sensor still reports all it lost.
+      - **The contract**: `ReceivedBatch.earlier` is now also on a new sensor's first scan, 0
+        unless that scan came more than an interval after the assignment. The types read
+        `earlier ?? 0`, so nothing they say changes. `docs/administration.md` says what a new
+        sensor's first scan reads.
+      - **Tests.** `ring.test.ts`: reads from its assignment and nothing before; what the ring
+        overwrote after it is `dropped` and once on Probe Health; less, never more, after a double
+        overflow; one interval back with `earlier` when the first scan is late; an assignment a
+        complete push takes back is forgotten; a paused sensor reads from its return.
+        `listener-restart-scenario.test.ts`: a probe running an hour is handed 20 trap and 20
+        syslog sensors for its device, and their first scans across the next minute each read
+        every message since the push, nothing earlier, with no failure and no limit crossed.
+        Probe suite 648/648.
+      - **Mutations 5/5**, against the ring tests and the scenario: no assignment (9 fail,
+        the scenario among them); a new sensor resuming from sequence 0 as a restart does (10);
+        an assignment never forgotten (1); sensors assigned before the restart set is taken, so
+        restart candidates resume from the push rather than the listener's start (13); the
+        assignment dated at the listener's start (1).
 
 - [x] **P-270 — `earlier` and `undated` listener records have no Probe Health count** · S ·
       P-254 · Found 2026-10-07 in `P-254`. A resuming sensor names what it did not read in its

@@ -241,9 +241,11 @@ export interface ReceivedBatch {
    */
   readonly dropped: number;
   /**
-   * On a sensor's first scan after a probe restart, or after a cut configuration push took it off
-   * the scheduler, only: what the listener received before this batch's window, which reaches
-   * one interval back, and after the sensor's last scan or the listener's start (`P-254`).
+   * On a sensor's first scan after a probe restart, after a cut configuration push took it off
+   * the scheduler, or after a push first assigned it to a running probe (`P-269`), only: what the
+   * listener received before this batch's window, which reaches one interval back, and after the
+   * sensor's last scan, its assignment or the listener's start (`P-254`). After an assignment it
+   * is 0 unless the first scan came more than an interval later.
    *
    * Neither this sensor's count nor its loss. No scan of it was there to cover that time — the
    * probe had just started, could not yet reach its core, or was not scanning it — so a count of

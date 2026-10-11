@@ -427,6 +427,74 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
   });
 });
 
+describe('sensors added to a running probe (`P-269`)', () => {
+  it('read what their device sent before their first scans, and raise no alarm', async () => {
+    // The probe has run for an hour with its forty sensors scanning each minute. An operator adds
+    // twenty trap and twenty syslog sensors for the same device; the push names them, and their
+    // first scans come across the next minute as the wheel's phases spread them. The device
+    // sends three a minute throughout. `P-254` started each at its first scan, so what the device
+    // sent between the push and that scan was in no reading.
+    const probe = await probeOf();
+    probe.traps.retain(held, true);
+    probe.syslog.retain(held, true);
+    for (let minute = 0; minute < 60; minute += 1) {
+      probe.advance(MINUTE);
+      for (const id of trapIds) probe.traps.drain(id, MINUTE);
+      for (const id of syslogIds) probe.syslog.drain(id, MINUTE);
+    }
+
+    const addedTraps = trapIds.map((id) => id + 200);
+    const addedSyslog = syslogIds.map((id) => id + 200);
+    const atPush = probe.received();
+    probe.traps.retain([...held, ...addedTraps, ...addedSyslog], true);
+    probe.syslog.retain([...held, ...addedTraps, ...addedSyslog], true);
+
+    let breaches = 0;
+    let failures = 0;
+    for (let index = 0; index < SENSORS; index += 1) {
+      probe.advance(3_000);
+      const total = probe.received();
+      for (const [type, id, batch, received, noun] of [
+        [
+          trapType,
+          addedTraps[index] ?? 0,
+          probe.traps.drain(addedTraps[index] ?? 0, MINUTE),
+          total.traps - atPush.traps,
+          'traps',
+        ],
+        [
+          syslogType,
+          addedSyslog[index] ?? 0,
+          probe.syslog.drain(addedSyslog[index] ?? 0, MINUTE),
+          total.messages - atPush.messages,
+          'messages',
+        ],
+      ] as const) {
+        assert.equal(
+          batch.items.length + batch.dropped,
+          received,
+          `sensor ${String(id)} did not read every one of the ${noun} since it was added`,
+        );
+        assert.equal(batch.earlier ?? 0, 0, `sensor ${String(id)}: nothing before it was added`);
+        try {
+          const { primary } = await scan(type, id, batch);
+          if (primary > LIMIT) breaches += 1;
+        } catch (error) {
+          if (error instanceof assert.AssertionError) throw error;
+          failures += 1;
+        }
+      }
+    }
+    // The last of them scanned a minute after the push, and read the three sent in it.
+    const lastBatch = probe.received();
+    assert.equal(lastBatch.traps - atPush.traps, 3, 'a minute of the device: three traps');
+    assert.equal(failures, 0, 'a first scan failed');
+    assert.equal(breaches, 0, 'a first scan crossed its per-minute limit');
+    assert.equal(probe.traps.stats().earlier, 0);
+    assert.equal(probe.syslog.stats().earlier, 0);
+  });
+});
+
 describe('a first scan that fails on what it missed still names what it did not read (`P-274`)', () => {
   // A batch the ring could not date always carries a full buffer `dropped`, and syslog always,
   // and trap and flow under their default parameters, fail on `dropped`. Before `P-274` that

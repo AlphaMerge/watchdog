@@ -8,8 +8,9 @@ import { NotificationRing } from '../src/listeners/ring.js';
  * `H-15` restarted a probe, sent three traps 41 seconds later, and found them in Probe Health's
  * `trapReceived` and in neither trap sensor's `count` or `dropped`: each sensor's cursor was made at
  * its first scan, at the ring's current sequence, so what was already in the ring belonged to
- * nobody. The ring now tells apart the three reasons a sensor has no cursor, and each is here:
- * the probe restarted, the sensor is new to a running probe, and `retain` removed it.
+ * nobody. The ring now tells apart the reasons a sensor has no cursor, and each is here: the
+ * probe restarted, a cut push parked it, the sensor is new to a running probe (`P-269`: it reads
+ * from its assignment), and `retain` removed it.
  *
  * Sensor 9 stands for a sensor of another type — a ping sensor — which `retain` is handed like any
  * other and which never drains this ring.
@@ -309,14 +310,17 @@ describe('how far back a restart reads: one interval (`P-254`, the alarm volume)
     assert.equal(Date.parse(first.until) - Date.parse(first.since), MINUTE, 'one monotonic minute');
   });
 
-  it('carries no `earlier` on any scan but a restart’s first', () => {
+  it('carries no `earlier` on any scan but a resume’s first', () => {
     const h = ringOf();
     h.ring.retain([1]);
     h.ring.drain(1, TRAP, MINUTE);
     h.push(1);
     assert.equal('earlier' in h.ring.drain(1, TRAP, MINUTE), false);
     h.ring.retain([1, 2]);
-    assert.equal('earlier' in h.ring.drain(2, TRAP, MINUTE), false, 'nor a new sensor’s first');
+    // A new sensor's first scan resumes from its assignment (`P-269`), and nothing came before.
+    assert.equal(h.ring.drain(2, TRAP, MINUTE).earlier, 0, 'a new sensor’s first: none earlier');
+    h.push(1);
+    assert.equal('earlier' in h.ring.drain(2, TRAP, MINUTE), false, 'nor its second');
   });
 });
 
@@ -397,8 +401,8 @@ describe('a sensor a cut push took off the wheel (`P-254`)', () => {
     h.ring.retain([1], true);
     h.ring.retain([1, 2], true);
     const back = h.ring.drain(2, TRAP, MINUTE);
-    assert.deepEqual(back.items, []);
-    assert.equal('earlier' in back, false, 'deleted, then added again: new, not resumed');
+    assert.deepEqual(back.items, [], 'not the three from before it was added again');
+    assert.equal(back.earlier, 0, 'deleted, then added again: from its return, not resumed');
   });
 
   it('counts on Probe Health what it lost inside its window, once', () => {
@@ -732,22 +736,85 @@ describe('what a resuming first scan kept out, counted on Probe Health once (`P-
   });
 });
 
-describe('a sensor new to a running probe (`P-254`)', () => {
-  it('starts at its first scan, with nothing and nothing dropped', () => {
+describe('a sensor new to a running probe (`P-269`)', () => {
+  it('reads what arrived between its assignment and its first scan, and nothing from before', () => {
+    // `P-254` started it at its first scan: what the device just added sent while the sensor
+    // waited for its phase was in no reading.
     const h = ringOf();
     h.ring.retain([1, PING]);
     h.ring.drain(1, TRAP, MINUTE);
     h.push(2);
+    h.tick(5);
     h.ring.retain([1, 2, PING]);
+    const assigned = new Date(1_800_000_000_000 + 5_000).toISOString();
     h.tick();
+    h.push(3);
+    h.tick(30);
 
     const first = h.ring.drain(2, TRAP, MINUTE);
-    assert.deepEqual(first.items, [], 'what came before it is not its to read');
+    assert.deepEqual(
+      first.items.map((item) => item.text),
+      ['trap 2', 'trap 3', 'trap 4'],
+      'the three since it was assigned, not the two before',
+    );
     assert.equal(first.dropped, 0);
-    assert.notEqual(first.since, h.started, 'since its first scan, not the listener’s start');
+    assert.equal(first.earlier, 0, 'what came before its assignment is not its, nor earlier');
+    assert.equal(first.since, assigned, 'since its assignment');
     h.push(1);
-    assert.deepEqual(texts(h.ring, 2), ['trap 2']);
-    assert.equal(texts(h.ring, 1).length, 3, 'and the sensor held at the restart read all three');
+    assert.deepEqual(texts(h.ring, 2), ['trap 5']);
+    assert.equal(texts(h.ring, 1).length, 6, 'and the sensor held at the restart read all six');
+    assert.equal(h.ring.earlier, 0);
+  });
+
+  it('counts what the ring overwrote after its assignment as dropped, and once on Probe Health', () => {
+    const h = ringOf(4);
+    h.ring.retain([PING]);
+    h.push(2);
+    h.ring.retain([PING, 3]);
+    h.push(6);
+
+    const first = h.ring.drain(3, TRAP, MINUTE);
+    assert.deepEqual(
+      first.items.map((item) => item.text),
+      ['trap 4', 'trap 5', 'trap 6', 'trap 7'],
+    );
+    assert.equal(first.dropped, 2, 'traps 2 and 3 arrived after it was assigned and left unread');
+    assert.equal(h.ring.unread, 2, 'and not traps 0 and 1, which nobody was waiting for');
+    assert.equal(h.ring.drain(3, TRAP, MINUTE).dropped, 0);
+    assert.equal(h.ring.unread, 2);
+  });
+
+  it('counts less on Probe Health, never more, when the ring overflowed twice over first', () => {
+    // Only the last `size` overwrites are dated record by record; a new sensor's assignment is
+    // not noted against the running total, so what left before those cannot be claimed.
+    const h = ringOf(4);
+    h.ring.retain([PING]);
+    h.push(2);
+    h.ring.retain([PING, 3]);
+    h.push(10);
+
+    const first = h.ring.drain(3, TRAP, MINUTE);
+    assert.equal(first.items.length, 4);
+    assert.equal(first.dropped, 6, 'the sensor still says all it lost');
+    assert.ok(h.ring.unread <= first.dropped, `${String(h.ring.unread)} counted, more than lost`);
+  });
+
+  it('reads one interval back when its first scan comes later than that, with the rest earlier', () => {
+    const h = ringOf();
+    h.ring.retain([PING]);
+    h.ring.retain([PING, 4]);
+    h.push(2);
+    h.tick(90);
+    h.push(1);
+
+    const first = h.ring.drain(4, TRAP, MINUTE);
+    assert.deepEqual(
+      first.items.map((item) => item.text),
+      ['trap 2'],
+    );
+    assert.equal(first.earlier, 2);
+    assert.equal(first.dropped, 0);
+    assert.equal(h.ring.earlier, 2);
   });
 
   it('starts at its first scan when that comes before the sweep that names it', () => {
@@ -766,6 +833,18 @@ describe('a sensor new to a running probe (`P-254`)', () => {
     assert.equal(first.dropped, 0);
     assert.equal(h.ring.unread, 0, 'nothing was waiting for those ten');
   });
+
+  it('forgets an assignment a complete push takes back', () => {
+    const h = ringOf();
+    h.ring.retain([PING]);
+    h.ring.retain([PING, 5]);
+    h.push(2);
+    h.ring.retain([PING]);
+    h.push(1);
+    h.ring.retain([PING, 5]);
+    h.push(1);
+    assert.deepEqual(texts(h.ring, 5), ['trap 3'], 'from its second assignment');
+  });
 });
 
 describe('a sensor whose cursor `retain` removed, back again (`P-254`)', () => {
@@ -781,6 +860,24 @@ describe('a sensor whose cursor `retain` removed, back again (`P-254`)', () => {
     assert.deepEqual(back.items, [], 'what arrived while it was paused is not its');
     assert.equal(back.dropped, 0);
     assert.equal(texts(h.ring, 1).length, 3);
+  });
+
+  it('reads what arrived after its return, before its first scan back (`P-269`)', () => {
+    const h = ringOf();
+    h.ring.retain([1, 2, PING]);
+    h.ring.drain(2, TRAP, MINUTE);
+    h.ring.retain([1, PING]);
+    h.push(3);
+    h.ring.retain([1, 2, PING]);
+    h.push(2);
+
+    const back = h.ring.drain(2, TRAP, MINUTE);
+    assert.deepEqual(
+      back.items.map((item) => item.text),
+      ['trap 3', 'trap 4'],
+      'not the three that came while it was paused',
+    );
+    assert.equal(back.dropped, 0);
   });
 
   it('starts at its return when it had scanned before it left', () => {
