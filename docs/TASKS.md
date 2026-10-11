@@ -3554,7 +3554,7 @@ because each is a decision rather than a defect:
       - **Mutation 26/26.** The 25 above, re-run against the changed tests, plus the fix
         reverted to `IS NOT DISTINCT FROM`, which fails the new row.
 
-- [ ] **N-23 — alarms of one trigger are not ordered among themselves** · S · N-21 · Found
+- [x] **N-23 — alarms of one trigger are not ordered among themselves** · S · N-21 · Found
       2026-10-07 in `N-21`. An escalation queued while the initial alarm waits for a retry can be
       delivered first. Ordering alarms among themselves breaks the overflowing-digest test, so
       `N-21` left it. **Done when** decided: keep, or order a trigger's alarms (initial, escalation,
@@ -3563,6 +3563,33 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** order them. A trigger's alarms go initial,
       escalation, repeat, per template, never delaying any past its mode's promise, with a
       scenario test.
+
+      **N-23 outcome. `undecided`'s lookup pairs an alarm with the earlier alarms of its trigger on
+      its own template too, as it pairs it with the last outage's recovery.**
+      - **What waits.** An alarm whose earlier alarm of the same sensor, trigger and channel, on
+        the same template, is still owed: undecided, sent at once and waiting out a retry or a
+        lease, or held with no window. It joins that alarm's digest when it is held in one, and
+        `#decide`'s existing rule flushes the digest when the mode would send this one at once.
+      - **Undecided counts.** Otherwise two would be decided in one pass and claimed in one batch,
+        and the first refused would let the second through ahead of its retry. Each is decided
+        on the pass after the one ahead of it is.
+      - **Own template only, and a known trigger only.** Another template's recipients and
+        transport are not this one's (`N-21`'s reason for alarms). A deleted trigger leaves NULL,
+        and two deleted triggers are not one (`N-22`'s rule), which is also why the
+        overflowing-digest test, sixty alarms with no trigger, still decides in one pass: the
+        blunter rule `N-21` rejected would have broken it.
+      - **The `N-21` exception narrowed.** "Not through a recovery of its own template that is
+        itself waiting for another template's alarm" applied to any undecided request ahead; it
+        now applies to recoveries only, so an alarm behind its trigger's undecided alarm waits
+        even when the trigger has an alarm owed on another template.
+      - **Never past the promise.** A wait is the same template's own retries, on the same
+        transport, bounded by `N-13`; given up on, the alarm behind it goes on its own.
+      - **Tests.** `retry-recovery-scenario.test.ts`: an initial and its escalation on one
+        `always-immediate` template; the initial is refused twice and the escalation, due inside
+        its retry delay, is delivered after it; refused for good, the escalation goes alone.
+        `notification-summaries.test.ts`: six table rows (waiting on a retrying, an undecided, a
+        delivered, a given-up alarm, another template's, a deleted trigger's), and the narrowed
+        exception.
 - [x] **N-24 — control characters other than NUL still reach a delivery's last error** · S ·
       P-277 · Found 2026-10-07 in `P-277`. `P-277` removes NUL from `last_error` because it breaks
       the database write; other control characters from a program's output or a webhook's body

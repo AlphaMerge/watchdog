@@ -560,7 +560,9 @@ describe(
         kinds?: readonly [Kind, Kind];
         /** Whether the first went to the second's own template or to another. */
         own: boolean;
-        disposition: 'immediate' | 'held';
+        disposition: 'immediate' | 'held' | 'undecided';
+        /** Both of one trigger that still exists, rather than of a deleted one (`N-23`). */
+        trigger?: 'known';
         status: 'pending' | 'sent' | 'failed';
         /** What has happened to the alarm's template. */
         template?: 'disabled' | 'suppressed' | 'untransported';
@@ -665,9 +667,55 @@ describe(
           template: 'disabled',
           waits: false,
         },
+        // An alarm behind an earlier alarm of its trigger (`N-23`): initial, escalation, repeat.
         {
-          // Alarms are not ordered among themselves by this.
-          name: 'an alarm behind another alarm',
+          name: 'an alarm behind its trigger’s alarm awaiting a retry',
+          kinds: ['alarm', 'alarm'],
+          own: true,
+          trigger: 'known',
+          ...owed,
+          waits: true,
+        },
+        {
+          // Decided in the pass before this one is, so the two are never claimed together.
+          name: 'an alarm behind its trigger’s alarm not yet decided',
+          kinds: ['alarm', 'alarm'],
+          own: true,
+          trigger: 'known',
+          ...owed,
+          disposition: 'undecided',
+          waits: true,
+        },
+        {
+          name: 'an alarm behind its trigger’s delivered alarm',
+          kinds: ['alarm', 'alarm'],
+          own: true,
+          trigger: 'known',
+          ...owed,
+          status: 'sent',
+          waits: false,
+        },
+        {
+          name: 'an alarm behind its trigger’s alarm given up on',
+          kinds: ['alarm', 'alarm'],
+          own: true,
+          trigger: 'known',
+          ...owed,
+          status: 'failed',
+          waits: false,
+        },
+        {
+          // Never across templates: another template's recipients and transport.
+          name: 'an alarm behind its trigger’s alarm on another template, awaiting a retry',
+          kinds: ['alarm', 'alarm'],
+          own: false,
+          trigger: 'known',
+          ...owed,
+          waits: false,
+        },
+        {
+          // Two deleted triggers are not one trigger (`N-22`).
+          name: 'an alarm behind an alarm, both of deleted triggers',
           kinds: ['alarm', 'alarm'],
           own: true,
           ...owed,
@@ -675,12 +723,12 @@ describe(
         },
       ];
 
-      const queued = (templateId: number, kind: Kind): Promise<number> =>
+      const queued = (templateId: number, kind: Kind, triggerId?: number): Promise<number> =>
         queue(
           templateId,
           kind === 'alarm'
-            ? { sensor: sensorAt(0) }
-            : { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
+            ? { sensor: sensorAt(0), triggerId }
+            : { sensor: sensorAt(0), reason: 'recovery', state: 'up', triggerId },
         );
 
       for (const entry of cases) {
@@ -688,7 +736,8 @@ describe(
         await db.query('DELETE FROM notification_request');
         const behindTemplate = await template();
         const aheadTemplate = entry.own ? behindTemplate : await template();
-        const ahead = await queued(aheadTemplate, aheadKind);
+        const triggerId = entry.trigger === 'known' ? await triggerRow() : undefined;
+        const ahead = await queued(aheadTemplate, aheadKind, triggerId);
         await db.query(
           `UPDATE notification_request
            SET disposition = $2, status = $3, attempts = 1,
@@ -701,7 +750,7 @@ describe(
             aheadTemplate,
           ]);
         }
-        const behind = await queued(behindTemplate, behindKind);
+        const behind = await queued(behindTemplate, behindKind, triggerId);
         const suppressed = entry.template === 'suppressed' ? [aheadTemplate] : [];
         const methods = entry.template === 'untransported' ? [] : ['email'];
         const decidable = await db.tx((q) => summaries.undecided(q, 100, suppressed, methods));
@@ -711,6 +760,35 @@ describe(
           entry.name,
         );
       }
+    });
+
+    it('keeps an alarm behind its trigger’s undecided alarm when another template has one owed too (`N-23`)', async () => {
+      // The initial went to another template and waits for its retry; the escalation and the
+      // repeat went to this one, neither decided. The repeat waits for the escalation, which is
+      // decided first: the other template's wait is the escalation's business, not a reason for
+      // the two of this template to be decided, and claimed, together.
+      const summaries = new SummaryRepository();
+      const mine = await template();
+      const theirs = await template();
+      const triggerId = await triggerRow();
+      const initial = await queue(theirs, { sensor: sensorAt(0), triggerId });
+      await db.query(
+        `UPDATE notification_request
+         SET disposition = 'immediate', attempts = 1, next_attempt_at = now() + interval '1 minute'
+         WHERE id = $1`,
+        [initial],
+      );
+      const escalation = await queue(mine, {
+        sensor: sensorAt(0),
+        triggerId,
+        reason: 'escalation',
+      });
+      const repeat = await queue(mine, { sensor: sensorAt(0), triggerId, reason: 'repeat' });
+      const decidable = (await db.tx((q) => summaries.undecided(q, 100, [], ['email']))).map(
+        (request) => request.id,
+      );
+      assert.ok(decidable.includes(escalation), 'an alarm never waits on another template');
+      assert.ok(!decidable.includes(repeat), 'the repeat waits for the escalation');
     });
 
     it('sends the digest now for a Down the mode sends at once, ending on the Down', async () => {

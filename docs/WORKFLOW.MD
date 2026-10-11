@@ -281,6 +281,10 @@ Behaviours that must be right:
   One that had taken its window's single immediate Up gives it back when it is dropped, while
   that window is open (`N-26`): it sent nothing, so the next Up in the window goes at once as the
   first would have. An Up already held in the same pass stays in the digest.
+  **A trigger's alarms go in the order they were queued** (`N-23`): initial, escalation, repeat,
+  per template. One waits while an earlier alarm of its trigger on its own template is undecided,
+  retrying or claimed, and joins that one's digest when it is held in one, flushing it when its
+  mode sends it at once. Never across templates, and never for a deleted trigger.
 - **Immediate-only channels.** Slack, Teams, HTTP action, script execution and ticket
   assignment are never summarised — they are cheap and often machine-consumed.
 - **Template schedules.** A template can be active only during business hours, with a choice

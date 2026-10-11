@@ -71,6 +71,8 @@ describe(
     let inbox: string[];
     /** The body of each message in `inbox`, at the same index: a digest lists its lines here. */
     let bodies: string[];
+    /** The request each message in `inbox` delivered, at the same index. */
+    let delivered: number[];
     /**
      * Whether to refuse this attempt, and how. Null delivers it. `attempt` counts the attempts
      * at this subject so far, this one included.
@@ -95,6 +97,7 @@ describe(
               if (refused !== null) return Promise.resolve(refused);
               inbox.push(message.subject);
               bodies.push(message.body);
+              delivered.push(message.requestId);
               return Promise.resolve({ ok: true, detail: 'recorded' } as const);
             },
           },
@@ -145,6 +148,7 @@ describe(
       attempts = [];
       inbox = [];
       bodies = [];
+      delivered = [];
       refuse = () => null;
       dispatcher = freshDispatcher();
 
@@ -365,6 +369,73 @@ describe(
         'escalation/immediate/sent',
         'recovery/immediate/sent',
       ]);
+    });
+
+    /** The ids of the requests queued for each reason, in the order queued. */
+    async function idsOf(reason: string): Promise<number[]> {
+      const rows = await db.query<{ id: string }>(
+        'SELECT id::text AS id FROM notification_request WHERE reason = $1 ORDER BY id',
+        [reason],
+      );
+      return rows.map((row) => Number(row.id));
+    }
+
+    /**
+     * `N-23`: an initial and its escalation on one template that sends both at once. The initial
+     * is refused, twice when `given` is false, and for good when it is true; the escalation falls
+     * due at +180, inside the initial's retry delay.
+     */
+    async function escalationBehindARefusedInitial(givenUp: boolean): Promise<void> {
+      const templateId = await template('%sensor is %status', 'always-immediate');
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: templateId,
+        escalationLatencySeconds: 120,
+        escalationTemplateId: templateId,
+      });
+      await scan(false, 0);
+      await scan(false, 60);
+      await scheduler.sweep(at(61));
+      const [initial] = await idsOf('initial');
+      assert.ok(initial !== undefined);
+      refuse = (_subject, _attempt, requestId) => {
+        if (requestId !== initial) return null;
+        if (givenUp) return { ok: false, retryable: false, error: '550 mailbox unavailable' };
+        // Refused twice: retries due at +121 and +241.
+        return attempts.length <= 2
+          ? { ok: false, retryable: true, error: '451 try again later' }
+          : null;
+      };
+      await tick(61);
+    }
+
+    it('sends an escalation after the initial it escalates, not inside its retry delay (`N-23`)', async () => {
+      await escalationBehindARefusedInitial(false);
+      await tick(121);
+      // The escalation falls due at +180, with the initial waiting for its retry at +241.
+      await tick(200);
+      assert.deepEqual(inbox, [], 'nothing delivered: the escalation waits behind the initial');
+      assert.deepEqual(await requests(), [
+        'initial/immediate/pending',
+        'escalation/undecided/pending',
+      ]);
+
+      await tick(241);
+      const [initial] = await idsOf('initial');
+      const [escalation] = await idsOf('escalation');
+      assert.ok(initial !== undefined && escalation !== undefined);
+      assert.deepEqual(delivered, [initial, escalation], 'the initial, then its escalation');
+      assert.deepEqual(await requests(), ['initial/immediate/sent', 'escalation/immediate/sent']);
+    });
+
+    it('sends the escalation on its own once the initial is given up on (`N-23`)', async () => {
+      await escalationBehindARefusedInitial(true);
+      assert.deepEqual(await requests(), ['initial/immediate/failed']);
+      await tick(200);
+      const [escalation] = await idsOf('escalation');
+      assert.ok(escalation !== undefined);
+      assert.deepEqual(delivered, [escalation], 'not held behind a page that will never go');
     });
 
     /**

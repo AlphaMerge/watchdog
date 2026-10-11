@@ -96,8 +96,20 @@ export class SummaryRepository {
    * a late page is worse than one out of order, and another template has other recipients and
    * another transport, whose failure must not make this one's Downs late. Joining a digest never
    * delays a Down the mode would send at once either: the dispatcher sends that digest now
-   * (`SummaryRepository.flush`). Alarms are not ordered among themselves here: an escalation
-   * queued behind a refused initial is not this ordering's business.
+   * (`SummaryRepository.flush`).
+   *
+   * **And an alarm is never told before the alarms of its trigger ahead of it** (`N-23`). An
+   * escalation queued while the initial alarm waited out a retry was claimed first, being never
+   * tried, and paged before the page it escalates. So an alarm looks for an earlier owed alarm of
+   * the same sensor, trigger and channel **on its own template**, as it looks for a recovery:
+   * it waits while that one is undecided, retrying or claimed, and joins its digest when it is
+   * held in one. Undecided too, so two of them are never decided in one pass and claimed in one
+   * batch, where the first refused would let the second through; each is decided on the pass
+   * after the one before it. Own template only, for the reason above: another template's
+   * recipients and transport are not this one's. A known trigger only (`N-22`'s rule), so a
+   * storm of alarms whose triggers were deleted is still decided in one pass. Never past its
+   * mode's promise: one the mode sends at once flushes the digest it joins, as above, and the
+   * wait for one retrying is that same template's own retries, on the same transport.
    *
    * **Every wait is bounded by the retries of the request at its head.** A request only ever
    * waits for an earlier one, so the waits form a chain that starts at a request waiting for
@@ -152,7 +164,13 @@ export class SummaryRepository {
           AND a.trigger_id IS NOT DISTINCT FROM r.trigger_id
           AND a.channel_key IS NOT DISTINCT FROM r.channel_key
           AND a.id < r.id
-          AND (a.reason IN ('recovery', 'clear')) <> (r.reason IN ('recovery', 'clear'))
+          AND ((a.reason IN ('recovery', 'clear')) <> (r.reason IN ('recovery', 'clear'))
+               -- And an alarm after the earlier alarms of its trigger (N-23): initial, escalation,
+               -- repeat, in the order queued, on its own template, which the template condition
+               -- below holds any alarm to. A known trigger only, as N-22 asks: two deleted
+               -- triggers are not one trigger.
+               OR (r.reason NOT IN ('recovery', 'clear') AND a.reason NOT IN ('recovery', 'clear')
+                   AND a.trigger_id = r.trigger_id))
           AND a.status = 'pending'
           -- A recovery waits for another template's alarm only while something will send it:
           -- enabled, with a transport in this build, and inside its activation schedule.
@@ -167,7 +185,8 @@ export class SummaryRepository {
           -- template's alarm, an escalation say: that would be the same wait, one step removed.
           -- Only an undecided one is waiting for anything: once decided, held or retrying, it
           -- waits for its own delivery alone, whatever another template has since reopened.
-          AND (r.reason IN ('recovery', 'clear') OR a.disposition <> 'undecided' OR NOT EXISTS (
+          AND (r.reason IN ('recovery', 'clear') OR a.reason NOT IN ('recovery', 'clear')
+               OR a.disposition <> 'undecided' OR NOT EXISTS (
                 SELECT 1
                 FROM notification_request b
                 JOIN notification_template bt ON bt.id = b.template_id
