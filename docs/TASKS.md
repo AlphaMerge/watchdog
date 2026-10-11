@@ -10144,11 +10144,29 @@ because each is a decision rather than a defect:
         channel's `close`) fails the probe test, which then stores `[1,'ok'],[2,'ok'],[3,'ok']`.
       - **Not done:** a structured phase on a stored check failure (protocol).
 
-- [ ] **P-280 — an ssh2 upgrade could quietly break what `P-259` relies on** · S · P-259 · Found
+- [x] **P-280 — an ssh2 upgrade could quietly break what `P-259` relies on** · S · P-259 · Found
       2026-10-07 in `P-259`. `SshSession` reads the client channel's `incoming.state`, and the
       simulator uses `_protocol.disconnect` and `_protocol.channelEOF` with `outgoing.id`. None
       is public ssh2 API. **Done when** a test fails by name if any of them is missing or changes
       meaning in the installed ssh2, and the dependency notes say to re-check them on upgrade.
+
+      **P-280 outcome.** `packages/sensors/test/ssh2-internals.test.ts` runs a bare `ssh2` client
+      against the SSH simulator, with no layer of ours between, one test per internal:
+      - the installed `ssh2` is `1.17.0` as both packages resolve it;
+      - `Protocol#channelEOF` and `Protocol#disconnect` exist and take one argument;
+      - `ClientChannel.incoming.state` reads `open` while the server runs the command, `eof` after
+        its EOF, `closed` after its CLOSE;
+      - `channelEOF` with a server channel's `outgoing.id` ends that channel, and the exit status
+        still arrives after it, with the state already `eof`;
+      - `disconnect(10)` reaches the client as an `error` whose `code` is 10 and message
+        `CONNECTION_LOST`.
+      ADR-001's note on `ssh2` now lists the three and names the test. **Mutations of the installed
+      `ssh2`** (each restored byte for byte): `channelEOF` renamed fails its test by name (and three
+      more, since the simulator then throws); the client recording EOF as another word fails the
+      two state tests; the reason moved off `code` fails the disconnect test. One trap found on
+      the way: `ssh2` emits `exit` as it parses the request, which can be in the same read as the
+      channel's confirmation, so a listener attached after awaiting `exec` misses it. The tests
+      attach theirs inside the callback.
 
 - [x] **P-281 — the core refuses a whole results batch for one result that does not fit** · S
       · P-277 · Found 2026-10-07 in `P-277`. **Take first.** Since `P-277` a probe fits every

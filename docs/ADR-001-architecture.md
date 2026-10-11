@@ -521,6 +521,15 @@ implementations without them. So the SSH stack costs the installer nothing eithe
 release build keeps install scripts off*. Turning them on to satisfy some other package would
 quietly add a compiled addon to the tarball, which is the thing this decision exists to avoid.
 
+**And an `ssh2` upgrade has three things to re-check that are not its public API** (`P-280`):
+the client channel's `incoming.state`, which `support/ssh/session.ts` reads to tell a command the
+server had finished from one the connection took with it (`P-259`); and the server-side
+`Protocol#channelEOF(recipient)`, with a channel's `outgoing.id`, and `Protocol#disconnect(reason)`,
+which the SSH simulator uses to behave like Dropbear and like a server that reports a lost
+connection. `packages/sensors/test/ssh2-internals.test.ts` names each of them and fails by that
+name if one is gone or means something else. The version is pinned exactly in both packages
+that use it, and that test checks the pin too, so moving it means moving the test's.
+
 Revisit when SEA stabilises. `pkg` is deprecated by Vercel; `nexe`
 has been in beta for years. Neither is an option.
 
