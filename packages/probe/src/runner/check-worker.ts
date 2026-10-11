@@ -38,7 +38,11 @@ interface AbortMessage {
 if (parentPort === null) throw new Error('check worker started outside a worker thread');
 const port = parentPort;
 
-const { registryModule } = workerData as { registryModule: string };
+const { registryModule, sessionReportMs } = workerData as {
+  registryModule: string;
+  /** How often an idle worker says its session pools changed (`P-256`). */
+  sessionReportMs: number;
+};
 
 // Top-level await: the port buffers anything the pool sends before the listener is attached, so
 // a slow import delays the first check rather than losing it. An import that *fails* takes the
@@ -102,13 +106,14 @@ function elapsed(startedAt: bigint): number {
   return Number(process.hrtime.bigint() - startedAt) / 1e6;
 }
 
+/** What this worker last told the pool about its session pools. */
+let reported: SessionCounters | undefined;
+
 /**
  * This worker's session-pool counters, to ride back with the result (`P-36`).
  *
- * **On the result rather than on a timer of its own**, because a worker that is running checks
- * is a worker that is reporting, and one that is idle has counters that cannot have changed. It
- * costs four integers on a message that already exists, and it needs no second channel between
- * the thread and the pool.
+ * It costs four integers on a message that already exists. A worker running checks reports
+ * this way, and `reportIdleSessions` covers the one that is not.
  *
  * Absent when the registry keeps no pools — a fixture registry, mostly — and absent means
  * absent: the pool leaves the field off rather than sending zeros, so a build with no session
@@ -116,7 +121,45 @@ function elapsed(startedAt: bigint): number {
  */
 function sessions(): { sessions?: SessionCounters } {
   const counters = registry.sessionCounters?.();
-  return counters === undefined ? {} : { sessions: counters };
+  if (counters === undefined) return {};
+  reported = counters;
+  return { sessions: counters };
+}
+
+/**
+ * Tells the pool when this worker's session pools changed with no check running (`P-256`).
+ *
+ * **An idle worker's counters do change.** Each pool closes a session nobody has used for its
+ * `idleMs`, on a timer of its own, and the worker that holds it is usually one that has stopped
+ * being sent checks. Reported only on results, those closes were never heard: `H-15` read
+ * `sessionsOpen` at 8 for 85 minutes after a device recovered, with `sessionsEvicted` flat, while
+ * the workers that had taken the device's checks during its hang had long since closed them.
+ * The pool dispatches to the first idle worker, so after a spike the higher ones go quiet.
+ *
+ * Polled rather than told, because the pools belong to the registry and a change can come from
+ * any of them. Sent only when something differs from what the pool last heard, so a quiet worker
+ * sends nothing.
+ */
+function reportIdleSessions(): void {
+  const counters = registry.sessionCounters?.();
+  if (counters === undefined || (reported !== undefined && same(counters, reported))) return;
+  reported = counters;
+  port.postMessage({ type: 'sessions', sessions: counters });
+}
+
+function same(a: SessionCounters, b: SessionCounters): boolean {
+  return (
+    a.open === b.open &&
+    a.overflowed === b.overflowed &&
+    a.evicted === b.evicted &&
+    a.opened === b.opened
+  );
+}
+
+// A registry that keeps no pools has nothing to report, and gets no timer.
+if (registry.sessionCounters !== undefined) {
+  // `unref`'d: the port is what keeps this thread alive, never the report.
+  setInterval(reportIdleSessions, sessionReportMs).unref();
 }
 
 port.postMessage({ type: 'ready' });

@@ -1307,6 +1307,109 @@ describe('reusing connections', () => {
     }
   });
 
+  describe('once the checks stop (P-256)', () => {
+    // On the pool's own timer, not a supplied clock: what is under test is that nothing has to
+    // call `sweep` for a connection to go, and that the server sees it go.
+    const IDLE_MS = 150;
+
+    // Counted from an empty server: an earlier test's closed connection can still be on its way.
+    beforeEach(async () => {
+      await pollWithin(2_000, 'earlier tests’ connections to close', () => server.open === 0, 5);
+    });
+
+    it('closes a connection a command hung on, and does not keep it', async () => {
+      // `H-15`'s paused device: it accepts a channel and says nothing. The command is given up at
+      // its timeout, which closes its channel and not the connection, so the connection is idle
+      // from then on like any other.
+      const pool = new SshSessionPool({ idleMs: IDLE_MS });
+      server.behave({ password: 'monitor', hang: true });
+      try {
+        await assert.rejects(
+          within(
+            5_000,
+            'the hung command to time out',
+            withSsh(
+              target(),
+              credentials(),
+              { commandTimeoutMs: 200 },
+              (s) => s.exec('sleep 9999', signal()),
+              pool,
+            ),
+          ),
+          /did not finish/,
+        );
+        const releasedAt = Date.now();
+        assert.equal(pool.stats().inUse, 0, 'the hung check gave its lease back');
+        assert.equal(server.open, 1, 'kept for its idle window, as any connection is');
+
+        await pollWithin(
+          IDLE_MS * 4 + 2_000,
+          'the server to see the connection closed',
+          () => server.open === 0,
+          5,
+        );
+        // Read after the release, so a little slack: what this rules out is a close at once.
+        assert.ok(Date.now() - releasedAt >= IDLE_MS - 10, 'not before its idle window');
+        assert.deepEqual(
+          { connections: pool.stats().connections, evicted: pool.stats().evicted },
+          { connections: 0, evicted: 1 },
+        );
+      } finally {
+        pool.closeAll();
+      }
+    });
+
+    it('closes every leftover connection after its idle window', async () => {
+      // Two connections to one server, on two keys, given back at different times: each goes on
+      // its own clock, and neither is kept because the other was used more recently.
+      const pool = new SshSessionPool({ idleMs: IDLE_MS });
+      server.answer('uptime', { stdout: 'up\n' });
+      try {
+        // Both held before either is given back, so the gap between the releases is the test's
+        // and not however long a handshake took.
+        const first = await within(
+          5_000,
+          'the first connection',
+          pool.acquire(target(), credentials(), { connectTimeoutMs: 5_000 }),
+        );
+        const second = await within(
+          5_000,
+          'the second connection',
+          pool.acquire(target(), credentials(), { connectTimeoutMs: 6_000 }),
+        );
+        assert.equal((await second.session.exec('uptime', signal())).stdout, 'up\n');
+        assert.equal(server.open, 2, 'one connection per key');
+        // Read before each release, which stamps its own `Date.now()` no earlier than this.
+        const firstAt = Date.now();
+        first.release();
+        await new Promise((resolve) => setTimeout(resolve, IDLE_MS / 2));
+        const secondAt = Date.now();
+        second.release();
+
+        let oneGoneAt: number | undefined;
+        await pollWithin(
+          IDLE_MS * 4 + 2_000,
+          'both connections to close',
+          () => {
+            if (server.open <= 1) oneGoneAt ??= Date.now();
+            return server.open === 0;
+          },
+          5,
+        );
+        const bothGoneAt = Date.now();
+        assert.ok(oneGoneAt !== undefined);
+        assert.ok(oneGoneAt - firstAt >= IDLE_MS, 'the first not before its idle window');
+        assert.ok(bothGoneAt - secondAt >= IDLE_MS, 'the second not before its own');
+        assert.deepEqual(
+          { connections: pool.stats().connections, evicted: pool.stats().evicted },
+          { connections: 0, evicted: 2 },
+        );
+      } finally {
+        pool.closeAll();
+      }
+    });
+  });
+
   it('never evicts a connection a check is still using', async () => {
     // The lease count is what stands between eviction and a check whose connection vanished
     // mid-command.

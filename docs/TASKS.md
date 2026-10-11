@@ -8698,7 +8698,7 @@ because each is a decision rather than a defect:
       `scheduled`; and the Probe Health sensor's stored message is still prose only, as every
       sensor's is.
 
-- [ ] **P-256 — a device that hung and recovered leaves the probe holding more sessions** · S ·
+- [x] **P-256 — a device that hung and recovered leaves the probe holding more sessions** · S ·
       P-36 · Found 2026-10-04 by `H-15`. One device, with three SSH sensors and five SNMP
       sensors, hung for three minutes (a paused container: its TCP accepted and nothing
       answered). Probe Health's `sessionsOpen` read **5 → 10 → 8**: 5 for the 85 minutes
@@ -8723,6 +8723,37 @@ because each is a decision rather than a defect:
       - a session that hung is closed, not kept.
 
       A probe-wide count returning to 5 is not the criterion.
+
+      **P-256 outcome.** Neither hypothesis as stated: **the count was stale.** A worker sent its
+      session counters to the pool only with a check's result (`check-worker.ts`), on the stated
+      premise that an idle worker's counters cannot change. They do: each pool closes a session
+      idle for its `idleMs` on its own timer, and the worker holding it is usually one that has
+      stopped being sent checks. Dispatch hands a check to the first idle worker (`#pump`), so
+      during the hang the device's checks spilled to higher workers, each of which opened its
+      own sessions; after it, a quiet probe's checks went back to the lowest ones, and the
+      others went silent with their last count. Their sessions closed, unheard. The flat
+      `sessionsOpened` and `sessionsEvicted` fit this too: an eviction in a silent worker was
+      never counted. **No leak**: a hung check always gives its lease back (`withSsh`/`withSnmp`
+      release in `finally`, a hung SSH command ends at its command timeout closing its channel,
+      and a check that ignores its abort has its worker, pools and all, terminated), and the
+      session is then idle like any other. H-15's 8 cannot be split after the fact into stale
+      and live sessions, since nothing recorded sessions per worker; the next field test reads a
+      current figure.
+      - **Fix**: a worker whose registry keeps pools compares its counters every
+        `SESSION_REPORT_MS` (5 s, `sessionReportMs` for tests) and posts a `sessions` message
+        to the pool when they differ from what it last sent; the pool updates that worker's
+        slot. A quiet worker sends nothing.
+      - **Tests**: `check-pool.test.ts` runs the real SNMP pool (`idle-session-registry.ts`,
+        `idleMs` 200 ms) against an agent that goes silent: two hung checks on two workers, then
+        checks one at a time on one worker. The quiet worker's session is reported closed and
+        counted as evicted, and once the checks stop every session is: `open` 0, `evicted` 2,
+        `opened` 2. With the worker's report taken out, or the pool ignoring it, it fails where
+        H-15 did, `open` stuck at 2. `ssh-session.test.ts` and `snmp-pool.test.ts` assert on each
+        pool's own timer that a session a request or command hung on is closed after its idle
+        window and not kept (the SSH server sees the connection end: `TestSshServer.open`), and
+        that every leftover session closes after its own idle window and none before.
+      - **Docs**: the `sessionsOpen` row in `administration.md` and the field-test runbook say
+        how the count moves when a device hangs.
 
 - [x] **P-257 — `ssh-shared-open.test.ts` fails about one run in five on its own** · S · A-65 ·
       Found 2026-10-04 in the suite for `H-30`/`H-31`. Both its tests pass, then its `after` hook

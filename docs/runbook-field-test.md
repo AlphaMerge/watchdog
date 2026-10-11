@@ -315,7 +315,10 @@ The numbers that decide the criterion:
 - **`sessionsOpen` against `sessionsEvicted`** — the pair, not either alone. A steady `open` with
   `evicted` climbing is a probe reopening sessions it just closed, because `idleMs` is shorter
   than your scan interval; on SSH that is a full handshake per check and it will show in
-  `checkWait` before it shows anywhere else.
+  `checkWait` before it shows anywhere else. A device that hangs sends its checks to more workers,
+  each with its own sessions, so `open` rises during an outage and falls back within `idleMs` of
+  the workers it no longer reaches going quiet (`P-256`). Still high an `idleMs` after the checks
+  stopped is a finding.
 
 ## 5. What counts as a failure
 

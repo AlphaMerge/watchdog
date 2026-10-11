@@ -21,6 +21,8 @@ import { pollWithin, within } from './support/within.js';
 import { assertFits } from './support/fits.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
+import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
+import { IDLE_MS } from './support/idle-session-registry.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -1564,6 +1566,102 @@ describe('session-pool counters (P-36)', () => {
       `evicted fell from ${String(before.evicted)} to ${String(after.evicted)}`,
     );
   });
+});
+
+/**
+ * What Probe Health says about sessions after a device hung and recovered (`P-256`).
+ *
+ * `H-15` read `sessionsOpen` at 5, then 10 during a three-minute hang, then 8 for the 85 minutes
+ * after it, with `sessionsEvicted` flat. These run the real SNMP session pool, with a short idle
+ * window, against an agent that stops answering and starts again.
+ */
+describe('sessions a hung device left behind (P-256)', () => {
+  const IDLE_FIXTURES = join(import.meta.dirname, 'support', 'idle-session-registry.js');
+  const MIB: AgentEntry[] = [{ oid: '1.3.6.1.2.1.1.1.0', type: 'OctetString', value: 'device' }];
+
+  const snmpGet = (sensorId: number, port: number) => ({
+    sensorId,
+    sensorType: 'test.snmp-get',
+    target: { host: '127.0.0.1', ipVersion: 'auto' as const },
+    params: { port, requestTimeoutMs: 300 },
+    timeoutMs: 2_000,
+  });
+
+  it('closes, and reports closed, what the workers that took the hang were left holding', async () => {
+    const device = await TestSnmpAgent.start(MIB);
+    try {
+      await hangAndRecover(device);
+    } finally {
+      await device.stop();
+    }
+  });
+
+  async function hangAndRecover(device: TestSnmpAgent): Promise<void> {
+    device.accept('public');
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger: silent,
+      size: 2,
+      minSize: 2,
+      idleShrinkMs: 0,
+      sessionReportMs: 50,
+      registryModule: IDLE_FIXTURES,
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    await pool.start();
+
+    // **The hang.** Two checks due together go to both workers, and each opens its own session
+    // to the device, since a worker's pools are its own. Neither is answered.
+    device.behave({ silent: true });
+    pool.submit(snmpGet(1, device.port));
+    pool.submit(snmpGet(2, device.port));
+    await until(() => seen.length === 2, 'both hung checks to time out');
+    assert.ok(
+      seen.every((one) => one.result.outcome === 'error'),
+      'the device answered nothing',
+    );
+    assert.equal(new Set(seen.map((one) => one.meta.workerId)).size, 2, 'one check on each worker');
+    assert.equal(pool.sessionCounters()?.open, 2, 'a session on each worker');
+
+    // **The recovery.** Checks one at a time, as a quiet probe runs them: each goes to the first
+    // idle worker, so one worker carries them all and the other is sent nothing more.
+    device.behave({});
+    const recoveredUntil = Date.now() + IDLE_MS * 6;
+    let sensorId = 3;
+    while (Date.now() < recoveredUntil) {
+      const before = seen.length;
+      pool.submit(snmpGet(sensorId, device.port));
+      sensorId += 1;
+      await until(() => seen.length === before + 1, 'a check after the recovery');
+      const last = seen.at(-1);
+      assert.equal(last?.result.outcome, 'ok', 'the device answers again');
+    }
+    const recovered = seen.slice(2);
+    const carrier = recovered[0]?.meta.workerId;
+    assert.ok(carrier !== undefined);
+    assert.ok(
+      recovered.every((one) => one.meta.workerId === carrier),
+      'every check after the recovery went to one worker',
+    );
+
+    // The quiet worker's session closed after its idle window, and the probe says so. Before
+    // `P-256` this read 2 for ever: that worker never finished another check, which was the
+    // only time it told the pool anything.
+    await until(
+      () => pool.sessionCounters()?.open === 1,
+      'the quiet worker’s session to be reported closed',
+    );
+    assert.ok((pool.sessionCounters()?.evicted ?? 0) >= 1, 'counted as evicted');
+
+    // **And every leftover session closes once its checks stop**, the one still in use too.
+    await until(
+      () => pool.sessionCounters()?.open === 0,
+      'every session to be reported closed once the checks stopped',
+    );
+    assert.equal(pool.sessionCounters()?.evicted, 2, 'each closed for being idle, once');
+    assert.equal(pool.sessionCounters()?.opened, 2, 'and none opened since the hang');
+  }
 });
 
 /**

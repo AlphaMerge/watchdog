@@ -6,6 +6,8 @@ import {
   stringOf,
   withSnmp,
   type SnmpCredentials,
+  type SnmpLease,
+  type SnmpSession,
 } from '../src/support/snmp/index.js';
 import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
 import { pollWithin } from './support/within.js';
@@ -242,6 +244,81 @@ describe('eviction', () => {
 
     await pollWithin(2_000, 'the sweeper to close an idle session', () => session.closed);
     assert.ok(pool.stats().evicted >= 1);
+  });
+
+  it('closes a session whose request hung once its checks stop, and does not keep it (P-256)', async () => {
+    // `H-15`'s paused device: nothing answers. The request times out, the check gives its lease
+    // back, and the session is idle from then on like any other — closed on the pool's own timer.
+    agent.behave({ silent: true });
+    let session: SnmpSession | undefined;
+    await assert.rejects(
+      withSnmp(
+        target(),
+        PUBLIC,
+        { timeoutMs: 100, retries: 0 },
+        (held) => {
+          session = held;
+          return held.get([SYS_DESCR], new AbortController().signal);
+        },
+        pool,
+      ),
+    );
+    const releasedAt = Date.now();
+    assert.ok(session !== undefined);
+    const hung = session;
+    assert.equal(pool.stats().inUse, 0, 'the hung check gave its lease back');
+    assert.equal(hung.closed, false, 'kept for its idle window, as any session is');
+
+    await pollWithin(2_000, 'the hung session to be closed', () => hung.closed, 5);
+    // Read after the release, so a millisecond or two of slack: what this rules out is a close
+    // at once, not one a tick early.
+    assert.ok(Date.now() - releasedAt >= 45, 'not before its idle window');
+    assert.deepEqual(
+      { sessions: pool.stats().sessions, evicted: pool.stats().evicted },
+      { sessions: 0, evicted: 1 },
+    );
+  });
+
+  it('closes every leftover session after its own idle window (P-256)', async () => {
+    // Three sessions on three keys, given back at different times. Each goes on its own clock.
+    // All held before any is given back, so the gaps between the releases are the test's and not
+    // however long a request took.
+    const leases: SnmpLease[] = [];
+    for (const timeoutMs of [400, 500, 600]) {
+      const lease = pool.acquire(target(), PUBLIC, { timeoutMs, retries: 0 });
+      await lease.session.get([SYS_DESCR], new AbortController().signal);
+      leases.push(lease);
+    }
+    assert.equal(pool.stats().sessions, 3);
+    const released: { session: SnmpSession; at: number }[] = [];
+    for (const lease of leases) {
+      // Read before the release, which stamps its own `Date.now()` no earlier than this.
+      const at = Date.now();
+      lease.release();
+      released.push({ session: lease.session, at });
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+
+    const closedAt = new Map<SnmpSession, number>();
+    await pollWithin(
+      2_000,
+      'every leftover session to be closed',
+      () => {
+        for (const { session } of released) {
+          if (session.closed && !closedAt.has(session)) closedAt.set(session, Date.now());
+        }
+        return closedAt.size === released.length;
+      },
+      2,
+    );
+    for (const { session, at } of released) {
+      const closed = closedAt.get(session);
+      assert.ok(closed !== undefined && closed - at >= 50, 'none before its own idle window');
+    }
+    assert.deepEqual(
+      { sessions: pool.stats().sessions, evicted: pool.stats().evicted },
+      { sessions: 0, evicted: 3 },
+    );
   });
 
   it('replaces a session that was closed from underneath it', () => {

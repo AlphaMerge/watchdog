@@ -328,6 +328,11 @@ export class TestSshServer {
     return '127.0.0.1';
   }
 
+  /** Connections open now: what proves a client closed one rather than kept it (`P-256`). */
+  get open(): number {
+    return this.#connections.size;
+  }
+
   behave(behaviour: SshServerBehaviour): void {
     this.#behaviour = behaviour;
   }

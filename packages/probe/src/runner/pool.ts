@@ -68,6 +68,15 @@ const MIN_DURATION_SAMPLES = 8;
 const OVER_CEILING_RETRY_MS = 250;
 
 /**
+ * How often an idle worker tells the pool its session pools changed (`P-256`).
+ *
+ * The pools close idle sessions every `idleMs` — 60 s for SNMP, 120 s for SSH — so five seconds
+ * puts a close on Probe Health well inside the interval it happened in, for a comparison of four
+ * integers per worker and no message at all when nothing changed.
+ */
+const SESSION_REPORT_MS = 5_000;
+
+/**
  * Workers allowed to load their registry at the same time (`P-206`).
  *
  * **Loading together is most of what made a probe's start-up expensive.** Measured at 64 workers
@@ -261,6 +270,11 @@ export interface CheckPoolOptions {
    * `startupFailed`, and replaced after a growing delay.
    */
   startupTimeoutMs?: number;
+  /**
+   * How often an idle worker reports a change in its session pools (`P-256`).
+   * `SESSION_REPORT_MS` unless a test sets it.
+   */
+  sessionReportMs?: number;
   /** Module whose default export is a `CheckRegistry`. P-05 supplies the real one. */
   registryModule?: string;
   /**
@@ -299,12 +313,12 @@ interface Slot {
   ready: boolean;
   job: Job | undefined;
   /**
-   * This worker's session-pool counters as of its last result (`P-36`).
+   * This worker's session-pool counters as of its last result or report (`P-36`, `P-256`).
    *
    * Per slot because each worker thread holds its own pools — the module singletons in
    * `@ms/sensors` are per-thread — so the probe's real total is the sum over workers, not any
-   * one of them. `undefined` until the worker has finished a check, and for ever on a build
-   * whose registry keeps no pools.
+   * one of them. `undefined` until the worker has finished a check or reported, and for ever on
+   * a build whose registry keeps no pools.
    */
   sessions: SessionCounters | undefined;
   /**
@@ -447,6 +461,7 @@ export class CheckPool {
   readonly #queueMax: number;
   readonly #abortGraceMs: number;
   readonly #startupTimeoutMs: number;
+  readonly #sessionReportMs: number;
   readonly #registryModule: string;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
 
@@ -557,6 +572,7 @@ export class CheckPool {
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
     this.#startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS);
+    this.#sessionReportMs = Math.max(1, options.sessionReportMs ?? SESSION_REPORT_MS);
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#onResult = options.onResult;
@@ -1212,6 +1228,11 @@ export class CheckPool {
       this.#pump();
       return;
     }
+    if (parsed.type === 'sessions') {
+      // An idle worker's pools closed something, or a busy one's changed mid-check (`P-256`).
+      slot.sessions = (message as { sessions: SessionCounters }).sessions;
+      return;
+    }
     if (parsed.type !== 'result') return;
 
     const job = slot.job;
@@ -1525,7 +1546,10 @@ export class CheckPool {
   async #start(): Promise<void> {
     this.#nextWorkerId += 1;
     const worker = new Worker(join(import.meta.dirname, 'check-worker.js'), {
-      workerData: { registryModule: pathToFileURL(this.#registryModule).href },
+      workerData: {
+        registryModule: pathToFileURL(this.#registryModule).href,
+        sessionReportMs: this.#sessionReportMs,
+      },
       resourceLimits: { maxYoungGenerationSizeMb: WORKER_YOUNG_GENERATION_MB },
     });
     const slot: Slot = {
