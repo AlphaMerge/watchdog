@@ -109,8 +109,11 @@ export const tlsCertificate: SensorType = {
       );
     }
     if (!verdict.hostMatches) {
+      // Its addresses beside its names (`A-75`): since `A-71` an address is what this sensor may
+      // have asked for, and a note naming only DNS names would hide the address it does list.
+      const listed = [...verdict.names.slice(0, 4), ...verdict.addresses.slice(0, 4)];
       notes.push(
-        `the certificate is for ${verdict.names.slice(0, 4).join(', ') || 'no name at all'} and ` +
+        `the certificate is for ${listed.join(', ') || 'no name or address at all'} and ` +
           `this sensor asked for ${servername}`,
       );
     }

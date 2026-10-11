@@ -13,6 +13,7 @@ import {
   inspectCertificate,
   nameMatches,
   namesOf,
+  addressesOf,
 } from '../src/support/tls/handshake.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 
@@ -139,6 +140,17 @@ describe('reading a certificate', () => {
       subjectaltname: 'DNS:example.com, DNS:www.example.com, IP Address:10.0.0.1',
     } as never);
     assert.deepEqual(names, ['example.com', 'www.example.com']);
+  });
+
+  it('collects every IP SAN apart from the names, for the mismatch note (A-75)', () => {
+    const certificate = {
+      subject: { CN: 'example.com' },
+      subjectaltname: 'DNS:example.com, IP Address:10.0.0.1, IP Address:FD00:0:0:0:0:0:0:1',
+    };
+    assert.deepEqual(addressesOf(certificate as never), ['10.0.0.1', 'FD00:0:0:0:0:0:0:1']);
+    assert.deepEqual(addressesOf({ subjectaltname: 'DNS:example.com' }), []);
+    // Absent on a certificate with no SANs at all.
+    assert.deepEqual(addressesOf({}), []);
   });
 
   it('stops walking a chain at a self-issued root rather than looping', () => {

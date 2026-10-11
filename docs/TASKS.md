@@ -30764,7 +30764,7 @@ because each is a decision rather than a defect:
       through a login with TLS on, and TDS 8 `strict`. **Done when** each is fixed with a
       test or written down as accepted, and (7) is run once against a real server.
 
-- [ ] **A-75 — three small things the heartbeat and the certificate sensor still say
+- [x] **A-75 — three small things the heartbeat and the certificate sensor still say
       wrongly** · S · A-71 ·
       Found 2026-10-02 by `A-71`. The channel is still named "Host name matches" though it
       now answers for an address: find out whether renaming touches stored channel rows
@@ -30773,6 +30773,48 @@ because each is a decision rather than a defect:
       logged as phase `request` with a sentence, not as `refused` with its status. And the
       heartbeat was never tried under `NODE_USE_ENV_PROXY`, which `fetch` honoured and
       `node:https` does not. **Done when** each is fixed with a test or written down.
+
+      **A-75 outcome. Three fixed with tests, the name written down; the proxy was a real
+      regression.** No migration, no protocol change.
+      - **The channel keeps *Host name matches*. Written down.** A rename would reach stored rows
+        only for sensors created after it. An existing sensor's channel name is written at
+        creation and re-declared by an edit only when the declaration moved (`P-303`), and the
+        stored parameters' declaration is computed by the running type, so after a rename both
+        sides of every edit carry the new name and nothing moves. One channel would read under
+        two names across an installation, which costs more than the wording: *host* is also the
+        device field that holds a name or an address, and the `A-71` upgrade note says what the
+        channel answers for an address.
+      - **The mismatch note names the addresses too.** `addressesOf` in `support/tls/handshake.ts`
+        reads the IP SANs as Node writes them, for saying what a certificate is for and never for
+        deciding (that stays `certificateListsAddress`, OpenSSL on the DER). The verdict carries
+        them, and the note lists up to four names and up to four addresses: *the certificate is
+        for ms-a67-test, 127.0.0.2, ::2 and this sensor asked for ::1*, where it said only the
+        name.
+      - **A `101` is refused with its status.** The request listens for `upgrade`, so Node hands
+        the `101` over instead of destroying the socket; the socket is hung up on and the status
+        goes the way of any answer that is not a 2xx: phase `refused`, `status: 101`, one failure,
+        the next pass sends. `close` still ends any request that ends with no answer.
+      - **The proxy, measured first.** On the toolchain's Node 24.19: with `NODE_USE_ENV_PROXY=1`
+        and `HTTP_PROXY` set, the global agent goes through the proxy, and both `agent: false` and
+        a fresh `new Agent()` go direct; an `Agent` given `proxyEnv` goes through it. Node turns it
+        on for `NODE_USE_ENV_PROXY=1` (not `true`, not `0`) and for `--use-env-proxy`. So since
+        `A-71` the heartbeat went direct where `fetch` had gone through the proxy. Each request now
+        has an agent of its own, `keepAlive: false`, handed the environment when
+        `proxiesFromEnvironment` says Node is told to: `NODE_USE_ENV_PROXY=1`, or `--use-env-proxy`
+        in `execArgv` or `NODE_OPTIONS`. Node applies `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`.
+        `administration.md` says so in the heartbeat section and the upgrade notes.
+      - **Tests.**
+        - `heartbeat.test.ts`: the `101` case now asserts phase `refused` and status 101 on both
+          passes. The proxy rule's table, seven rows. Told to: a URL whose host resolves nowhere
+          is answered by the proxy, which was asked for it as written. Not told to, with a proxy
+          named, and told to with `NO_PROXY` naming the receiver: each goes direct and the proxy
+          is asked nothing. HTTPS through a proxy (Node's `CONNECT` tunnel) is not tried here.
+        - `tls.test.ts`: `addressesOf` reads IPv4 and IPv6 SANs and nothing from a certificate
+          without them. `tls-address-identity.test.ts`: at `::1`, the note for the certificate
+          for other addresses names `127.0.0.2` and `::2`.
+      - **Mutation: 5/5**, each restored byte for byte and `dist` rebuilt: no `upgrade` listener,
+        the proxy never handed to the agent, any value of `NODE_USE_ENV_PROXY` taken as on, no
+        addresses in the verdict, and the note naming names only.
 
 ### Panel round two — notifications, schedules, triggers
 

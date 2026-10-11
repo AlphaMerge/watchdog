@@ -11,7 +11,13 @@ import * as tls from 'node:tls';
 import { pino } from 'pino';
 import { ConfigError, type HousekeepingConfig, type Logger } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
-import { Heartbeat, HEARTBEAT_TIMEOUT_MS, heartbeatFor } from '../src/health/heartbeat.js';
+import {
+  Heartbeat,
+  HEARTBEAT_TIMEOUT_MS,
+  heartbeatFor,
+  proxiesFromEnvironment,
+  type ProxySettings,
+} from '../src/health/heartbeat.js';
 import { Housekeeper } from '../src/timeseries/housekeeper.js';
 import { pollWithin } from './support/within.js';
 
@@ -1141,7 +1147,7 @@ describe('the heartbeat request always ends (A-71)', () => {
     }
   }
 
-  it('counts a 101 nobody asked for as one failure, and the next pass sends again', async () => {
+  it('counts a 101 nobody asked for as refused with its status, and the next pass sends again', async () => {
     const receiver = await raw((socket) => {
       socket.write(
         'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
@@ -1153,14 +1159,14 @@ describe('the heartbeat request always ends (A-71)', () => {
     assert.deepEqual(result.second, { sent: 0, failures: 2 });
     assert.equal(receiver.requests(), 2);
     assert.equal(result.warned.length, 2);
-    const [line] = result.warned;
-    assert.ok(line !== undefined);
-    assert.equal(line['phase'], 'request');
-    assert.equal(line['receiver'], new URL(receiver.url).origin);
-    assert.match(
-      (line['err'] as { message: string }).message,
-      /closed .* with no answer this could use/,
-    );
+    // An answer, and not a heartbeat: refused with its status, as any answer but a 2xx is
+    // (`A-75`). Until then it was a phase `request` and a sentence about a closed connection.
+    for (const line of result.warned) {
+      assert.equal(line['phase'], 'refused');
+      assert.equal(line['status'], 101);
+      assert.equal(line['receiver'], new URL(receiver.url).origin);
+      assert.equal(line['err'], undefined);
+    }
     assert.ok(!result.text.includes('s3cret-token'), 'the token reached the log');
   });
 
@@ -1196,5 +1202,80 @@ describe('the heartbeat request always ends (A-71)', () => {
       given.warned.map((line) => line['phase']),
       ['timeout', 'timeout'],
     );
+  });
+});
+
+/**
+ * The proxy Node is told of (`A-75`). `fetch` went through it when `NODE_USE_ENV_PROXY=1` or
+ * `--use-env-proxy` said so, and `A-71` moved the heartbeat to `http.request` with an agent of its
+ * own, which goes direct unless that agent is handed the environment. The proxy here is a
+ * receiver: an HTTP proxy is asked for the absolute URL, and it answers.
+ */
+describe('the heartbeat through the proxy Node is told of (A-75)', () => {
+  const through = (url: string, settings: ProxySettings): Heartbeat =>
+    new Heartbeat({
+      url,
+      intervalSeconds: 300,
+      passSeconds: 300,
+      version: '9.9.9',
+      logger: silent,
+      timeoutMs: 3_000,
+      proxySettings: settings,
+    });
+
+  it('is told by NODE_USE_ENV_PROXY=1 or --use-env-proxy, and by nothing else, as Node is', () => {
+    const table: readonly [ProxySettings, boolean][] = [
+      [{ env: { NODE_USE_ENV_PROXY: '1' }, execArgv: [] }, true],
+      [{ env: {}, execArgv: ['--use-env-proxy'] }, true],
+      [{ env: { NODE_OPTIONS: '--max-old-space-size=512 --use-env-proxy' }, execArgv: [] }, true],
+      [{ env: { NODE_USE_ENV_PROXY: 'true' }, execArgv: [] }, false],
+      [{ env: { NODE_USE_ENV_PROXY: '0' }, execArgv: [] }, false],
+      [
+        {
+          env: { HTTP_PROXY: 'http://127.0.0.1:1', HTTPS_PROXY: 'http://127.0.0.1:1' },
+          execArgv: [],
+        },
+        false,
+      ],
+      [{ env: { NODE_OPTIONS: '--use-env-proxy-not' }, execArgv: [] }, false],
+    ];
+    for (const [settings, expected] of table) {
+      assert.equal(proxiesFromEnvironment(settings), expected, JSON.stringify(settings));
+    }
+  });
+
+  it('goes through the proxy when told to, asking it for the URL as written', async () => {
+    const proxy = await receiver((_request, response) => {
+      response.statusCode = 204;
+      response.end();
+    });
+    // A name nothing resolves: only the proxy can have answered for it.
+    const heartbeat = through(`http://receiver.invalid/${TOKEN}?site=north`, {
+      env: { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: proxy.origin },
+      execArgv: [],
+    });
+    heartbeat.passed();
+    await heartbeat.settled();
+    assert.deepEqual(heartbeat.stats(), { sent: 1, failures: 0 });
+    assert.deepEqual(
+      proxy.seen.map((one) => one.url),
+      [`http://receiver.invalid/${TOKEN}?site=north`],
+    );
+  });
+
+  it('goes direct with a proxy named and Node not told to use it, and for a host NO_PROXY names', async () => {
+    const proxy = await receiver();
+    for (const env of [
+      { HTTP_PROXY: proxy.origin },
+      { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: proxy.origin, NO_PROXY: '127.0.0.1' },
+    ]) {
+      const target = await receiver();
+      const heartbeat = through(target.url, { env, execArgv: [] });
+      heartbeat.passed();
+      await heartbeat.settled();
+      assert.deepEqual(heartbeat.stats(), { sent: 1, failures: 0 }, JSON.stringify(env));
+      assert.equal(target.seen.length, 1, JSON.stringify(env));
+    }
+    assert.deepEqual(proxy.seen, [], 'the proxy was asked');
   });
 });

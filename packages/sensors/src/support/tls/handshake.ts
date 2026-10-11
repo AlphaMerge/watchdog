@@ -249,6 +249,26 @@ export function namesOf(certificate: PeerCertificate): string[] {
 }
 
 /**
+ * The addresses a certificate lists, as IP subject alternative names, in the form Node writes
+ * them (`A-75`). For saying what a certificate is for, never for deciding whether it is for an
+ * address: that is `certificateListsAddress`, which asks OpenSSL of the DER rather than parse
+ * this string.
+ */
+export function addressesOf(certificate: Pick<PeerCertificate, 'subjectaltname'>): string[] {
+  const addresses = new Set<string>();
+  // Absent on a certificate with no SANs at all, whatever the type says.
+  const san: string = certificate.subjectaltname || '';
+  for (const entry of san.split(',')) {
+    const trimmed = entry.trim();
+    if (trimmed.toLowerCase().startsWith('ip address:')) {
+      const address = trimmed.slice('ip address:'.length).trim();
+      if (address !== '') addresses.add(address);
+    }
+  }
+  return [...addresses];
+}
+
+/**
  * Whether a certificate name covers this host, wildcards included.
  *
  * A wildcard matches exactly one label and never a dot — `*.example.com` covers `a.example.com`
@@ -306,6 +326,8 @@ export interface CertificateVerdict {
   readonly hostMatches: boolean;
   /** Every name the leaf is valid for. */
   readonly names: readonly string[];
+  /** Every address the leaf lists (`A-75`): what the mismatch note names beside the names. */
+  readonly addresses: readonly string[];
   readonly issuer: string;
   readonly chainLength: number;
   /** The subject whose expiry is soonest, when that is *not* the leaf. */
@@ -358,6 +380,7 @@ export function inspectCertificate(
       names.some((name) => nameMatches(name, servername)) ||
       certificateListsAddress(servername, leaf),
     names,
+    addresses: addressesOf(leaf),
     // A certificate's subject fields are `string | string[]`: a name may legitimately appear
     // more than once, and the type reflects that even though it almost never happens.
     issuer: one(leaf.issuer.CN) ?? one(leaf.issuer.O) ?? 'an unnamed issuer',

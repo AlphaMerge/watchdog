@@ -2002,6 +2002,11 @@ there.
   alternative name; a certificate for a name does not cover it. (Before `A-71` an IPv6 address
   was refused under any certificate.) The URL is your own configuration, so the probes' target
   policy does not bound it.
+- **Through a proxy when Node is told to use one.** Run the core with `NODE_USE_ENV_PROXY=1`, or
+  with `--use-env-proxy` on its command line or in `NODE_OPTIONS`, and the heartbeat goes through
+  the proxy `HTTP_PROXY` or `HTTPS_PROXY` names, skipping the hosts `NO_PROXY` lists: Node's own
+  rule, which `fetch` followed. A proxy variable alone, without the switch, changes nothing, as it
+  does not for Node. (Between `A-71` and `A-75` the heartbeat went direct whatever was set.)
 - **When**: at the end of a housekeeping pass, once every `intervalSeconds` (300 by default, from
   10 to 86,400). **It has no timer of its own**, and that is the point: a core whose housekeeping
   has wedged goes on answering its API, and a timer would go on reporting it as well. So
@@ -2219,6 +2224,11 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   withholding from its probe is dropped and counted there rather than taken as a failed scan, so
   such a sensor stays Unknown where it used to turn Down. Rolling back below 069 drops the table
   and with it any flap in progress, which is all it holds.
+- **The core's heartbeat goes through the proxy Node is told of again** (`A-75`). A core run with
+  `NODE_USE_ENV_PROXY=1` or `--use-env-proxy` sends it through `HTTP_PROXY`/`HTTPS_PROXY` as it
+  did before `A-71`; since `A-71` it had gone direct. A receiver that answers it with
+  `101 Switching Protocols` is logged as phase `refused` with status 101, where it was phase
+  `request` with a sentence; it was and is one failure in `heartbeatFailures`.
 - **Two readings move on a device given by address** (`A-71`), once its probe runs this build.
   `tls.certificate`'s *Host name matches* channel read 0 for every such device and now reads 1
   where the certificate lists the address as an IP subject alternative name, so a limit set on

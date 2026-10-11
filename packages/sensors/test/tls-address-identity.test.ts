@@ -474,6 +474,14 @@ describe('tls.certificate and tls.security on a device given by address', () => 
       const execution = await run(tlsCertificate, '::1', { port: server.port });
       assert.equal(valueOf(execution, 'trusted'), 0);
       assert.match(execution.message ?? '', /not trusted: ERR_TLS_CERT_ALTNAME_INVALID/);
+      if (pair === certificates.forOtherAddresses) {
+        // The addresses it lists are said, not only its name (`A-75`): this sensor asked for an
+        // address, and "the certificate is for ms-a67-test" hid the two it is for.
+        assert.match(
+          execution.message ?? '',
+          /the certificate is for ms-a67-test, 127\.0\.0\.2, (::2|0:0:0:0:0:0:0:2) and this sensor asked for ::1/iu,
+        );
+      }
       // A reading and not a failed check: the countdown is what the sensor is for.
       assert.ok((valueOf(execution, 'daysRemaining') ?? -1) >= 28);
     }

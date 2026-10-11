@@ -1,5 +1,5 @@
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent as HttpAgent, request as httpRequest, type AgentOptions } from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import {
   ConfigError,
   describeError,
@@ -38,6 +38,34 @@ export interface HeartbeatOptions {
   timeoutMs?: number;
   /** A monotonic clock in milliseconds, injectable so a test decides when a beat is due. */
   monotonicMs?: () => number;
+  /**
+   * Where Node's proxy settings are read (`A-75`): the process's own unless a test says
+   * otherwise, since Node reads them once at start and a test cannot change them under it.
+   */
+  proxySettings?: ProxySettings;
+}
+
+/** What decides whether, and through what, a request goes by a proxy. */
+export interface ProxySettings {
+  /** `NODE_USE_ENV_PROXY`, `NODE_OPTIONS`, and `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`. */
+  readonly env: Readonly<Record<string, string | undefined>>;
+  /** The process's own command-line options, where `--use-env-proxy` may be. */
+  readonly execArgv: readonly string[];
+}
+
+/**
+ * Whether Node is told to send HTTP through the proxy its environment names (`A-75`).
+ *
+ * **Node's own rule, as measured on its 24 line**: `NODE_USE_ENV_PROXY=1`, and no other value of
+ * it, or `--use-env-proxy` given to the process directly or in `NODE_OPTIONS`. `fetch` honoured
+ * it; `http.request` honours it only through the global agent, and a request given its own
+ * agent, as the heartbeat is, goes direct unless that agent is handed the environment. A
+ * proxy variable alone, without the switch, changes nothing, as it does not for Node.
+ */
+export function proxiesFromEnvironment(settings: ProxySettings): boolean {
+  if (settings.env['NODE_USE_ENV_PROXY'] === '1') return true;
+  const given = [...settings.execArgv, ...(settings.env['NODE_OPTIONS'] ?? '').split(/\s+/u)];
+  return given.includes('--use-env-proxy');
 }
 
 /**
@@ -110,6 +138,8 @@ export class Heartbeat implements PassWitness {
   readonly #userAgent: string;
   readonly #logger: Logger;
   readonly #monotonicMs: () => number;
+  /** The environment a request's agent reads its proxy from, or none when Node is not told to. */
+  readonly #proxyEnv: Readonly<Record<string, string | undefined>> | undefined;
   readonly #stop = new AbortController();
 
   #lastDueAt: number | undefined;
@@ -133,6 +163,8 @@ export class Heartbeat implements PassWitness {
     this.#userAgent = `ms-core/${options.version}`;
     this.#logger = options.logger.child({ component: 'heartbeat' });
     this.#monotonicMs = options.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n));
+    const settings = options.proxySettings ?? { env: process.env, execArgv: process.execArgv };
+    this.#proxyEnv = proxiesFromEnvironment(settings) ? { ...settings.env } : undefined;
   }
 
   /** Sent and failed since the process started. Core Health takes the difference. */
@@ -225,8 +257,10 @@ export class Heartbeat implements PassWitness {
           method: 'GET',
           signal,
           // A connection for each heartbeat. They are minutes apart, and one kept open between
-          // them would be one more thing that could be stale when it mattered.
-          agent: false,
+          // them would be one more thing that could be stale when it mattered. An agent of its
+          // own rather than `false`, so it can be handed the proxy Node is told to use (`A-75`):
+          // `fetch` went by it, and moving off `fetch` in `A-71` had the heartbeat go direct.
+          agent: this.#agent(secure),
           headers: {
             // What `fetch` sent, name for name and value for value, so that whatever answered
             // those answers these. (`connection` is Node's own, and says `close`: true now.)
@@ -252,23 +286,36 @@ export class Heartbeat implements PassWitness {
       // Left on for the life of the request: an error after the answer has nowhere else to go,
       // and rejecting a promise that has settled does nothing.
       request.on('error', reject);
-      // **Every end is an end.** Node tells of an answer with `response` and of a failure with
-      // `error`, and of an answer it will not use with neither: a `101 Switching Protocols`
-      // nobody asked for has it destroy the socket and say only `close`. Waiting on the first
-      // two, this never settled; the one-at-a-time rule then held every later heartbeat back
-      // behind it, uncounted and unlogged — a dead man's switch stopped without a word, which
-      // `fetch` never did (found in `A-71`'s review). `close` is the one event every request
-      // ends with, and it comes after the other two, so by then this has usually been said.
+      // **An upgrade is an answer, and it is not a heartbeat** (`A-75`). A `101 Switching
+      // Protocols` nobody asked for is told with `upgrade`, and only to a listener: with none,
+      // Node destroys the socket and says nothing but `close`, which is how `A-71` met it. So it
+      // is refused with its status like any answer that is not a 2xx, and the socket it offers
+      // is hung up on.
+      request.on('upgrade', (response, socket) => {
+        socket.destroy();
+        resolve(response.statusCode ?? 101);
+      });
+      // **Every end is an end.** Node tells of an answer with `response` or `upgrade` and of a
+      // failure with `error`, and of a connection that ends with no answer at all with neither.
+      // Waiting on those alone, a request could never settle; the one-at-a-time rule then held
+      // every later heartbeat back behind it, uncounted and unlogged — a dead man's switch
+      // stopped without a word, which `fetch` never did (found in `A-71`'s review). `close` is
+      // the one event every request ends with, and it comes after the others, so by then this
+      // has usually been said.
       request.on('close', () => {
-        reject(
-          new Error(
-            'the receiver closed the connection with no answer this could use (an upgrade ' +
-              'to another protocol is one such)',
-          ),
-        );
+        reject(new Error('the receiver closed the connection with no answer this could use'));
       });
       request.end();
     });
+  }
+
+  /** One request's agent: kept open for nobody, and through the proxy when Node is told to. */
+  #agent(secure: boolean): HttpAgent {
+    const options: AgentOptions & { proxyEnv?: Readonly<Record<string, string | undefined>> } = {
+      keepAlive: false,
+      ...(this.#proxyEnv === undefined ? {} : { proxyEnv: this.#proxyEnv }),
+    };
+    return secure ? new HttpsAgent(options) : new HttpAgent(options);
   }
 
   #fail(phase: FailurePhase, detail: Record<string, unknown>): void {
