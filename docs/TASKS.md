@@ -9321,7 +9321,7 @@ because each is a decision rather than a defect:
         - **Runs:** check-pool, core probe-health and metrics, probe-health-report, health-types,
           capabilities and `build-hygiene` whole, 298/298, at VM count 1.
 
-- [ ] **P-264 — two more tests read red on a loaded machine** · S · P-258 · Found 2026-10-05
+- [x] **P-264 — two more tests read red on a loaded machine** · S · P-258 · Found 2026-10-05
       in `P-260`, each once while a probe suite ran on loop beside it at load up to 28:
       `check-pool.test.ts` `P-34` "raises its ceiling from what it measured …" (*4 -> 4*) and
       `probe-flow.test.ts` `B-09` (*timed out after 20000 ms waiting for the probe to stop*).
@@ -9329,6 +9329,59 @@ because each is a decision rather than a defect:
       explained as `P-258` explained its two — where the time goes, measured — and asserts
       without depending on how loaded the machine is, with twenty runs beside a running probe
       suite.
+
+      **P-264 outcome. Both were the tests' numbers, not the probe. Neither failure reproduced,
+      so both are explained from the code and fixed so that load cannot cross them.**
+      - **Measured first, with the old tests instrumented** (each slow check's outcome, phase and
+        duration, the median the sizer read, and the probe's stop time with every shutdown hook
+        at debug level). 26 runs, 0 failures:
+        - 20 beside the probe suite on a loop, load 0.9 to 7.2.
+        - 6 with eight busy loops added, load 4.1 to 15.4.
+
+        Every one of the 12 slow checks was `ok` at 400 to 415 ms. No check timed out. A stop took
+        271 to 1,534 ms, most of it `spool-drain` (up to 0.9 s) and `core-client` (0.25 s).
+        Load 28, where both failed, was not reached without a third heavy run, which the VM does
+        not allow.
+      - **`P-34` "raises its ceiling…", read *4 -> 4*.**
+        - A ceiling of 4 means the median the sizer read was 61 ms or less: 50 checks a second ×
+          the median × 1.3, over 4.
+        - The test gave its 400 ms checks `request()`'s default 1 s timeout, and the pool records
+          no duration for a check it has already timed out (`#recordTypeDuration` runs only for a
+          result that settles the job).
+        - With 12 fast and 12 slow samples the median is the 13th of 24, the first slow one, so
+          one slow sample lost to the timeout made it the 12th fast one: *4 -> 4*. Timers in a
+          worker were measured up to 323 ms late in `P-258`, so a 600 ms margin can be crossed at
+          load 28.
+        - The quiet half hung on the same kind of margin: a 20 ms check's median had to stay under
+          61 ms for the floor to hold.
+      - **`P-34`, now.** Every check has 30 s. 300 sensors, so the quiet phase holds the floor until
+        its median check is measured at 615 ms, ten times the old margin. Slow checks take 2 s, so
+        the busy ceiling is at least 13, and lateness only raises it. 8 of each: the median is the
+        fastest slow sample however late the fast ones ran. A new assertion checks every check
+        answered `ok`, so a lost sample fails by name. The test takes about 4.5 s instead of 1.5.
+        The sibling, "gives the room back", already had a dozen or more samples of one kind on each
+        side of its median, so a lost or late sample cannot move it, and it is unchanged.
+      - **`B-09`, "timed out after 20000 ms waiting for the probe to stop".**
+        `RunningProbe.stop` waited 20 s, which is the probe's own default shutdown budget. Past
+        that budget the probe abandons its hooks and exits 1 by itself. With the two bounds
+        equal, a probe that was slow but within budget, or exiting just after it, failed the
+        test's bound instead of its own. That failure kept none of the probe's log, so which hook
+        held it was never known. Now `probe-process.ts` writes `shutdownTimeoutMs`
+        (`PROBE_SHUTDOWN_BUDGET_MS`, 20 s) into every test probe's configuration, and `stop`
+        waits `PROBE_STOP_WAIT_MS`, the budget plus 10 s. A probe over budget then exits 1 and
+        `stop() === 0` fails with its *shutdown budget exhausted* line in the log. If the wait
+        itself passes, the error carries the probe's last five log lines. This covers every user
+        of the helper: `probe-flow`, `probe-listeners` and `root-scripts`.
+      - **Mutation: 5/5 killed** on what `P-34` guards: no duration recorded; the median read as
+        the minimum; no margin; a raised ceiling not taken; the slow checks back on the default
+        1 s timeout, which now fails by name since 2 s cannot fit in 1 s. The margin mutant
+        **survived the old test**, run against it: 50 a second at 400 ms is 20 in flight with or
+        without the margin, against `>= 20`. The `B-09` change is to a bound, which no single run
+        can catch, so its evidence is the loaded runs below.
+      - **Runs.** The ticket's twenty: both tests, fixed, 20 of 20 beside the probe suite on a
+        loop with eight busy loops added, load 13.2 to 23.1. `P-34` took 4.2 to 5.3 s a run and
+        `B-09` 20.5 to 47.8 s. `@ms/probe` whole, rebased onto `U-36`: 660/660, no skipped
+        suites.
 
 - [ ] **P-265 — should a check the probe could not start read Down?** · S · P-260 · Found
       2026-10-05 in `P-260`. A start-up failure is an error result, so the sensor goes Down, as

@@ -358,6 +358,25 @@ export async function sendUdp(
   }
 }
 
+/**
+ * The shutdown budget written into every probe started here (`service.shutdownTimeoutMs`, its
+ * default). Past it the probe stops waiting for its hooks and exits 1 on its own.
+ */
+export const PROBE_SHUTDOWN_BUDGET_MS = 20_000;
+
+/**
+ * How long `stop` waits for the probe to exit: its budget and then some (`P-264`).
+ *
+ * The wait was 20 s, the budget itself, so a probe still inside its budget under load, or exiting
+ * just after it, failed as "timed out waiting for the probe to stop": a failure of the test's
+ * bound and not of the probe, and one that kept nothing the probe had logged. With the budget
+ * inside the wait, a probe that overruns exits 1 by itself and the test reads that code, with the
+ * probe's own *shutdown budget exhausted* line in its log. The ten seconds over are for what comes
+ * after the budget: the exit, and the pipes closing. Only a probe that ignores its own budget
+ * reaches this bound.
+ */
+export const PROBE_STOP_WAIT_MS = PROBE_SHUTDOWN_BUDGET_MS + 10_000;
+
 export interface RunningProbe {
   /** Every line the probe has logged so far, parsed. */
   readonly logs: () => readonly Record<string, unknown>[];
@@ -385,7 +404,12 @@ export function startProbe(options: {
   writeFileSync(
     file,
     JSON.stringify({
-      service: { dataDir: join(dir, 'data'), logLevel: 'info', logPretty: false },
+      service: {
+        dataDir: join(dir, 'data'),
+        logLevel: 'info',
+        logPretty: false,
+        shutdownTimeoutMs: PROBE_SHUTDOWN_BUDGET_MS,
+      },
       probe: {
         displayName: 'probe under test',
         spoolDir: join(dir, `spool-${String(process.hrtime.bigint())}`),
@@ -455,7 +479,16 @@ export function startProbe(options: {
       if (child.exitCode !== null) return child.exitCode;
       child.kill('SIGTERM');
       try {
-        return await within(20_000, 'the probe to stop', exited);
+        // What it was doing when the bound passed, since a hook that hangs says nothing itself.
+        return await within(
+          PROBE_STOP_WAIT_MS,
+          () =>
+            `the probe to stop; its last lines: ${lines
+              .slice(-5)
+              .map((line) => JSON.stringify(line))
+              .join(' ')}`,
+          exited,
+        );
       } catch (error) {
         child.kill('SIGKILL');
         throw error;

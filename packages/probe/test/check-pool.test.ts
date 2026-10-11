@@ -1746,9 +1746,18 @@ describe('a probe whose checks get slower (P-34)', () => {
     //
     // The same sensor type throughout, because that is the real case: `http.get` against an
     // endpoint that degrades is not a new type, it is the same one costing more.
+    //
+    // **Numbers a loaded machine cannot cross** (`P-264`). Every check is given 30 s, because a
+    // result the pool has already timed out records no duration: 400 ms checks under the default
+    // 1 s did, at load 28, and with twelve of each the median sat on the line between the two
+    // kinds, so one lost slow sample read as the fast median and the ceiling as 4 -> 4. And the
+    // workload is light enough that the quiet phase stays at the floor until its median check is
+    // measured at 615 ms, ten times the 61 ms the old numbers allowed a 20 ms check to slip.
+    // Lateness only lengthens the slow checks, which raises the busy ceiling further.
     const { pool, seen } = await poolOf({ size: 4, minSize: 4, idleShrinkMs: 0 });
+    const TIMEOUT_MS = 30_000;
 
-    const SENSORS = 3_000;
+    const SENSORS = 300;
     const assignments = Array.from({ length: SENSORS }, () => ({
       sensorType: 'test.slow',
       intervalSeconds: 60,
@@ -1766,16 +1775,26 @@ describe('a probe whose checks get slower (P-34)', () => {
       return demand.ceiling;
     };
 
-    // A quiet network: 3,000 sensors a minute apart is 50 checks a second, and at 20 ms each
-    // that is one worker's worth of work. The floor is under the minimum, so the minimum wins.
-    for (let i = 0; i < 12; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 20 }));
-    await until(() => seen.length === 12, 'the fast checks');
+    // A quiet network: 300 sensors a minute apart is 5 checks a second, and at 20 ms each that
+    // is a tenth of a worker. The floor is over what it needs, so the floor wins.
+    for (let i = 0; i < 8; i += 1) {
+      pool.submit(request(i, 'test.slow', { delayMs: 20, timeoutMs: TIMEOUT_MS }));
+    }
+    await until(() => seen.length === 8, 'the fast checks');
     const quiet = sizePool();
     assert.equal(quiet, 4, `a light workload derives the floor, got ${String(quiet)}`);
 
-    // The same sensors, now answering ten times slower. 50 a second at 400 ms is 20 in flight.
-    for (let i = 100; i < 112; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 400 }));
-    await until(() => seen.length === 24, 'the slow checks');
+    // The same sensors, now answering a hundred times slower. 5 a second at 2 s is 10 in flight,
+    // 13 with the margin. Eight of each, so the median is the fastest of the slow ones however
+    // late the fast ones ran, provided none is lost, which the timeout above sees to.
+    for (let i = 100; i < 108; i += 1) {
+      pool.submit(request(i, 'test.slow', { delayMs: 2_000, timeoutMs: TIMEOUT_MS }));
+    }
+    await until(() => seen.length === 16, 'the slow checks');
+    assert.ok(
+      seen.every((one) => one.result.outcome === 'ok'),
+      `every check answered: ${seen.map((one) => one.result.outcome).join(', ')}`,
+    );
 
     const busy = sizePool();
     assert.ok(
@@ -1783,13 +1802,13 @@ describe('a probe whose checks get slower (P-34)', () => {
       `the ceiling did not move when the work got slower: ${String(quiet)} -> ${String(busy)}`,
     );
     assert.ok(
-      busy >= 20,
-      `50 checks a second at 400 ms needs 20 in flight; derived ${String(busy)}`,
+      busy >= 13,
+      `5 checks a second at 2 s needs 10 in flight, 13 with the margin; derived ${String(busy)}`,
     );
     assert.equal(pool.maxSize, busy, 'and the pool took it');
 
     // **"Before the backlog grows" is the clause that matters**, and this is what makes it true:
-    // the estimate comes from checks that have already *finished*, so a dozen of them is enough
+    // the estimate comes from checks that have already *finished*, so eight of them are enough
     // to move the ceiling. Nothing had to queue up for the probe to find out.
     const stats = pool.stats();
     assert.equal(stats.deferred, 0, 'nothing was deferred while it learned');
