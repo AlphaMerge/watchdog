@@ -586,6 +586,12 @@ export const WITHHELD_CREDENTIALS = {
   probeTooOld:
     'Not scanned: the SSH credentials it would use list host keys, and its probe is too old to ' +
     'check a server against more than one. Upgrading the probe to protocol 22 sends them again.',
+  heldByFlap:
+    'Not scanned: its probe already speaks a protocol that may be sent these credentials, but ' +
+    'its protocol version has changed more than once inside an hour, and until it has held one ' +
+    'version for an hour it is sent only what the oldest version it spoke in that time may be ' +
+    'sent. Nothing needs upgrading: they are sent again once its version has held, and Probe ' +
+    'Health says when.',
 } as const;
 
 /**
@@ -1417,8 +1423,14 @@ export class CredentialVouching {
     sensors: readonly SensorBeingSent[],
     /** What the probe speaks, which decides whether it may be sent a set bounded by its keys. */
     peerVersion: number = PROTOCOL_VERSION,
+    /**
+     * What the probe speaks when `peerVersion` is the version a flap holds it at, which is lower
+     * (`A-78`): a sensor refused only for the flap is told so, and not told to upgrade a probe
+     * that already speaks enough.
+     */
+    spoken: number = peerVersion,
   ): Promise<Map<number, string>> {
-    return this.#check(probeId, sensors, peerVersion, new Set());
+    return this.#check(probeId, sensors, peerVersion, new Set(), spoken);
   }
 
   /** `refusals`, noting in `left` each sensor sent a set its probe has to check a name against. */
@@ -1427,6 +1439,7 @@ export class CredentialVouching {
     sensors: readonly SensorBeingSent[],
     peerVersion: number,
     left: Set<number>,
+    spoken: number = peerVersion,
   ): Promise<Map<number, string>> {
     const refused = new Map<number, string>();
     const sent = sensors.filter((sensor) => sensor.owners.size > 0);
@@ -1464,13 +1477,21 @@ export class CredentialVouching {
       for (const [kind, ownerId] of sensor.owners) {
         const restriction = sensor.restrictions?.get(kind);
         if (restriction !== undefined && isRestricted(restriction)) {
-          const refusal = boundRefusal(
-            restriction,
-            sensor.host,
-            peerVersion,
-            this.#types.pinsAddress(sensor.sensorType, kind),
-            kind,
-          );
+          const pins = this.#types.pinsAddress(sensor.sensorType, kind);
+          const reason = boundRefusalReason(restriction, sensor.host, peerVersion, pins, kind);
+          // **Held by a flap, and said so** (`A-78`). Refused at the floor, it is asked again at
+          // the version the probe speaks: the refusal there is the true one, and an upgrade
+          // mends it, and with none it is the flap alone that holds it. A refusal no version
+          // decides is the same at both.
+          const refusal =
+            reason === null
+              ? null
+              : WITHHELD_CREDENTIALS[
+                  spoken > peerVersion
+                    ? (boundRefusalReason(restriction, sensor.host, spoken, pins, kind) ??
+                      'heldByFlap')
+                    : reason
+                ];
           if (refusal !== null) refused.set(sensor.sensorId, refusal);
           else if (targetVerdict(sensor.host, restriction.targets) === 'undecided') {
             left.add(sensor.sensorId);
@@ -1558,7 +1579,7 @@ export class CredentialVouching {
       this.#flapHoldMs,
     );
     const left = new Set<number>();
-    const refused = await this.#check(probeId, sensors, judged, left);
+    const refused = await this.#check(probeId, sensors, judged, left, peerVersion);
     // A sensor refused for another of its kinds is not sent at all, and so not the probe's.
     for (const sensorId of refused.keys()) left.delete(sensorId);
     const otherwise = await this.#leftUnderVersionBefore(probeId, sensors, judged, left);

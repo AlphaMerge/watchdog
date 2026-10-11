@@ -25,7 +25,7 @@ export type {
 } from './machine.js';
 export { loadRuntimes, readSensorState, writeRuntimes, writeStateHistory } from './runtime.js';
 export type { RuntimeWrite, SensorRuntime, StateDecisions, StateTransition } from './runtime.js';
-export { SensorStateService } from './service.js';
+export { RELEASED_FROM_WITHHOLDING, SensorStateService } from './service.js';
 export type { SensorResult, SensorStateServiceOptions, StateStats } from './service.js';
 export {
   PAUSE_CAUSE,

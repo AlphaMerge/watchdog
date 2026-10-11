@@ -30814,7 +30814,7 @@ because each is a decision rather than a defect:
           above what was advertised, so both give the same judged version. After the last,
           `dist` matched `src`.
 
-- [ ] **A-78 — what is left of a probe that flaps** · S · A-72 · Found 2026-10-04 by `A-72`.
+- [x] **A-78 — what is left of a probe that flaps** · S · A-72 · Found 2026-10-04 by `A-72`.
       A sensor let go after a hold re-decides with an empty message until its next scan (the
       `A-29` release path). Results that arrive before a restarted core has built a probe's
       first configuration are handled as they were before `A-72`. The held sensors' sentence
@@ -30822,6 +30822,76 @@ because each is a decision rather than a defect:
       already speaks 24. And `main.ts` is still booted by no test, so its new wiring
       (`onProtocolFlapOver` to `configNotifier.flush()`) is read and not run. **Done when**
       each is fixed with a test or written down.
+
+      **A-78 outcome.** Two fixed, two written down as `A-83` and `A-84`. No migration, no
+      protocol number.
+      - **A sensor the flap alone holds says so** (`WITHHELD_CREDENTIALS.heldByFlap`). A
+        refusal that turns on the version (`probeCannotPin`, `probeCannotPinDatabase`,
+        `probeTooOld`) made at the flap's floor is now judged again at the version the probe
+        speaks. If that version would send the set, the sensor reads the flap's sentence: the
+        probe already speaks enough, nothing needs upgrading, and Probe Health says when the
+        hold ends. If it would not, the sensor reads the sentence for the version it speaks,
+        which is the one an upgrade mends. A refusal no version decides (`outside`,
+        `undecided`, vouching) keeps its words. "Check now" goes the same way
+        (`ProbeConfigService.assignmentFor` passes the version spoken beside the version
+        judged). Moving between the two sentences as the probe flips is a rewrite of an
+        Unknown's message, not a transition. The five-alternation scenario still pages once
+        for each held sensor.
+      - **A sensor let go by the voucher check says where it stands** until its next scan
+        (`RELEASED_FROM_WITHHOLDING`, in `SensorStateService.reevaluate`). Leaving
+        `unknown`/`access` for a state its facts decide used to write that state with no
+        message: an Up or a Down that said neither that it was the state from before the hold
+        nor why. Every release of `A-29`'s set takes it, not only a flap's. The next scan's
+        own words replace it. A probe that comes back after an outage (cause `probe`) still
+        re-decides in no words; that is `R-11`.
+      - **Results before a restarted core's first configuration: written down as `A-83`.**
+      - **`main.ts`'s flap-over wiring run, not read: written down as `A-84`.** The source
+        assertion `A-72` added stays.
+      - **Tests.** `credential-pinning.test.ts`: one new case (the flap's sentence, the
+        spoken version's sentence below 22 and 24, no flap, a refusal no version decides,
+        nothing recorded by asking). The flap cases, the two-kinds table, the restart cases,
+        the five-alternation scenario (minute 13 and the release) and the operator-change
+        scenario's "check now" now expect the new words, and "check now" at the older
+        version still expects the upgrade sentence.
+      - **Mutation:** 7 of 7 killed (the flap path off by reversing its comparison, the
+        flap's sentence always, the judged reason as the fallback, "check now" without the
+        spoken version, `withhold` without it, the release silent, and the release sentence on
+        a probe's return instead). An eighth mutant counted `outside` as a version refusal and
+        survived because it was equivalent: a refusal no version decides is the same at every
+        version. So the list of version refusals it mutated is gone, and the refusal is asked
+        again at the spoken version whatever it is.
+
+- [ ] **A-83 — results that reach a restarted core before the probe's first configuration**
+      · S · A-78 · Found 2026-10-11 by `A-78`. What a probe's configuration withholds is held
+      in memory (`#withheldByProbe`, and `SensorVouching`'s live fact) and rebuilt by the first
+      configuration the restarted core builds for it. `ProbeEndpoint.#queueResults` hands a
+      batch to ingestion as soon as the probe is known, without waiting for that
+      configuration. A spooled result for a sensor the core before the restart withheld (one
+      a flap held, or any refusal of `A-29`'s set) is therefore taken as an ordinary result:
+      it decides the sensor out of `unknown`/`access`. The first configuration then withholds
+      it again, which is an Unknown page and its recovery that one outage did not earn. The
+      window is the time from the probe's hello to its first build, usually under a second,
+      and the sensor needs a result spooled from before it was withheld. Proposed: chain the
+      session's result batches behind its first configuration, under a bound, and as before
+      once the bound has passed. **Done when** fixed with a scenario test on the real tables
+      (stored withheld sensor, a restart, a spooled result first) or decided to keep.
+
+- [ ] **A-84 — `main.ts`'s flap-over wiring has not been run** · S · A-78 · Found
+      2026-10-11 by `A-78`. `onProtocolFlapOver` → `configNotifier.flush()` is asserted on
+      the source text. The `P-331` harness (`test/support/core-process.ts`) boots `main.ts`,
+      but no test connects a probe to that core. The prune that ends a flap runs every 60 s
+      with an hour's hold, and a push to nobody logs nothing. Running it needs three things:
+      a probe enrolled against a booted core (the probe package's `probe-process.ts` beside
+      `startCore`), a stored `probe_protocol_flap` row that ends inside the test, and either
+      a minute's wait or the prune interval as an `MS_*` setting. **Done when** a test sees
+      the configuration pushed when the flap ends, or the cost is judged not worth it and
+      said here.
+
+- [ ] **R-11 — a sensor re-decided when its probe comes back says nothing** · XS · R-05,
+      A-78 · Found 2026-10-11 by `A-78`. Leaving `unknown`/`probe` for the state its last
+      scan decided writes that state with an empty message until the next scan, as a
+      release from `A-29`'s set did before `A-78`. **Done when** it carries a sentence of its
+      own (as `RELEASED_FROM_WITHHOLDING`) with a test, or the silence is decided right.
 
 - [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A

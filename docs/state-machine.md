@@ -259,6 +259,12 @@ The core now notes, for every configuration it builds for a probe, the version t
   A flap that begins with an upgrade withholds at the downgrade after it, as the version
   requires; a probe is never sent a set it cannot be trusted with. "Check now" is judged at the
   floor too.
+- **A sensor the flap alone holds says so** (`A-78`). When the version the probe speaks would
+  send the set and only the floor refuses it, the sensor reads that its probe already speaks
+  enough, that the flap holds it, and that Probe Health says when the hold ends. It is not told
+  to upgrade. When the version it speaks would refuse the set too, it reads that version's
+  sentence, which an upgrade does mend. The words follow the probe as it flips, as a rewrite of
+  the Unknown's message: no transition, no page.
 - **It is over when the version has held for an hour** (`PROTOCOL_FLAP_HOLD_MS`) since its last
   change. The minute timer that removes spent windows notices, and asks for the probe's
   configuration at once rather than at its next reconnect: what the floor held is let go then,
@@ -720,7 +726,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
 | any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled; or the sensor is outside its credentials' bounds (`A-41b`) | `access` |
-| `unknown` (`access`) | `up` / `warning` / `down` / `unknown` | Vouched for again: its last reading decides, as when a probe returns, until the next one | `scan` / `limit` / `lookup` |
+| `unknown` (`access`) | `up` / `warning` / `down` / `unknown` | Vouched for again: its last reading decides, as when a probe returns, until the next one, and its message says so (`A-78`) | `scan` / `limit` / `lookup` |
 | any but `paused`    | `down`              | Simulated error set                                | `simulated`            |
 | `up`/`warning`/`down` | itself            | The reason changed, not the state                  | `scan` / `limit` / `lookup` |
 

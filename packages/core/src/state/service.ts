@@ -196,6 +196,15 @@ export interface StateStats {
 
 const DEFAULT_MAX_CACHED = 20_000;
 
+/**
+ * What a sensor let go from `unknown`/`access` says until its next result (`A-78`): vouched for
+ * again, or its credentials sent again, or a factory's voucher able to read again. Its state is
+ * the one its facts decide, which is where it stood before it was withheld, and nothing has
+ * measured it since: without these words it read Up, or Down, with no message at all.
+ */
+export const RELEASED_FROM_WITHHOLDING =
+  'No longer withheld. Until its next result it stands where it stood before it was withheld.';
+
 export class SensorStateService {
   readonly #db: Database;
   readonly #logger: Logger;
@@ -534,9 +543,14 @@ export class SensorStateService {
       //
       // A withheld sensor's words come from the voucher check whoever re-decided it (`A-29`):
       // they are the only ones that say what fixes it, and they are held with the fact.
+      //
+      // **Let go by the voucher check, it says so** (`A-78`): its state is the one it had before
+      // it was withheld, and an Up or a Down with nothing beside it said neither that nor why.
       const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
       const message = !operatorDecided(decision)
-        ? ''
+        ? runtime.cause === 'access'
+          ? RELEASED_FROM_WITHHOLDING
+          : ''
         : (this.#withheldMessage(sensorId, decision) ??
           (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
       transitions.push({

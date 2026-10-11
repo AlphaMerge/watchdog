@@ -325,6 +325,7 @@ export class ProbeConfigService {
       probeObjectId,
       beingSent([{ sensor_id: String(sensorId), ...row }], credentials),
       judged,
+      connected ? peerVersion : judged,
     );
     const withheld = refused?.get(sensorId);
     if (withheld !== undefined) {

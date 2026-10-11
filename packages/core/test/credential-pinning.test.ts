@@ -54,7 +54,7 @@ import { ProbeRefusals } from '../src/probes/refusals.js';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
-import type { SensorResult } from '../src/state/service.js';
+import { RELEASED_FROM_WITHHOLDING, type SensorResult } from '../src/state/service.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
 import { TriggerService } from '../src/triggers/service.js';
 import {
@@ -2389,6 +2389,8 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       };
     }
     const CANNOT = WITHHELD_CREDENTIALS.probeCannotPin;
+    /** What a sensor held only by the flap is told: not to upgrade a probe that speaks enough. */
+    const HELD = WITHHELD_CREDENTIALS.heldByFlap;
     const all = (sentence: string): Map<number, string> =>
       new Map([1, 2, 3].map((sensorId) => [sensorId, sentence]));
 
@@ -2404,7 +2406,11 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       const versions = [PINNING, PINNING - 1, PINNING, PINNING - 1];
       for (const [index, version] of versions.entries()) {
         tick(180_000);
-        assert.deepEqual(await speak(version), all(CANNOT), `change ${String(index + 2)}`);
+        assert.deepEqual(
+          await speak(version),
+          all(version >= PINNING ? HELD : CANNOT),
+          `change ${String(index + 2)}`,
+        );
         assert.equal(credentials.stats().withheld, 3);
         assert.deepEqual(credentials.protocolFlap(7), {
           version,
@@ -2458,7 +2464,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       tick(120_000);
       await speak(PINNING);
       tick(HOLD - 1);
-      assert.deepEqual(await speak(PINNING), all(CANNOT), 'the last millisecond of the hold');
+      assert.deepEqual(await speak(PINNING), all(HELD), 'the last millisecond of the hold');
       assert.equal(credentials.protocolFlap(7)?.remainingMs, 1);
       tick(1);
       assert.equal(credentials.protocolFlap(7), null);
@@ -2490,7 +2496,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       // never sent a set it would connect by name with.
       assert.deepEqual(await speak(PINNING - 1), all(CANNOT));
       tick(60_000);
-      assert.deepEqual(await speak(PINNING), all(CANNOT), 'and from there it holds');
+      assert.deepEqual(await speak(PINNING), all(HELD), 'and from there it holds');
       assert.equal(credentials.protocolFlap(7)?.floor, PINNING - 1);
     });
 
@@ -2510,7 +2516,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       await speak(PINNING);
       await speak(PINNING - 1);
       tick(60_000);
-      assert.deepEqual(await speak(PINNING), all(CANNOT));
+      assert.deepEqual(await speak(PINNING), all(HELD));
       // A name entry now covers sensor 1's device, and sensor 3 is no longer sent at all.
       const covered: SensorBeingSent = {
         ...leftToProbe(1),
@@ -2519,7 +2525,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
         ]),
       };
       const refused = await credentials.withhold(7, [covered, leftToProbe(2)], PINNING);
-      assert.deepEqual(refused, new Map([[2, CANNOT]]), 'sensor 1 is sent; 2 is still held');
+      assert.deepEqual(refused, new Map([[2, HELD]]), 'sensor 1 is sent; 2 is still held');
       assert.equal(credentials.stats().withheld, 1);
     });
 
@@ -2537,6 +2543,52 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       assert.equal(flaps.length, writes);
       tick(HOLD);
       assert.equal(credentials.judgedVersion(7, PINNING), PINNING);
+    });
+
+    it('tells a sensor the flap alone holds that the flap holds it, and not to upgrade (A-78)', async () => {
+      const { credentials, flaps } = flapping();
+      // Sensor 4 is entered by address, with a set bounded by its SSH keys: protocol 22 decides it.
+      const keyed: SensorBeingSent = {
+        ...leftToProbe(4),
+        host: '10.20.0.5',
+        restrictions: new Map([['snmp', { targets: [], hostKeys: ['SHA256:a'] }]]),
+      };
+      const ask = (judged: number, spoken: number): Promise<Map<number, string>> =>
+        credentials.refusals(7, [leftToProbe(1), keyed], judged, spoken);
+      // Held below what it speaks, and what it speaks would send it: the flap's sentence.
+      assert.deepEqual(await ask(PINNING - 1, PINNING), new Map([[1, HELD]]));
+      // Each sensor by its own version: 22 sends the keyed set and does not pin a name, so the
+      // named one is told what an upgrade mends, and the keyed one that the flap holds it.
+      assert.deepEqual(
+        await ask(21, 22),
+        new Map([
+          [1, CANNOT],
+          [4, HELD],
+        ]),
+      );
+      assert.deepEqual(
+        await ask(20, 21),
+        new Map([
+          [1, CANNOT],
+          [4, WITHHELD_CREDENTIALS.probeTooOld],
+        ]),
+      );
+      // No flap, or none said: as before.
+      assert.deepEqual(await ask(PINNING - 1, PINNING - 1), new Map([[1, CANNOT]]));
+      assert.deepEqual(
+        await credentials.refusals(7, [leftToProbe(1)], PINNING - 1),
+        new Map([[1, CANNOT]]),
+      );
+      // A sentence no version decides is never the flap's.
+      const outside: SensorBeingSent = {
+        ...leftToProbe(5),
+        restrictions: new Map([['snmp', { targets: ['*.other.test'], hostKeys: null }]]),
+      };
+      assert.deepEqual(
+        await credentials.refusals(7, [outside], PINNING - 1, PINNING),
+        new Map([[5, WITHHELD_CREDENTIALS.outside]]),
+      );
+      assert.deepEqual(flaps, [], 'asked, and nothing recorded');
     });
 
     it('records no version that is not one, and judges it as given', async () => {
@@ -2711,7 +2763,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
           sensor: both(BY_ADDRESS, BY_NAME),
           at24: null,
           at23: CANNOT,
-          heldAt24: CANNOT,
+          heldAt24: HELD,
           left: true,
         },
         {
@@ -2853,7 +2905,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
           remainingMs: HOLD - 300_000,
         });
         // The probe redials at the newer version, the one it spoke when the core stopped: held.
-        assert.deepEqual(await second.speak(PINNING), all(CANNOT));
+        assert.deepEqual(await second.speak(PINNING), all(HELD));
         assert.deepEqual(second.flaps, [], 'and the same version again writes nothing');
         // And at the older: a third change, counted on.
         second.tick(60_000);
@@ -2870,7 +2922,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
         second.clock.wall = first.clock.wall + 60_000;
         await second.credentials.restore();
         // It comes back at the newer version: the second change, inside the hold.
-        assert.deepEqual(await second.speak(PINNING), all(CANNOT));
+        assert.deepEqual(await second.speak(PINNING), all(HELD));
         assert.equal(second.credentials.protocolFlap(7)?.changes, 2);
       });
 
@@ -4904,6 +4956,8 @@ describe(
             refusals,
           );
         const withheld = { state: 'unknown', message: WITHHELD_CREDENTIALS.probeCannotPin };
+        // At the newer version inside the flap: the same Unknown, in the flap's words (`A-78`).
+        const held = { state: 'unknown', message: WITHHELD_CREDENTIALS.heldByFlap };
         const health = (
           one: One,
           version: number,
@@ -4987,24 +5041,27 @@ describe(
         await speak(PINNING, false, ...four);
         assert.equal(health(steady, PINNING).reading['protocolFlap'], 2);
         for (const one of [steady, flapping, quiet]) {
-          assert.deepEqual(await stateOf(one.sensor), withheld);
+          assert.deepEqual(await stateOf(one.sensor), held);
           assert.deepEqual(await paged(one.sensor), ['initial:unknown']);
         }
         assert.deepEqual(await paged(probes.unheld.sensor), [...flapped, 'recovery:unknown']);
 
         // An hour on, the version has held. The flap is over: the sensors are let go, each from
         // the state it stood in before it was held, which is Up, and each with the one recovery.
-        // No Down for any: what was dropped while they were held is not a failed scan. (A sensor
-        // the core lets go is re-decided in no words until its next scan, as every release of
-        // `A-29`'s set is: what `A-68` saw as a Down with no message is that, over two failed
-        // scans that are now dropped.)
+        // No Down for any: what was dropped while they were held is not a failed scan. (What
+        // `A-68` saw as a Down with no message was two failed scans that are now dropped.) Until
+        // its next scan a sensor let go says where it stands and why (`A-78`), as every release
+        // of `A-29`'s set does, where it said nothing.
         ahead.ms += PROTOCOL_FLAP_HOLD_MS;
         for (const one of [steady, flapping, quiet]) {
           assert.equal(credentials.protocolFlap(one.probe), null);
         }
         await speak(PINNING, true, steady, flapping, quiet);
         for (const one of [steady, flapping, quiet]) {
-          assert.deepEqual(await stateOf(one.sensor), { state: 'up', message: '' });
+          assert.deepEqual(await stateOf(one.sensor), {
+            state: 'up',
+            message: RELEASED_FROM_WITHHOLDING,
+          });
           assert.deepEqual(await paged(one.sensor), ['initial:unknown', 'recovery:unknown']);
         }
         // And its next scan says what it is, in its own words.
@@ -5165,11 +5222,18 @@ describe(
         await scheduler.sweep(later(3_600));
         assert.deepEqual(await paged(sensor), ['initial:unknown']);
         // "Check now" is judged as a configuration is: at the flap's floor, so the probe on the
-        // line at the core's version is not asked, as the configuration did not send it.
+        // line at the core's version is not asked, as the configuration did not send it. And it
+        // says the flap holds it, not to upgrade a probe that speaks enough (`A-78`).
         await assert.rejects(
           config.assignmentFor(sensor, () => PINNING),
           (error: unknown) =>
+            error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.heldByFlap,
+        );
+        await assert.rejects(
+          config.assignmentFor(sensor, () => PINNING - 1),
+          (error: unknown) =>
             error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.probeCannotPin,
+          'at the older version, what an upgrade mends',
         );
 
         // Somebody adds a name entry: the core decides the device now, whatever the probe
