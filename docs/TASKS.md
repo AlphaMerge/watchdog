@@ -3560,6 +3560,9 @@ because each is a decision rather than a defect:
       `N-21` left it. **Done when** decided: keep, or order a trigger's alarms (initial, escalation,
       repeat) per template without delaying any past its mode's promise, with a scenario test.
 
+      **Decided 2026-10-11 by the user:** order them. A trigger's alarms go initial,
+      escalation, repeat, per template, never delaying any past its mode's promise, with a
+      scenario test.
 - [x] **N-24 — control characters other than NUL still reach a delivery's last error** · S ·
       P-277 · Found 2026-10-07 in `P-277`. `P-277` removes NUL from `last_error` because it breaks
       the database write; other control characters from a program's output or a webhook's body
@@ -3626,6 +3629,8 @@ because each is a decision rather than a defect:
       sensor's first Up in that window waits for the digest. One message fewer, never one more.
       **Done when** decided: give the slot back, or keep, with a scenario test either way.
 
+      **Decided 2026-10-11 by the user:** give the slot back. A recovery dropped at send
+      frees the window's immediate Up, with a scenario test.
 - [x] **N-27 — a test send's error is not made legible, and invisible format characters are kept**
       · XS · N-24 · Found 2026-10-08 in `N-24`. `test-send.ts` returns the transport's error to the
       template form as it came, without `legible()`. Zero-width and other format characters
@@ -9392,6 +9397,9 @@ because each is a decision rather than a defect:
       test `M-17` asks for: a probe whose child starts all time out raises one alarm, on Probe
       Health, not one per sensor.
 
+      **Decided 2026-10-11 by the user:** Unknown. A check the probe could not start reads
+      as a probe-side failure, and Probe Health raises the one alarm, with the `M-17`
+      scenario test.
 - [x] **P-266 — a check process that dies outright leaves its script running** · S · P-262 ·
       Found 2026-10-05 in `P-262`. A script runs in a process group of its own, so the runner's
       kill of the check process's group does not reach it. Since `P-262` the check process ends
@@ -9772,6 +9780,9 @@ because each is a decision rather than a defect:
       keep it, or latch (or settle the queue) after a long streak of hangs with nothing ever
       ready — with the streak length, a test and the administration note.
 
+      **Decided 2026-10-11 by the user:** give up after a long streak (about 30 hangs in a
+      row with nothing ever ready). The pool latches as disabled until a restart and settles
+      its queue at once as `pool-disabled`, with a test and the administration note.
 - [x] **P-273 — a parked sensor resuming inside its window can overcount Probe Health** · S ·
       P-254 · Found 2026-10-07 in review of `P-254`. `NotificationRing.#countLostFrom` draws from
       the running total of overwrites not counted at push time whenever the read starts below the
@@ -11234,6 +11245,8 @@ because each is a decision rather than a defect:
       Warning with a scenario test (`M-17`) showing it does not hold a sensor in Warning for good,
       as `P-283` found for the probe.
 
+      **Decided 2026-10-11 by the user:** keep. The sensor stays Up and its message keeps
+      the note of how many channels were not sent.
 - [x] **P-302 — a cloned sensor's channels lose their lookup, counter width and limit source** ·
       S · P-297 · Found 2026-10-08 in `P-297`. The clone path in `repository.ts` (about line 1812)
       copies channels without `lookup_id`, `counter_bits` and `limits_source`. A cloned
@@ -11659,6 +11672,8 @@ because each is a decision rather than a defect:
       scenario test that nothing goes Down that the operator silenced), or a view or report that
       lists them for the operator, or keep.
 
+      **Decided 2026-10-11 by the user:** list them for the operator, in a view or report
+      naming the channels missing their declared lookup. No automatic copy.
 - [x] **P-309 — an edit does not re-declare which channel is primary** · XS · P-303 · Found
       2026-10-08 in `P-303`. A `snmp.table` edit that reorders columns leaves the first-created
       column primary. **Done when** decided: re-declare `is_primary` on edit (one primary always),
@@ -12525,11 +12540,16 @@ because each is a decision rather than a defect:
       `deploy/enrol-probe.sh` names the certificate before the core assigns a GID), with a rotation
       path and tests.
 
+      **Decided 2026-10-11 by the user:** do it. Record the certificate fingerprint at
+      enrolment and check it at every hello, with a rotation path (a migration). `P-327`
+      relies on this binding.
 - [ ] **P-327 — a pending probe's row is writable by anyone holding the enrolment key** · S ·
       P-319 · Found 2026-10-08 in `P-319`. A pending probe has no key of its own, so a hello proven
       on the shared enrolment key may rename it or move its address. **Done when** decided:
       per-enrolment tokens, or rely on `P-326`'s binding, written down, with a test.
 
+      **Decided 2026-10-11 by the user:** rely on `P-326`'s binding; no per-enrolment
+      tokens. Written down, with a test, when `P-326` lands.
 - [x] **P-328 — `last_seen_at` and `protocol_accepted_at` now nearly coincide** · XS · P-319 ·
       Found 2026-10-08 in `P-319`. Only a proven version refusal moves last seen without setting
       accepted. **Done when** U-32/U-33's reasons for keeping both are re-read and either one is
@@ -12689,6 +12709,8 @@ because each is a decision rather than a defect:
       policy for when such passes run (always, on a build change, or behind a version marker), with
       the reason written down.
 
+      **Decided 2026-10-11 by the user:** behind a version marker. Each start-up pass stores
+      the version of its own rules and runs only when that changes or was never recorded.
 - [x] **P-334 — no request schema marks a password `writeOnly`** · XS · P-318 · Found 2026-10-09
       in `P-318`. `POST /auth/login` `password`, `/auth/password` `currentPassword`/`newPassword` and
       the account-create `password` are plain strings, so neither the OpenAPI document nor the
@@ -13110,6 +13132,9 @@ because each is a decision rather than a defect:
       differ, or keep the channel's) with an M-17 scenario test over notification and summary
       bodies, since it changes notification text for every sensor.
 
+      **Decided 2026-10-11 by the user:** store both when they differ: the channel's
+      message, then the check's sentence, in notifications and summaries too, with an `M-17`
+      scenario test over the bodies.
 - [x] **P-346 — the last hand-written polls and helpers in the tests** · XS · P-330 · Found
       2026-10-09 in `P-330`. Three inline polls with their own deadlines (`flat-names.test.ts`,
       `hardening.test.ts`, `migrator.test.ts`), about fifteen local `until`/`waitUntil` helpers in
@@ -14469,6 +14494,8 @@ because each is a decision rather than a defect:
       leaves out sensors refused only on a `writeOnly` path for such readers, or the bit is
       accepted and said in `administration.md`), and done if adopted.
 
+      **Decided 2026-10-11 by the user:** the `?invalidParams=true` filter requires write on
+      the sensor.
 - [x] **P-381 — two more `UPDATE … RETURNING` whose order was not checked** · XS · N-31 · Found
       2026-10-09 in `N-31`. `N-31` found the dispatcher sending in whatever order `RETURNING`
       gave; `objects/repository.ts` and `notifications/templates.ts` also use `RETURNING` and were
@@ -24681,6 +24708,9 @@ because each is a decision rather than a defect:
       nobody, as if every object outside the group were hidden. **Done when** decided, and the
       choice done with a test in `object-visibility.test.ts`.
 
+      **Decided 2026-10-11 by the user:** option 1. A scheduled pass runs with the sight of
+      the rule's writer (`written_by_user`), and reading its problems needs write on the
+      group.
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found
       2026-09-28 by the round-three review of the API's browser boundary. Three findings, each
@@ -26712,6 +26742,9 @@ because each is a decision rather than a defect:
       offered and then refused with a 409. **Done when** the form reads the sensor's channel rows
       and locks the mode for such a column too, with a test.
 
+      **Decided 2026-10-11 by the user:** the form learns a column's channel key from a new
+      core dry-run route (which channels these parameters would declare, for any type), not
+      from a hook on the sensor type.
 - [x] **U-41 — clearing an entry in an array of plain strings is ignored** · XS · U-39 · Found
       2026-10-08 in `U-39`. Deleting the last character of a tag puts the text back: the entry's
       control reports "absent", and an entry cannot be absent without being removed. **Done when**
@@ -27398,6 +27431,8 @@ because each is a decision rather than a defect:
       **Done when** decided (load failures announced through an always-present region, or left
       as they are because the page has nothing else to say), and done if adopted.
 
+      **Decided 2026-10-11 by the user:** announce them. Load failures go through an
+      always-present region, about thirty panels, with tests.
 - [x] **U-60 — a failed channel-list read says "Loading channels…" for good** · XS · U-55 ·
       Found 2026-10-09 in `U-55`. If the first read of a sensor's channel list fails — on opening
       the page or after moving from another sensor — `LiveChannels` shows its loading line forever
@@ -28065,6 +28100,9 @@ because each is a decision rather than a defect:
       words keeps the one shown; `U-71` review), so this decision covers only the channel list,
       the templates list and the shared map.
 
+      **Decided 2026-10-11 by the user:** a repeat of the same failure from a read nobody
+      asked for stays silent, and a new or different failure is announced. For the channel
+      list, the templates list and the shared map, with tests.
 - [x] **U-73 — *Save template* is `disabled` while it saves** · XS · U-69 · Found 2026-10-09 in
       `U-69`. A refused save can lose focus before the refusal is said. `U-64` used
       `aria-disabled` on *Yes, delete* for this. **Done when** *Save* and *Create* do the same,
@@ -28351,6 +28389,9 @@ because each is a decision rather than a defect:
       first** on the stale cue's wording and whether it is announced; then do all three, with
       tests.
 
+      **Decided 2026-10-11 by the user:** a stale cue after three missed reads ("Not updated
+      for N minutes: the last read failed"), announced once, politely. The time comes from
+      the core's clock in the public payload, and the re-render after a 404 stops.
 - [x] **U-81 — the template-delete focus tests fail about one run in eight** · S · U-64, U-68 ·
       Found 2026-10-09 in round 21's suite. In `templates-refused.test.tsx`, "puts it on Keep
       it when the question is asked" and "never leaves it on the page while a delete is out"
