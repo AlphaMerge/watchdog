@@ -1794,21 +1794,5 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.match(stored.skew.explanation, /has not connected/);
       assert.equal(stored.protocolRefusedAt, null);
     });
-
-    it('says a version this core refuses, with no refusal recorded, will be refused at the next hello (U-35)', async () => {
-      // What a core with a lower floor leaves behind once this one's floor is above it: a version
-      // it accepted, which this core refuses, and no refusal yet. The floor is 1 and a hello's
-      // version is at least 0, so no such row can be written by a handshake today; -1, which the
-      // column allows, stands in for it, because the skew reads it the same way.
-      await db.query(
-        `INSERT INTO probe_registration (gid, status, object_id, decided_at, protocol_version)
-         VALUES ('accepted-then', 'approved', $1, now(), -1)`,
-        [probeId],
-      );
-      const stored = await registry.get('accepted-then');
-      assert.equal(stored?.skew.kind, 'incompatible');
-      assert.match(stored.skew.explanation, /will be refused when it next connects/);
-      assert.doesNotMatch(stored.skew.explanation, /hello was refused/);
-    });
   });
 });

@@ -2519,7 +2519,7 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 | `items[].firstSeenAt` | string | **required** |  |
 | `items[].lastSeenAt` | string | nullable |  |
 | `items[].decidedAt` | string | nullable |  |
-| `items[].skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `items[].skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
 | `items[].skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `items[].skew.peerVersion` | integer |  |  |
 | `items[].skew.ownVersion` | integer |  |  |
@@ -2565,7 +2565,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
@@ -2610,7 +2610,7 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
@@ -2655,7 +2655,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |

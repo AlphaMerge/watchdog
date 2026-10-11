@@ -1118,11 +1118,16 @@ function read(row: Record<string, unknown>): ProbeRegistration {
  * the version and `protocol_refused_at`, so a refused 0 is the probe's own claim, and is
  * `incompatible` like any other version below the floor.
  *
- * **And `incompatible` says what happens next, from what the row says happened** (`U-35`). A
- * version this build refuses was either refused at a hello, or accepted by a core whose floor
- * was lower and recorded before this one started: that probe is not connected, because this core
- * has refused it at every hello since, and will be refused at its next one. The reason alone said
- * neither.
+ * **And `incompatible` says what happens next, where the row says a hello was refused over it**
+ * (`U-35`): it will be refused again until it is upgraded. The reason alone did not say so.
+ *
+ * **Only there, while the floor is 1** (`P-315`). The other way to hold a version this build
+ * refuses is to have been accepted by a core whose floor was lower, and while
+ * `MIN_PROTOCOL_VERSION` is 1 there is no lower floor: every hello's version is at least 0, and 0
+ * is refused and recorded as refused. Its sentence, "so it will be refused when it next connects,
+ * unless it has been upgraded since", was reached only by a stored -1, so it was taken out with
+ * the web form's, and `capability-versions.test.ts` fails the day the floor rises, saying to put
+ * both back.
  *
  * **"A hello was refused over it", never "its last hello"** (`P-317` review). The refusal's time
  * moves only on a version refusal, and since `P-319` a later hello that does not prove it is this
@@ -1132,11 +1137,11 @@ function read(row: Record<string, unknown>): ProbeRegistration {
 function skewFor(protocolVersion: number, refused: boolean): RegistrationSkew {
   const skew: ProtocolSkew =
     protocolVersion === 0 && !refused ? { kind: 'unknown' } : describeSkew(protocolVersion);
-  if (skew.kind !== 'incompatible') return { ...skew, explanation: explainSkew(skew) };
-  const next = refused
-    ? 'so a hello was refused over it, and it will be refused again until it is upgraded'
-    : 'so it will be refused when it next connects, unless it has been upgraded since';
-  return { ...skew, explanation: `${explainSkew(skew)}, ${next}` };
+  if (skew.kind !== 'incompatible' || !refused) return { ...skew, explanation: explainSkew(skew) };
+  return {
+    ...skew,
+    explanation: `${explainSkew(skew)}, so a hello was refused over it, and it will be refused again until it is upgraded`,
+  };
 }
 
 function iso(value: unknown): string {

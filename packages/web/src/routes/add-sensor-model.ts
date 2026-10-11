@@ -37,11 +37,14 @@ import type { ObjectRef, ProbeHealthView } from '../api/types';
  * refused over, so the version alone is not a connection: the form says that hello was refused,
  * and does not say "when it last connected".
  *
- * **Refused is read from the core's word, and "will be refused" from the floor** (`U-35`). The
- * core answers when a hello was last refused over the version, so a refusal at 0 is no longer
- * served as nothing recorded. And a version a core with a lower floor accepted, which this core
- * refuses, is not a connection the probe can make again: the form says it will be refused, with
- * when it last connected, rather than the listener's `U-31` and `U-32` sentences.
+ * **Refused is read from the core's word** (`U-35`). The core answers when a hello was last
+ * refused over the version, so a refusal at 0 is no longer served as nothing recorded.
+ *
+ * **A version a core with a lower floor accepted is not said** (`P-315`). While
+ * `MIN_PROTOCOL_VERSION` is 1 there is no lower floor, so no probe can hold one; its sentence ("it
+ * will be refused when it tries") was reached only under a mocked floor, and was taken out with
+ * the core's. `capability-versions.test.ts` fails the day the floor rises, saying to put both
+ * back.
  */
 
 interface ListenerSpec {
@@ -185,29 +188,25 @@ export function listenerNotice(
   if (speaks !== null && speaks < spec.since) {
     return { kind: 'unknown', text: tooOld(spec, probeName, speaks, spec.since) };
   }
-  // **Not connected, and a version this core refuses** (`U-33`, `U-35`). Before the listener's
-  // version, because a refused probe will not report anything, whatever its version says of the
-  // counter. The test is the handshake's own, from the same table, not a copy of the floor. Then
-  // which of two things the core recorded:
-  // - **a hello was refused over it**, which the core says with the refusal's time. A refusal at
-  //   0 is served as 0 beside it, and not as nothing recorded (`U-35`). Not "its last hello": a
-  //   later hello refused for its key or its address writes nothing (`P-319`);
-  // - **a core with a lower floor accepted it**, and this one has not seen the probe since. It
-  //   will be refused when it tries, and before `U-35` it was given the `U-31` or `U-32` sentence,
-  //   which said it would connect and not report.
+  // **Not connected, and a hello was refused over its version** (`U-33`, `U-35`). Before the
+  // listener's version, because a refused probe will not report anything, whatever its version
+  // says of the counter. The test is the handshake's own, from the same table, not a copy of the
+  // floor, and the refusal is the core's word, with its time. A refusal at 0 is served as 0 beside
+  // it, and not as nothing recorded (`U-35`). Not "its last hello": a later hello refused for its
+  // key or its address writes nothing (`P-319`). A refused version with no refusal recorded can
+  // only be one a lower floor accepted, and there is none while the floor is 1 (`P-315`).
   const spoke = health.lastProtocolVersion;
   const refusedAt = health.lastProtocolRefusedAt;
-  if (speaks === null && typeof spoke === 'number' && !isProtocolCompatible(spoke)) {
-    const when = whenSaid(
-      typeof refusedAt === 'string' ? refusedAt : health.lastProtocolVersionAt,
-      health.at,
-    );
+  if (
+    speaks === null &&
+    typeof spoke === 'number' &&
+    !isProtocolCompatible(spoke) &&
+    typeof refusedAt === 'string'
+  ) {
+    const when = whenSaid(refusedAt, health.at);
     return {
       kind: 'unknown',
-      text:
-        typeof refusedAt === 'string'
-          ? refusedOverVersion(spec, probeName, spoke, when)
-          : acceptedBelowFloor(spec, probeName, spoke, when),
+      text: refusedOverVersion(spec, probeName, spoke, when),
       ...(when === null ? {} : { time: when }),
     };
   }
@@ -356,28 +355,6 @@ function refusedOverVersion(
     `checked. ${aHello} was refused over its version: it spoke protocol ${String(spoke)}, ` +
     `and this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has ` +
     `been upgraded since, it will be refused again when it tries. ${checkByHand(spec)}`
-  );
-}
-
-/**
- * A probe that is not connected, which a core with a lower floor accepted at a version this core
- * refuses (`U-35`). It has not tried this core since, or the core would have recorded the
- * refusal. So it is said of the last connection, as `U-31` says it, and of what happens next: it
- * will be refused, which is the thing to act on, and not merely that it will not report.
- */
-function acceptedBelowFloor(
-  spec: ListenerSpec,
-  probeName: string,
-  spoke: number,
-  when: { readonly shown: string } | null,
-): string {
-  const lastConnected =
-    when === null ? 'When it last connected' : `When it last connected, ${when.shown},`;
-  return (
-    `Probe “${probeName}” is not connected, so whether its ${spec.name} is running cannot be ` +
-    `checked. ${lastConnected} it spoke protocol ${String(spoke)}, which this core no longer ` +
-    `accepts: it accepts protocol ${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has been ` +
-    `upgraded since, it will be refused when it tries. ${checkByHand(spec)}`
   );
 }
 

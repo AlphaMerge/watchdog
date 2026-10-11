@@ -66,9 +66,8 @@ const registrationSchema = {
         'feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning ' +
         'nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and ' +
         'the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a ' +
-        'version this core refuses at the handshake; its `explanation` says whether the last ' +
-        'hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted ' +
-        'it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: ' +
+        'version this core refuses at the handshake; its `explanation` says when a hello was ' +
+        'refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: ' +
         'nothing recorded.',
       properties: {
         // Every kind `describeSkew` returns (`P-313`): the serializer does not check an enum, so

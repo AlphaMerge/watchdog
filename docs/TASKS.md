@@ -11794,11 +11794,25 @@ because each is a decision rather than a defect:
       - **Not done.** A declared primary whose row a reading created before this build stays
         unpromoted until an edit changes the declaration (no repair pass).
 
-- [ ] **P-315 — `/probes`' "will be refused when it next connects" cannot be reached** · XS ·
+- [x] **P-315 — `/probes`' "will be refused when it next connects" cannot be reached** · XS ·
       U-35 · Found 2026-10-08 in `U-35`. While `MIN_PROTOCOL_VERSION` is 1 no real handshake
       reaches it; the core test uses a stored -1 and the web test mocks a floor of 20. **Done
       when** a test raises the floor through the same seam a release would, or the sentence is
       removed until a floor above 1 exists, said in the outcome.
+
+      **P-315 outcome. Removed until the floor rises, with a tripwire.** The seam a release uses
+      is one constant, `MIN_PROTOCOL_VERSION` in `capability-versions.ts`, and no test can raise
+      it at run time without a module mock, which is what the web test already did. So both
+      sentences for "a core with a lower floor accepted it" are out:
+      - **Core**: `skewFor` (`probes/registry.ts`) adds what happens next only where the row
+        records a refused hello. The route's `skew` description and `docs/api-reference.md`
+        (regenerated) no longer promise the other case. The stored -1 test is gone.
+      - **Web**: the add-sensor form's refused branch now needs the core's refusal time;
+        `acceptedBelowFloor` and its mocked-floor case are gone. The refused-over-version cases
+        under the mocked floor stay.
+      - **Tripwire**: `capability-versions.test.ts` asserts the floor is 1, and fails with "the
+        protocol floor rose: restore the … sentences P-315 took out". Checked with the floor set
+        to 2.
 
 - [x] **P-316 — a version refused before migration 074 still reads as nothing recorded** · XS ·
       U-35 · Found 2026-10-08 in `U-35`. 074 leaves `protocol_refused_at` NULL on existing rows,

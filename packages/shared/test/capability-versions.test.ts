@@ -82,4 +82,20 @@ describe('the capability versions entry point', () => {
       );
     }
   });
+
+  it('is still 1, the floor below which no probe can have been accepted (P-315)', () => {
+    // **A tripwire, not a rule.** While the floor is 1 there is no lower floor a probe could have
+    // been accepted under, so "a core with a lower floor accepted it, and this one will refuse it
+    // at its next hello" cannot happen, and `P-315` took out the two sentences that said it rather
+    // than keep them reachable only by a stored -1 and a mocked floor. The release that raises the
+    // floor makes it possible: put back `skewFor`'s clause in `packages/core/src/probes/registry.ts`
+    // and `acceptedBelowFloor` in `packages/web/src/routes/add-sensor-model.ts` (`git log --grep
+    // P-315` has both), with a test that raises the floor, then change this number.
+    assert.equal(
+      MIN_PROTOCOL_VERSION,
+      1,
+      'the protocol floor rose: restore the "will be refused when it next connects" sentences ' +
+        'P-315 took out, in the core’s registry and the web’s add-sensor form',
+    );
+  });
 });
