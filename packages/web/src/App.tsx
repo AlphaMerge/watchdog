@@ -23,6 +23,7 @@ import { TreeView } from './routes/TreeView';
 import { ObjectDetailView } from './routes/ObjectDetailView';
 import { SensorTypesView } from './routes/SensorTypesView';
 import { UnboundedCredentialsView } from './routes/UnboundedCredentialsView';
+import { ChannelsWithoutLookupView } from './routes/ChannelsWithoutLookupView';
 
 /**
  * The routes, and the two things that can stand in front of them (`U-17`).
@@ -96,6 +97,7 @@ export function App(): React.JSX.Element {
           <Route path="objects/:id/add-sensor" element={<AddSensor />} />
           <Route path="sensor-types" element={<SensorTypesView />} />
           <Route path="credentials/unbounded" element={<UnboundedCredentialsView />} />
+          <Route path="channels/without-lookup" element={<ChannelsWithoutLookupView />} />
           <Route
             path="maps"
             element={

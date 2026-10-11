@@ -426,6 +426,7 @@ build does not construct them (`H-12`).
 | `/api/v1/auth/tokens` | GET · POST | 401 |
 | `/api/v1/auth/tokens/{id}` | DELETE | 401 |
 | `/api/v1/build` | GET | 401 |
+| `/api/v1/channels/without-lookup` | GET | 401 |
 | `/api/v1/core-health` | GET | 401 |
 | `/api/v1/credential-kinds` | GET | 401 |
 | `/api/v1/credentials/unbounded` | GET | 401 |

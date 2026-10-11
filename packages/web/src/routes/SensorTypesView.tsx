@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type { SensorTypeSummary } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { Combobox, type ComboboxOption } from '../components/Combobox';
 import { PageTitle } from '../components/PageTitle';
+import { WITHOUT_LOOKUP_PATH } from './channels-without-lookup';
 import {
   matchRange,
   plural,
@@ -86,6 +88,12 @@ export function SensorTypesView(): React.JSX.Element {
           />
         </div>
       </div>
+      {/* Where a type's declarations meet channels that do not hold them (`P-308`). */}
+      <p className="text-sm text-text-muted">
+        <Link to={WITHOUT_LOOKUP_PATH} className="text-accent hover:underline">
+          Channels without the lookup their type declares
+        </Link>
+      </p>
 
       {types.status === 'loading' && <Loading what="the catalogue" />}
       {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}

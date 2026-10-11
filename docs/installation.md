@@ -484,25 +484,21 @@ the release before reads them correctly.
 somebody cleared on purpose, on the clone or on the sensor it was cloned from, and the upgrade
 cannot tell which: setting it would turn every shut port on every clone Down at the first scan.
 So 073 leaves them, and logs a warning naming, for each sensor type, how many channels have no
-lookup although the type declares one, and the first 50 sensors holding them. To list all of
-them, and the lookup each type declares, ask the database:
-
-```sql
-SELECT c.sensor_id, o.name AS sensor, sc.type, c.key
-  FROM channel c
-  JOIN sensor_config sc ON sc.object_id = c.sensor_id
-  JOIN object o ON o.id = c.sensor_id
- WHERE c.lookup_id IS NULL
-   AND (sc.type, c.key) IN (('snmp.traffic', 'status'))
- ORDER BY sc.type, c.sensor_id;
-```
-
-Widen the last condition with the types and keys the warning names (`snmp.custom.string`'s
-`value`, an `snmp.table` sensor's status columns). Set the ones that should be judged, one channel
-at a time, with the lookup the type declares (`ms.snmp.if-oper-status` for an interface status):
+lookup although the type declares one, and the first 50 sensors holding them. All of them, with
+the lookup each type declares, are listed in the web UI under **Sensor types** → **Channels
+without the lookup their type declares** (`P-308`), and by the API:
 
 ```bash
 auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
+curl -s "${auth[@]}" http://127.0.0.1:8080/api/v1/channels/without-lookup
+```
+
+The list names only sensors you can see, the first thousand of them with `total` counting the
+rest, and never fills anything in. Set the ones that should be judged, one channel at a time,
+with the lookup the list names (`ms.snmp.if-oper-status` for an interface status), by the API;
+the web UI shows a channel's lookup but cannot set one yet:
+
+```bash
 curl -s "${auth[@]}" -X PATCH http://127.0.0.1:8080/api/v1/objects/<sensor id>/channels/status \
   -d '{"lookupId": "ms.snmp.if-oper-status"}'
 ```

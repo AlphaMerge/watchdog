@@ -378,6 +378,23 @@ export interface UnboundedCredential {
   updatedAt: string;
 }
 
+/** One row of `GET /channels/without-lookup` (`P-308`). */
+export interface ChannelWithoutLookup {
+  sensorId: number;
+  sensorName: string;
+  sensorType: string;
+  key: string;
+  channelName: string;
+  declaredLookup: string;
+}
+
+/** `GET /channels/without-lookup`: the first thousand, every one counted, and the unjudged. */
+export interface ChannelsWithoutLookup {
+  items: ChannelWithoutLookup[];
+  total: number;
+  unanswered: number;
+}
+
 /** As much of `GET /objects/:id/access/effective` as a view reads: what this account may do. */
 export interface EffectiveAccess {
   right: 'none' | 'read' | 'write' | 'full';

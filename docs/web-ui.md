@@ -216,6 +216,15 @@ is generated from. Useful for checking that a new type's schema says what its au
 The full reference, including channels and defaults, is
 [sensor-reference.md](sensor-reference.md).
 
+Above the catalogue, **Channels without the lookup their type declares** opens
+`/channels/without-lookup` (`P-308`): status channels judged by nothing, because they do not hold
+the lookup their sensor's type declares, on the sensors you can see. Most lost it in a clone made
+before `P-302`; some may have been cleared on purpose, so the page lists them and fills nothing
+in. Each row names the sensor, the channel and the declared lookup. The lookup is set through the
+API, since the channel table shows a channel's lookup but cannot yet set one (`U-82`). A status
+line says how many there are, and says the list is the first thousand of more when the core cut
+it; a line under it counts the sensors whose type could not say what it declares.
+
 ### Maps
 
 A map is a canvas somebody arranged: status icons, live graphs, data tables, sensor lists,

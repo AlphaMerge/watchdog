@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-167 routes.
+168 routes.
 
 ## Conventions
 
@@ -2489,6 +2489,28 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, lookupsKept, settings, channels, credentials, ancestors }
 
 **200** is [ms:objectDetail](#schema-ms-objectdetail)
+
+### `GET /api/v1/channels/without-lookup`
+
+Channels without the lookup their type declares
+
+The channels whose sensor type declares a lookup, for the sensor’s stored parameters, that the channel does not hold (`P-308`), so its value is judged by nothing. Most are channels a clone made before `P-302` lost, which migration 073 left empty; but an operator may also have cleared one on purpose, and nothing recorded tells the two apart, so nothing is filled: set the ones that should be judged with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the caller can see**, by sensor id and then key, at most 1000; `total` counts all of them. `unanswered` counts sensors whose type could not say what it declares for their parameters, or is not in this build: those are not judged either way.
+
+**200** { items, total, unanswered }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].sensorId` | integer | **required** |  |
+| `items[].sensorName` | string | **required** |  |
+| `items[].sensorType` | string | **required** |  |
+| `items[].key` | string | **required** |  |
+| `items[].channelName` | string | **required** |  |
+| `items[].declaredLookup` | string | **required** |  |
+| `total` | integer, at least 0 | **required** |  |
+| `unanswered` | integer, at least 0 | **required** |  |
 
 ## probes
 

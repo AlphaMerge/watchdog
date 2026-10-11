@@ -31,6 +31,7 @@ import {
 import { SENSOR_STATES } from '../../state/tables.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
 import {
+  MAX_CHANNELS_WITHOUT_LOOKUP,
   OBJECT_KINDS,
   WRITABLE_KINDS,
   type CarriedGrants,
@@ -2081,6 +2082,69 @@ export async function objectRoutes(
       await reply
         .header('cache-control', PRIVATE)
         .send({ items: await service.unboundedCredentials(await visibilityOf(request)) });
+    },
+  );
+
+  // ── 15c. the channels without the lookup their type declares ─────────────────────────────
+  app.get(
+    '/channels/without-lookup',
+    {
+      // Everything the caller can see, filtered by it (`A-12`), as the list above is.
+      config: READS,
+      schema: {
+        tags: ['objects'],
+        summary: 'Channels without the lookup their type declares',
+        description:
+          'The channels whose sensor type declares a lookup, for the sensor’s stored ' +
+          'parameters, that the channel does not hold (`P-308`), so its value is judged by ' +
+          'nothing. Most are channels a clone made before `P-302` lost, which migration 073 ' +
+          'left empty; but an operator may also have cleared one on purpose, and nothing ' +
+          'recorded tells the two apart, so nothing is filled: set the ones that should be ' +
+          'judged with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the ' +
+          'caller can see**, by sensor id and then key, at most ' +
+          `${String(MAX_CHANNELS_WITHOUT_LOOKUP)}; \`total\` counts all of them. ` +
+          '`unanswered` counts sensors whose type could not say what it declares for their ' +
+          'parameters, or is not in this build: those are not judged either way.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items', 'total', 'unanswered'],
+            properties: {
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: [
+                    'sensorId',
+                    'sensorName',
+                    'sensorType',
+                    'key',
+                    'channelName',
+                    'declaredLookup',
+                  ],
+                  properties: {
+                    sensorId: { type: 'integer' },
+                    sensorName: { type: 'string' },
+                    sensorType: { type: 'string' },
+                    key: { type: 'string' },
+                    channelName: { type: 'string' },
+                    declaredLookup: { type: 'string' },
+                  },
+                },
+              },
+              total: { type: 'integer', minimum: 0 },
+              unanswered: { type: 'integer', minimum: 0 },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      await reply
+        .header('cache-control', PRIVATE)
+        .send(await service.channelsWithoutLookup(await visibilityOf(request)));
     },
   );
 

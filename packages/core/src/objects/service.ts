@@ -66,6 +66,8 @@ import type {
   CredentialKind,
   CredentialView,
   UnboundedCredential,
+  ChannelsWithoutLookup,
+  ChannelWithoutLookup,
   DeleteExpectation,
   DeleteReport,
   ListExpansions,
@@ -88,6 +90,7 @@ import type {
   SubtreeResult,
   UpdateObjectInput,
 } from './types.js';
+import { MAX_CHANNELS_WITHOUT_LOOKUP } from './types.js';
 
 /**
  * The causes the pause API is entitled to speak for (`P-140`).
@@ -1510,6 +1513,83 @@ export class ObjectService {
         kind: set.kind as CredentialKind,
         updatedAt: set.updatedAt,
       }));
+  }
+
+  /**
+   * The channels whose sensor's type declares a lookup the row does not hold, among the sensors
+   * the caller can see (`P-308`).
+   *
+   * **Listed, never filled.** Until `P-302` a clone lost its channels' lookups, so a status
+   * channel was judged by nothing; migration 073 did not put them back, because an empty lookup
+   * may be one an operator cleared on purpose (`M-06`), on the clone or on its source, and filling
+   * it would turn every shut port Down at the first scan. The user decided on 2026-10-11 that the
+   * operator gets the list and sets what should be judged, by hand. So a channel somebody cleared
+   * deliberately is in it too: nothing recorded can tell the two apart.
+   *
+   * **Asked as the type answers for the sensor's own stored parameters** (`storedChannelsFor`),
+   * as an edit re-declares against. A type that cannot answer for them, or one this build does
+   * not have, is counted in `unanswered` and judged neither way.
+   */
+  async channelsWithoutLookup(
+    visibility: Visibility,
+    limit: number = MAX_CHANNELS_WITHOUT_LOOKUP,
+  ): Promise<ChannelsWithoutLookup> {
+    // Every sensor with a channel that has no lookup, its keys beside it: most channels have none
+    // and most types declare none, so the type is asked once per sensor, not once per channel.
+    const rows = await this.#db.query<{
+      sensor_id: string;
+      sensor_name: string;
+      type: string;
+      params: Record<string, unknown>;
+      keys: string[];
+      names: string[];
+    }>(
+      `SELECT sc.object_id::text AS sensor_id, o.name AS sensor_name, sc.type, sc.params,
+              array_agg(c.key ORDER BY c.key) AS keys,
+              array_agg(c.name ORDER BY c.key) AS names
+       FROM channel c
+       JOIN sensor_config sc ON sc.object_id = c.sensor_id
+       JOIN object o ON o.id = c.sensor_id
+       WHERE c.lookup_id IS NULL
+       GROUP BY sc.object_id, o.name, sc.type, sc.params
+       ORDER BY sc.object_id`,
+    );
+    const visible = await visibility.visibleAmong(
+      this.#db,
+      rows.map((row) => Number(row.sensor_id)),
+    );
+    const items: ChannelWithoutLookup[] = [];
+    let total = 0;
+    let unanswered = 0;
+    for (const row of rows) {
+      const sensorId = Number(row.sensor_id);
+      if (!visible.has(sensorId)) continue;
+      const declaration = this.#sensorTypes.storedChannelsFor(row.type, row.params);
+      if (declaration.kind === 'unanswered') {
+        unanswered += 1;
+        continue;
+      }
+      const declared = new Map(
+        declaration.channels.flatMap((one) =>
+          one.lookup === undefined ? [] : [[one.key, one.lookup] as const],
+        ),
+      );
+      row.keys.forEach((key, index) => {
+        const declaredLookup = declared.get(key);
+        if (declaredLookup === undefined) return;
+        total += 1;
+        if (items.length >= limit) return;
+        items.push({
+          sensorId,
+          sensorName: row.sensor_name,
+          sensorType: row.type,
+          key,
+          channelName: row.names[index] ?? key,
+          declaredLookup,
+        });
+      });
+    }
+    return { items, total, unanswered };
   }
 
   /**

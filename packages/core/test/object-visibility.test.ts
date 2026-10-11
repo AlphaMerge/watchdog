@@ -424,6 +424,18 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       name: `${MARK}-b-sensor`,
       sensorType: 'icmp.ping',
     });
+    // A channel without the lookup its type declares, on the other branch (`P-308`): the list of
+    // them names the sensor, so it is swept like any listing.
+    const lostLookup = await create({
+      kind: 'sensor',
+      parentId: otherDeviceId,
+      name: `${MARK}-b-uplink`,
+      sensorType: 'snmp.traffic',
+      params: {},
+    });
+    await db.query("UPDATE channel SET lookup_id = NULL WHERE sensor_id = $1 AND key = 'status'", [
+      lostLookup,
+    ]);
 
     // ── what hidden objects lend to visible ones ─────────────────────────────────────────────
     templateId = (

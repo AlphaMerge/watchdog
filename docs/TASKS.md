@@ -11770,7 +11770,7 @@ because each is a decision rather than a defect:
         removed fails the flap test (`found` called for the branch). Either check alone holds
         the flap test, since the second catches what the first lets by.
 
-- [ ] **P-308 — a status channel left without its lookup is only named, never repaired** · S ·
+- [x] **P-308 — a status channel left without its lookup is only named, never repaired** · S ·
       P-302 · Found 2026-10-08 in `P-302`'s review. Migration 073 fills no `lookup_id` (a wrong
       fill raises alarms) and logs the channels whose type declares one they lack. One narrow case
       is provable: a clone whose source still exists with the same type and parameters and holds
@@ -11780,6 +11780,33 @@ because each is a decision rather than a defect:
 
       **Decided 2026-10-11 by the user:** list them for the operator, in a view or report
       naming the channels missing their declared lookup. No automatic copy.
+
+      **P-308 outcome. Listed, by the API and on a page, and nothing is filled.**
+      - **`GET /channels/without-lookup`** (`ObjectService.channelsWithoutLookup`) lists the
+        channels whose sensor's type declares a lookup the row does not hold. It covers only
+        sensors the caller can see, ordered by sensor id and then key.
+        - Each row has the sensor, its type, the channel, and the declared lookup.
+        - At most 1,000 rows, with `total` counting all of them.
+        - `unanswered` counts sensors whose type could not say what it declares, or is not in
+          this build.
+        - The type is asked once per sensor, with its stored parameters (`storedChannelsFor`),
+          as an edit re-declares.
+        - It writes nothing. A channel an operator cleared on purpose is listed too, and both the
+          route's description and the page say so.
+      - **The page** `/channels/without-lookup` (`ChannelsWithoutLookupView`) is linked from
+        **Sensor types**. It shows a table with a caption and row headers, a polite status line,
+        and the unanswered count.
+      - **Not done: setting a lookup from the UI.** The channel table shows a lookup and has no
+        control to set one, so the page and `installation.md` say to use
+        `PATCH /objects/{id}/channels/{key}`. Filed as `U-82`.
+      - **Tests.**
+        - `channels-without-lookup.test.ts`: listed and not filled; only what the caller sees;
+          unanswered counted; the limit, the order and the total.
+        - `object-visibility.test.ts` plants a hidden sensor with a lost lookup, so the branch
+          sweep covers the route.
+        - `channels-without-lookup.test.tsx` covers the page.
+      - **Docs.** `installation.md`'s note on migration 073 points at the list instead of SQL;
+        `web-ui.md` § Sensor types.
 - [x] **P-309 — an edit does not re-declare which channel is primary** · XS · P-303 · Found
       2026-10-08 in `P-303`. A `snmp.table` edit that reorders columns leaves the first-created
       column primary. **Done when** decided: re-declare `is_primary` on edit (one primary always),
@@ -28626,6 +28653,13 @@ because each is a decision rather than a defect:
       - **The bar.** The whole file 52 runs in a row with four copies running at once — the load
         that reproduced it once in 48 before the fix — all passed. Full web suite 1,106 passed.
 
+- [ ] **U-82 — a channel's lookup cannot be set from the web UI** · S · P-308 · Found 2026-10-12
+      in `P-308`. The list of channels without their declared lookup tells an operator which to
+      set, and the channel table shows a channel's lookup, but setting one takes
+      `PATCH /objects/{id}/channels/{key}` with `lookupId`. **Done when** the channel table can
+      set and clear a channel's lookup for a caller with write on the sensor, offering the
+      declared one first, and the list's page and `installation.md` say so instead of the API
+      call.
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.

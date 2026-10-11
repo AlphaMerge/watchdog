@@ -377,6 +377,33 @@ export interface UnboundedCredential {
   readonly updatedAt: string;
 }
 
+/** A channel whose type declares a lookup its row does not hold, as the list shows it (`P-308`). */
+export interface ChannelWithoutLookup {
+  readonly sensorId: ObjectId;
+  readonly sensorName: string;
+  readonly sensorType: string;
+  readonly key: string;
+  readonly channelName: string;
+  /** The lookup the type declares for this channel, for the sensor's stored parameters. */
+  readonly declaredLookup: string;
+}
+
+/** The channels without their declared lookup that the caller can see (`P-308`). */
+export interface ChannelsWithoutLookup {
+  /** The first `MAX_CHANNELS_WITHOUT_LOOKUP`, by sensor id and then key. */
+  readonly items: readonly ChannelWithoutLookup[];
+  /** Every one the caller can see; more than `items` holds when the list was cut. */
+  readonly total: number;
+  /**
+   * Sensors the caller can see, with a channel lacking a lookup, whose type could not say what
+   * it declares for their stored parameters, or is not in this build. Not judged either way.
+   */
+  readonly unanswered: number;
+}
+
+/** How many channels the list of those without their lookup names at most (`P-308`). */
+export const MAX_CHANNELS_WITHOUT_LOOKUP = 1_000;
+
 export interface SettingView {
   readonly key: string;
   readonly description: string;
