@@ -407,6 +407,24 @@ async function asMeasured(
   });
 }
 
+/**
+ * Each sensor's newest stored row, for the sensors in `$1` (`P-388`).
+ *
+ * One sensor at a time, read backwards from `(sensor_id, time)`, so the cost is a few blocks for
+ * each sensor asked about however long its history is. The `DISTINCT ON` it replaced read every
+ * row of every sensor asked about and sorted them by the id made text: at 5,000 sensors, a sort
+ * that spilled to disk and 280–320 ms over four runs, against 12 ms. Exported so the measurement
+ * (`test/perf/state-latest-plan.test.ts`, `docs/findings/2026-10-11-state-latest-plan.md`) is of
+ * this text and not of a copy.
+ */
+export const NEWEST_STATES = `SELECT asked.id::text AS sensor_id, newest.time, newest.state, newest.cause
+  FROM unnest($1::bigint[]) AS asked(id)
+  CROSS JOIN LATERAL (
+    SELECT s.time, s.state, s.cause FROM sensor_state s
+    WHERE s.sensor_id = asked.id
+    ORDER BY s.time DESC LIMIT 1
+  ) AS newest`;
+
 async function orderedAfterLast(
   q: Queryable,
   changes: readonly StateTransition[],
@@ -416,12 +434,7 @@ async function orderedAfterLast(
     time: Date;
     state: SensorState;
     cause: SensorStateCause;
-  }>(
-    `SELECT DISTINCT ON (sensor_id) sensor_id::text AS sensor_id, time, state, cause
-     FROM sensor_state WHERE sensor_id = ANY($1::bigint[])
-     ORDER BY sensor_id, time DESC`,
-    [[...new Set(changes.map((change) => change.sensorId))]],
-  );
+  }>(NEWEST_STATES, [[...new Set(changes.map((change) => change.sensorId))]]);
   const newest = new Map(rows.map((row) => [Number(row.sensor_id), row]));
 
   return changes.map((change) => {

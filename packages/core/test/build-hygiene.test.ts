@@ -1038,14 +1038,6 @@ describe('SQL that sorts by its own computed column', () => {
         'coalesce only names the requests that have no template.',
     },
     {
-      where: 'src/state/runtime.ts DISTINCT ON, ORDER BY',
-      column: 'sensor_id::text AS sensor_id',
-      reason:
-        "`orderedAfterLast`: each sensor's newest row. Text and bigint ids are one to one, so " +
-        '`DISTINCT ON` keeps the same row under either, and the rows are read into a map by id. ' +
-        'Whether the text key costs the index is `P-388`.',
-    },
-    {
       where: 'src/objects/credential-vouching.ts ORDER BY',
       column: 'cs.kind::text AS kind (from owners)',
       reason:
@@ -1056,8 +1048,22 @@ describe('SQL that sorts by its own computed column', () => {
       where: 'src/timeseries/store.ts DISTINCT ON, ORDER BY',
       column: 'sensor_id::text AS sensor_id',
       reason:
-        "`stateAtHorizon`: each sensor's last state before the horizon, the same shape and the " +
-        'same reason as `orderedAfterLast`, also `P-388`.',
+        "`stateAtHorizon`: each sensor's last state before the horizon. Text and bigint ids are " +
+        'one to one, so `DISTINCT ON` keeps the same row under either. Measured in `P-388`: ' +
+        'qualified, it skips the sort and is about a third faster warm at 5,000 sensors, but ' +
+        'reads 45,463 blocks where this reads 386, and a retention pass reads the chunks it is ' +
+        'about to drop (docs/findings/2026-10-11-state-latest-plan.md).',
+    },
+    // The form `P-388` measured, kept beside what replaced it so it can be measured again.
+    {
+      where: 'test/perf/state-latest-plan.test.ts DISTINCT ON, ORDER BY',
+      column: 'sensor_id::text AS sensor_id',
+      reason: '`orderedAfterLast` as it was, measured against what replaced it.',
+    },
+    {
+      where: 'test/perf/state-latest-plan.test.ts DISTINCT ON, ORDER BY',
+      column: 'sensor_id::text AS sensor_id',
+      reason: '`stateAtHorizon` as it is, measured against the qualified form.',
     },
   ];
 

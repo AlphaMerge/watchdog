@@ -14437,12 +14437,31 @@ because each is a decision rather than a defect:
       - **Mutations.** `WHERE is_local` replaced by the highest object id fails all 3; the session
         fixed at 0 fails 2.
 
-- [ ] **P-388 — `DISTINCT ON` over a text alias may skip the `(sensor_id, time)` index** · S ·
+- [x] **P-388 — `DISTINCT ON` over a text alias may skip the `(sensor_id, time)` index** · S ·
       P-385 · Found 2026-10-09 in `P-385` review. `timeseries/store.ts` `stateAtHorizon` and
       `state/runtime.ts` `orderedAfterLast` key `DISTINCT ON` by `sensor_id::text`. The result is
       right, since text and number map one to one, but the plan may not use the index.
       **Done when** both plans are read at 5,000 sensors and qualified to the input column if
       that helps, with the measurement in `docs/findings/`.
+
+      **P-388 outcome. Both plans were read at 5,000 sensors. `orderedAfterLast` now reads each
+      sensor's newest row on its own (`CROSS JOIN LATERAL … LIMIT 1`), which beat qualifying it.
+      `stateAtHorizon` is unchanged, with the measured reason.** Measurement:
+      `docs/findings/2026-10-11-state-latest-plan.md`, from `test/perf/state-latest-plan.test.ts`.
+      - **The text key cost the index's order.** Every alias plan sorted what it read; at 5,000
+        sensors the sort spilled to disk. Qualifying removed the sort but still read every row of
+        every sensor asked about: 201,425 blocks at 5,000 sensors, for a fetch of `cause` per row.
+      - **`orderedAfterLast`, one sensor at a time**: 0.09, 0.26 and 12.1 ms for 1, 50 and 5,000
+        sensors, against 0.28, 2.72 and 323 ms. 3 blocks per sensor however long its history,
+        since TimescaleDB stops at the newest chunk with a row. At 5,000 sensors the old
+        sequential scan read fewer blocks (1,480 to 15,000) before its sort; a cold cache was not
+        measured. The query is exported as `NEWEST_STATES` and the perf test measures that text.
+        It asserts no sort and at most 4 blocks per sensor, and fails with the old query put back.
+      - **`stateAtHorizon` kept.** Qualified, it was about a third faster warm, but read 45,463
+        blocks to 386, in the chunks a retention pass is about to drop.
+      - **`ALLOWED`**: `orderedAfterLast`'s entry is gone; `stateAtHorizon`'s carries the
+        measurement. Two entries are new, for the perf test's own copies of the old forms, kept
+        so they can be measured again.
 
 - [x] **P-389 — a build-hygiene check for an alias named in its own `ORDER BY`** · S · P-385 ·
       Found 2026-10-09 in `P-385` review. The pause sweep and access bugs were both a

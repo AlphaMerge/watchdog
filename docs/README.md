@@ -130,6 +130,7 @@ measurement is not a claim.
 - [Most TimescaleDB features we planned on are not Apache-2.0](findings/2026-08-25-timescaledb-licensing.md)
 - [Apache-only rollups versus the Timescale Community licence](findings/2026-08-25-rollup-storage-spike.md)
 - [TimescaleDB on Windows](findings/2026-09-03-timescaledb-on-windows.md) (`S-11`)
+- [Each sensor's newest state: the text alias, the column, or one sensor at a time](findings/2026-10-11-state-latest-plan.md) (`P-388`)
 
 **Scheduler, probes and checks**
 
