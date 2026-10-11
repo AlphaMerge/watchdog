@@ -2281,6 +2281,22 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   which no standard allowed: a server that picked a certificate by an address in SNI now
   answers with its default one. A device given by name is as it was, and so is a TLS sensor
   with a *Server name* set.
+- **The first start of a build brings stored rows up to it; a restart does not read them again**
+  (`P-333`). Two start-up passes apply what sensor types declare to rows an earlier build wrote,
+  and each records, in `startup_pass` (migration 077), the rules it last finished under:
+  - **Declared channel limits** (`S-18`, `P-291`), before the API opens: a digest of every
+    declaration and every registered type. It runs when a build declares something different.
+  - **Declared primary channels** (`P-323`), in the background once the core is up: the exact
+    build — commit, profile and dependency lock. It runs once per build. A build that is not
+    exactly one commit, such as a working tree or a package with uncommitted changes, runs it at
+    every start and records nothing.
+
+  A pass records only once it has finished. One that stopped at shutdown, lost a page, or left a
+  sensor someone else held runs again at the next start. Two passes run at every start and have
+  no marker. The alarm reconciliation (`P-177`) repairs an alarm a crash or a restart lost, and
+  nothing recorded can say whether that happened. The stored-parameters check (`P-358`) writes
+  nothing and holds what it finds in memory for Core Health. Rolling back below 077 drops the
+  table, and every pass runs at the next start, as before.
 
 ---
 

@@ -468,6 +468,56 @@ describe(
       assert.deepEqual(await primaryOf(id), ['fresh']);
     });
 
+    it('reads every sensor once per exact build, and again after a run that stopped (P-333)', async () => {
+      const marker = async (): Promise<string[]> =>
+        (
+          await db.query<{ rules: string }>(
+            "SELECT rules FROM startup_pass WHERE name = 'declared-primary'",
+          )
+        ).map((one) => one.rules);
+      await db.query('DELETE FROM startup_pass');
+      const stale = (): Promise<number> =>
+        sensorWith('test.columns', cols('used'), cols('fresh', 'used'), [
+          ['fresh', false],
+          ['used', true],
+        ]);
+      const recorded: Recorded[] = [];
+      const id = await stale();
+
+      // Stopped at shutdown: nothing recorded, so the same build reads every sensor again.
+      const stopped = new AbortController();
+      stopped.abort();
+      const cut = await repair(recording(recorded), { rules: 'build-a', signal: stopped.signal });
+      assert.deepEqual({ ran: cut.ran, complete: cut.complete }, { ran: true, complete: false });
+      assert.deepEqual(await marker(), []);
+
+      const first = await repair(recording(recorded), { rules: 'build-a' });
+      assert.equal(first.ran, true);
+      assert.deepEqual(await primaryOf(id), ['fresh']);
+      assert.deepEqual(await marker(), ['build-a']);
+
+      // An earlier build's leftover, written behind the pass's back: the same build does not
+      // read it, since nothing it runs makes one — and a new build does.
+      const later = await stale();
+      const same = await repair(recording(recorded), { rules: 'build-a' });
+      assert.deepEqual(
+        { ran: same.ran, sensors: same.sensors, moved: same.moved },
+        { ran: false, sensors: 0, moved: 0 },
+      );
+      assert.deepEqual(await primaryOf(later), ['used'], 'not read under the same build');
+      const next = await repair(recording(recorded), { rules: 'build-b' });
+      assert.deepEqual({ ran: next.ran, moved: next.moved }, { ran: true, moved: 1 });
+      assert.deepEqual(await primaryOf(later), ['fresh']);
+      assert.deepEqual(await marker(), ['build-b']);
+
+      // A build that cannot say what it is: run every time, and nothing recorded.
+      const unsure = await stale();
+      const anyway = await repair(recording(recorded), { rules: null });
+      assert.deepEqual({ ran: anyway.ran, moved: anyway.moved }, { ran: true, moved: 1 });
+      assert.deepEqual(await primaryOf(unsure), ['fresh']);
+      assert.deepEqual(await marker(), ['build-b'], 'left as the last exact build wrote it');
+    });
+
     // ── at the same time as something else ───────────────────────────────────────────────────
 
     /** A gate: `wait` resolves once `open` is called. */
@@ -564,7 +614,8 @@ describe(
         const report = await within(
           4_000,
           'the repair, beside a held sensor',
-          repair(recording(recorded)),
+          // Under a build's marker: a run that skipped a sensor must not record it (`P-333`).
+          repair(recording(recorded), { rules: 'held-sensor-build' }),
         );
         assert.deepEqual(
           { moved: report.moved, skipped: report.skipped, failedPages: report.failedPages },
@@ -579,7 +630,8 @@ describe(
       }
       assert.deepEqual(await primaryOf(id), ['other'], 'left as it was');
 
-      const next = await repair(recording(recorded));
+      const next = await repair(recording(recorded), { rules: 'held-sensor-build' });
+      assert.equal(next.ran, true, 'the same build again: a run that skipped one recorded nothing');
       assert.deepEqual({ moved: next.moved, skipped: next.skipped }, { moved: 1, skipped: 0 });
       assert.deepEqual(await primaryOf(id), ['used']);
       assert.deepEqual(fromReading, [], 'the reading moved nothing: `extra` is not the primary');
@@ -703,6 +755,7 @@ describe(
         db: failingOnce,
         batchSize: 1,
         logger,
+        rules: 'failed-page-build',
       });
       assert.equal(failed, 1);
       const said = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -727,7 +780,12 @@ describe(
       );
       assert.deepEqual(await primaryOf(first), ['other'], 'its page failed');
       assert.deepEqual(await primaryOf(second), ['used'], 'the page after it went on');
-      await repair(recording(recorded));
+      const again = await repair(recording(recorded), { rules: 'failed-page-build' });
+      assert.equal(
+        again.ran,
+        true,
+        'the same build again: a run that lost a page recorded nothing',
+      );
       assert.deepEqual(await primaryOf(first), ['used'], 'moved by the next run');
     });
 

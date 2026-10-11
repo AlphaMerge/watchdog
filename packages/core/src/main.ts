@@ -45,7 +45,7 @@ import {
   declaredChannelLookup,
   declaredLimitsLookup,
 } from './state/declared-limits.js';
-import { repairDeclaredPrimaries } from './state/declared-primary.js';
+import { declaredPrimaryRules, repairDeclaredPrimaries } from './state/declared-primary.js';
 import { StoredParamsCheck } from './objects/stored-params-check.js';
 import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
@@ -720,7 +720,9 @@ async function serve(): Promise<void> {
   // **After the migration and before anything reads a channel's limits.** A default that only
   // reached installations created after the build declaring it would leave the same version of
   // the same software alarming on a new install and silent on an old one (`S-18`). Nothing an
-  // operator has decided is touched, including a decision to clear a threshold.
+  // operator has decided is touched, including a decision to clear a threshold. Only when this
+  // build's declarations differ from the last ones applied (`P-333`): every channel is created
+  // with them, so nothing else gives the pass work.
   const declaredLimits = await applyDeclaredLimits({ db, logger, catalogue });
   if (declaredLimits.unmatched.length > 0) {
     // A declaration matching no channel is not an error — an installation with no probes has no
@@ -732,8 +734,9 @@ async function serve(): Promise<void> {
     );
   }
 
-  // **A declared primary a reading created before `P-314` is moved onto at every start**
-  // (`P-323`), and so is one a later build's type declares differently. The same move, the same
+  // **A declared primary a reading created before `P-314` is moved onto at the first start of each
+  // build** (`P-323`, `P-333`), and so is one a later build's type declares differently; a build
+  // that is not exactly one commit runs it at every start. The same move, the same
   // record and the same sinks as ingestion's, by its own system actor. Not awaited, unlike the
   // pass above: that one is one statement, while this runs every sensor's type on its stored
   // parameters, in pages, and what it moves is what a list shows rather than anything judged —
@@ -746,6 +749,7 @@ async function serve(): Promise<void> {
     catalogue,
     audit: ingestionAudit,
     signal: lifecycle.signal,
+    rules: declaredPrimaryRules(BUILD),
   }).then(
     () => undefined,
     (error: unknown) => {
@@ -766,7 +770,9 @@ async function serve(): Promise<void> {
   // (`P-368`), and the count on Core Health. The object service's own gate, so "invalid" is what
   // an edit would refuse. Not awaited, as the repair above: it reads every sensor's parameters in
   // pages, takes no lock and writes nothing, so nothing waits for it. Shutdown stops it between
-  // pages; it never rejects, and the channel gaps until it has gone over every sensor.
+  // pages; it never rejects, and the channel gaps until it has gone over every sensor. **Every
+  // start, not behind a marker** (`P-333`): what it finds is held in memory, and it judges a hand
+  // edit of `sensor_config`, which no marker would see.
   const storedParamsRun = storedParams.run().then(
     () => undefined,
     (error: unknown) => {
@@ -914,6 +920,9 @@ async function serve(): Promise<void> {
   // running — the ingestor's deferred reactions, which live only in memory and are dropped by a
   // restart mid-drain (`P-157`); a crash between a state write and its reaction; anything else
   // that decided a state and did not get to act on it.
+  //
+  // **Every start, not behind a marker** (`P-333`): what it repairs is a loss at the last stop,
+  // and no version of anything says whether there was one.
   //
   // Not awaited before the port opens: it reads the current state, so running it a second later
   // gives the same answer, and blocking the API on a full-tree pass would trade a rare missed

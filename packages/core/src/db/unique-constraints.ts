@@ -63,6 +63,7 @@ export const UNIQUE_CONSTRAINTS = {
   },
   credential_voucher_adoption_pkey: { unreachable: 'one row, written by its migration' },
   access_epoch_pkey: { unreachable: 'one row, written by its migration' },
+  startup_pass_pkey: { unreachable: 'no route; start-up only, ON CONFLICT (name) DO UPDATE' },
 
   // ── probes ───────────────────────────────────────────────────────────────────────────────
   probe_registration_pkey: { unreachable: 'the probe endpoint only, ON CONFLICT (gid)' },

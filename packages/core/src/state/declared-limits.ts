@@ -1,6 +1,7 @@
 import type { ChannelDef, SensorCatalogue } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { passIsDue, recordPass, rulesDigest, type StartupPassRules } from '../db/startup-pass.js';
 import { errorKindOf, errorWithoutParamValues } from '../support/param-values.js';
 import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
 
@@ -26,8 +27,13 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  * build and may never be *restored* over a removal.
  *
  * Runs once at startup rather than in the housekeeping loop: an operator upgrading for a fix to
- * their alarming wants it when the service comes up, not within the hour. After the first pass
- * the query matches nothing, which is cheap enough to keep it there.
+ * their alarming wants it when the service comes up, not within the hour.
+ *
+ * **Only when the declarations changed** (`P-333`). Every channel is created with its type's
+ * declaration (`declaredLimitsLookup`, by ingestion and by a create alike), so after a pass under
+ * a set of declarations nothing but a new set gives it work. The pass stores what it applied as a
+ * digest of every declaration and every registered type (`declaredLimitsRules`), and a start
+ * whose digest matches the stored one does nothing at all.
  */
 
 /** A channel's lookup and counter width, as its sensor's type declares them (`P-80`). */
@@ -239,6 +245,11 @@ export interface DeclaredLimitsOptions {
 }
 
 export interface DeclaredLimitsReport {
+  /**
+   * False when this build's declarations are the ones the last finished pass applied (`P-333`):
+   * nothing was read or written, and the counts below are zero.
+   */
+  readonly ran: boolean;
   /** Channels whose limits this pass wrote. Zero on every start after the first. */
   readonly applied: number;
   /**
@@ -268,6 +279,10 @@ export async function applyDeclaredLimits(
   // one-file job.
   const declarations = declarationsIn(options.catalogue);
   const { declared } = declarations;
+  const pass = declaredLimitsRules(declarations);
+  if (!(await passIsDue(options.db, pass))) {
+    return { ran: false, applied: 0, cleared: 0, operatorOwned: 0, unmatched: [] };
+  }
 
   // Before the early return below: a catalogue that declares nothing at all may be one whose
   // last declaration was just removed, and that is a clearing to do, not nothing to do.
@@ -279,7 +294,10 @@ export async function applyDeclaredLimits(
     );
   }
 
-  if (declared.size === 0) return { applied: 0, cleared, operatorOwned: 0, unmatched: [] };
+  if (declared.size === 0) {
+    await recordPass(options.db, pass);
+    return { ran: true, applied: 0, cleared, operatorOwned: 0, unmatched: [] };
+  }
 
   const types = [...new Set([...declared.keys()].map((one) => one.split(' ')[0] ?? ''))];
 
@@ -332,7 +350,32 @@ export async function applyDeclaredLimits(
       'applied the sensor types’ declared channel limits to existing channels',
     );
   }
-  return { applied, cleared, operatorOwned, unmatched };
+  // Last, so a pass that threw anywhere above is run again at the next start.
+  await recordPass(options.db, pass);
+  return { ran: true, applied, cleared, operatorOwned, unmatched };
+}
+
+/** Bumped when what the pass does with a declaration changes, not when a declaration does. */
+const DECLARED_LIMITS_RULES_VERSION = 1;
+
+/**
+ * What the declared-limits pass applies, as `startup_pass` stores it (`P-333`).
+ *
+ * Every registered type, since `clearWithdrawn` speaks for those only and a type registered or
+ * dropped changes what it clears; and every declaration, sorted, since that is what it writes.
+ */
+export function declaredLimitsRules(declarations: {
+  readonly declared: ReadonlyMap<string, ChannelLimits>;
+  readonly registered: readonly string[];
+}): StartupPassRules {
+  return {
+    name: 'declared-limits',
+    rules: rulesDigest([
+      DECLARED_LIMITS_RULES_VERSION,
+      [...declarations.registered].sort(),
+      [...declarations.declared.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    ]),
+  };
 }
 
 /**

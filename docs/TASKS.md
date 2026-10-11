@@ -12809,7 +12809,7 @@ because each is a decision rather than a defect:
       - Parameters other than `{}` and a cold cache were not measured; the finding says why the
         first is unlikely to matter. `P-333` can take this as the pass's cost.
 
-- [ ] **P-333 — start-up passes each read the whole tree on every start** · S · P-323 · Found
+- [x] **P-333 — start-up passes each read the whole tree on every start** · S · P-323 · Found
       2026-10-08 in `P-323`. S-18's declared limits, P-177's alarm reconciliation and P-323's
       declared primaries each go over every sensor at every start. **Done when** decided: one shared
       policy for when such passes run (always, on a build change, or behind a version marker), with
@@ -12817,6 +12817,41 @@ because each is a decision rather than a defect:
 
       **Decided 2026-10-11 by the user:** behind a version marker. Each start-up pass stores
       the version of its own rules and runs only when that changes or was never recorded.
+
+      **Refined 2026-10-12 by the user**, on two points the decision had not met:
+      - P-177's reconciliation and P-358's check stay on every start. P-177 repairs what a crash
+        or a restart lost, so behind a marker it would never run again. P-358 only reads, and
+        what it finds is held in memory for Core Health and `?invalidParams=true`.
+      - P-323's rules are its own version plus the exact build: a primary is a type's code run on
+        each sensor's parameters, so no stored value can show it is unchanged.
+
+      **P-333 outcome. The two rule-applying passes run when their rules change. The other two
+      run every start, and the reason is written down.**
+      - **Where it is stored.** Migration 077 adds `startup_pass(name, rules, completed_at)`, one
+        row per pass. `db/startup-pass.ts` has `passIsDue`, `recordPass` and `rulesDigest`. Null
+        rules mean "cannot say": the pass runs and records nothing.
+      - **S-18 declared limits.** Its rules are a digest of every declaration and every registered
+        type (`declaredLimitsRules`). Every channel is created with its declaration, whether by a
+        create, a clone or ingestion, so only new declarations give the pass work. It records at
+        the end, so a pass that threw runs again. The report gains `ran`.
+      - **P-323 declared primaries.** Its rules are a version plus the commit, profile and lock
+        (`declaredPrimaryRules`), and null unless `isExactBuild`, so a working tree runs it every
+        start. A run records only when it completed with no failed page and no skipped sensor.
+        It never rejects: a marker it cannot read means the pass runs.
+      - **P-177 and P-358** stay on every start, with the reason beside each call in `main.ts`
+        and in `startup-pass.ts`. This also answers `P-369`'s note that `P-333` owed the policy
+        for all four.
+      - **Tests.**
+        - `declared-limits.test.ts`: once per set of declarations, again for another and for a
+          build going back, and again after a pass that threw. The older tests clear the marker
+          first, since they ask what a run does.
+        - `declared-primary.test.ts`: once per build, again after shutdown cut it short, again
+          for a new build, every time for null. The skip and failed-page tests now pass rules and
+          assert the next run under the same rules still runs.
+        - `startup-pass.test.ts`: the build marker's inputs, and a null pass never touching the
+          database.
+        - Migration 077's rollback is covered by the migrator's all-up, all-down round trip.
+      - **Docs.** `administration.md` § Upgrades.
 - [x] **P-334 — no request schema marks a password `writeOnly`** · XS · P-318 · Found 2026-10-09
       in `P-318`. `POST /auth/login` `password`, `/auth/password` `currentPassword`/`newPassword` and
       the account-create `password` are plain strings, so neither the OpenAPI document nor the

@@ -1,6 +1,7 @@
 import type { SensorCatalogue } from '@ms/sensors';
-import { describeError, type Logger } from '@ms/shared';
+import { describeError, isExactBuild, type BuildStamp, type Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import { passIsDue, recordPass, rulesDigest, type StartupPassRules } from '../db/startup-pass.js';
 import { moveDeclaredPrimaries } from '../ingestion/channels.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { declaredChannelLookup, type DeclaredShapes } from './declared-limits.js';
@@ -17,14 +18,19 @@ import { declaredChannelLookup, type DeclaredShapes } from './declared-limits.js
  * never come, so the list number, the mini-graph line and a notification's last value go on
  * following the column the operator moved away from. This pass moves it once.
  *
- * **Every start, no marker** — as `S-18`'s declared-limits pass does. A marker would need a table
- * (a migration) and would buy nothing an idempotent pass does not: after the first run every
- * sensor's declared primary is already primary, the unlocked read below finds nothing to move,
- * and nothing is written, locked or audited. And it is the same upgrade for a later build: a type
+ * **Once per build** (`P-333`, which replaced "every start, no marker"). After a finished run
+ * every sensor's declared primary is primary, and only a new declaration gives it work: a reading
+ * that creates a declared primary's row moves it (`P-314`), and an edit that changes it does
+ * (`P-309`). A declaration is a type's code run on each sensor's parameters, so no stored value
+ * can say it is unchanged short of running it; the build can. So the marker is the exact build
+ * (`declaredPrimaryRules`), and a build that cannot say exactly what it is — a working tree, or
+ * a package with uncommitted changes — runs the pass at every start and records nothing. A type
  * whose new build declares a different primary for the same stored parameters gets it on
- * existing sensors at the next start, as a create of those parameters would. Nobody's decision is
- * overridden, because no route lets an operator choose `is_primary` (`P-309`): a row that is not
- * the declared primary is one an earlier declaration left behind.
+ * existing sensors at the first start of that build, as a create of those parameters would.
+ * Nobody's decision is overridden, because no route lets an operator choose `is_primary`
+ * (`P-309`): a row that is not the declared primary is one an earlier declaration left behind.
+ * The marker is recorded only by a run that read every sensor and left none for later: one that
+ * stopped at shutdown, lost a page, or skipped a held sensor runs again at the next start.
  *
  * **What it moves, and what it leaves** (each a row of `declared-primary.test.ts`):
  * - the sensor's own stored parameters declare a primary, that key has a row, and the row is not
@@ -89,9 +95,19 @@ export interface DeclaredPrimaryRepairOptions {
   readonly batchSize?: number;
   /** Checked between pages: shutdown waits for at most the page in flight. */
   readonly signal?: AbortSignal;
+  /**
+   * What a finished run records, and a later start compares (`P-333`): `declaredPrimaryRules`
+   * of the running build. Absent or null, the pass runs and records nothing.
+   */
+  readonly rules?: string | null;
 }
 
 export interface DeclaredPrimaryRepairReport {
+  /**
+   * False when this exact build already finished a run (`P-333`): nothing was read, and the
+   * counts below are zero.
+   */
+  readonly ran: boolean;
   /** Sensors read. Every sensor in the installation, unless `complete` is false. */
   readonly sensors: number;
   /** Sensors whose primary this pass moved. Zero on every start after the first. */
@@ -138,6 +154,30 @@ export async function repairDeclaredPrimaries(
   options: DeclaredPrimaryRepairOptions,
 ): Promise<DeclaredPrimaryRepairReport> {
   const logger = options.logger.child({ component: 'declared-primary-repair' });
+  const pass: StartupPassRules = { name: DECLARED_PRIMARY_PASS, rules: options.rules ?? null };
+  // **Never rejects**, the marker included: a marker that cannot be read is a pass to run.
+  let due = true;
+  try {
+    due = await passIsDue(options.db, pass);
+  } catch (error) {
+    logger.warn(
+      { ...describeError(error), phase: 'read-marker' },
+      'could not read whether this build has moved the declared primaries; moving them again',
+    );
+  }
+  if (!due) {
+    logger.debug('this build has already moved every sensor’s declared primary; not read again');
+    return {
+      ran: false,
+      sensors: 0,
+      moved: 0,
+      skipped: 0,
+      failedPages: 0,
+      undeclared: 0,
+      undeclaredTypes: [],
+      complete: true,
+    };
+  }
   // Without a logger: its warning speaks of a channel ingestion creates, and this creates none.
   // A type that cannot answer is counted here instead, and said in this pass's own line.
   const declared = declaredChannelLookup(options.catalogue);
@@ -218,6 +258,7 @@ export async function repairDeclaredPrimaries(
   }
 
   const report: DeclaredPrimaryRepairReport = {
+    ran: true,
     sensors,
     moved,
     skipped,
@@ -236,7 +277,36 @@ export async function repairDeclaredPrimaries(
   } else {
     logger.debug(report, 'every sensor’s declared primary is already primary');
   }
+  // Recorded only when nothing is left for the next start to do.
+  if (complete && failedPages === 0 && skipped === 0) {
+    try {
+      await recordPass(options.db, pass);
+    } catch (error) {
+      logger.warn(
+        { ...describeError(error), phase: 'record-marker' },
+        'could not record that this build moved the declared primaries; the next start reads ' +
+          'every sensor again',
+      );
+    }
+  }
   return report;
+}
+
+/** The `startup_pass` row this pass keeps. */
+export const DECLARED_PRIMARY_PASS = 'declared-primary';
+
+/** Bumped when what the pass does with a declaration changes; a new build reruns it anyway. */
+const DECLARED_PRIMARY_RULES_VERSION = 1;
+
+/**
+ * What a run of the repair under this build records (`P-333`), or null for a build that is not
+ * exactly one commit: then nothing is recorded and every start runs it, as `isExactBuild` asks of
+ * anything that caches across builds. The profile and the lock are part of it, since either
+ * changes which types, and which code, a commit's package holds.
+ */
+export function declaredPrimaryRules(build: BuildStamp): string | null {
+  if (!isExactBuild(build)) return null;
+  return rulesDigest([DECLARED_PRIMARY_RULES_VERSION, build.commit, build.profile, build.lock]);
 }
 
 /**

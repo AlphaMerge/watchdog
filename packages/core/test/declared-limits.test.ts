@@ -3,7 +3,12 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { probeHealth, SensorCatalogue, type ChannelDef, type SensorType } from '@ms/sensors';
 import type { Database } from '../src/db/pool.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
-import { applyDeclaredLimits, declaredLimitsLookup } from '../src/state/declared-limits.js';
+import {
+  applyDeclaredLimits as applyMarked,
+  declaredLimitsLookup,
+  type DeclaredLimitsOptions,
+  type DeclaredLimitsReport,
+} from '../src/state/declared-limits.js';
 import {
   limitsFromDeclaration,
   NO_LIMITS,
@@ -18,6 +23,17 @@ import {
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
 const available = await databaseAvailable();
+
+/**
+ * The pass as it runs when it has work (`P-333`). These tests write rows behind its back and ask
+ * what a run does with them, under declarations a run has already applied, so the marker the last
+ * run left is taken away first. Whether it runs at all is `only when the declarations changed`,
+ * which calls `applyMarked`.
+ */
+async function applyDeclaredLimits(options: DeclaredLimitsOptions): Promise<DeclaredLimitsReport> {
+  await options.db.query("DELETE FROM startup_pass WHERE name = 'declared-limits'");
+  return applyMarked(options);
+}
 
 /**
  * Thresholds a sensor type declares, and who is allowed to overwrite them (`S-18`).
@@ -371,7 +387,13 @@ describe(
         };
         const c = new SensorCatalogue().register(needy).register(watched).seal();
         const report = await applyDeclaredLimits({ db, logger: silent, catalogue: c });
-        assert.deepEqual(report, { applied: 0, cleared: 0, operatorOwned: 0, unmatched: [] });
+        assert.deepEqual(report, {
+          ran: true,
+          applied: 0,
+          cleared: 0,
+          operatorOwned: 0,
+          unmatched: [],
+        });
         assert.equal(declaredLimitsLookup(c)('test.watched', 'lag')?.upperError, 5_000);
       });
 
@@ -386,7 +408,90 @@ describe(
           logger: silent,
           catalogue: new SensorCatalogue().register(bare).seal(),
         });
-        assert.deepEqual(report, { applied: 0, cleared: 0, operatorOwned: 0, unmatched: [] });
+        assert.deepEqual(report, {
+          ran: true,
+          applied: 0,
+          cleared: 0,
+          operatorOwned: 0,
+          unmatched: [],
+        });
+      });
+    });
+
+    describe('only when the declarations changed (P-333)', () => {
+      const marked = (type: SensorType): Promise<DeclaredLimitsReport> =>
+        applyMarked({ db, logger: silent, catalogue: catalogueOf(type) });
+      const behindItsBack = (): Promise<unknown> =>
+        db.query(
+          `UPDATE channel SET limits = '{}'::jsonb, limits_source = 'unset' WHERE sensor_id = $1`,
+          [sensorId],
+        );
+
+      it('runs once for a set of declarations, and again for another', async () => {
+        await db.query('DELETE FROM startup_pass');
+        await behindItsBack();
+        const first = await marked(watched);
+        assert.deepEqual({ ran: first.ran, applied: first.applied }, { ran: true, applied: 1 });
+
+        // Every channel is created with its declaration, so under the same ones nothing makes a
+        // channel like this: it is not looked for, and nothing is read or written.
+        await behindItsBack();
+        assert.deepEqual(await marked(watched), {
+          ran: false,
+          applied: 0,
+          cleared: 0,
+          operatorOwned: 0,
+          unmatched: [],
+        });
+        assert.equal((await channel('lag')).source, 'unset', 'not read under the same rules');
+
+        const next = await marked(revised);
+        assert.deepEqual({ ran: next.ran, applied: next.applied }, { ran: true, applied: 1 });
+        assert.equal(parseLimits((await channel('lag')).limits).upperError, 750);
+
+        // A build going back is a change too.
+        const back = await marked(watched);
+        assert.deepEqual({ ran: back.ran, applied: back.applied }, { ran: true, applied: 1 });
+        assert.equal(parseLimits((await channel('lag')).limits).upperError, 5_000);
+      });
+
+      it('runs when a type comes back with no declaration, though no declaration changed', async () => {
+        // The registered types are part of the rules, since `clearWithdrawn` speaks only for
+        // those (`P-293`). A build that leaves `test.watched` out declares nothing and clears
+        // nothing of it; the build that brings it back declaring nothing declares the same
+        // nothing, and its pass is what takes the old limit away.
+        await db.query('DELETE FROM startup_pass');
+        await marked(watched);
+        assert.equal((await channel('lag')).source, 'declared');
+        const without = await applyMarked({
+          db,
+          logger: silent,
+          catalogue: new SensorCatalogue().seal(),
+        });
+        assert.deepEqual({ ran: without.ran, cleared: without.cleared }, { ran: true, cleared: 0 });
+        assert.equal((await channel('lag')).source, 'declared', 'a type left out is left alone');
+
+        const bare = { key: 'lag', name: 'Lag', unit: 'ms', isPrimary: true };
+        const back = await marked(watchedLater([bare, { key: 'plain', name: 'Plain', unit: '' }]));
+        assert.deepEqual({ ran: back.ran, cleared: back.cleared }, { ran: true, cleared: 1 });
+        assert.equal((await channel('lag')).source, 'unset');
+      });
+
+      it('runs again after a pass that failed, since it records only at the end', async () => {
+        await db.query('DELETE FROM startup_pass');
+        const failing = {
+          query: (text: string, values?: readonly unknown[]) =>
+            text.includes('SET limits = d.limits')
+              ? Promise.reject(new Error('the write failed'))
+              : db.query(text, values),
+        } as unknown as Database;
+        await assert.rejects(
+          applyMarked({ db: failing, logger: silent, catalogue: catalogueOf(revised) }),
+          /the write failed/u,
+        );
+        const rows = await db.query('SELECT 1 FROM startup_pass');
+        assert.equal(rows.length, 0, 'nothing recorded');
+        assert.equal((await marked(revised)).ran, true);
       });
     });
 

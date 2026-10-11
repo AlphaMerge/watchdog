@@ -74,6 +74,7 @@ import { migration073 } from './073-channel-declared-shape.js';
 import { migration074 } from './074-probe-protocol-refused-at.js';
 import { migration075 } from './075-one-local-probe.js';
 import { migration076 } from './076-request-released-in.js';
+import { migration077 } from './077-startup-pass.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -159,6 +160,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration074,
   migration075,
   migration076,
+  migration077,
 ];
 
 export type { Migration } from './types.js';
