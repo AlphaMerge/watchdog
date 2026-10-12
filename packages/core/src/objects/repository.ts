@@ -44,7 +44,9 @@ import type {
  * (`M-07`), and the display flags. A declaration would lose those, and a clone is its source.
  *
  * `limits_source` matters as much as `limits`: written as `unset`, an operator's threshold on a
- * fixed type is replaced by the declared default at the next start.
+ * fixed type is replaced by the declared default at the next start. And `undeclared` (`P-312`): a
+ * row copied from one a fallback wrote holds the same fallback's shape, so it is repaired with its
+ * source at the first start of a build whose type can answer; left unmarked, it never would be.
  */
 export const CLONED_CHANNEL_COLUMNS = [
   'key',
@@ -62,6 +64,7 @@ export const CLONED_CHANNEL_COLUMNS = [
   'spike_max',
   'show_in_graph',
   'show_in_table',
+  'undeclared',
 ] as const;
 
 /**
@@ -1182,12 +1185,22 @@ export class ObjectRepository {
     lookupId: string | null,
   ): Promise<boolean> {
     const rows = await q.query<{ id: number }>(
-      `UPDATE channel SET lookup_id = $3
+      // A person's decision, so the start-up repair leaves it alone from now on (`P-312`).
+      `UPDATE channel SET lookup_id = $3, undeclared = false
        WHERE sensor_id = $1 AND key = $2
        RETURNING id`,
       [sensorId, key, lookupId],
     );
     return rows.length > 0;
+  }
+
+  /**
+   * Records that a person chose this channel's lookup though it is the one it already had
+   * (`P-312`): the start-up repair must not replace it with the declared one either. Nothing a
+   * reader sees changes, so the sensor's version does not (`clearUndeclaredMarks`).
+   */
+  async keepChannelLookup(q: Queryable, sensorId: ObjectId, key: string): Promise<void> {
+    await clearUndeclaredMarks(q, [{ sensorId, key }]);
   }
 
   // ── tree predicates: the database's own rules, never restated in TypeScript ───────────────
@@ -2173,6 +2186,38 @@ export class ObjectRepository {
       context: { objectId: id, phase: 'update' },
     });
   }
+}
+
+/**
+ * Clears `channel.undeclared` on these channels without moving their sensors' versions (`P-312`).
+ *
+ * The mark is the core's own bookkeeping — no API reads it, and no form is rendered from it — so a
+ * change to it alone is not a change to the state an ETag stands for. `channel_touch_owner` would
+ * bump the sensor's version on any UPDATE of the row, and an operator with the sensor open would
+ * be refused `412` for nothing they could see, by a write the audit log does not show. So the
+ * statement runs with `ms.bulk_load` on, the trigger's own switch for a write nobody holds a
+ * validator against (as a clone's inserts are), and the setting goes back to what it was: a caller
+ * already in a bulk load stays in it. A row whose lookup or counter width changes is not cleared
+ * here: that is a change, and it bumps the version and is audited.
+ */
+export async function clearUndeclaredMarks(
+  q: Queryable,
+  channels: readonly { readonly sensorId: ObjectId | string; readonly key: string }[],
+): Promise<number> {
+  if (channels.length === 0) return 0;
+  const [before] = await q.query<{ value: string }>(
+    `SELECT coalesce(current_setting('ms.bulk_load', true), 'off') AS value`,
+  );
+  await q.query(`SELECT set_config('ms.bulk_load', 'on', true)`);
+  const cleared = await q.query<{ id: number }>(
+    `UPDATE channel AS c SET undeclared = false
+     FROM unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
+     WHERE c.sensor_id = w.sensor_id AND c.key = w.key AND c.undeclared
+     RETURNING c.id`,
+    [channels.map((one) => String(one.sensorId)), channels.map((one) => one.key)],
+  );
+  await q.query(`SELECT set_config('ms.bulk_load', $1, true)`, [before?.value ?? 'off']);
+  return cleared.length;
 }
 
 export function versionConflict(id: ObjectId, expected: number, actual: number): ObjectError {

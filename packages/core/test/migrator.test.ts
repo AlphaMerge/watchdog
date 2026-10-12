@@ -1973,6 +1973,80 @@ describe(
       }
     });
 
+    it('marks no channel that exists, indexes only the marked, and rolls back to no mark (079)', async () => {
+      // `P-312`: which rows a fallback wrote was never recorded, so a row from before is unmarked.
+      const fresh = await createScratchDatabase('channel_undeclared');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 79),
+        );
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 78),
+        ).up();
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const sensorId = await insert('sensor', 'sensor', device);
+        await q.query(
+          `INSERT INTO channel (sensor_id, key, name) VALUES ($1, 'before', 'Before')`,
+          [sensorId],
+        );
+        await all.up();
+        const marks = async (): Promise<string[]> =>
+          (
+            await q.query<{ line: string }>(
+              `SELECT key || ':' || undeclared::text AS line FROM channel ORDER BY key`,
+            )
+          ).map((row) => row.line);
+        assert.deepEqual(await marks(), ['before:false']);
+        await q.query(
+          `INSERT INTO channel (sensor_id, key, name, undeclared) VALUES ($1, 'after', 'After', true)`,
+          [sensorId],
+        );
+        assert.deepEqual(await marks(), ['after:true', 'before:false']);
+        await assert.rejects(
+          q.query(`UPDATE channel SET undeclared = NULL WHERE key = 'after'`),
+          /null value/,
+        );
+        const index = async (): Promise<string[]> =>
+          (
+            await q.query<{ def: string }>(
+              `SELECT indexdef AS def FROM pg_indexes WHERE indexname = 'channel_undeclared_idx'`,
+            )
+          ).map((row) => row.def);
+        const [def] = await index();
+        assert.match(def ?? '', /\(sensor_id\) WHERE undeclared/);
+
+        await all.down(1);
+        assert.deepEqual(await index(), []);
+        const column = await q.query(
+          `SELECT 1 FROM information_schema.columns
+           WHERE table_name = 'channel' AND column_name = 'undeclared'`,
+        );
+        assert.equal(column.length, 0);
+        assert.deepEqual(await marks().catch(() => 'gone'), 'gone', 'the column went with it');
+        assert.equal(await tableExists(q, 'probe_registration'), true, 'and nothing else');
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [79],
+        );
+        assert.deepEqual(await marks(), ['after:false', 'before:false'], 'no mark comes back');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

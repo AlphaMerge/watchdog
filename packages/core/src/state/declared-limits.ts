@@ -46,9 +46,11 @@ export interface ChannelShape {
  * What a sensor's type declares for its channels, and whether it could say (`P-306`).
  *
  * `undeclared` is set when the type could not answer for the sensor's stored parameters, so
- * `shapes` is its answer to `{}` or nothing: a channel created from it may lack the lookup or
- * counter width the sensor really declares, for good. The resolver counts the channels it creates
- * that way, for Core Health, since the warning below is said once a type and kind of error.
+ * `shapes` is its answer to `{}` or nothing, and when this build does not register the type at
+ * all (`P-312`), so `shapes` is nothing: a channel created from it may lack the lookup or counter
+ * width the sensor really declares. The resolver counts the channels it creates that way, for
+ * Core Health, since the warning below is said once a type and kind of error, and marks them
+ * (`channel.undeclared`) for the start-up repair to write once a build's type can answer.
  */
 export interface DeclaredShapes {
   readonly shapes: ReadonlyMap<string, ChannelShape>;
@@ -101,9 +103,10 @@ export interface DeclaredShapes {
  * what every sensor got before.
  *
  * **That fallback is said, not swallowed** (`P-297` review). It is still caught — a type that
- * cannot answer must not cost the batch its other readings — but a channel it creates may get no
- * lookup and no counter width for good, since an edit declares no channels and the row is never
- * written again: `P-80`'s failure, on one sensor. So `logger` warns, once for each type and kind
+ * cannot answer must not cost the batch its other readings — but a channel it creates gets no
+ * lookup until a build whose type can answer writes it at start (`P-312`), and a counter it
+ * creates as a gauge stays one, its samples stored as cumulative totals (`P-303` refuses that
+ * change of an edit, and the repair keeps it): `P-80`'s failure, on one sensor. So `logger` warns, once for each type and kind
  * of error (its `code`, or its name): the type, the sensor, and the error with every value of the
  * sensor's parameters taken out of its message, since those can be secrets. Once rather than per
  * sensor, because one broken type would otherwise write a line for every sensor of it on every
@@ -151,13 +154,28 @@ export function declaredChannelLookup(
       ]),
     );
   const none: ReadonlyMap<string, ChannelShape> = new Map();
-  // A type this build does not register declares nothing, and nothing is what it is given: not
-  // a fallback, so not counted.
+  // **A type this build does not register declares nothing, and nothing is what it is given:
+  // counted and marked as a fallback is** (`P-312`). The row it makes is the same shape of wrong —
+  // no lookup, no counter width — and the usual cause, a build older than the sensor's, is
+  // mended the same way: a build that registers the type repairs it at its first start.
   const unregistered: DeclaredShapes = {
     shapes: none,
-    undeclared: false,
+    undeclared: true,
     primary: null,
     everyKey: false,
+  };
+  const unknownTypes = new Set<string>();
+  const sayUnregistered = (sensorType: string, sensorId: number): void => {
+    const logger = options.logger;
+    if (logger === undefined || unknownTypes.has(sensorType)) return;
+    unknownTypes.add(sensorType);
+    logger.warn(
+      { sensorType, sensorId, phase: 'declare-channels-on-ingest', fallback: 'nothing' },
+      'a sensor’s type is not registered in this build, so a channel ingestion creates for it ' +
+        'has no lookup and is stored as a gauge; a build that registers the type writes its ' +
+        'lookup at its first start, and a counter stays a gauge until the sensor is added ' +
+        'again; later channels of this type are not logged again',
+    );
   };
   const bare = new Map<string, ReadonlyMap<string, ChannelShape>>();
   for (const id of catalogue.ids()) {
@@ -168,7 +186,10 @@ export function declaredChannelLookup(
     }
   }
   return (sensorType, params, sensorId) => {
-    if (!catalogue.has(sensorType)) return unregistered;
+    if (!catalogue.has(sensorType)) {
+      sayUnregistered(sensorType, sensorId);
+      return unregistered;
+    }
     try {
       const defs = catalogue.channelsFor(sensorType, params);
       return {

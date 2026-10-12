@@ -400,8 +400,9 @@ describe(
           moved: 3,
           skipped: 0,
           failedPages: 0,
-          undeclared: 1,
-          types: ['test.brittle'],
+          // `test.dropped` too, which this build does not register (`P-312`): not judged either.
+          undeclared: 2,
+          types: ['test.brittle', 'test.dropped'],
           complete: true,
         },
         'the report counts what it moved and what it could not judge',

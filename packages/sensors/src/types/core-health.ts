@@ -500,10 +500,12 @@ const CHANNELS: readonly ChannelDef[] = [
   },
   // `P-306`. Channels ingestion created for a sensor whose type could not declare its channels
   // for the sensor's stored parameters (a type's own error, or a declaration `P-296` refuses on a
-  // sensor stored before it), so they took the type's answer to `{}`, or nothing (`P-297`). Each
-  // may keep no lookup or counter width for good, since nothing writes the row again: a counter
-  // storing cumulative totals, or a status judged by nothing. The core log names the type, once
-  // for each kind of error; this is the count the log cannot give.
+  // sensor stored before it), so they took the type's answer to `{}`, or nothing (`P-297`); and
+  // channels of a type the core's build does not register (`P-312`). Each may have no lookup —
+  // a status judged by nothing — until a build whose type can answer starts and writes it
+  // (`P-312`); a counter created as a gauge goes on storing cumulative totals, since its samples
+  // are stored as one. The core log names the type, once for each kind of error; this is the
+  // count the log cannot give.
   //
   // **No limit.** The damage is done when the row is written, and no alarm undoes it. Made a
   // rate, a warning would come and go with each first sighting, a Warning and a recovery more on

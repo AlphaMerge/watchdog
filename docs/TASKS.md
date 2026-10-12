@@ -11963,12 +11963,79 @@ because each is a decision rather than a defect:
       - **Not done.** Nothing tells the operator in the reply; the edit answers 200 and the log is
         for whoever ships the type.
 
-- [ ] **P-312 — channels created from the fallback are never repaired, and an unregistered type's
+- [x] **P-312 — channels created from the fallback are never repaired, and an unregistered type's
       are not counted** · S · P-306 · Found 2026-10-08 in `P-306`. Ingestion's `{}` fallback writes
       a channel without its declared shape and nothing writes it again; a sensor whose type this
       build does not register gets no shape and is not counted on `channelsCreatedUndeclared`.
       **Done when** decided for each: repair on the next successful declaration (or say why not),
       and count the unregistered case or say why it differs, with tests.
+
+      **P-312 outcome. Both: repaired at the first start of a build whose type can answer, and an
+      unregistered type counted and marked as a fallback is.** Migration 079, no protocol change.
+      - **Marked.** `channel.undeclared` (default false, a partial index on the marked rows): the
+        resolver's INSERT sets it for every channel whose sensor's answer was `undeclared`.
+        `declaredChannelLookup` now answers `undeclared` for a type this build does not register
+        (it made the same row: no lookup, no counter width) and warns once a type. `P-323`'s report
+        counts those sensors among the ones it could not judge.
+      - **Why at start, not on ingestion.** A cold batch only reads the rows that exist; asking the
+        declaration again there would cost every restart a type call per sensor. And the realistic
+        mend — a build whose type answers — always comes with a start. An edit re-declares a
+        fallback's name, unit and width against the row (`P-303`) but keeps its lookup, which it
+        cannot tell from an operator's (`P-311`); the mark can, so the repair writes it. So `repairUndeclaredChannels`
+        (`state/undeclared-channels.ts`) runs at every start, not awaited, beside `P-323`'s: it
+        reads only marked rows, so with none it is one empty query, and needs no `P-333` marker.
+        Locked as `P-323`'s is (object, `sensor_config`, `channel`; `SKIP LOCKED`; decided again
+        under the lock); a sensor someone holds is left marked for the next start.
+      - **What it writes is what an edit would.** The declared lookup and counter width; each
+        change a `channel.redeclared` by `undeclared-channel-startup-repair` through
+        `ingestionAuditSinks`, so the resolver forgets the sensor's cached channels. **Not a mode
+        change**: a channel created a gauge whose type now declares a counter (or the reverse)
+        keeps its mode, since its samples are stored as one, and the log says to add a new sensor
+        — `P-303`'s rule for an edit. Not limits (`S-18`'s, by type and key), not the primary
+        (`P-323`'s). A key the answer does not name is left as it is. The mark is cleared once
+        the type has answered, so each channel is said once; a sensor whose type still cannot
+        answer keeps its marks and is counted with its type in the pass's line.
+      - **An operator's lookup wins.** `setChannelLookup` (`PATCH …/channels/:key` with
+        `lookupId`) clears the mark, and so does a `PATCH` naming the lookup the channel already
+        has (`keepChannelLookup`), so the repair never undoes either.
+      - **A clone copies the mark** (`CLONED_CHANNEL_COLUMNS`): the copy holds the same
+        fallback's row, and unmarked it would never be repaired (`P-302`'s column guard caught it).
+      - **A mark cleared alone moves no version.** `channel_touch_owner` bumps the sensor's
+        version on any channel UPDATE; a row whose lookup and width stay as they are is cleared
+        with `ms.bulk_load` on (`clearUndeclaredMarks`), as a clone's inserts are, so an operator
+        with the sensor open is not refused `412` for a write nothing shows. A real change bumps
+        and is audited.
+      - **After `P-323`'s repair, not beside it.** Both take sensors `SKIP LOCKED`, and a build's
+        first start is when both have the same sensors; side by side each left the other's for
+        the next start.
+      - **Reviewed** by a read-only five-lens workflow (concurrency, logic, ripple, tests, docs)
+        with a skeptic per finding: 22 of 23 findings confirmed, all fixed above or below — the
+        clone mark, the ETag bump, the same-value `PATCH`, the order beside `P-323`, texts that
+        promised a gauge's counter width, the `/metrics` help, the Upgrades passes, and the
+        test gaps.
+      - **Not done.** Channels created from a fallback before 079 are not marked and so not
+        repaired: which rows a fallback wrote was never recorded. `P-308`'s list finds those
+        missing a lookup; a counter stored as a gauge needs a new sensor either way.
+      - **Docs.** `administration.md`'s `channelsCreatedUndeclared` row; `adding-a-sensor-type.md`.
+      - **Tests.** `undeclared-channels.test.ts`: the marks (fallback and unregistered, not an
+        answered sensor); the repair (lookup and width written, a mode kept, a key not named left,
+        audited by its actor, nothing the second time); a type still unable to answer left marked,
+        and an unregistered one repaired once registered; an operator's lookup kept; a held sensor
+        skipped and repaired after. `migrator.test.ts` (079 up and back), `core-startup.test.ts`
+        (its shutdown hook before the database's), and the changed expectations in
+        `channel-provisioning.test.ts` and `declared-primary.test.ts`. Since the review: the
+        reverse mode (a counter declared a gauge), a key the answer does not name keeping the
+        fallback's lookup, the audit's sensor id, the version untouched by a mark-only clear and
+        moved by a write, a `PATCH` of the same lookup, a clone's copy, paging past a page that
+        cannot answer, the decision made again under the lock, a failed page, shutdown, and the
+        unregistered warning once a type.
+      - **Mutations** (16, each restored byte for byte, `dist` rebuilt), all killed: nothing
+        marked; unregistered not counted; an operator's `PATCH` keeping the mark; a mode
+        rewritten; waiting instead of skipping a held sensor; a type still unable to answer
+        repaired anyway; no audit; a write leaving its mark; a mark-only clear moving the
+        version; the same-value `PATCH` ignored; a clone dropping the mark; the unlocked page's
+        parameters reused; an unnamed key reset; stopping at a stuck page; the unregistered
+        warning every time; mark-only rows left marked.
 
 - [x] **P-313 — `/probes`' schema does not allow the skew `ahead`** · XS · U-33 · Found 2026-10-08
       in `U-33`. The registration schema's `skew.kind` enum in `api/routes/probes.ts` lacks

@@ -44,8 +44,11 @@ export interface ResolvedChannels {
   created: number;
   /**
    * Of `created`, those whose sensor's type could not declare its channels for the sensor's
-   * stored parameters, so they were created from its answer to `{}` or from nothing (`P-306`).
-   * Each may lack a lookup or counter width for good: nothing writes the row again.
+   * stored parameters, so they were created from its answer to `{}` or from nothing (`P-306`), and
+   * those of a type this build does not register (`P-312`). Each may lack a lookup or counter
+   * width, and is marked `undeclared` for the start-up repair (`repairUndeclaredChannels`) to
+   * write once a build's type can answer — the lookup, and the width of a channel created a
+   * counter; one created a gauge stays one.
    */
   createdUndeclared: number;
   /**
@@ -593,15 +596,17 @@ export class ChannelResolver {
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
     // raise would fail the whole batch — including every other sensor's readings in it.
+    // **Marked when made from a fallback** (`P-312`), so a build whose type can answer finds it.
     const created = await q.query<{ id: number; sensor_id: string; key: string }>(
       `INSERT INTO channel (sensor_id, key, name, unit, lookup_id, counter_bits,
-                            limits, limits_source)
+                            limits, limits_source, undeclared)
        SELECT s.sensor_id, s.key, s.name, s.unit, s.lookup_id, s.counter_bits,
               COALESCE(s.limits, '{}'::jsonb),
-              CASE WHEN s.limits IS NULL THEN 'unset' ELSE 'declared' END
+              CASE WHEN s.limits IS NULL THEN 'unset' ELSE 'declared' END,
+              s.undeclared
        FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::jsonb[],
-                   $6::text[], $7::smallint[])
-            AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits)
+                   $6::text[], $7::smallint[], $8::boolean[])
+            AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits, undeclared)
        WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = s.sensor_id AND o.kind = 'sensor')
        ON CONFLICT (sensor_id, key) DO NOTHING
        RETURNING id, sensor_id::text AS sensor_id, key`,
@@ -613,6 +618,7 @@ export class ChannelResolver {
         limits,
         shapes.map((shape) => shape.lookup),
         shapes.map((shape) => shape.counterBits),
+        absent.map((row) => undeclared.has(String(row.sensorId))),
       ],
     );
     // Only a row this INSERT returned: a key another batch created first conflicted, and that

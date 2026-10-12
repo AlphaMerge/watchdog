@@ -46,6 +46,7 @@ import {
   declaredLimitsLookup,
 } from './state/declared-limits.js';
 import { declaredPrimaryRules, repairDeclaredPrimaries } from './state/declared-primary.js';
+import { repairUndeclaredChannels } from './state/undeclared-channels.js';
 import { StoredParamsCheck } from './objects/stored-params-check.js';
 import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
@@ -763,6 +764,41 @@ async function serve(): Promise<void> {
     name: 'declared-primary-repair',
     timeoutMs: 5_000,
     run: () => primaryRepair,
+  });
+
+  // **A channel created without its declared shape is written once its type can answer**
+  // (`P-312`): the lookup and counter width of every channel ingestion marked as made from a
+  // fallback or for a type this build does not register, at every start. Only marked rows are
+  // read, through a partial index, so with none it is one empty query. Not awaited, locked and
+  // stopped by shutdown as the repair above is; a sensor whose type still cannot answer stays
+  // marked for the next start. **After the repair above, not beside it**: both take sensors
+  // `SKIP LOCKED`, and a first start of a build that fixes a type is when both have the same
+  // sensors to work on, so side by side each would leave the other's for a start that may be the
+  // next upgrade. A sensor an operator or a reading holds at that moment is still left.
+  const undeclaredRepair = primaryRepair
+    .then(() =>
+      repairUndeclaredChannels({
+        db,
+        logger,
+        catalogue,
+        audit: ingestionAudit,
+        signal: lifecycle.signal,
+      }),
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => {
+        logger.error(
+          describeError(error),
+          'could not finish repairing channels created undeclared at startup; the next start ' +
+            'tries again',
+        );
+      },
+    );
+  lifecycle.onShutdown({
+    name: 'undeclared-channel-repair',
+    timeoutMs: 5_000,
+    run: () => undeclaredRepair,
   });
 
   // **Stored parameters a later build's schema refuses are named at every start** (`P-358`):

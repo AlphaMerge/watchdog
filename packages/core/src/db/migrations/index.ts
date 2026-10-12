@@ -76,6 +76,7 @@ import { migration075 } from './075-one-local-probe.js';
 import { migration076 } from './076-request-released-in.js';
 import { migration077 } from './077-startup-pass.js';
 import { migration078 } from './078-probe-certificate.js';
+import { migration079 } from './079-channel-undeclared.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -163,6 +164,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration076,
   migration077,
   migration078,
+  migration079,
 ];
 
 export type { Migration } from './types.js';

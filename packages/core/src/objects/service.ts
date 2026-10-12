@@ -537,6 +537,10 @@ export class ObjectService {
         });
       }
 
+      // The lookup it already has, said again, is still a person's choice (`P-312`).
+      if (patch.lookupId !== undefined && patch.lookupId === channel.lookupId) {
+        await this.#repo.keepChannelLookup(q, id, key);
+      }
       if (patch.lookupId !== undefined && patch.lookupId !== channel.lookupId) {
         await this.#repo.setChannelLookup(q, id, key, patch.lookupId);
         mutations.push({

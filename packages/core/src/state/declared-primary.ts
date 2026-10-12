@@ -124,7 +124,8 @@ export interface DeclaredPrimaryRepairReport {
   readonly failedPages: number;
   /**
    * Sensors left alone because their type threw for their stored parameters, so what they declare
-   * primary is unknown (`P-306`'s fallback).
+   * primary is unknown (`P-306`'s fallback), or because this build does not register their type
+   * (`P-312`).
    */
   readonly undeclared: number;
   /** The types of those, sorted. */

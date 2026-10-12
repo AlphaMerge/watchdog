@@ -1020,8 +1020,9 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
   it('answers nothing for a type this build does not register', () => {
     const answer = shipped('gone.type', { anything: 1 }, 1);
     assert.equal(answer.shapes.size, 0);
-    // Nothing to fall back from: not counted as a channel created without its shape (`P-306`).
-    assert.equal(answer.undeclared, false);
+    // Nothing to fall back from, and the same row a fallback makes: counted and marked as one,
+    // for a build that registers the type to repair (`P-312`).
+    assert.equal(answer.undeclared, true);
     assert.equal(answer.primary, null, 'and no primary to move to (`P-314`)');
     assert.equal(answer.everyKey, false, 'and no promise to hold it to (`P-321`)');
   });
