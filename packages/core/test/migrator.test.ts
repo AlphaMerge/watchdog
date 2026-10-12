@@ -2047,6 +2047,154 @@ describe(
       }
     });
 
+    it('dates a sensor’s parameters apart from its other writes, from its last change, and rolls back to none (080)', async () => {
+      // `P-340`: `updated_at` moved on a voucher write, and `retired` and `P-321`’s minute read it.
+      const fresh = await createScratchDatabase('sensor_params_changed_at');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 80),
+        );
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 79),
+        ).up();
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const sensor = await insert('sensor', 'sensor', device);
+        await q.query(
+          `INSERT INTO sensor_config (object_id, type, params, updated_at)
+           VALUES ($1, 'ping', '{"count": 3}', '2026-10-01T06:00:00Z')`,
+          [sensor],
+        );
+        const versionBefore = await q.query<{ version: number }>(
+          'SELECT version FROM object WHERE id = $1',
+          [sensor],
+        );
+        await all.up();
+
+        const times = async (): Promise<{ updated: string; changed: string }> => {
+          const [row] = await q.query<{ updated: string; changed: string }>(
+            `SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') AS updated,
+                    to_char(params_changed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') AS changed
+             FROM sensor_config WHERE object_id = $1`,
+            [sensor],
+          );
+          return row ?? assert.fail('no sensor_config');
+        };
+        // Backfilled from `updated_at`, which the backfill itself did not move, nor the version.
+        assert.deepEqual(await times(), {
+          updated: '2026-10-01 06:00:00.000000',
+          changed: '2026-10-01 06:00:00.000000',
+        });
+        assert.deepEqual(
+          await q.query('SELECT version FROM object WHERE id = $1', [sensor]),
+          versionBefore,
+          'no open form is refused for the migration',
+        );
+
+        // A write that changes no parameter: `updated_at` moves, the new column does not, even
+        // when the write names it.
+        // A voucher that really changes, as an account's edit records one over the installation's.
+        await q.query(`UPDATE sensor_config SET vouched_by = 'account' WHERE object_id = $1`, [
+          sensor,
+        ]);
+        assert.equal(
+          (await times()).changed,
+          '2026-10-01 06:00:00.000000',
+          'a voucher is no change',
+        );
+        // And the row's own triggers are back on after the backfill: the write moved the version.
+        const [moved] = await q.query<{ version: number }>(
+          'SELECT version FROM object WHERE id = $1',
+          [sensor],
+        );
+        assert.ok((moved?.version ?? 0) > (versionBefore[0]?.version ?? 0), 'the ETag still moves');
+        assert.deepEqual(
+          await q.query(
+            `SELECT tgname AS name, tgenabled AS enabled FROM pg_trigger
+             WHERE tgrelid = 'sensor_config'::regclass
+               AND tgname IN ('sensor_config_set_updated_at', 'sensor_config_touch_owner')
+             ORDER BY tgname`,
+          ),
+          [
+            { name: 'sensor_config_set_updated_at', enabled: 'O' },
+            { name: 'sensor_config_touch_owner', enabled: 'O' },
+          ],
+        );
+        await q.query(
+          `UPDATE sensor_config SET params = '{"count": 3}'::jsonb,
+                                    params_changed_at = '2030-01-01T00:00:00Z'
+           WHERE object_id = $1`,
+          [sensor],
+        );
+        const unchanged = await times();
+        assert.notEqual(unchanged.updated, '2026-10-01 06:00:00.000000');
+        assert.equal(unchanged.changed, '2026-10-01 06:00:00.000000');
+
+        // A change of parameters, or of type, moves it to the change's time.
+        for (const write of [
+          `UPDATE sensor_config SET params = '{"count": 4}'::jsonb WHERE object_id = $1`,
+          `UPDATE sensor_config SET type = 'ping.renamed' WHERE object_id = $1`,
+        ]) {
+          // The database's clock past the last change, so a new time is a different one.
+          await q.query('SELECT pg_sleep(0.002)');
+          const before = (await times()).changed;
+          await q.query(write, [sensor]);
+          const after = await times();
+          assert.notEqual(after.changed, before, write);
+          assert.equal(after.changed, after.updated, write);
+        }
+        // A new row is dated by its insert.
+        const second = await insert('sensor', 'second', device);
+        await q.query(`INSERT INTO sensor_config (object_id, type) VALUES ($1, 'ping')`, [second]);
+        const [inserted] = await q.query<{ same: boolean }>(
+          'SELECT params_changed_at = created_at AS same FROM sensor_config WHERE object_id = $1',
+          [second],
+        );
+        assert.equal(inserted?.same, true);
+
+        await all.down(1);
+        const column = await q.query(
+          `SELECT 1 FROM information_schema.columns
+           WHERE table_name = 'sensor_config' AND column_name = 'params_changed_at'`,
+        );
+        assert.equal(column.length, 0);
+        const fn = await q.query(
+          `SELECT 1 FROM pg_proc WHERE proname = 'sensor_config_params_changed'`,
+        );
+        assert.equal(fn.length, 0);
+        assert.equal(
+          (await q.query(`SELECT 1 FROM pg_indexes WHERE indexname = 'channel_undeclared_idx'`))
+            .length,
+          1,
+          'and nothing else: 079 stays',
+        );
+        await q.query(
+          `UPDATE sensor_config SET params = '{"count": 5}'::jsonb WHERE object_id = $1`,
+          [sensor],
+        );
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [80],
+        );
+        const back = await times();
+        assert.equal(back.changed, back.updated, 'backfilled again from the last write');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

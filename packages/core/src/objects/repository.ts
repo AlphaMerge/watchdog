@@ -1060,19 +1060,24 @@ export class ObjectRepository {
    * `reportable` is every key the sensor's type can report for its stored parameters, or `null`
    * where the type cannot say (`SensorTypeGate.reportableKeys`); with `null` nothing is retired.
    * A channel whose key it does not name is retired **unless it has a reading newer than the
-   * sensor's last configuration change** (`sensor_config.updated_at`, which every write of the
-   * parameters moves): the declaration stopped naming the key no later than that, so a reading
-   * after it came from something that still reports the key. That is a probe running a newer
-   * build of the type than this core (ADR-001 Decision 13), whose declaration this core cannot
-   * ask, or a type breaking its promise (`P-321`, counted when the channel is created). Either
-   * way the channel is read, and calling it retired would say it is not.
+   * sensor's parameters last changed** (`sensor_config.params_changed_at`, which a write that
+   * changes the parameters or the type moves, and nothing else, `P-340`): the declaration stopped naming
+   * the key no later than that, so a reading after it came from something that still reports the
+   * key. That is a probe running a newer build of the type than this core (ADR-001 Decision 13),
+   * whose declaration this core cannot ask, or a type breaking its promise (`P-321`, counted when
+   * the channel is created). Either way the channel is read, and calling it retired would say it
+   * is not. Not `updated_at`, which a voucher write moves too (`recordVoucher`): it called a
+   * channel a newer probe reads retired again, until its next reading, after a write that changed
+   * nothing it declares.
    *
-   * **Two clocks** (`P-322` review): `sample.time` is the probe's, `updated_at` the database's.
-   * A probe behind the database is seen to read the key only once its clock passes the change, so
-   * such a channel reads retired for one scan interval plus that offset after each change. Not
-   * corrected here: the offset lives in the probe's link, not in any table, and a tolerance
-   * subtracted from the change would count the readings taken just *before* an edit, keeping
-   * every column an edit removes from a regularly read sensor live until the next change.
+   * **Two clocks** (`P-322` review): `sample.time` is the probe's, `params_changed_at` the
+   * database's. A probe behind the database is seen to read the key only once its clock passes the
+   * change, so such a channel reads retired for one scan interval plus that offset after each
+   * change. Not corrected here, and the offset is not stored for it (`P-340`): the core measures a
+   * probe's offset on its link, now, and a stored copy would be applied to readings taken under
+   * other offsets, and to a sensor's readings from a probe it has since moved away from. A
+   * tolerance subtracted from the change would count the readings taken just *before* an edit,
+   * keeping every column an edit removes from a regularly read sensor live until the next change.
    *
    * **Asked only of a key outside the declaration**, inside the `CASE`, so a declared channel,
    * and every channel of a type that cannot say, costs nothing. For the rest it is one probe of
@@ -1104,7 +1109,7 @@ export class ObjectRepository {
                 WHEN $2::text[] IS NULL OR c.key = ANY($2::text[]) THEN false
                 ELSE NOT EXISTS (
                   SELECT 1 FROM sample s
-                  WHERE s.channel_id = c.id AND s.time > sc.updated_at
+                  WHERE s.channel_id = c.id AND s.time > sc.params_changed_at
                 )
               END AS retired
        FROM channel c

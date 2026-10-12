@@ -327,7 +327,7 @@ export interface ChannelRecord {
   /**
    * Nothing will read this channel again (`P-310`): its sensor's type declares every channel it
    * reports, the sensor's stored parameters no longer declare this key, and it has no reading
-   * newer than the sensor's last configuration change (`P-322`). An edit took it out (a table
+   * newer than the last change to the sensor's parameters (`P-322`, `P-340`). An edit took it out (a table
    * column removed); the row and its history are kept, and putting the key back makes it live
    * again. A reading after the change means something still reports the key — a probe running a
    * newer build of the type than the core (ADR-001 Decision 13), or a type breaking its promise

@@ -327,7 +327,7 @@ longer declare is one nothing will read again — an edit took it out, as removi
 column does — and the core shows it as **retired** (`P-310`): `retired: true` on the channel, a
 mark beside it on the sensor page, its row, settings and history kept. Putting the key back makes
 it live again. Nothing is stored: it is worked out from your declaration on each read. A channel
-with a reading newer than the sensor's last configuration change is not called retired whatever
+with a reading newer than the last change to the sensor's parameters is not called retired whatever
 the declaration says (`P-322`): a probe may run a newer build of your type than the core does
 (ADR-001 Decision 13), and the core can only ask its own build.
 

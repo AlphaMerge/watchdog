@@ -13242,12 +13242,49 @@ because each is a decision rather than a defect:
       - **Runs.** `channel-provisioning`'s `P-321` and `P-339` cases 12/12. `@ms/core` whole,
         rebased onto `2aac7a75`: 5,265/5,265, none skipped.
 
-- [ ] **P-340 — the retired window grows with a voucher write and with a probe clock behind** · S ·
+- [x] **P-340 — the retired window grows with a voucher write and with a probe clock behind** · S ·
       P-322 · Found 2026-10-09 in `P-322`. `retired` compares readings with
       `sensor_config.updated_at`, which `recordVoucher` also moves, and a probe clock behind the
       database lengthens the window by its offset. **Done when** a column that only a parameters
       change moves, and/or the probe's clock offset stored where the query can use it (a
       migration), or the reason not to is written down.
+
+      **P-340 outcome. A column only a parameters change moves; the probe's offset not stored,
+      and why written down.** Migration 080, no protocol change.
+      - **`sensor_config.params_changed_at`**, moved by a trigger (`sensor_config_params_changed`)
+        when `params` or `type` changes and kept as it was by any other write, whatever that
+        write sets it to; jsonb compares by value, so parameters written again unchanged are no
+        change. A trigger for the reason `updated_at` has one: every writer — an edit, discovery,
+        a data migration — is covered without remembering. Backfilled from `updated_at` with the
+        row's `set_updated_at` and `touch_owner` triggers held off for the statement, so no
+        `updated_at` and no sensor version moves.
+      - **Both readers moved to it**: `retired` (`channelsWithRetirement`), and the start of
+        `P-321`'s settling minute in the resolver, which read the same column and had the same
+        fault — a voucher write restarted the minute for a reading nothing had changed under.
+      - **The clock offset, not stored.** The core measures a probe's offset on its link, now; a
+        stored copy would be applied to readings taken under other offsets, and to a sensor's
+        readings from a probe it has since moved away from. The cost stays as `P-322` accepted
+        it — one scan interval plus the offset after a change — and the comment on
+        `channelsWithRetirement` says so.
+      - **Docs.** The `retired` description (`ChannelRecord`, `ms:channelRecord`,
+        `api-reference.md` regenerated), `web-ui.md`, `adding-a-sensor-type.md`.
+      - **Tests.** `migrator.test.ts` (080: backfill without moving `updated_at` or the version,
+        and both triggers it held off on again after it; a voucher that changes, `installation`
+        to `account`, and an unchanged rewrite naming the column leave it; a parameters or type
+        change moves it; an insert dates it; back and up again), `retired-channels.test.ts` (a
+        voucher write after a newer probe's reading leaves the channel live),
+        `channel-provisioning.test.ts` (a key outside a promise counted a minute after the
+        change though a voucher write came since), `object-schema.test.ts` (the column in
+        `sensor_config`'s inventory: the row's own history, not a setting).
+      - **Reviewed** by a read-only four-lens workflow with a skeptic per finding: 5 of 6
+        confirmed and fixed — the schema inventory, test voucher writes that re-stored the same
+        value (so a trigger reacting to any column would have passed), no check that the backfill
+        turned its triggers back on, and two comments that overstated the column.
+      - **Mutations** (10, each restored byte for byte), all killed: `retired` or the resolver
+        back on `updated_at`; an unchanged write moving the column; a type change not moving it;
+        the backfill moving `updated_at` or every version; the rollback keeping the function; the
+        touch trigger left off; a voucher moving the column (in the migration's test and in the
+        resolver's and `retired`'s).
 
 - [ ] **P-341 — the channel list and a conditional GET now cost more** · XS · P-322 · Found
       2026-10-09 in `P-322`. The list plans against `sample` even when no key needs it (about 0.9 ms

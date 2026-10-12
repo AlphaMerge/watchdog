@@ -175,13 +175,15 @@ describe(
          WHERE table_name = 'sensor_config' ORDER BY column_name`,
       );
       // Who vouched for the sensor (`A-29`, 059) is a fact about this sensor's last write, not a
-      // setting — nothing inherits it, and a child has no reason to.
+      // setting — nothing inherits it, and a child has no reason to. Nor when its parameters last
+      // changed (`P-340`, 080), which is this row's own history.
       assert.deepEqual(
         columns.map((row) => row.column_name),
         [
           'created_at',
           'object_id',
           'params',
+          'params_changed_at',
           'type',
           'updated_at',
           'vouched_by',

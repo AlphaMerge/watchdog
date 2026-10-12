@@ -4115,7 +4115,7 @@ one of 4 shapes, by `kind`
 | `showInGraph` | boolean | **required** |  |
 | `showInTable` | boolean | **required** |  |
 | `lookupId` | string | **required** nullable |  |
-| `retired` | boolean | **required** | Nothing will read this channel again: the sensor’s type declares every channel it reports, and the sensor’s parameters no longer declare this one (an edit took it out), and it has no reading newer than the sensor’s last change, which a probe running a newer build than the core could still send. A reading is timed by the probe’s clock, so after each change such a channel can read `true` for one scan interval plus however far that probe’s clock runs behind the core’s database. Its history is kept, and putting it back makes it live again. Worked out from the type on every read. `false` also where the type cannot say: one whose readings can name channels it does not declare, such as a script’s. |
+| `retired` | boolean | **required** | Nothing will read this channel again: the sensor’s type declares every channel it reports, and the sensor’s parameters no longer declare this one (an edit took it out), and it has no reading newer than the last change to the sensor’s parameters, which a probe running a newer build than the core could still send. A reading is timed by the probe’s clock, so after each change such a channel can read `true` for one scan interval plus however far that probe’s clock runs behind the core’s database. Its history is kept, and putting it back makes it live again. Worked out from the type on every read. `false` also where the type cannot say: one whose readings can name channels it does not declare, such as a script’s. |
 
 <a id="schema-ms-channelvalue"></a>
 

@@ -125,9 +125,10 @@ interface SensorDeclaring {
   readonly type: string;
   readonly params: Readonly<Record<string, unknown>>;
   /**
-   * When its configuration last changed (`sensor_config.updated_at`), in epoch milliseconds: a
-   * reading taken before it, or not long enough after it, may have run under parameters that
-   * named a key these do not (`P-321` review).
+   * When its parameters last changed (`sensor_config.params_changed_at`, `P-340`), in epoch
+   * milliseconds: a reading taken before it, or not long enough after it, may have run under
+   * parameters that named a key these do not (`P-321` review). Not `updated_at`, which a voucher
+   * write moves too and would restart the minute for nothing a reading could have run under.
    */
   readonly changedAt: number;
 }
@@ -143,7 +144,7 @@ interface WantedChannel {
 }
 
 /**
- * How long after a sensor's configuration changed a reading may still have run under the
+ * How long after a sensor's parameters changed (`P-340`) a reading may still have run under the
  * parameters before it (`P-321` review): the change reaching its probe, a scan already in flight,
  * and a probe clock ahead of the database's by up to the minute Core Health first warns of. A key
  * outside the declaration in such a reading is not counted as a broken promise.
@@ -382,9 +383,9 @@ export class ChannelResolver {
       object_id: string;
       type: string;
       params: unknown;
-      updated_at: Date;
+      params_changed_at: Date;
     }>(
-      `SELECT object_id::text, type, params, updated_at
+      `SELECT object_id::text, type, params, params_changed_at
        FROM sensor_config WHERE object_id = ANY($1::bigint[])`,
       [[...new Set(wanted.map((one) => one.sensorId))]],
     );
@@ -393,7 +394,7 @@ export class ChannelResolver {
         row.object_id,
         {
           type: row.type,
-          changedAt: row.updated_at.getTime(),
+          changedAt: row.params_changed_at.getTime(),
           params:
             typeof row.params === 'object' && row.params !== null && !Array.isArray(row.params)
               ? (row.params as Record<string, unknown>)

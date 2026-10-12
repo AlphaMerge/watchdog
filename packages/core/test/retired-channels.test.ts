@@ -316,7 +316,7 @@ describe(
       /** Just after the sensor's last change: a reading the probe took once it had it. */
       const afterChange = async (): Promise<Date> => {
         const rows = await db.query<{ at: Date }>(
-          'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+          'SELECT params_changed_at AS at FROM sensor_config WHERE object_id = $1',
           [id],
         );
         const at = rows[0]?.at;
@@ -346,6 +346,17 @@ describe(
         'each read since the edit, so neither is called retired',
       );
 
+      // **A write that changes no parameter is not a change** (`P-340`): recording who vouched
+      // for the sensor, as `recordVoucher` does, after the reading. `updated_at` moved past the
+      // reading and called `b` retired again until the next one; the parameters' own time did not.
+      await db.query('SELECT pg_sleep(0.01)');
+      await db.query(`UPDATE sensor_config SET vouched_by = 'account' WHERE object_id = $1`, [id]);
+      assert.deepEqual(
+        await retirement(id),
+        { a: false, b: false, newer: false },
+        'a voucher write does not undo a reading',
+      );
+
       // Put back: live, as it is declared.
       await edit(id, { columns: [{ key: 'a' }, { key: 'b' }] });
       assert.deepEqual(await retirement(id), { a: false, b: false, newer: true });
@@ -373,7 +384,7 @@ describe(
     it('counts a key a probe ahead of the core adds, and does not call its channel retired', async () => {
       const id = await create('test.columns', { columns: [{ key: 'a' }] });
       const rows = await db.query<{ at: Date }>(
-        'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+        'SELECT params_changed_at AS at FROM sensor_config WHERE object_id = $1',
         [id],
       );
       const changedAt = rows[0]?.at;
@@ -423,7 +434,7 @@ describe(
 
       // A reading of `b` after the edit, as a probe ahead of the core sends: live again.
       const rows = await db.query<{ at: Date }>(
-        'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+        'SELECT params_changed_at AS at FROM sensor_config WHERE object_id = $1',
         [id],
       );
       const changedAt = rows[0]?.at;
@@ -459,7 +470,7 @@ describe(
       await db.query(
         `DELETE FROM sample s USING channel c, sensor_config sc
          WHERE s.channel_id = c.id AND c.sensor_id = $1 AND c.key = 'b'
-           AND sc.object_id = c.sensor_id AND s.time > sc.updated_at`,
+           AND sc.object_id = c.sensor_id AND s.time > sc.params_changed_at`,
         [id],
       );
       const retiredAgain = await app.inject({
@@ -494,7 +505,7 @@ describe(
 
       // A reading of `b` after the edit, as a probe ahead of the core sends (`P-322`): live.
       const rows = await db.query<{ at: Date }>(
-        'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+        'SELECT params_changed_at AS at FROM sensor_config WHERE object_id = $1',
         [id],
       );
       const changedAt = rows[0]?.at;

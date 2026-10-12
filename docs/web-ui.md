@@ -333,7 +333,7 @@ and it is read again, with its history. Only a type that promises its readings n
 marked this way (`P-310`): every shipped type but three (`P-320`). An advanced script's extra
 channels, and Windows CPU's per-processor and Windows Volume's per-drive channels, come from what
 was read, so no channel of those three types is ever called retired. Nor is a channel
-with a reading newer than the sensor's last change: a probe running a newer build than the core
+with a reading newer than the last change to the sensor's parameters (`P-340`): a probe running a newer build than the core
 may still read a key the core's build no longer declares (`P-322`).
 
 Add a sensor beneath a device at `/objects/:id/add-sensor`. Everything after "which type" is

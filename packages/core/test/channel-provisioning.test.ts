@@ -598,7 +598,7 @@ describe(
           one.key,
         ]);
         const changed = await db.query<{ at: Date }>(
-          'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+          'SELECT params_changed_at AS at FROM sensor_config WHERE object_id = $1',
           [sensor.id],
         );
         const changedAt = changed[0]?.at;
@@ -659,6 +659,50 @@ describe(
         assert.equal(said().length, one.outside ? 1 : 0, 'said once a channel');
       });
     }
+
+    // `P-340`: the minute runs from the parameters' last change, not from the row's last write.
+    // Recording who vouched for a sensor changes no parameter a reading could have run under.
+    it('counts a key outside its declaration a minute after the parameters changed, though a voucher write came since', async () => {
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: `vouched-${String(process.hrtime.bigint())}`,
+        sensorType: 'test.promised',
+        params: { columns: [{ key: 'a' }] },
+      });
+      // A minute and a half ago. The trigger dates a change by the database's clock, so it is held
+      // off for the one statement that puts this one in the past.
+      await db.tx(async (q) => {
+        await q.query('ALTER TABLE sensor_config DISABLE TRIGGER sensor_config_params_changed');
+        await q.query(
+          `UPDATE sensor_config SET params_changed_at = now() - interval '90 seconds'
+           WHERE object_id = $1`,
+          [sensor.id],
+        );
+        await q.query('ALTER TABLE sensor_config ENABLE TRIGGER sensor_config_params_changed');
+      });
+      await db.query(`UPDATE sensor_config SET vouched_by = 'account' WHERE object_id = $1`, [
+        sensor.id,
+      ]);
+      const catalogue = testCatalogue([columns, brittle, promised]);
+      const resolver = new ChannelResolver({
+        logger: silent,
+        declaredLimits: declaredLimitsLookup(catalogue),
+        declaredShape: declaredChannelLookup(catalogue),
+      });
+      // Eighty seconds after the change, and a moment before the voucher.
+      const reading: CheckResult = {
+        sensorId: sensor.id,
+        at: new Date(Date.now() - 10_000).toISOString(),
+        outcome: 'ok',
+        message: '',
+        durationMs: 1,
+        channels: [{ key: 'newer', value: 1 }],
+      };
+      const created = await db.tx((q) => resolver.resolve(q, [reading]));
+      assert.equal(created.created, 1);
+      assert.equal(created.createdOutsideDeclaration, 1, 'evidence, whatever was written since');
+    });
 
     // `P-339`: a key created from a reading inside the minute after an edit is created uncounted,
     // since that reading may have run under the parameters before it. Its first reading after the
@@ -748,7 +792,7 @@ describe(
           one.key,
         ]);
         const changed = await db.query<{ at: Date }>(
-          'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+          'SELECT params_changed_at AS at FROM sensor_config WHERE object_id = $1',
           [sensor.id],
         );
         const changedAt = changed[0]?.at;

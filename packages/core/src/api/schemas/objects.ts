@@ -391,7 +391,7 @@ export const channelRecordSchema = {
       description:
         'Nothing will read this channel again: the sensor’s type declares every channel it ' +
         'reports, and the sensor’s parameters no longer declare this one (an edit took it ' +
-        'out), and it has no reading newer than the sensor’s last change, which a probe ' +
+        'out), and it has no reading newer than the last change to the sensor’s parameters, which a probe ' +
         'running a newer build than the core could still send. A reading is timed by the ' +
         'probe’s clock, so after each change such a channel can read `true` for one scan ' +
         'interval plus however far that probe’s clock runs behind the core’s database. Its ' +
