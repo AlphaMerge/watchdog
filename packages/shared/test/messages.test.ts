@@ -959,6 +959,7 @@ describe('what a rejection means for a probe that is running', () => {
     'not-approved',
     'revoked',
     'source-not-allowed',
+    'certificate-not-bound',
     'internal-error',
   ];
 
@@ -976,6 +977,9 @@ describe('what a rejection means for a probe that is running', () => {
     for (const code of [
       'protocol-version',
       'bad-access-key',
+      // A certificate out of step with the binding is the probe's own, renewed, far more often
+      // than anybody else's (`P-326`): an administrator moves the binding and it is back.
+      'certificate-not-bound',
       'internal-error',
     ] satisfies RejectCode[]) {
       assert.equal(rejectionStopsMonitoring(code), false, code);

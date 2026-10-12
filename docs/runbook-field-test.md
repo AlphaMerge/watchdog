@@ -491,6 +491,7 @@ build does not construct them (`H-12`).
 | `/api/v1/probes/{gid}` | DELETE | 401 |
 | `/api/v1/probes/{gid}/allow-from` | PUT | 401 |
 | `/api/v1/probes/{gid}/approve` | POST | 401 |
+| `/api/v1/probes/{gid}/certificate` | PUT | 401 |
 | `/api/v1/probes/{gid}/revoke` | POST | 401 |
 | `/api/v1/probes/{id}/health` | GET | 401 |
 | `/api/v1/schedules` | GET · POST | 401 |

@@ -12666,7 +12666,7 @@ because each is a decision rather than a defect:
         its polls end once it has looked, so a helper that does not stop fails the case instead
         of holding the file open. With the `finally`'s abort removed, those three fail.
 
-- [ ] **P-326 — a probe certificate is not bound to its GID** · M · P-319 · Found 2026-10-08 in
+- [x] **P-326 — a probe certificate is not bound to its GID** · M · P-319 · Found 2026-10-08 in
       `P-319`. mTLS proves only that the shared CA signed the certificate, so any certificate holder
       can claim any GID and is stopped only by the key. **Done when** the peer certificate's
       fingerprint is recorded at enrolment and checked at every hello (a migration;
@@ -12676,13 +12676,43 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** do it. Record the certificate fingerprint at
       enrolment and check it at every hello, with a rotation path (a migration). `P-327`
       relies on this binding.
-- [ ] **P-327 — a pending probe's row is writable by anyone holding the enrolment key** · S ·
+
+      **P-326 outcome.** Migration 078, protocol 34.
+      - **Recorded.** `probe_registration.cert_fingerprint` (the SHA-256 fingerprint, upper-case
+        colon hex, checked by a constraint) and `cert_bound_at`, set together or not at all. A new
+        GID is bound to the certificate of the hello that enrols it; a row from before 078 is
+        bound by its next hello that proves the key.
+      - **Checked.** Every hello, after the address filter and before the key: another
+        certificate under a bound GID is refused `certificate-not-bound`, counted in
+        `probeHellosUnproven`, and writes nothing to the row — not even the key-issue stamp. The
+        refusal keeps the probe checking and spooling and keeps its key
+        (`rejectionStopsMonitoring` is false): the commonest cause is the probe's own renewed
+        certificate. A probe below 34 is told `internal-error` with the same sentence
+        (`rejectCodeForPeer`), since it cannot parse the new code.
+      - **Rotation.** `PUT /api/v1/probes/:gid/certificate` (administrators), `{fingerprint}`
+        binds a named certificate, `null` clears so the next proven hello binds; audited as
+        `probe.certificate.set`, and it drops the probe's connection. `ms-enrol` prints the
+        fingerprint it issued. `installation.md` → *The certificate a probe is bound to*.
+      - Tests: `probe-registry.test.ts` (forgery rows and the binding describe),
+        `probe-endpoint.test.ts` (the fingerprints the registry is told, the downgrade at 33),
+        `capabilities.test.ts`, `deploy-scripts.test.ts`, `migrator.test.ts` (078 up and back).
+        Seven mutants killed: the check removed, enrolment not binding, a legacy row never
+        binding, a rebind keeping the session or skipping its audit, no downgrade below 34, and
+        the endpoint not reading the certificate.
+- [x] **P-327 — a pending probe's row is writable by anyone holding the enrolment key** · S ·
       P-319 · Found 2026-10-08 in `P-319`. A pending probe has no key of its own, so a hello proven
       on the shared enrolment key may rename it or move its address. **Done when** decided:
       per-enrolment tokens, or rely on `P-326`'s binding, written down, with a test.
 
       **Decided 2026-10-11 by the user:** rely on `P-326`'s binding; no per-enrolment
       tokens. Written down, with a test, when `P-326` lands.
+
+      **P-327 outcome.** A pending probe is bound to its certificate by the hello that enrols
+      it, before anybody approves it, so a second holder of the enrolment key and a CA-signed
+      certificate who names that GID is refused `certificate-not-bound` and cannot rename it
+      or move its address. What the enrolment key alone still opens is a *new* pending GID —
+      which nothing trusts until a person approves it by name. Test: "keeps a pending probe's
+      row from anyone else holding the enrolment key (P-327)" in `probe-registry.test.ts`.
 - [x] **P-328 — `last_seen_at` and `protocol_accepted_at` now nearly coincide** · XS · P-319 ·
       Found 2026-10-08 in `P-319`. Only a proven version refusal moves last seen without setting
       accepted. **Done when** U-32/U-33's reasons for keeping both are re-read and either one is

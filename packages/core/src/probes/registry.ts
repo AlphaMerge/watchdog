@@ -48,7 +48,12 @@ export type ProbeDecision =
   | { kind: 'pending'; gid: string }
   | {
       kind: 'refused';
-      code: 'revoked' | 'source-not-allowed' | 'bad-access-key' | 'protocol-version';
+      code:
+        | 'revoked'
+        | 'source-not-allowed'
+        | 'bad-access-key'
+        | 'protocol-version'
+        | 'certificate-not-bound';
       detail: string;
     };
 
@@ -115,6 +120,15 @@ export interface ProbeRegistration {
    * let a single dropped welcome lock a probe out for ever.
    */
   hasOwnKey: boolean;
+  /**
+   * The SHA-256 fingerprint of the client certificate this probe's identity is bound to
+   * (`P-326`), or null: a row from before migration 078 that no hello has proved since, or one an
+   * administrator cleared for the next certificate that proves it. A fingerprint, never the
+   * certificate, and nothing secret: the certificate is shown to every server the probe meets.
+   */
+  certificateFingerprint: string | null;
+  /** When it was bound: at enrolment, at the first proven hello since 078, or by an administrator. */
+  certificateBoundAt: string | null;
   objectId: number | null;
   note: string;
   firstSeenAt: string;
@@ -211,6 +225,8 @@ export interface ProbeHello {
   protocolVersion: number;
   accessKey: string;
   remoteAddress: string;
+  /** The SHA-256 fingerprint of the certificate it connected with (`P-326`), or null for none. */
+  certificate: string | null;
 }
 
 export class ProbeRegistry {
@@ -310,6 +326,7 @@ export class ProbeRegistry {
       if (proof.proven) {
         await this.#touch(existing.gid, hello);
         await this.#speaks(existing.gid, hello.protocolVersion, false);
+        await this.#bindUnbound(existing, hello);
       }
       return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
     }
@@ -322,6 +339,7 @@ export class ProbeRegistry {
     // Proven, and accepted: what it says about itself, then the version it speaks and when.
     await this.#touch(existing.gid, hello);
     await this.#speaks(existing.gid, hello.protocolVersion, true);
+    await this.#bindUnbound(existing, hello);
 
     if (existing.status === 'pending') return { kind: 'pending', gid: existing.gid };
     const accepted = proof.key;
@@ -399,10 +417,14 @@ export class ProbeRegistry {
     const gid = hello.gid === '' || reserved ? randomBytes(16).toString('hex') : hello.gid;
     const now = this.#now();
     await this.#db.query(
+      // **Bound to the certificate it enrolled with** (`P-326`), from its first hello: until an
+      // administrator moves the binding, no other certificate proves this identity, pending or
+      // approved — whoever else holds the enrolment key (`P-327`).
       `INSERT INTO probe_registration
          (gid, status, display_name, agent_version, protocol_version, last_address,
-          first_seen_at, last_seen_at, protocol_accepted_at)
-       VALUES ($1, 'pending', $2, $3, $4, $5, $6, $6, $6)
+          first_seen_at, last_seen_at, protocol_accepted_at, cert_fingerprint, cert_bound_at)
+       VALUES ($1, 'pending', $2, $3, $4, $5, $6, $6, $6, $7::text,
+               CASE WHEN $7::text IS NULL THEN NULL ELSE $6::timestamptz END)
        ON CONFLICT (gid) DO NOTHING`,
       [
         gid,
@@ -411,6 +433,7 @@ export class ProbeRegistry {
         hello.protocolVersion,
         hello.remoteAddress.slice(0, 64),
         now.toISOString(),
+        hello.certificate,
       ],
     );
     this.#logger.info(
@@ -697,6 +720,68 @@ export class ProbeRegistry {
     return updated;
   }
 
+  /**
+   * Binds this probe to a certificate, or clears the binding for the next one that proves it
+   * (`P-326`): the rotation path, for a probe whose certificate was renewed or reissued.
+   *
+   * **A fingerprint, so the operator binds the certificate they issued**, read off it with
+   * `openssl x509 -noout -fingerprint -sha256`, before the probe presents it. Null instead lets
+   * the next hello that proves this identity by its key bind whatever certificate it presents,
+   * which is simpler and trusts the key alone for that one hello. Either way the live connection
+   * is closed, so the next hello is judged against what was just decided rather than at some
+   * later reconnect. Audited, as every trust decision is (`A-20`).
+   */
+  async bindCertificate(
+    gid: string,
+    fingerprint: string | null,
+    actor: Actor,
+  ): Promise<ProbeRegistration> {
+    const bound = fingerprint === null ? null : normaliseFingerprint(fingerprint);
+    const updated = await this.#db.tx(async (q) => {
+      const existing = await this.#lock(q, gid);
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE probe_registration
+         SET cert_fingerprint = $2::text,
+             cert_bound_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END
+         WHERE gid = $1 RETURNING *`,
+        [gid, bound],
+      );
+      const after = readOne(rows, gid);
+      if (existing.certificateFingerprint !== after.certificateFingerprint) {
+        await this.#record(q, actor, {
+          action: 'probe.certificate.set',
+          objectId: after.objectId,
+          probe: identityOf(after),
+          before: trustOf(existing),
+          after: trustOf(after),
+        });
+      }
+      return after;
+    });
+    this.#connections?.disconnect(gid, 'the certificate this probe is bound to was changed');
+    return updated;
+  }
+
+  /**
+   * A row with no certificate takes the one that just proved it (`P-326`): a probe recorded
+   * before migration 078, or one an administrator cleared. Only while it is still unbound, so a
+   * binding made meanwhile is kept.
+   */
+  async #bindUnbound(existing: ProbeRegistration, hello: ProbeHello): Promise<void> {
+    if (existing.certificateFingerprint !== null || hello.certificate === null) return;
+    const rows = await this.#db.query(
+      `UPDATE probe_registration SET cert_fingerprint = $2, cert_bound_at = now()
+       WHERE gid = $1 AND cert_fingerprint IS NULL RETURNING gid`,
+      [existing.gid, hello.certificate],
+    );
+    if (rows.length > 0) {
+      this.#logger.info(
+        { gid: existing.gid, certificate: hello.certificate },
+        'bound this probe to the certificate it proved itself with',
+      );
+    }
+  }
+
   /** The registration, locked for the decision about to be taken on it, or `PROBE_NOT_FOUND`. */
   async #lock(q: Queryable, gid: string): Promise<ProbeRegistration> {
     const rows = await q.query<Record<string, unknown>>(
@@ -780,7 +865,8 @@ export class ProbeRegistry {
    * Whether this hello proves it is the probe the row describes (`P-319`), and with which key.
    *
    * In the order the refusals have always been given: a revoked identity, then an address its
-   * filter does not allow, then the key. Nothing here writes to the row except `#keyAccepted`
+   * filter does not allow, then the key, with the certificate it is bound to checked before the
+   * key since `P-326`. Nothing here writes to the row except `#keyAccepted`
    * recording a key's first use, and that only once the key has matched — which is the proof.
    */
   async #prove(existing: ProbeRegistration, hello: ProbeHello): Promise<Proof> {
@@ -805,6 +891,27 @@ export class ProbeRegistry {
           kind: 'refused',
           code: 'source-not-allowed',
           detail: refusedFrom(hello.remoteAddress),
+        },
+      };
+    }
+
+    // **The certificate, before anything about the key** (`P-326`). mTLS says the CA signed it;
+    // this says it is the one this identity was bound to. Before the key, so a hello with
+    // another certificate never reaches `#keyAccepted` and its one write, a key's first use.
+    if (
+      existing.certificateFingerprint !== null &&
+      hello.certificate !== existing.certificateFingerprint
+    ) {
+      return {
+        proven: false,
+        why: 'a hello presented a certificate other than the one this probe is bound to',
+        fields: { bound: existing.certificateFingerprint, presented: hello.certificate },
+        refusal: {
+          kind: 'refused',
+          code: 'certificate-not-bound',
+          detail:
+            'this probe is bound to another certificate; if its certificate was replaced, an ' +
+            'administrator binds the new one to it',
         },
       };
     }
@@ -1075,12 +1182,34 @@ function identityOf(registration: ProbeRegistration): ProbeIdentity {
   };
 }
 
+/**
+ * A SHA-256 fingerprint as the column holds it, from either way it is usually written: Node's and
+ * `openssl x509 -fingerprint -sha256`'s colon-separated hex (with or without openssl's
+ * `sha256 Fingerprint=`), or 64 hex digits. Anything else is refused, naming the shape wanted.
+ */
+export function normaliseFingerprint(input: string): string {
+  const bare = input
+    .trim()
+    .replace(/^sha256 fingerprint=/iu, '')
+    .replace(/:/gu, '')
+    .toUpperCase();
+  if (!/^[0-9A-F]{64}$/u.test(bare)) {
+    throw new ProbeRegistryError(
+      'PROBE_INVALID',
+      'a certificate fingerprint is the SHA-256 of the certificate: 64 hex digits, with or ' +
+        'without colons, as `openssl x509 -noout -fingerprint -sha256` prints it',
+    );
+  }
+  return (bare.match(/../gu) ?? []).join(':');
+}
+
 function trustOf(registration: ProbeRegistration): ProbeTrustAudit {
   return {
     status: registration.status,
     objectId: registration.objectId,
     allowFrom: registration.allowFrom.join(', '),
     note: registration.note,
+    certificate: registration.certificateFingerprint ?? '',
   };
 }
 
@@ -1098,6 +1227,8 @@ function read(row: Record<string, unknown>): ProbeRegistration {
     lastAddress: text(row['last_address']),
     allowFrom: Array.isArray(row['allow_from']) ? (row['allow_from'] as string[]) : [],
     hasOwnKey: row['access_key_hash'] != null && row['access_key_confirmed_at'] != null,
+    certificateFingerprint: row['cert_fingerprint'] == null ? null : text(row['cert_fingerprint']),
+    certificateBoundAt: row['cert_bound_at'] == null ? null : iso(row['cert_bound_at']),
     objectId: row['object_id'] == null ? null : Number(row['object_id']),
     note: text(row['note']),
     firstSeenAt: iso(row['first_seen_at']),

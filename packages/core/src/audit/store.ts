@@ -682,6 +682,7 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
 
     case 'probe.revoked':
     case 'probe.allowFrom.set':
+    case 'probe.certificate.set':
       return {
         ...base,
         objectKind: null,
@@ -1183,6 +1184,7 @@ const PROBE_FIELDS = [
   'objectId',
   'allowFrom',
   'note',
+  'certificate',
 ] as const satisfies readonly (keyof ProbeTrustAudit)[];
 
 const REDISCOVERY_FIELDS = [

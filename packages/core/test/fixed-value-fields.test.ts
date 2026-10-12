@@ -1302,6 +1302,8 @@ describe('fields left open', () => {
       protocolAcceptedAt: '2026-10-09T08:00:00.000Z',
       protocolRefusedAt: null,
       firstSeenAt: '2026-10-09T08:00:00.000Z',
+      certificateFingerprint: null,
+      certificateBoundAt: null,
       skew: { ...skew, explanation: explainSkew(skew) },
     };
     const answer = await serve('/probes', '/probes', (app) => {

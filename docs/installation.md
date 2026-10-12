@@ -321,6 +321,35 @@ The probe appears in the UI as `pending` within a few seconds of starting. Appro
 it a branch of the tree to monitor. **A leaked bundle is an identity that can knock, not one that
 monitors** — nothing it grants takes effect until a person approves that probe by name.
 
+### The certificate a probe is bound to
+
+**A probe's identity is its GID, its key and the certificate it enrolled with** (`P-326`). The
+core records the SHA-256 fingerprint of the client certificate a probe presents at its first
+hello — before approval, so a pending probe is held to it too (`P-327`) — and from then on
+refuses that GID under any other certificate with `certificate-not-bound`, even with the right
+key. A second machine holding a certificate the same CA signed cannot answer for a probe that is
+not its own. `ms-enrol` prints the fingerprint of the certificate it issued, and
+`certificateFingerprint` in `GET /api/v1/probes` is the one the probe is bound to — check they
+match before approving it.
+
+**Renewing or reissuing a probe's certificate is two steps, in this order.** Bind the new one,
+then install it:
+
+```bash
+openssl x509 -noout -fingerprint -sha256 -in probe.crt       # the new certificate
+curl -s "${auth[@]}" -X PUT http://127.0.0.1:8080/api/v1/probes/<gid>/certificate \
+  -d '{"fingerprint":"AB:CD:…"}'
+```
+
+The write is audited (`probe.certificate.set`) and drops the probe's connection, so a session
+opened on the old certificate does not outlive the change. A probe that reconnects with a
+certificate the core was not told about keeps checking and spools what it reads — the refusal
+does not stop monitoring, and binding the right fingerprint brings it back with its spool.
+`{"fingerprint": null}` clears the binding instead, and the next hello that proves the probe's
+key binds whatever certificate it presents: use it when the new certificate is already in place,
+from a host you trust. It applies to the local probe exactly as to a remote one. A probe
+registered before this release has no binding until its next proven hello sets one.
+
 **A probe that cannot reach the core does not lose readings.** It spools them to its own disk and
 replays them, rate-limited, when the connection comes back — so a network outage between a probe
 and its core costs you the outage and not the data.

@@ -56,6 +56,11 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * alarm, rather than counting a failed scan. A core below 33 is sent the result without it and
  * reads it as the failed check it always did, with the reason in its message.
  *
+ * Version 34 adds the reject code `certificate-not-bound`, under `certificateBinding` (`P-326`):
+ * the hello's client certificate is not the one the probe's identity is bound to. A probe keeps
+ * checking and keeps its key on it, as on `internal-error`, which is what a probe below 34 is told
+ * instead, with the same sentence (`rejectCodeForPeer`): a newer code would fail its validation.
+ *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
@@ -186,7 +191,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 33;
+export const PROTOCOL_VERSION = 34;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -433,6 +438,12 @@ export type RejectCode =
   | 'not-approved'
   | 'revoked'
   | 'source-not-allowed'
+  /**
+   * The hello's client certificate is not the one this probe's identity is bound to (`P-326`):
+   * a certificate replaced without the binding being moved, or a peer naming a probe it is not.
+   * Version 34; an older probe is told `internal-error`, with the same sentence.
+   */
+  | 'certificate-not-bound'
   | 'internal-error';
 
 /**
@@ -476,8 +487,13 @@ export function rejectionStopsMonitoring(code: RejectCode): boolean {
     case 'not-approved':
     case 'source-not-allowed':
       return true;
+    // `certificate-not-bound` **keeps checking, and keeps its key** (`P-326`): the commonest
+    // cause is the probe's own certificate, renewed without the binding moved, and an
+    // administrator moving it brings the probe back with its spool. `bad-access-key` would make
+    // it throw away its key.
     case 'protocol-version':
     case 'bad-access-key':
+    case 'certificate-not-bound':
     case 'internal-error':
       return false;
   }
@@ -1522,6 +1538,7 @@ const coreToProbeSchema = {
             'not-approved',
             'revoked',
             'source-not-allowed',
+            'certificate-not-bound',
             'internal-error',
           ],
         },

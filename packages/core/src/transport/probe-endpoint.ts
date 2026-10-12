@@ -14,6 +14,7 @@ import {
   parseProbeToCore,
   PROTOCOL_VERSION,
   newCorrelationId,
+  rejectCodeForPeer,
   versionFor,
   withCorrelation,
   type CheckResult,
@@ -274,6 +275,16 @@ export interface ProbeReachabilitySink {
 }
 
 /**
+ * The SHA-256 fingerprint of the client certificate a probe connected with, as Node and
+ * `openssl x509 -fingerprint -sha256` both print it (`P-326`), or null when the peer presented
+ * none — which `rejectUnauthorized` keeps from reaching a hello.
+ */
+export function certificateOf(socket: Pick<TLSSocket, 'getPeerCertificate'>): string | null {
+  const fingerprint = (socket.getPeerCertificate() as { fingerprint256?: unknown }).fingerprint256;
+  return typeof fingerprint === 'string' && fingerprint !== '' ? fingerprint.toUpperCase() : null;
+}
+
+/**
  * The admission decision, as far as the transport cares (`R-01`).
  *
  * An interface for the same reason as `ResultReceiver` and `ProbeConfigSource`: the transport
@@ -287,12 +298,19 @@ export interface ProbeAdmission {
     protocolVersion: number;
     accessKey: string;
     remoteAddress: string;
+    /** The SHA-256 fingerprint of the client certificate the hello came over (`P-326`). */
+    certificate: string | null;
   }): Promise<
     | { kind: 'approved'; gid: string; objectId: number | null; issuedKey?: string }
     | { kind: 'pending'; gid: string }
     | {
         kind: 'refused';
-        code: 'revoked' | 'source-not-allowed' | 'bad-access-key' | 'protocol-version';
+        code:
+          | 'revoked'
+          | 'source-not-allowed'
+          | 'bad-access-key'
+          | 'protocol-version'
+          | 'certificate-not-bound';
         detail: string;
       }
   >;
@@ -715,6 +733,9 @@ export class ProbeEndpoint {
 
   #accept(socket: TLSSocket): void {
     const remoteAddress = socket.remoteAddress ?? 'unknown';
+    // **Which certificate this peer holds, for the registry to bind and compare** (`P-326`). The
+    // CA's signature says only that it is one of the installation's; this says which.
+    const certificate = certificateOf(socket);
     const connectionLogger = this.#logger.child({ remoteAddress });
     const { config, coreVersion } = this.#options;
 
@@ -770,6 +791,7 @@ export class ProbeEndpoint {
         onMessage: (message) => {
           session = this.#handleMessage(message, connection, connectionLogger, session, {
             remoteAddress,
+            certificate,
             coreVersion,
             handshakeTimer,
           });
@@ -786,7 +808,12 @@ export class ProbeEndpoint {
     connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>,
     logger: Logger,
     session: ProbeSession | undefined,
-    context: { remoteAddress: string; coreVersion: string; handshakeTimer: NodeJS.Timeout },
+    context: {
+      remoteAddress: string;
+      certificate: string | null;
+      coreVersion: string;
+      handshakeTimer: NodeJS.Timeout;
+    },
   ): ProbeSession | undefined {
     if (message.type === 'hello') {
       if (session !== undefined) {
@@ -1426,12 +1453,15 @@ export class ProbeEndpoint {
     hello: Extract<ProbeToCoreMessage, { type: 'hello' }>,
     connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>,
     logger: Logger,
-    context: { remoteAddress: string; coreVersion: string },
+    context: { remoteAddress: string; certificate: string | null; coreVersion: string },
   ): ProbeSession | undefined {
     const { config } = this.#options;
 
-    const reject = (code: RejectCode, detail: string): void => {
-      logger.warn({ code, detail, gid: hello.gid }, 'rejecting probe');
+    const reject = (decided: RejectCode, detail: string): void => {
+      // A code the probe's version can read (`P-326`): one newer than it fails its validation,
+      // and it would be left with a closed socket and no reason.
+      const code = rejectCodeForPeer(decided, hello.protocolVersion);
+      logger.warn({ code, decided, detail, gid: hello.gid }, 'rejecting probe');
       connection.close(`rejected: ${code}`, { type: 'reject', code, message: detail });
     };
 
@@ -1499,6 +1529,7 @@ export class ProbeEndpoint {
             protocolVersion: hello.protocolVersion,
             accessKey: hello.accessKey,
             remoteAddress: context.remoteAddress,
+            certificate: context.certificate,
           });
         } catch (error) {
           // A registry that cannot answer is not permission to come in. The probe retries, which

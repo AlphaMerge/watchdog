@@ -94,6 +94,7 @@ export {
   resultForPeer,
   missingCapabilities,
   pinningCapabilityFor,
+  rejectCodeForPeer,
   versionFor,
 } from './protocol/capabilities.js';
 export type {

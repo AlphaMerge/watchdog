@@ -34,6 +34,10 @@ import { responseSchemaAjv } from './support/response-schema-ajv.js';
 
 const available = await databaseAvailable();
 
+/** Two certificates the installation's CA signed, as Node prints their SHA-256 (`P-326`). */
+const CERT_A = Array.from({ length: 32 }, () => 'AA').join(':');
+const CERT_B = Array.from({ length: 32 }, () => 'BB').join(':');
+
 describe('the probe registry', { skip: available ? false : 'no database' }, () => {
   let scratch: ScratchDatabase;
   let db: Database;
@@ -102,6 +106,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     protocolVersion: PROTOCOL_VERSION,
     accessKey: 'shared-key',
     remoteAddress: '10.4.2.9',
+    // The certificate it connects with, bound at enrolment (`P-326`).
+    certificate: CERT_A as string | null,
     ...over,
   });
 
@@ -1633,6 +1639,21 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         code: 'source-not-allowed',
       },
       {
+        name: 'the probe’s own key, with a certificate other than the one it is bound to (P-326)',
+        over: ({ gid, key }) => ({ gid, accessKey: key, certificate: CERT_B }),
+        code: 'certificate-not-bound',
+      },
+      {
+        name: 'the probe’s own key, with no certificate at all (P-326)',
+        over: ({ gid, key }) => ({ gid, accessKey: key, certificate: null }),
+        code: 'certificate-not-bound',
+      },
+      {
+        name: 'the probe’s own key, with another certificate, at a version this core refuses',
+        over: ({ gid, key }) => ({ gid, accessKey: key, certificate: CERT_B, protocolVersion: 0 }),
+        code: 'protocol-version',
+      },
+      {
         name: 'the probe’s own key, from an address its filter does not allow, at a version this core refuses',
         arrange: (gid) => proving.setAllowFrom(gid, ['10.4.2.0/24'], testActor),
         over: ({ gid, key }) => ({ gid, accessKey: key, protocolVersion: 0 }),
@@ -1764,6 +1785,197 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // A genuine enrolment is not counted, and still enrols (`R-01`).
       assert.equal((await narrowed.admit(hello({ gid: 'newcomer' }))).kind, 'pending');
       assert.equal(narrowed.stats().hellosRefusedUnproven, 3);
+    });
+  });
+
+  describe('the certificate a probe is bound to (P-326, P-327)', () => {
+    let clock = new Date('2026-02-01T09:00:00.000Z');
+    let bound: ProbeRegistry;
+    const closed: string[] = [];
+
+    beforeEach(() => {
+      clock = new Date('2026-02-01T09:00:00.000Z');
+      closed.length = 0;
+      bound = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        enrolmentKeys: ['shared-key'],
+        now: () => clock,
+      });
+      bound.attach({
+        disconnect: (gid) => {
+          closed.push(gid);
+          return true;
+        },
+        withdraw: () => true,
+        remoteAddressOf: () => null,
+      });
+    });
+
+    const columns = async (gid: string): Promise<Record<string, unknown>> => {
+      const [found] = await db.query<Record<string, unknown>>(
+        `SELECT * FROM probe_registration WHERE gid = $1`,
+        [gid],
+      );
+      assert.ok(found !== undefined);
+      return JSON.parse(JSON.stringify(found)) as Record<string, unknown>;
+    };
+
+    it('binds a new probe to the certificate it enrolled with', async () => {
+      const first = await bound.admit(hello());
+      assert.ok(first.kind === 'pending');
+      const stored = await bound.get(first.gid);
+      assert.equal(stored?.certificateFingerprint, CERT_A);
+      assert.equal(stored.certificateBoundAt, '2026-02-01T09:00:00.000Z');
+    });
+
+    it('keeps a pending probe’s row from anyone else holding the enrolment key (P-327)', async () => {
+      // The enrolment key is shared by every probe that ever enrolled, so it alone proved a
+      // pending row: anybody holding it, and any certificate the CA signed, could rename it or
+      // move its address. The certificate it enrolled with is now what proves it.
+      const first = await bound.admit(hello({ displayName: 'web-dc2' }));
+      assert.ok(first.kind === 'pending');
+      const before = await columns(first.gid);
+      const counted = bound.stats().hellosRefusedUnproven;
+
+      const forged = await bound.admit(
+        hello({
+          gid: first.gid,
+          displayName: 'not-web-dc2',
+          remoteAddress: '192.0.2.66',
+          certificate: CERT_B,
+        }),
+      );
+      assert.ok(forged.kind === 'refused' && forged.code === 'certificate-not-bound');
+      assert.deepEqual(await columns(first.gid), before, 'every column as it was');
+      assert.equal(bound.stats().hellosRefusedUnproven, counted + 1);
+
+      // Its own certificate still renames it, as a pending probe's hello always could.
+      const own = await bound.admit(hello({ gid: first.gid, displayName: 'web-dc2-renamed' }));
+      assert.equal(own.kind, 'pending');
+      assert.equal((await bound.get(first.gid))?.displayName, 'web-dc2-renamed');
+    });
+
+    it('does not record a key’s first use for a hello with another certificate', async () => {
+      // `#keyAccepted` writes when a key is first used, and the certificate is checked before
+      // it: a peer with the probe's new key and another certificate proves nothing.
+      const first = await bound.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await bound.approve(first.gid, probeId, testActor);
+      const issuing = await bound.admit(hello({ gid: first.gid }));
+      assert.ok(issuing.kind === 'approved' && issuing.issuedKey !== undefined);
+      const refused = await bound.admit(
+        hello({ gid: first.gid, accessKey: issuing.issuedKey, certificate: CERT_B }),
+      );
+      assert.ok(refused.kind === 'refused' && refused.code === 'certificate-not-bound');
+      assert.equal((await bound.get(first.gid))?.hasOwnKey, false, 'not confirmed');
+      const own = await bound.admit(hello({ gid: first.gid, accessKey: issuing.issuedKey }));
+      assert.equal(own.kind, 'approved');
+      assert.equal((await bound.get(first.gid))?.hasOwnKey, true);
+    });
+
+    it('binds a row from before migration 078 to the first certificate that proves it', async () => {
+      const first = await bound.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await db.query(
+        'UPDATE probe_registration SET cert_fingerprint = NULL, cert_bound_at = NULL WHERE gid = $1',
+        [first.gid],
+      );
+      // A hello that proves nothing binds nothing.
+      const wrongKey = await bound.admit(
+        hello({ gid: first.gid, accessKey: 'forged', certificate: CERT_B }),
+      );
+      assert.ok(wrongKey.kind === 'refused' && wrongKey.code === 'bad-access-key');
+      assert.equal((await bound.get(first.gid))?.certificateFingerprint, null);
+
+      clock = new Date('2026-02-02T09:00:00.000Z');
+      assert.equal(
+        (await bound.admit(hello({ gid: first.gid, certificate: CERT_B }))).kind,
+        'pending',
+      );
+      const stored = await bound.get(first.gid);
+      assert.equal(stored?.certificateFingerprint, CERT_B);
+      assert.notEqual(stored.certificateBoundAt, null);
+      // And from then on it is the one.
+      const other = await bound.admit(hello({ gid: first.gid, certificate: CERT_A }));
+      assert.ok(other.kind === 'refused' && other.code === 'certificate-not-bound');
+    });
+
+    it('moves the binding when an administrator says so, audited, and closes the connection', async () => {
+      const first = await bound.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await bound.approve(first.gid, probeId, testActor);
+      closed.length = 0;
+
+      // Written however `openssl` or a person writes it, stored as Node prints it.
+      const renewed = await bound.bindCertificate(
+        first.gid,
+        `sha256 Fingerprint=${CERT_B.replaceAll(':', '').toLowerCase()}`,
+        testActor,
+      );
+      assert.equal(renewed.certificateFingerprint, CERT_B);
+      assert.deepEqual(closed, [first.gid], 'judged again at once');
+      const [entry] = await db.query<{ summary: Record<string, unknown>; diff: unknown }>(
+        `SELECT summary, diff FROM audit_log
+         WHERE action = 'probe.certificate.set' AND summary->>'gid' = $1`,
+        [first.gid],
+      );
+      assert.ok(entry !== undefined, 'audited');
+      assert.match(JSON.stringify(entry.diff), new RegExp(CERT_B));
+
+      const old = await bound.admit(hello({ gid: first.gid }));
+      assert.ok(old.kind === 'refused' && old.code === 'certificate-not-bound');
+      const now = await bound.admit(hello({ gid: first.gid, certificate: CERT_B }));
+      assert.equal(now.kind, 'approved');
+
+      // The same binding again is no change, and no second entry.
+      await bound.bindCertificate(first.gid, CERT_B, testActor);
+      const entries = await db.query(
+        `SELECT 1 FROM audit_log WHERE action = 'probe.certificate.set' AND summary->>'gid' = $1`,
+        [first.gid],
+      );
+      assert.equal(entries.length, 1);
+
+      // Cleared: the next hello that proves it by its key binds what it presents.
+      await bound.bindCertificate(first.gid, null, testActor);
+      assert.equal((await bound.get(first.gid))?.certificateFingerprint, null);
+      const rebound = await bound.admit(hello({ gid: first.gid, certificate: CERT_A }));
+      assert.notEqual(rebound.kind, 'refused');
+      assert.equal((await bound.get(first.gid))?.certificateFingerprint, CERT_A);
+    });
+
+    it('refuses what is not a SHA-256 fingerprint, and a probe nobody has, through the route', async () => {
+      const first = await bound.admit(hello());
+      assert.ok(first.kind === 'pending');
+      const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
+      app.setErrorHandler((error, _request, reply) => {
+        const answer = toHttpError(error);
+        return reply.status(answer.status).send(answer.body);
+      });
+      await app.register(probeRoutes, { registry: bound });
+      try {
+        const put = (gid: string, fingerprint: unknown) =>
+          app.inject({
+            method: 'PUT',
+            url: `/probes/${gid}/certificate`,
+            payload: { fingerprint },
+          });
+        const short = await put(first.gid, 'AB:CD');
+        assert.equal(short.statusCode, 400, short.body);
+        assert.equal(short.json<{ error: { code: string } }>().error.code, 'PROBE_INVALID');
+        assert.equal((await put('nobody', CERT_B)).statusCode, 404);
+        const ok = await put(first.gid, CERT_B);
+        assert.equal(ok.statusCode, 200, ok.body);
+        assert.equal(
+          ok.json<{ certificateFingerprint: string }>().certificateFingerprint,
+          CERT_B,
+          'shown, as a fingerprint',
+        );
+        assert.equal((await bound.get(first.gid))?.certificateFingerprint, CERT_B);
+      } finally {
+        await app.close();
+      }
     });
   });
 

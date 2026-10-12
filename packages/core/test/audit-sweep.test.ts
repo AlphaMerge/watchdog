@@ -433,6 +433,11 @@ const FIXTURES: Record<string, Fixture> = {
     url: `/api/v1/probes/${await k.pendingProbe()}/allow-from`,
     payload: { allowFrom: ['10.0.0.0/24'] },
   }),
+  // The probe is enrolled with no certificate, so binding one is a change (`P-326`).
+  'PUT /api/v1/probes/:gid/certificate': async (k) => ({
+    url: `/api/v1/probes/${await k.pendingProbe()}/certificate`,
+    payload: { fingerprint: Array.from({ length: 32 }, () => 'C3').join(':') },
+  }),
   'DELETE /api/v1/probes/:gid': async (k) => ({
     url: `/api/v1/probes/${await k.pendingProbe()}`,
   }),
@@ -922,6 +927,7 @@ describe(
             protocolVersion: PROTOCOL_VERSION,
             accessKey: 'sweep-key',
             remoteAddress: '192.0.2.200',
+            certificate: null,
           });
           return gid;
         },

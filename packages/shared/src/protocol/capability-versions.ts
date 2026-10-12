@@ -44,6 +44,7 @@ const SINCE = {
   scriptGroups: 31,
   unsendableReadings: 32,
   checkNotStarted: 33,
+  certificateBinding: 34,
 } as const satisfies Readonly<Record<keyof ProbeCapabilities, number>>;
 
 /** Every capability with the version it arrived in, oldest first. */

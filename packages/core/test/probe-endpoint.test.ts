@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { X509Certificate } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createTcpServer, Socket } from 'node:net';
@@ -103,6 +104,9 @@ function generateCerts(dir: string): void {
   // A core that probes reach by its IPv6 address (`A-67`).
   issue('core-v6', 'ms-core', 'IP:::1');
   issue('probe', 'ms-probe', null);
+  // Another probe's certificate from the same CA: mTLS takes it, and only a binding tells the
+  // two apart (`P-326`).
+  issue('probe2', 'ms-probe-2', null);
   // A second CA, to prove an untrusted client certificate is refused.
   run([
     'req',
@@ -854,6 +858,70 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
       assert.ok(connected !== undefined, JSON.stringify(lines.map((line) => line['msg'])));
       assert.notEqual(connected['requestId'], admittedId);
       forged.close();
+      genuine.close();
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
+  it('tells the registry which certificate each peer holds, and says a refusal over it so an older probe can read it (P-326)', async () => {
+    const fingerprintOf = (name: string): string =>
+      new X509Certificate(readFileSync(join(dir, `${name}.crt`))).fingerprint256;
+    const told: (string | null)[] = [];
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+      registry: {
+        admit: (said) => {
+          told.push(said.certificate);
+          return Promise.resolve(
+            said.certificate === fingerprintOf('probe')
+              ? { kind: 'approved' as const, gid: said.gid, objectId: 7 }
+              : {
+                  kind: 'refused' as const,
+                  code: 'certificate-not-bound' as const,
+                  detail: 'this probe is bound to another certificate',
+                },
+          );
+        },
+      },
+    });
+    const address = await endpoint.start();
+    try {
+      const genuine = await TestProbe.connect(dir, address.port);
+      genuine.send(hello({ gid: 'probe-gid' }));
+      await genuine.waitFor((m) => m.type === 'welcome');
+
+      const other = await TestProbe.connect(dir, address.port, 'probe2');
+      other.send(hello({ gid: 'probe-gid' }));
+      const refused = await other.waitFor((m) => m.type === 'reject');
+      assert.ok(refused.type === 'reject');
+      assert.equal(refused.code, 'certificate-not-bound');
+
+      // A probe below 34 would fail its validation on a code it has never heard of, and be
+      // left with a closed socket and no reason: it is told `internal-error`, with the sentence.
+      const older = await TestProbe.connect(dir, address.port, 'probe2');
+      older.send(hello({ gid: 'probe-gid', protocolVersion: 33 }));
+      const said = await older.waitFor((m) => m.type === 'reject');
+      assert.ok(said.type === 'reject');
+      assert.equal(said.code, 'internal-error');
+      assert.equal(said.message, 'this probe is bound to another certificate');
+
+      // As Node prints it, which is as `openssl x509 -fingerprint -sha256` does.
+      assert.match(fingerprintOf('probe'), /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/u);
+      assert.notEqual(fingerprintOf('probe'), fingerprintOf('probe2'));
+      assert.deepEqual(told, [
+        fingerprintOf('probe'),
+        fingerprintOf('probe2'),
+        fingerprintOf('probe2'),
+      ]);
       genuine.close();
     } finally {
       await endpoint.stop();

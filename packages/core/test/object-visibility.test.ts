@@ -4653,6 +4653,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         protocolVersion: PROTOCOL_VERSION,
         accessKey: 'visibility-key',
         remoteAddress: '192.0.2.44',
+        certificate: null,
       });
       await registry.approve(gid, site, actorNamed('visibility'));
       await registry.setAllowFrom(gid, ['192.0.2.0/24'], actorNamed('visibility'));

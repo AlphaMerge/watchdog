@@ -4,6 +4,7 @@ import {
   PROTOCOL_VERSION,
   type CheckResult,
   type ProbeHealthReport,
+  type RejectCode,
 } from './messages.js';
 import { INTRODUCED, versionFor } from './capability-versions.js';
 
@@ -216,6 +217,12 @@ export interface ProbeCapabilities {
    * the sensor Unknown behind the probe's alarm instead of counting a failed scan. Stripped below.
    */
   checkNotStarted: boolean;
+  /**
+   * Can be told its certificate is not the one its identity is bound to (`P-326`): the reject
+   * code `certificate-not-bound`. Below, `internal-error` with the same sentence
+   * (`rejectCodeForPeer`).
+   */
+  certificateBinding: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -257,6 +264,8 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'report the readings it dropped because they could not be sent, and the results its spool discarded',
   checkNotStarted:
     'say which checks it could not start, so their sensors are held rather than failed',
+  certificateBinding:
+    'be told that it presented a certificate other than the one its identity is bound to',
 };
 
 /**
@@ -275,6 +284,21 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
   return Object.fromEntries(
     INTRODUCED.map(([name, since]) => [name, whole && peerVersion >= since]),
   ) as Record<keyof ProbeCapabilities, boolean>;
+}
+
+/**
+ * The reject code a peer of this version can read (`P-326`).
+ *
+ * A reject's code is an enum on the wire, so a code newer than the peer fails its validation and
+ * the probe is left with a closed socket and no reason. `certificate-not-bound` goes to an older
+ * probe as `internal-error`: what it does with that is what it should do here, keep checking and
+ * keep its key, and the sentence beside it says what is wrong.
+ */
+export function rejectCodeForPeer(code: RejectCode, peerVersion: number): RejectCode {
+  if (code === 'certificate-not-bound' && !capabilitiesFor(peerVersion).certificateBinding) {
+    return 'internal-error';
+  }
+  return code;
 }
 
 /** The capabilities that say a probe connects one credential kind to an address it checked. */

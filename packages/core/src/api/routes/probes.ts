@@ -17,6 +17,8 @@ const registrationSchema = {
     'displayName',
     'protocolAcceptedAt',
     'protocolRefusedAt',
+    'certificateFingerprint',
+    'certificateBoundAt',
     'firstSeenAt',
   ],
   properties: {
@@ -51,6 +53,16 @@ const registrationSchema = {
         'Whether a key has been issued to this probe. Never the key — it is sent once, in the ' +
         'welcome that approves it, and no route can read it back.',
     },
+    certificateFingerprint: {
+      type: ['string', 'null'],
+      description:
+        'The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as ' +
+        '`openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other ' +
+        'certificate is refused with `certificate-not-bound`. Null until a hello proves the ' +
+        'identity: a probe recorded before the binding existed, or one whose binding an ' +
+        'administrator cleared.',
+    },
+    certificateBoundAt: { type: ['string', 'null'] },
     objectId: { type: ['integer', 'null'] },
     note: { type: 'string' },
     firstSeenAt: { type: 'string' },
@@ -287,6 +299,40 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
       const { gid } = request.params as { gid: string };
       const { allowFrom } = request.body as { allowFrom: string[] };
       return await registry.setAllowFrom(gid, allowFrom, actorFor(request));
+    },
+  );
+
+  app.put(
+    '/probes/:gid/certificate',
+    {
+      config: ADMIN,
+      schema: {
+        tags: ['probes'],
+        summary: 'Bind a probe to the certificate it now holds',
+        description:
+          'The rotation path for a probe whose client certificate was renewed or reissued ' +
+          '(`P-326`). A `fingerprint` binds that certificate: read it off the new certificate ' +
+          'with `openssl x509 -noout -fingerprint -sha256 -in probe.crt`, colons optional. ' +
+          '`null` clears the binding, and the next hello that proves this identity by its key ' +
+          'binds whatever certificate it presents. Either way the probe’s live connection is ' +
+          'closed, so it is judged at once against the new binding. Audited as ' +
+          '`probe.certificate.set`.',
+        params: gidParams,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['fingerprint'],
+          properties: {
+            fingerprint: { type: ['string', 'null'], maxLength: 128 },
+          },
+        },
+        response: { 200: registrationSchema },
+      },
+    },
+    async (request: FastifyRequest) => {
+      const { gid } = request.params as { gid: string };
+      const { fingerprint } = request.body as { fingerprint: string | null };
+      return await registry.bindCertificate(gid, fingerprint, actorFor(request));
     },
   );
 

@@ -3841,6 +3841,7 @@ describe(
         protocolVersion: PINNING - 1,
         accessKey: 'shared-key',
         remoteAddress: '10.4.2.9',
+        certificate: null,
         ...over,
       });
       const first = await registry.admit(hello());

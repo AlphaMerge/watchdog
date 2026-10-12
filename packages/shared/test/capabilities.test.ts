@@ -9,6 +9,8 @@ import {
   missingCapabilities,
   negotiatedVersion,
   parseProbeToCore,
+  rejectCodeForPeer,
+  rejectionStopsMonitoring,
   resultForPeer,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
@@ -65,6 +67,7 @@ describe('what a protocol version can do', () => {
       scriptGroups: false,
       unsendableReadings: false,
       checkNotStarted: false,
+      certificateBinding: false,
     });
   });
 
@@ -134,6 +137,7 @@ describe('what a protocol version can do', () => {
       scriptGroups: 31,
       unsendableReadings: 32,
       checkNotStarted: 33,
+      certificateBinding: 34,
     };
     const names = Object.keys(ARRIVED) as (keyof ProbeCapabilities)[];
     assert.deepEqual(
@@ -688,7 +692,7 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 33);
+    assert.equal(PROTOCOL_VERSION, 34);
     assert.deepEqual(healthForPeer(health, 32), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
@@ -777,7 +781,7 @@ describe('the health a peer can be sent', () => {
   it('names the listeners’ counters at 13, and strips them for no core it can meet (P-294)', () => {
     // Named after the fact: protocol 13 added them, and only a comment on `P-64` held the number
     // until the add-sensor form needed it. Nothing on the wire changes for the name.
-    assert.equal(PROTOCOL_VERSION, 33, 'naming an old version does not bump the protocol');
+    assert.equal(PROTOCOL_VERSION, 34, 'naming an old version does not bump the protocol');
     assert.equal(versionFor('listenerCounters'), 13);
     assert.equal(capabilitiesFor(12).listenerCounters, false);
     assert.equal(capabilitiesFor(13).listenerCounters, true);
@@ -890,6 +894,7 @@ describe('the health a peer can be sent', () => {
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
+      'be told that it presented a certificate other than the one its identity is bound to',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -924,6 +929,7 @@ describe('the child start-up counters (`P-260`)', () => {
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
+      'be told that it presented a certificate other than the one its identity is bound to',
     ]);
   });
 });
@@ -940,6 +946,7 @@ describe('the check workers not started (`P-263`)', () => {
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
+      'be told that it presented a certificate other than the one its identity is bound to',
     ]);
   });
 });
@@ -958,10 +965,12 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
       'report the script process groups it ended, or refused to end, after a check process died',
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
+      'be told that it presented a certificate other than the one its identity is bound to',
     ]);
     assert.deepEqual(missingCapabilities(31), [
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
+      'be told that it presented a certificate other than the one its identity is bound to',
     ]);
   });
 });
@@ -974,6 +983,7 @@ describe('the readings a probe could not send (`P-283`)', () => {
     assert.equal(capabilitiesFor(32).unsendableReadings, true);
     assert.deepEqual(missingCapabilities(32), [
       'say which checks it could not start, so their sensors are held rather than failed',
+      'be told that it presented a certificate other than the one its identity is bound to',
     ]);
   });
 });
@@ -983,7 +993,30 @@ describe('a check the probe could not start (`P-265`)', () => {
     assert.equal(versionFor('checkNotStarted'), 33);
     assert.equal(capabilitiesFor(32).checkNotStarted, false);
     assert.equal(capabilitiesFor(33).checkNotStarted, true);
-    assert.deepEqual(missingCapabilities(33), []);
+    assert.deepEqual(missingCapabilities(33), [
+      'be told that it presented a certificate other than the one its identity is bound to',
+    ]);
+  });
+});
+
+describe('a certificate other than the bound one (`P-326`)', () => {
+  it('is told so from 34, and by nothing older', () => {
+    assert.equal(versionFor('certificateBinding'), 34);
+    assert.equal(capabilitiesFor(33).certificateBinding, false);
+    assert.equal(capabilitiesFor(34).certificateBinding, true);
+    assert.deepEqual(missingCapabilities(34), []);
+  });
+
+  it('is said as `internal-error` to a probe below 34, which keeps checking and its key', () => {
+    assert.equal(rejectCodeForPeer('certificate-not-bound', 34), 'certificate-not-bound');
+    assert.equal(rejectCodeForPeer('certificate-not-bound', 33), 'internal-error');
+    assert.equal(rejectCodeForPeer('certificate-not-bound', 1), 'internal-error');
+    // Every other code is as old as the reject itself, and goes as it is.
+    for (const code of ['revoked', 'bad-access-key', 'protocol-version'] as const) {
+      assert.equal(rejectCodeForPeer(code, 1), code);
+    }
+    assert.equal(rejectionStopsMonitoring('certificate-not-bound'), false);
+    assert.equal(rejectionStopsMonitoring('internal-error'), false);
   });
 });
 

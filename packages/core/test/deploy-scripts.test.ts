@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -215,6 +215,7 @@ function mode(path: string): number {
 interface Bundle {
   readonly probeName: string;
   readonly accessKey: string;
+  readonly tls: { readonly cert: string };
 }
 interface ProbeFile {
   readonly core: Record<string, unknown>;
@@ -476,6 +477,27 @@ describe('ms-enrol', { skip: linux ? false : 'Linux only' }, () => {
     assert.equal(result.status, 0, result.stderr);
     assert.equal(mode(out), 0o600);
     assert.equal(readBundle(out).probeName, 'web-dc2');
+  });
+
+  it('says the fingerprint of the certificate it issued, which the core binds the probe to (P-326)', () => {
+    const { box, conf } = enrolmentHost();
+    const out = join(box.dir, 'web-dc3.enrol');
+    const result = box.run([
+      script('enrol-probe.sh'),
+      'web-dc3',
+      '--confdir',
+      conf,
+      '--host',
+      'core.example',
+      '--port',
+      '23560',
+      '--out',
+      out,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    const issued = new X509Certificate(readBundle(out).tls.cert).fingerprint256;
+    assert.match(issued, /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/);
+    assert.ok(result.stderr.includes(issued), result.stderr);
   });
 
   it('makes a file on stdout private before writing the key into it', () => {

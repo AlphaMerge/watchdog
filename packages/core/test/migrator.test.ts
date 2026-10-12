@@ -1895,6 +1895,84 @@ describe(
       }
     });
 
+    it('binds a probe to one certificate fingerprint, with its time, and rolls back to none (078)', async () => {
+      // `P-326`: the SHA-256 of the client certificate a probe enrolled with, upper-case colon hex
+      // as Node's `fingerprint256` writes it, and the time it was bound — both or neither.
+      const fresh = await createScratchDatabase('probe_certificate');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 78),
+        );
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 77),
+        ).up();
+        const q = fresh.db;
+        await q.query(`INSERT INTO probe_registration (gid) VALUES ('before')`);
+        await all.up();
+        const columns = async (): Promise<string[]> =>
+          (
+            await q.query<{ name: string }>(
+              `SELECT column_name AS name FROM information_schema.columns
+               WHERE table_name = 'probe_registration' AND column_name LIKE 'cert%' ORDER BY 1`,
+            )
+          ).map((row) => row.name);
+        assert.deepEqual(await columns(), ['cert_bound_at', 'cert_fingerprint']);
+        const bound = async (): Promise<string[]> =>
+          (
+            await q.query<{ line: string }>(
+              `SELECT gid || ':' || coalesce(cert_fingerprint, 'null') || ':' ||
+                      (cert_bound_at IS NOT NULL)::text AS line
+               FROM probe_registration ORDER BY gid`,
+            )
+          ).map((row) => row.line);
+        assert.deepEqual(await bound(), ['before:null:false'], 'a row from before is unbound');
+
+        const fingerprint = Array.from({ length: 32 }, (_, i) =>
+          (i * 7).toString(16).padStart(2, '0').toUpperCase(),
+        ).join(':');
+        const set = (value: string | null, at: string | null): Promise<unknown> =>
+          q.query(
+            `UPDATE probe_registration SET cert_fingerprint = $1, cert_bound_at = $2::timestamptz
+             WHERE gid = 'before'`,
+            [value, at],
+          );
+        await set(fingerprint, '2026-10-12T06:00:00Z');
+        assert.deepEqual(await bound(), [`before:${fingerprint}:true`]);
+
+        const refused: [string | null, string | null, RegExp][] = [
+          [fingerprint.toLowerCase(), '2026-10-12T06:00:00Z', /cert_fingerprint_check/],
+          [fingerprint.replaceAll(':', ''), '2026-10-12T06:00:00Z', /cert_fingerprint_check/],
+          [fingerprint.slice(3), '2026-10-12T06:00:00Z', /cert_fingerprint_check/],
+          [fingerprint, null, /cert_bound_at_check/],
+          [null, '2026-10-12T06:00:00Z', /cert_bound_at_check/],
+        ];
+        for (const [value, at, why] of refused) {
+          await assert.rejects(set(value, at), why, `${value ?? 'null'} ${at ?? 'null'}`);
+        }
+        await set(null, null);
+        assert.deepEqual(await bound(), ['before:null:false'], 'and cleared, both go');
+
+        await set(fingerprint, '2026-10-12T06:00:00Z');
+        await all.down(1);
+        assert.deepEqual(await columns(), []);
+        assert.equal(await tableExists(q, 'startup_pass'), true, 'and nothing else: 077 stays');
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [78],
+        );
+        assert.deepEqual(
+          await bound(),
+          ['before:null:false'],
+          'a binding does not come back with the columns',
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

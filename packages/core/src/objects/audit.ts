@@ -635,6 +635,17 @@ export type Mutation =
       after: ProbeTrustAudit;
     }
   | {
+      /**
+       * Which certificate proves a probe was changed (`P-326`): bound to another, or cleared for
+       * the next one that proves it by its key.
+       */
+      action: 'probe.certificate.set';
+      objectId: ObjectId | null;
+      probe: ProbeIdentity;
+      before: ProbeTrustAudit;
+      after: ProbeTrustAudit;
+    }
+  | {
       /** A probe was forgotten: if it connects again it enrols as a stranger. */
       action: 'probe.deleted';
       objectId: ObjectId | null;
@@ -902,6 +913,8 @@ export interface ProbeTrustAudit {
   /** The address filter, one range after another; empty means anywhere. */
   readonly allowFrom: string;
   readonly note: string;
+  /** The SHA-256 fingerprint of the certificate it is bound to (`P-326`); empty for none. */
+  readonly certificate: string;
 }
 
 /**
@@ -1317,6 +1330,7 @@ function summarise(mutation: Mutation): Record<string, unknown> {
     case 'probe.approved':
     case 'probe.revoked':
     case 'probe.allowFrom.set':
+    case 'probe.certificate.set':
     case 'probe.deleted':
       return {
         action: mutation.action,

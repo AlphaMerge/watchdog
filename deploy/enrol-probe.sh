@@ -138,6 +138,12 @@ EXT
   rm -f probe.csr probe.ext
 )
 
+# **The certificate this probe will be bound to** (`P-326`). The core records the fingerprint of the
+# certificate a probe enrols with and refuses any other under that identity, so the operator can
+# check it against what the approval page shows — and, when re-issuing one for an existing probe,
+# set it first with PUT /api/v1/probes/<gid>/certificate.
+fingerprint="$(openssl x509 -noout -fingerprint -sha256 -in "${work}/probe.crt" | sed 's/^[^=]*=//')"
+
 # One self-describing file rather than a tarball of loose secrets: it can be scp'd, pasted into
 # a configuration-management tool, or read by the Windows installer, which has no tar.
 bundle="$(
@@ -189,6 +195,10 @@ if [ -n "${out}" ]; then
   approve it by name in the web UI or with
 
       curl -X POST http://${core_host}:8080/api/v1/probes/<gid>/approve
+
+  Its certificate's SHA-256 fingerprint, which the core binds it to:
+
+      ${fingerprint}
 SUMMARY
 else
   # No --out: straight to stdout, for `ms-enrol name | ssh host 'cat > b.enrol'`. The warning
@@ -204,4 +214,5 @@ else
   fi
   printf '%s\n' "${bundle}"
   echo "==> enrolment bundle for '${name}' written to stdout (it contains a private key)" >&2
+  echo "==> certificate SHA-256 fingerprint: ${fingerprint}" >&2
 fi

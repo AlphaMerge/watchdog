@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-168 routes.
+169 routes.
 
 ## Conventions
 
@@ -2541,6 +2541,8 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 | `items[].lastAddress` | string |  |  |
 | `items[].allowFrom` | string[] |  |  |
 | `items[].hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `items[].certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `items[].certificateBoundAt` | string | **required** nullable |  |
 | `items[].objectId` | integer | nullable |  |
 | `items[].note` | string |  |  |
 | `items[].firstSeenAt` | string | **required** |  |
@@ -2571,7 +2573,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `objectId` | integer, at least 1 | **required** | The probe object this identity owns from now on. |
 | `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. One probe object is local (`P-382`): another one holding it with a probe still approved onto it refuses this with 409, and one whose probe was revoked or deleted gives it up, as the approval's audit entry records. `false` never clears it. |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, certificateFingerprint, certificateBoundAt, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 **200 response**
 
@@ -2587,6 +2589,8 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |
@@ -2616,7 +2620,7 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | --- | --- | --- | --- |
 | `note` | string, at most 1000 characters | default `` | Why, for the operator who finds this months later. |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, certificateFingerprint, certificateBoundAt, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 **200 response**
 
@@ -2632,6 +2636,8 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |
@@ -2661,7 +2667,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | --- | --- | --- | --- |
 | `allowFrom` | string[], at most 64 items, each at most 200 characters | **required** |  |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, certificateFingerprint, certificateBoundAt, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 **200 response**
 
@@ -2677,6 +2683,55 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateBoundAt` | string | **required** nullable |  |
+| `objectId` | integer | nullable |  |
+| `note` | string |  |  |
+| `firstSeenAt` | string | **required** |  |
+| `lastSeenAt` | string | nullable |  |
+| `decidedAt` | string | nullable |  |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
+| `skew.peerVersion` | integer |  |  |
+| `skew.ownVersion` | integer |  |  |
+| `skew.missing` | string[] |  | Only on `outdated`: what this probe cannot be asked to do, oldest first, each a phrase for a person that completes "it cannot …". Free text: compare `peerVersion` with `ownVersion` rather than matching on it. |
+| `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
+| `skew.explanation` | string | **required** |  |
+
+### `PUT /api/v1/probes/{gid}/certificate`
+
+Bind a probe to the certificate it now holds
+
+The rotation path for a probe whose client certificate was renewed or reissued (`P-326`). A `fingerprint` binds that certificate: read it off the new certificate with `openssl x509 -noout -fingerprint -sha256 -in probe.crt`, colons optional. `null` clears the binding, and the next hello that proves this identity by its key binds whatever certificate it presents. Either way the probe’s live connection is closed, so it is judged at once against the new binding. Audited as `probe.certificate.set`.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `gid` | path | string, 1–128 characters | **required** |
+
+**Body**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `fingerprint` | string, at most 128 characters | **required** nullable |  |
+
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, certificateFingerprint, certificateBoundAt, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `gid` | string | **required** |  |
+| `status` | `pending` · `approved` · `revoked` | **required** |  |
+| `displayName` | string | **required** |  |
+| `agentVersion` | string |  |  |
+| `protocolVersion` | integer |  |  |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `lastAddress` | string |  |  |
+| `allowFrom` | string[] |  |  |
+| `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |

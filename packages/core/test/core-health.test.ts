@@ -903,6 +903,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         protocolVersion: PROTOCOL_VERSION,
         accessKey: 'shared-key',
         remoteAddress: '127.0.0.1',
+        certificate: null,
       });
       await registry.approve(gid, objectId, testActor, { local: true });
     };

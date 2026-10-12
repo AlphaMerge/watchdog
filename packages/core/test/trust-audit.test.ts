@@ -101,6 +101,7 @@ describe(
         protocolVersion: PROTOCOL_VERSION,
         accessKey: 'shared-key',
         remoteAddress: '10.4.2.9',
+        certificate: null,
       });
       return gid;
     };
@@ -214,6 +215,7 @@ describe(
           protocolVersion: PROTOCOL_VERSION,
           accessKey: 'shared-key',
           remoteAddress: '10.4.2.9',
+          certificate: null,
         });
         assert.ok(welcome.kind === 'approved' && welcome.issuedKey !== undefined);
         await registry.revoke(gid, 'decommissioned', actor);
