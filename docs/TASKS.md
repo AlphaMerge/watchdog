@@ -8524,7 +8524,7 @@ because each is a decision rather than a defect:
       not recorded; a re-decision clears what is owed before its commit; `retryGivenUp` clears
       nothing; the sweep does not call it.
 
-- [ ] **P-253 — what is left of a rolled-back change and the reachability overlay** · S ·
+- [x] **P-253 — what is left of a rolled-back change and the reachability overlay** · S ·
       P-249 · Found 2026-10-04 by `P-249`'s review. A probe result decided on another
       connection while a mutation is still open sees the overlay that mutation changed; if the
       mutation rolls back, that sensor's stored state is wrong until its next result. The
@@ -8534,6 +8534,80 @@ because each is a decision rather than a defect:
       `reports/runs.ts` `claim` and `state/stream.ts` `publish`/`publishProbe` take a
       `Queryable` and catch without a savepoint, safe only while every caller passes the pool.
       **Done when** each is fixed with a test or written down as accepted.
+
+      **P-253 outcome. Three fixed with a test; two left to new tickets.**
+      - **The overlay: worse than written, and fixed.** The sensor's state was not wrong only
+        until its next result. A result decided while the move was open misses the cache
+        (`reevaluate` dropped the moved sensor's entry), reads the committed row on its own
+        connection, and lays the moved overlay over it. The state service then caches that, and
+        `decide` folds the cached facts and never re-reads the overlay. So a sensor still under
+        its live probe was decided Unknown from that cache for every result the probe sent.
+        It stayed so until a transition or an eviction dropped the entry, and a sensor behind a
+        lost probe sends no result at all. `resync`'s undo now drops what it re-decided from
+        the state service's cache (`forgetSensors`, on a `ReachabilityStates` that only the
+        reachability asks for). It also owes those sensors a re-decision, which the delivery
+        sweep's `retryGivenUp` makes against the overlay as it is again.
+      - **A read that straddles the rollback, and a sweep already in flight** (both found by
+        the review). A cold read whose rows arrived before the undo and whose policy read
+        finished after it caches the moved overlay, and the undo had nothing to forget. A
+        re-decision that moves nothing would leave that entry deciding the sensor Unknown for
+        every result. So a settlement, the sweep's or a resync's, now drops what it settles from
+        the cache. And a sweep that read what was owed before a rollback owed it again cleared
+        the new owing when it committed a decision made against the rolled-back overlay. Each
+        owing is now numbered, and a settlement clears only the owings it read.
+      - **`claim`: under a savepoint.** Handed a transaction, the unique violation that means
+        "already running" aborted it: the caller answered busy and then lost its other writes to
+        a `25P02` at commit. It costs nothing on the pool, which is every caller today.
+      - **`publish` and `publishProbe`: the pool, by type.** A savepoint would hide the abort but
+        still read what has not committed, which `afterCommit` exists to prevent (`U-02`). Both
+        now take `StreamPool` (`Pick<Database, 'query' | 'tx'>`). A transaction's executor has
+        no `tx`, so the compiler refuses one. The test fakes gained a `tx`.
+      - **Tests.**
+        - `probe-offline.test.ts`: a result is decided while the move is open and comes out
+          Unknown. After the rollback it is forgotten and owed, the live probe's next result is
+          Up, and the sweep settles it and drops it from the cache. A second case holds a sweep
+          after it has read what is owed, rolls a second move back, and the second owing
+          outlasts that sweep.
+        - `report-runs.test.ts`: a claim inside `db.tx` answers busy, and the transaction still
+          commits its other write.
+        - `state-stream.test.ts`: at the type level, `Queryable` is refused and `Database` is
+          taken, for both methods.
+      - **Mutants 9/9:** the undo forgets nothing, or owes nothing; a give-up owes nothing (the
+        `#owe` refactor); an owing already held is not renewed; a settlement clears any owing,
+        or forgets nothing; `claim` without the savepoint; `publish` or `publishProbe` back on
+        `Queryable`.
+      - **Left to new tickets:** the Core Health reading (`P-400`) and the build-hygiene guard
+        (`P-401`). The line numbers `P-249` cites for `stream.ts` and `main.ts` had gone stale;
+        the methods are named above.
+
+- [ ] **P-400 — sensors owed a re-decision are a log line, not a Core Health reading** · S ·
+      P-253 · Found 2026-10-13 by `P-253`. `ProbeReachability.givenUp()` counts the sensors a
+      failed re-evaluation or a rolled-back move left owed, and nothing reads it. The only sign
+      is the `error` log from `#giveUp`, and the undo's `info` line, which an operator watching
+      Core Health never sees. A level channel, like `streamResyncsOwed`:
+      `sensorsOwedRedecision` from `reachability.givenUp()`, declared in
+      `packages/sensors/src/types/core-health.ts`, exported as a gauge, and listed in
+      `sensor-reference.md` and `administration.md`. **Done when** the reading is on Core
+      Health with a test that a failed re-evaluation raises it and the sweep lowers it.
+
+- [ ] **P-401 — nothing stops a `catch` inside a transaction that swallows without a savepoint**
+      · M · P-253 · Found 2026-10-04 by `P-249`'s review, left by `P-253`. A failed statement
+      aborts a PostgreSQL transaction, so a `catch` that does not rethrow leaves its caller's
+      transaction unusable and every write in it lost at commit. `P-253` fixed the three sites
+      in `src`. The durable guard is a build-hygiene check, and it needs the TypeScript
+      syntax tree, not a regex. It looks at a `try` that uses a parameter of an enclosing
+      function typed `Queryable` or `PoolClient`, or the first parameter of a callback passed to
+      `tx`, `transaction`, `withClient`, `savepoint` or `#txOrPreview`. It flags a `catch` that
+      can finish without a `throw`, unless every use of that parameter inside the `try` is
+      within a `savepoint(…)` call. Two known false positives, each an allow-list entry with
+      its reason, keyed by file and function:
+      - `probes/clock-freeze.ts` `ClockFreeze.#settle`: `if (caller !== undefined) throw error;
+        return 0;`, where the `return` runs only after its own `tx` rolled back.
+      - `probes/reachability.ts` `resync`: its re-decision `try` passes `q` to `#settled`, which
+        only registers `afterCommit` and runs no statement.
+
+      **Done when** the check runs in `build-hygiene.test.ts` with a floor and planted cases,
+      and it reports only the allow-listed sites on the current tree.
 
 - [x] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
       S · T-06, T-20 · Found 2026-10-04 by `H-15`

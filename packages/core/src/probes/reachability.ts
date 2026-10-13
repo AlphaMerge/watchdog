@@ -41,13 +41,23 @@ export interface StateReevaluator {
   ): Promise<number>;
 }
 
+/** And what this alone needs of it, because only this changes an overlay a rollback puts back. */
+export interface ReachabilityStates extends StateReevaluator {
+  /**
+   * Drop what is cached about these sensors, so their next result is decided from the stored row
+   * and the overlay as it is then (`P-253`): what a result decided against an overlay that a
+   * rollback has since put back would otherwise carry on deciding from.
+   */
+  forgetSensors(sensorIds: readonly number[]): void;
+}
+
 /** What the probe paths speak for when they re-decide a sensor (`R-11`). */
 export const PROBE_SOURCE: readonly 'probe'[] = ['probe'];
 
 export interface ProbeReachabilityOptions {
   db: Db;
   logger: Logger;
-  states: StateReevaluator;
+  states: ReachabilityStates;
   /**
    * Sensor types the **core** evaluates, which a probe outage does not touch (`P-13`).
    *
@@ -122,7 +132,7 @@ export type OfflineReason = 'link' | 'silence';
 export class ProbeReachability {
   readonly #db: Db;
   readonly #logger: Logger;
-  readonly #states: StateReevaluator;
+  readonly #states: ReachabilityStates;
   readonly #dependencies: DependencyRecomputer;
   readonly #coreEvaluatedTypes: readonly string[];
   readonly #probeAlarms: (probeObjectId: number) => readonly number[];
@@ -154,8 +164,13 @@ export class ProbeReachability {
   /**
    * Sensors whose re-decision a resync gave up (`P-249`), owed one by the next resync or delivery
    * sweep. At most `MAX_GIVEN_UP`; past that the rest are logged as dropped.
+   *
+   * **Each with the owing that put it here** (`P-253`). A settlement clears only the owings it
+   * read when it started, so one that a rollback makes while a re-decision is in flight — a
+   * re-decision that read the overlay the rollback has just put back — outlasts it.
    */
-  readonly #givenUp = new Set<number>();
+  readonly #givenUp = new Map<number, number>();
+  #owings = 0;
   #outages = 0;
 
   constructor(options: ProbeReachabilityOptions) {
@@ -236,7 +251,9 @@ export class ProbeReachability {
    * one can still fail and roll the move back, and an overlay left describing the tree as the
    * move would have made it held a sensor still under its live probe Unknown for every result
    * that probe sent, or the reverse: `P-103`'s defect, reached by a rollback. So the change is
-   * undone in `afterRollback`, probe by probe, and only where nothing has replaced it since.
+   * undone in `afterRollback`, probe by probe, and only where nothing has replaced it since —
+   * and what it re-decided is forgotten and owed again, because a result decided meanwhile on
+   * another connection read the overlay this changed (`P-253`).
    *
    * **Sensors whose re-decision was given up are re-decided later** (`P-249`). The overlay is
    * right once this has run, and the next resync would see nothing cross it, while a sensor
@@ -274,21 +291,7 @@ export class ProbeReachability {
       this.#byProbe.set(probeObjectId, change.now);
       applied.set(probeObjectId, change);
     }
-    if (applied.size > 0) {
-      this.#rebuild();
-      q.afterRollback?.(() => {
-        for (const [probeObjectId, change] of applied) {
-          if (this.#byProbe.get(probeObjectId) === change.now) {
-            this.#byProbe.set(probeObjectId, change.was);
-          }
-        }
-        this.#rebuild();
-        this.#logger.info(
-          { probes: [...applied.keys()] },
-          'a tree change rolled back; the lost probes’ sensors are as they were before it',
-        );
-      });
-    }
+    if (applied.size > 0) this.#rebuild();
     const touched = new Set(applied.keys());
 
     // Both directions: sensors that left an offline probe go back to what their last reading
@@ -299,7 +302,8 @@ export class ProbeReachability {
       ...[...this.#unreachable].filter((id) => !before.has(id)),
     ];
     // And whatever an earlier resync gave up re-deciding, which nothing else will.
-    const owed = [...this.#givenUp];
+    const owing = [...this.#givenUp];
+    const owed = owing.map(([id]) => id);
     if (changed.length === 0 && touched.size === 0 && owed.length === 0) return 0;
     // **And the alarm of every probe whose held set changed** (`M-24`), with them. Sensors that
     // arrive under a probe lost while it carried nothing are held behind its Probe Health, and
@@ -308,6 +312,7 @@ export class ProbeReachability {
     // the all-clear.
     const alarms = [...touched].flatMap((probeObjectId) => this.#probeAlarms(probeObjectId));
     const redecide = [...new Set([...changed, ...alarms, ...owed])];
+    if (applied.size > 0) this.#undoOnRollback(q, applied, redecide);
 
     try {
       const moved = await savepoint(q, async (inner) => {
@@ -320,7 +325,7 @@ export class ProbeReachability {
         await this.#dependencies.recompute(inner, this.#now());
         return count;
       });
-      this.#settled(q, owed);
+      this.#settled(q, owing);
       this.#logger.info(
         { sensors: changed.length, owed: owed.length, moved },
         'the tree moved sensors across a lost probe’s boundary',
@@ -340,7 +345,8 @@ export class ProbeReachability {
    * The delivery sweep calls it every pass. Never throws: what fails stays owed for the next.
    */
   async retryGivenUp(): Promise<number> {
-    const owed = [...this.#givenUp];
+    const owing = [...this.#givenUp];
+    const owed = owing.map(([id]) => id);
     if (owed.length === 0) return 0;
     try {
       const moved = await this.#db.tx(async (q) => {
@@ -351,7 +357,7 @@ export class ProbeReachability {
         await this.#dependencies.recompute(q, this.#now());
         return count;
       });
-      for (const id of owed) this.#givenUp.delete(id);
+      this.#settle(owing);
       this.#logger.info({ sensors: owed.length, moved }, 'sensors owed a re-decision settled');
       return moved;
     } catch (error) {
@@ -369,22 +375,79 @@ export class ProbeReachability {
   }
 
   /** Owed no longer, once the transaction that re-decided them has committed. */
-  #settled(q: Queryable, owed: readonly number[]): void {
-    if (owed.length === 0) return;
+  #settled(q: Queryable, owing: readonly (readonly [number, number])[]): void {
+    if (owing.length === 0) return;
     const settle = (): void => {
-      for (const id of owed) this.#givenUp.delete(id);
+      this.#settle(owing);
     };
     if (q.afterCommit === undefined) settle();
     else q.afterCommit(settle);
   }
 
-  #giveUp(sensorIds: readonly number[], error: unknown): void {
+  /**
+   * Clears the owings a committed re-decision read, and only those (`P-253`), and drops what is
+   * cached about them. A read that straddled a rollback — its rows arrived before the undo and
+   * it cached them after — holds the overlay the rollback put back, and a re-decision that moves
+   * nothing does not drop it; this does, and the next result is decided from the stored row.
+   */
+  #settle(owing: readonly (readonly [number, number])[]): void {
+    for (const [id, owingNumber] of owing) {
+      if (this.#givenUp.get(id) === owingNumber) this.#givenUp.delete(id);
+    }
+    this.#states.forgetSensors(owing.map(([id]) => id));
+  }
+
+  /**
+   * Puts the overlay back if the caller's transaction does not commit, and owes what it moved a
+   * re-decision (`P-249`, `P-253`).
+   *
+   * **Putting the overlay back is not enough on its own.** A result for a moved sensor decided on
+   * another connection while the move was open reads the stored row and lays this overlay over
+   * it, and the state service caches that: a sensor still under its live probe, decided Unknown
+   * against a move that never committed, went on being decided Unknown from its cache for every
+   * result that probe sent, and the ingest write that waited on the move's row lock stored it
+   * so. So what was re-decided is forgotten, and owed to the delivery sweep, which re-decides it
+   * against the overlay as it is again — a sensor behind a lost probe sends no result to do it.
+   */
+  #undoOnRollback(
+    q: Queryable,
+    applied: ReadonlyMap<number, { was: HeldBy; now: HeldBy }>,
+    redecide: readonly number[],
+  ): void {
+    q.afterRollback?.(() => {
+      for (const [probeObjectId, change] of applied) {
+        if (this.#byProbe.get(probeObjectId) === change.now) {
+          this.#byProbe.set(probeObjectId, change.was);
+        }
+      }
+      this.#rebuild();
+      this.#states.forgetSensors(redecide);
+      const dropped = this.#owe(redecide);
+      this.#logger.info(
+        { probes: [...applied.keys()], owed: this.#givenUp.size, dropped },
+        'a tree change rolled back; the lost probes’ sensors are as they were before it, and ' +
+          'what it re-decided is re-decided again at the next delivery sweep',
+      );
+    });
+  }
+
+  /**
+   * Owes these sensors a re-decision, up to the bound. Returns how many did not fit. One already
+   * owed is owed afresh, so a settlement already in flight does not clear it (`P-253`).
+   */
+  #owe(sensorIds: readonly number[]): number {
+    this.#owings += 1;
     let dropped = 0;
     for (const id of sensorIds) {
-      if (this.#givenUp.has(id)) continue;
-      if (this.#givenUp.size >= MAX_GIVEN_UP) dropped += 1;
-      else this.#givenUp.add(id);
+      if (this.#givenUp.has(id) || this.#givenUp.size < MAX_GIVEN_UP) {
+        this.#givenUp.set(id, this.#owings);
+      } else dropped += 1;
     }
+    return dropped;
+  }
+
+  #giveUp(sensorIds: readonly number[], error: unknown): void {
+    const dropped = this.#owe(sensorIds);
     this.#logger.error(
       {
         sensors: sensorIds.slice(0, GIVEN_UP_LOGGED),

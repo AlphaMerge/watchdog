@@ -601,6 +601,149 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       );
     });
 
+    it('forgets what a result decided against a move that rolled back (P-253)', async () => {
+      // A result for the moving sensor arrives while the move is open: the state service reads
+      // the committed row on its own connection and lays the moved overlay over it, so it is
+      // decided Unknown and cached so. The move rolls back, and its live probe's next result
+      // must count, not be decided from that cache.
+      const spare = await spareProbe();
+      const stranded = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: spare,
+        name: 'decided-meanwhile',
+        host: '127.0.0.5',
+      });
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: stranded.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+        params: { count: 3 },
+      });
+      await scanned([sensor.id]);
+      await reachability.lost(probeId, 'link');
+      await reachability.retryGivenUp();
+      assert.equal(reachability.givenUp(), 0);
+
+      let meanwhile: string | undefined;
+      harness.audit.also = new CompositeAuditSink([
+        new ReachabilitySync({ reachability: () => reachability, logger: silentLogger }),
+        {
+          record: async () => {
+            const decided = await states.decide([
+              {
+                sensorId: sensor.id,
+                at: new Date(),
+                outcome: 'ok',
+                message: '4/4 replies',
+                channels: ALL_CLEAR,
+              },
+            ]);
+            meanwhile = decided.runtimes[0]?.state;
+            throw new Error('a sink after the overlay’s failed');
+          },
+        },
+      ]);
+      try {
+        await assert.rejects(() =>
+          harness.service.move(testActor, stranded.id, probeId, { kind: 'none' }),
+        );
+      } finally {
+        harness.audit.also = undefined;
+      }
+      assert.equal(meanwhile, 'unknown', 'decided against the move while it was open');
+      assert.equal(states.peek(sensor.id), undefined, 'and forgotten when the move rolled back');
+      assert.ok(reachability.givenUp() > 0, 'and owed a re-decision, with no result promised');
+
+      await scanned([sensor.id]);
+      assert.deepEqual(await stateOf(sensor.id), { state: 'up', cause: 'scan' });
+      assert.ok(states.peek(sensor.id), 'cached again by that result');
+      await reachability.retryGivenUp();
+      assert.equal(reachability.givenUp(), 0, 'settled by the delivery sweep');
+      assert.equal((await stateOf(sensor.id))?.state, 'up');
+      // A read that straddled the rollback caches the moved overlay after the undo has run, and
+      // a re-decision that moves nothing would leave it there: the sweep drops what it settles.
+      assert.equal(states.peek(sensor.id), undefined, 'and dropped from the cache it settled');
+    });
+
+    it('keeps owed what a rollback owes while a sweep is settling it (P-253)', async () => {
+      // The sweep reads what is owed, then re-decides it. A rollback in between owes the sensor
+      // again, against the overlay it has just put back, and that must outlast the sweep.
+      let gate: Promise<void> | undefined;
+      let open = (): void => undefined;
+      let reached = (): void => undefined;
+      const atGate = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const real = states;
+      reachability = new ProbeReachability({
+        db,
+        logger: silentLogger,
+        states: {
+          reevaluate: async (q, ids, at, cause) => {
+            if (gate !== undefined) {
+              const held = gate;
+              gate = undefined;
+              reached();
+              await held;
+            }
+            return real.reevaluate(q, ids, at, cause);
+          },
+          forgetSensors: (ids) => {
+            real.forgetSensors(ids);
+          },
+        },
+        dependencies: harness.dependencies ?? { recompute: () => Promise.resolve({ moved: 0 }) },
+        coreEvaluatedTypes: ['core.factory', 'ms.core.health'],
+      });
+      const spare = await spareProbe();
+      const moving = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: spare,
+        name: 'moved-twice',
+        host: '127.0.0.6',
+      });
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: moving.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+        params: { count: 3 },
+      });
+      await scanned([sensor.id]);
+      await reachability.lost(probeId, 'link');
+      const moveThatRollsBack = async (): Promise<void> => {
+        harness.audit.also = syncThenFail();
+        try {
+          await assert.rejects(() =>
+            harness.service.move(testActor, moving.id, probeId, { kind: 'none' }),
+          );
+        } finally {
+          harness.audit.also = undefined;
+        }
+      };
+
+      await moveThatRollsBack();
+      assert.ok(reachability.givenUp() > 0, 'owed by the first rollback');
+
+      gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const sweep = reachability.retryGivenUp();
+      await atGate;
+      await moveThatRollsBack();
+      open();
+      await sweep;
+
+      assert.ok(
+        reachability.givenUp() > 0,
+        'the second owing outlasts the sweep that read the first',
+      );
+      await reachability.retryGivenUp();
+      assert.equal(reachability.givenUp(), 0);
+      assert.equal(reachability.reachable(sensor.id), true);
+    });
+
     it('leaves the overlay alone when a move off a lost probe rolls back', async () => {
       // The reverse: the device stays under the lost probe, so its sensors stay held.
       await scanned();

@@ -247,6 +247,33 @@ describe('running a report', { skip: available ? false : 'no database' }, () => 
       assert.equal((await runner.runNow(report, 'third')).state, 'succeeded');
     });
 
+    it('answers busy inside a transaction without costing it its other writes (P-253)', async () => {
+      // Every caller passes the pool today. Handed a transaction, the unique violation that is
+      // the answer would abort it: busy, and then a 25P02 at the commit for everything else.
+      const report = await make();
+      const held = await runs.claim(db, report.id, 'manual', 'holder');
+      assert.ok(held);
+
+      const second = await db.tx(async (q) => {
+        const claimed = await runs.claim(q, report.id, 'manual', 'second');
+        await q.query('UPDATE report_run SET requested_by = $1 WHERE id = $2', [
+          'still-writable',
+          held.id,
+        ]);
+        return claimed;
+      });
+
+      assert.equal(second, undefined, 'somebody else has it');
+      assert.equal((await runs.find(db, held.id))?.requestedBy, 'still-writable');
+      await runs.finish(db, held.id, {
+        state: 'succeeded',
+        spanLabel: 'x',
+        sections: 0,
+        unavailable: 0,
+        cells: 0,
+      });
+    });
+
     it('clears a run the core abandoned, rather than leaving the report stuck', async () => {
       // **A `kill -9` in the middle of a render.** `running` is a claim about a process that no
       // longer exists, and the partial unique index would otherwise keep that report unrunnable

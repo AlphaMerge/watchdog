@@ -21,6 +21,7 @@ import {
   type StateEvent,
   type StateSubscriber,
   type StreamSight,
+  type StreamPool,
   type StreamSocket,
 } from '../src/state/stream.js';
 import { HistoryService } from '../src/timeseries/history.js';
@@ -50,6 +51,31 @@ describe('a socket handler that throws (P-217)', () => {
     guarded(2);
     assert.equal(faults.length, 1);
     assert.match(String(faults[0]), /too big: 2/);
+  });
+});
+
+describe('what the broadcaster reads through (P-253)', () => {
+  it('takes the pool, and the compiler refuses a transaction’s executor', () => {
+    // Both never reject, so each swallows its read's failure: inside a transaction that would
+    // abort it unseen, and a read that succeeded would see what has not committed (`U-02`). A
+    // transaction's executor has no `tx`, which is how the type tells them apart.
+    type Publish = Parameters<StateBroadcaster['publish']>[0];
+    type PublishProbe = Parameters<StateBroadcaster['publishProbe']>[0];
+    const refused: [
+      Queryable extends Publish ? 'taken' : 'refused',
+      Queryable extends PublishProbe ? 'taken' : 'refused',
+    ] = ['refused', 'refused'];
+    const taken: [
+      Database extends Publish ? 'taken' : 'refused',
+      Database extends PublishProbe ? 'taken' : 'refused',
+    ] = ['taken', 'taken'];
+    assert.deepEqual(
+      [refused, taken],
+      [
+        ['refused', 'refused'],
+        ['taken', 'taken'],
+      ],
+    );
   });
 });
 
@@ -642,7 +668,7 @@ describe(
       const together = new Promise<void>((resolve) => {
         bothRead = resolve;
       });
-      const inStep: Queryable = {
+      const inStep: StreamPool = {
         async query<T extends QueryResultRow>(text: string, values?: readonly unknown[]) {
           const rows = await db.query<T>(text, values);
           arrived += 1;
@@ -650,6 +676,7 @@ describe(
           await together;
           return rows;
         },
+        tx: db.tx.bind(db),
       };
       const change = (id: number) => ({
         sensorId: id,
@@ -694,7 +721,7 @@ describe(
     }
 
     /** `db`, counting what is asked of it and holding each answer until `release` is called. */
-    function gated(): { q: Queryable; asked: () => number; release: () => void } {
+    function gated(): { q: StreamPool; asked: () => number; release: () => void } {
       let asked = 0;
       let release = (): void => undefined;
       const open = new Promise<void>((resolve) => {
@@ -712,6 +739,7 @@ describe(
             await open;
             return rows;
           },
+          tx: db.tx.bind(db),
         },
       };
     }
@@ -2426,8 +2454,9 @@ describe(
       const whole = tree(null);
       const elsewhere = tree(otherDeviceId);
       const gone = tree(null);
-      const failing: Queryable = {
+      const failing: StreamPool = {
         query: () => Promise.reject(new Error('the database went away')),
+        tx: () => Promise.reject(new Error('the database went away')),
       };
       const before = broadcaster.stats;
 

@@ -1,5 +1,5 @@
 import { describeError, type Logger } from '@ms/shared';
-import type { Queryable } from '../db/pool.js';
+import type { Database, Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Visibility } from '../auth/access.js';
 import {
@@ -10,6 +10,12 @@ import {
 } from '../auth/credentials.js';
 import type { ObjectId } from '../objects/types.js';
 import type { SensorState, SensorStateCause } from './tables.js';
+
+/**
+ * What `publish` and `publishProbe` read through: the pool, which a transaction's executor is not
+ * (it has no `tx`), so the compiler refuses one (`P-253`).
+ */
+export type StreamPool = Pick<Database, 'query' | 'tx'>;
 
 /**
  * One committed state change, as a subscriber receives it.
@@ -1341,8 +1347,12 @@ export class StateBroadcaster {
    *
    * **This never rejects**, for the reason `publish` does not: it is called from the probe
    * endpoint's socket handlers, where a rejection has nobody to catch it.
+   *
+   * **The pool, never a transaction** (`P-253`), which the type says: a `tx` is what a
+   * transaction's executor has not got. What never rejects swallows its read's failure, and
+   * inside a transaction that failure would have aborted it with nobody told.
    */
-  async publishProbe(q: Queryable, probeId: ObjectId): Promise<number> {
+  async publishProbe(db: StreamPool, probeId: ObjectId): Promise<number> {
     let watched = false;
     // Watchers the route has not judged yet (`U-26`): told when they stand, and no reason to
     // read anything now. See `considerProbe`.
@@ -1373,7 +1383,7 @@ export class StateBroadcaster {
     let path: ObjectId[] | undefined;
     let epoch: number | null;
     try {
-      const read = await this.#ancestryOf(q, [probeId]);
+      const read = await this.#ancestryOf(db, [probeId]);
       path = read.ancestry.get(probeId)?.path;
       epoch = read.epoch;
     } catch (error) {
@@ -1468,9 +1478,14 @@ export class StateBroadcaster {
    * caller could usefully do with the error, and a second hook added later would have to
    * remember. What it costs is every open tree reading a fresh snapshot, sent back by the next
    * sweep (`U-28`). Before that, the live stream stayed behind until the sensor next changed.
+   *
+   * **The pool, never a transaction** (`P-253`), which the type says. Handed one, the read that
+   * fails here would abort it unseen; the read that succeeds would read what has not committed,
+   * which is what being an `afterCommit` hook exists to prevent (`U-02`); and a transaction's
+   * executor captured into that hook runs on a client already released.
    */
   async publish(
-    q: Queryable,
+    db: StreamPool,
     changes: readonly {
       readonly sensorId: ObjectId;
       readonly state: SensorState;
@@ -1503,7 +1518,7 @@ export class StateBroadcaster {
     let epoch: number | null;
     try {
       ({ ancestry, epoch } = await this.#ancestryOf(
-        q,
+        db,
         changes.map((change) => change.sensorId),
       ));
     } catch (error) {

@@ -1,6 +1,6 @@
 import { describeError, type Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import { DatabaseError } from '../db/pool.js';
+import { DatabaseError, savepoint } from '../db/pool.js';
 import { ScheduleRepository } from '../schedules/repository.js';
 import { countCells, type ReportDocument } from './table.js';
 import { nextReportRun, validateSchedule } from './cadence.js';
@@ -129,6 +129,11 @@ export class ReportRunRepository {
    *
    * The unique violation *is* the answer: see the block comment on why this is not a look followed
    * by an insert.
+   *
+   * **Under a savepoint, so the answer does not cost a caller's transaction** (`P-253`). Every
+   * caller passes the pool today, where it costs nothing; handed a transaction, the violation
+   * caught here would leave it aborted, so the caller would answer "already running" and then lose
+   * every other write it made to a `25P02` at its commit.
    */
   async claim(
     q: Queryable,
@@ -137,11 +142,13 @@ export class ReportRunRepository {
     requestedBy: string,
   ): Promise<ReportRun | undefined> {
     try {
-      const rows = await q.query<RawRun>(
-        `INSERT INTO report_run (report_id, trigger, requested_by, state, started_at)
-         VALUES ($1, $2, $3, 'running', now())
-         RETURNING ${RUN_COLUMNS}`,
-        [reportId, trigger, requestedBy],
+      const rows = await savepoint(q, (inner) =>
+        inner.query<RawRun>(
+          `INSERT INTO report_run (report_id, trigger, requested_by, state, started_at)
+           VALUES ($1, $2, $3, 'running', now())
+           RETURNING ${RUN_COLUMNS}`,
+          [reportId, trigger, requestedBy],
+        ),
       );
       const row = rows[0];
       return row === undefined ? undefined : toRun(row);

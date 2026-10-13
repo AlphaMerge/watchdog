@@ -60,6 +60,7 @@ function reachabilityOver(
         reevaluated.push([...sensorIds]);
         return Promise.resolve(sensorIds.length);
       },
+      forgetSensors: () => undefined,
     },
     // This file drives the marking with a stub database; the dependency settle is exercised
     // against a real one in `probe-offline.test.ts`.

@@ -14,8 +14,8 @@ import { LoginThrottle } from '../src/auth/throttle.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
-import type { Database, Queryable } from '../src/db/pool.js';
-import { StateBroadcaster } from '../src/state/stream.js';
+import type { Database } from '../src/db/pool.js';
+import { StateBroadcaster, type StreamPool } from '../src/state/stream.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -1075,7 +1075,7 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
 
   describe('a watch that has not been judged yet (U-26)', () => {
     /** `db`, counting what is asked of it. */
-    const counting = (): { q: Queryable; asked: () => number } => {
+    const counting = (): { q: StreamPool; asked: () => number } => {
       let asked = 0;
       return {
         asked: () => asked,
@@ -1084,6 +1084,7 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
             asked += 1;
             return db.query<T>(text, values);
           },
+          tx: db.tx.bind(db),
         },
       };
     };
