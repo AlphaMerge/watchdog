@@ -11345,7 +11345,7 @@ because each is a decision rather than a defect:
         totals only for a null probe), an awaited answer hands back nothing. The endpoint test
         sinks gain `refusedLate`.
 
-- [ ] **P-301 — a sensor that loses channels to fitting stays Up** · S · P-292 · Found 2026-10-08
+- [x] **P-301 — a sensor that loses channels to fitting stays Up** · S · P-292 · Found 2026-10-08
       in `P-292`. The message now says how many channels could not be sent, but the state does not
       change, and a limit's or lookup's message replaces the note. **Done when** decided: keep, or
       Warning with a scenario test (`M-17`) showing it does not hold a sensor in Warning for good,
@@ -11353,6 +11353,19 @@ because each is a decision rather than a defect:
 
       **Decided 2026-10-11 by the user:** keep. The sensor stays Up and its message keeps
       the note of how many channels were not sent.
+
+      **P-301 outcome. Kept, and the note already survives: `P-345` made it so.** No code change;
+      a test pins it. The ticket's second half — a limit's or lookup's message replacing the
+      note — was the old rule for a reading-decided state, which stored the channel's sentence
+      alone. `P-345` (landed 2026-10-12) stores the channel's sentence, then the check's own
+      (`readingMessage`), and the note is the end of the check's message (`fitResult`). The core
+      does not clip the stored message (`sensor_runtime.message` and `sensor_state.message` have
+      no bound), so nothing cuts it off. The fitting itself changes no state, as `P-292` decided.
+      - **Test.** `reading-message-scenario.test.ts`, through `StateService.decide` and the rows
+        it writes: a fitted result with nothing breached is Up with the check's sentence and the
+        note; a limit's breach is Down with the limit's sentence first and the note at the end; a
+        lookup's, the same at Warning. A mutant that stores the channel's sentence alone, the old
+        rule, fails it.
 - [x] **P-302 — a cloned sensor's channels lose their lookup, counter width and limit source** ·
       S · P-297 · Found 2026-10-08 in `P-297`. The clone path in `repository.ts` (about line 1812)
       copies channels without `lookup_id`, `counter_bits` and `limits_source`. A cloned

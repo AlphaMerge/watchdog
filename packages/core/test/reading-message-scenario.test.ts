@@ -266,5 +266,67 @@ describe(
       const runtime = await readSensorState(db, sensors[0] ?? 0);
       assert.equal(runtime?.message, `${BREACH} — 2/2 replies, min 901 ms`);
     });
+
+    // `P-301`, decided 2026-10-11: a sensor whose channels fitting dropped stays Up, and its
+    // message keeps the note of how many were not sent (`P-292`), even when a limit's or a
+    // lookup's sentence comes first. Before `P-345` that sentence replaced the check's, note and
+    // all; the core does not clip the stored message, so the note at its end survives.
+    it('keeps the note of channels not sent, Up alone and beside a breach (P-301)', async () => {
+      const probe = await h.service.create(testActor, {
+        kind: 'probe',
+        parentId: h.rootId,
+        name: 'Fitting probe',
+      });
+      const device = await h.service.create(testActor, {
+        kind: 'device',
+        parentId: probe.id,
+        name: 'fitting-router',
+        host: '192.0.2.8',
+      });
+      const sensor = await h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: device.id,
+        name: 'ping-fitted',
+        sensorType: 'icmp.ping',
+      });
+      const states = h.states;
+      assert.ok(states !== undefined);
+      const fitted = `${CHECK} (2 channels could not be sent)`;
+      const apply = async (
+        when: Date,
+        channels: Exclude<SensorResult['channels'], undefined>,
+      ): Promise<{ state: string; message: string }> => {
+        const decisions = await states.decide([
+          { sensorId: sensor.id, at: when, outcome: 'ok', message: fitted, channels },
+        ]);
+        await db.tx(async (q) => {
+          await writeStateHistory(q, decisions.transitions);
+          await writeRuntimes(q, decisions.runtimes);
+        });
+        const runtime = await readSensorState(db, sensor.id);
+        return { state: runtime?.state ?? 'none', message: runtime?.message ?? '' };
+      };
+
+      // Nothing breached: Up, saying the check's sentence and the note.
+      assert.deepEqual(await apply(at(500), null), { state: 'up', message: fitted });
+      // A limit breached: the limit decides, its sentence first, and the note is still there.
+      assert.deepEqual(
+        await apply(at(560), {
+          verdict: { state: 'down', cause: 'limit' },
+          message: BREACH,
+          breaches: [],
+        }),
+        { state: 'down', message: `${BREACH} — ${fitted}` },
+      );
+      // And a lookup's, the same.
+      assert.deepEqual(
+        await apply(at(620), {
+          verdict: { state: 'warning', cause: 'lookup' },
+          message: 'Status is 2 (degraded)',
+          breaches: [],
+        }),
+        { state: 'warning', message: `Status is 2 (degraded) — ${fitted}` },
+      );
+    });
   },
 );
