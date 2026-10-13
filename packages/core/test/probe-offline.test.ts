@@ -824,11 +824,15 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       const failing = { now: false };
       reachability = flaky(failing);
       const sensorId = await arriveWhileFailing(failing);
+      // What Core Health reads (`P-400`), raised by the failure.
+      assert.equal(reachability.stats().sensorsOwedRedecision, reachability.givenUp());
+      assert.ok(reachability.stats().sensorsOwedRedecision > 0);
 
       await reachability.retryGivenUp();
 
       assert.deepEqual(await stateOf(sensorId), { state: 'unknown', cause: 'probe' });
       assert.equal(reachability.givenUp(), 0, 'and owes nothing more');
+      assert.equal(reachability.stats().sensorsOwedRedecision, 0, 'and lowered by the sweep');
     });
 
     it('re-decides at the next resync, though nothing crosses the overlay then', async () => {

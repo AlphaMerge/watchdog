@@ -66,8 +66,11 @@ export interface CoreHealthSources {
     /** Subscriptions owed an `overflow` the sweep has not yet sent (`U-28`). */
     resyncsOwed: number;
   };
-  /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
-  probes: () => { probesDown: number; probesSilent: number };
+  /**
+   * `ProbeReachability.stats()` — probes the core is not currently connected to, and the sensors
+   * a failed re-evaluation or a rolled-back move left owed a re-decision (`P-400`).
+   */
+  probes: () => { probesDown: number; probesSilent: number; sensorsOwedRedecision: number };
   /**
    * `AlarmScheduler.stats` — steps fired, and how far past its wake the scheduler is (`P-22`),
    * measured on the monotonic clock its timer runs on (`P-247`).
@@ -505,6 +508,8 @@ export class CoreHealthService {
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
       probesSilent: probes.probesSilent,
+      // A level, zero once the delivery sweep has re-decided them (`P-400`).
+      sensorsOwedRedecision: probes.sensorsOwedRedecision,
       // Never negative: a wake that is still ahead is not "minus forty seconds overdue", it is
       // on time. A scheduler that has never armed anything has no wake at all, which is also on
       // time — a gap here would read as "unknown" for a state that is simply quiet. The
@@ -819,6 +824,10 @@ function describe(reading: CoreHealthReading, parkedError: string | null = null)
   const silent = reading['probesSilent'];
   if (silent !== null && silent !== undefined && silent > 0) {
     parts.push(`${String(silent)} connected but not delivering`);
+  }
+  const owed = reading['sensorsOwedRedecision'];
+  if (owed !== null && owed !== undefined && owed > 0) {
+    parts.push(`${String(owed)} sensors owed a re-decision`);
   }
   // Last, because it carries a sentence of its own: the parked entry's error, which is what an
   // operator needs and what the channel's limit cannot say (`P-226`).

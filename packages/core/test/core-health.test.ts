@@ -64,6 +64,7 @@ function sources(
     resyncsOwed: number;
     probesDown: number;
     probesSilent: number;
+    sensorsOwedRedecision: number;
     pending: number;
     failed: number;
     oldestPendingAgeMs: number;
@@ -155,6 +156,7 @@ function sources(
     probes: () => ({
       probesDown: overrides.probesDown ?? 0,
       probesSilent: overrides.probesSilent ?? 0,
+      sensorsOwedRedecision: overrides.sensorsOwedRedecision ?? 0,
     }),
     credentialsToReenter: () => Promise.resolve(overrides.credentialsToReenter ?? 0),
     ...(overrides.unboundedCredentials === undefined
@@ -413,6 +415,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         p95: 12.5,
         overflowed: 2,
         probesDown: 1,
+        sensorsOwedRedecision: 6,
         pending: 9,
         failed: 4,
         oldestPendingAgeMs: 125_000,
@@ -476,6 +479,9 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(folded['streamCutoffs'], 1);
       assert.equal(reading['streamCoalesced'], 0);
       assert.equal(reading['probesDown'], 1);
+      // Sensors owed a re-decision (`P-400`), a level of their own beside the probes.
+      assert.equal(reading['sensorsOwedRedecision'], 6);
+      assert.equal(unplaced['sensorsOwedRedecision'], 0);
       assert.equal(reading['notifyPending'], 9);
       assert.equal(reading['notifyFailed'], 4);
       assert.equal(reading['notifyOldest'], 125, 'milliseconds in, seconds out');
@@ -1181,6 +1187,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         channelsCreatedOutsideDeclaration: 1,
         lateRefusalWritesGivenUp: 4,
         probeHellosUnproven: 3,
+        // `P-400`: a level, and so not among the counters below.
+        sensorsOwedRedecision: 2,
         ingestQueue: 0,
       });
       for (const reading of readings) {
@@ -1191,7 +1199,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 25);
+      assert.equal(readings.length, 26);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -1452,7 +1460,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     it('says what is not zero, and stays quiet about what is', async () => {
       const batches: CheckResult[][] = [];
       const service = build(
-        { queuedRows: 12, p95: 4.213, pending: 3, probesDown: 1 },
+        { queuedRows: 12, p95: 4.213, pending: 3, probesDown: 1, sensorsOwedRedecision: 5 },
         { cpuUs: [], elapsedNs: [] },
         (results) => {
           batches.push([...results]);
@@ -1466,6 +1474,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.match(message, /writes 4 ms/);
       assert.match(message, /3 notifications undelivered/);
       assert.match(message, /1 probes down/);
+      assert.match(message, /5 sensors owed a re-decision/);
       assert.equal(/rollup/.test(message), false, 'a tier that is not behind is not mentioned');
       assert.equal(/alarm sweep/.test(message), false, 'a scheduler on time is not mentioned');
     });

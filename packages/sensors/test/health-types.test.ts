@@ -320,6 +320,20 @@ describe('the self-monitoring sensor types', () => {
     assert.deepEqual(keys.slice(from, from + 2), ['hostsRefused', 'probeHellosUnproven']);
   });
 
+  it('carries the sensors owed a re-decision as a level beside the probes, with no limit (P-400)', () => {
+    // The delivery sweep is already re-deciding them every pass, and the log names why one
+    // failed: a limit would add an alarm for what is being retried.
+    const channels = coreHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'sensorsOwedRedecision'),
+      { key: 'sensorsOwedRedecision', name: 'Sensors owed a re-decision', unit: 'sensors' },
+    );
+    const keys = channels.map((one) => one.key);
+    const from = keys.indexOf('probesSilent');
+    assert.ok(from >= 0);
+    assert.deepEqual(keys.slice(from, from + 2), ['probesSilent', 'sensorsOwedRedecision']);
+  });
+
   it('keeps both out of every probe’s assignment list', () => {
     // The mechanism `T-21` built. For Probe Health it is not an optimisation but the whole
     // design: a probe cannot report its own absence, so the core has to be the one asking.

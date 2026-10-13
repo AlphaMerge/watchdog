@@ -1393,6 +1393,7 @@ The same numbers the Core Health sensor records, read live. **A `null` is a gap 
 | `channels.dependencyPauses` | number | nullable |  |
 | `channels.probesDown` | number | nullable |  |
 | `channels.probesSilent` | number | nullable |  |
+| `channels.sensorsOwedRedecision` | number | nullable |  |
 | `channels.alarmOverdue` | number | nullable |  |
 | `channels.alarmsFired` | number | nullable |  |
 | `channels.queriesRefused` | number | nullable |  |

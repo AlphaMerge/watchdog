@@ -8580,7 +8580,7 @@ because each is a decision rather than a defect:
         (`P-401`). The line numbers `P-249` cites for `stream.ts` and `main.ts` had gone stale;
         the methods are named above.
 
-- [ ] **P-400 — sensors owed a re-decision are a log line, not a Core Health reading** · S ·
+- [x] **P-400 — sensors owed a re-decision are a log line, not a Core Health reading** · S ·
       P-253 · Found 2026-10-13 by `P-253`. `ProbeReachability.givenUp()` counts the sensors a
       failed re-evaluation or a rolled-back move left owed, and nothing reads it. The only sign
       is the `error` log from `#giveUp`, and the undo's `info` line, which an operator watching
@@ -8589,6 +8589,25 @@ because each is a decision rather than a defect:
       `packages/sensors/src/types/core-health.ts`, exported as a gauge, and listed in
       `sensor-reference.md` and `administration.md`. **Done when** the reading is on Core
       Health with a test that a failed re-evaluation raises it and the sweep lowers it.
+
+      **P-400 outcome. A level on Core Health, in its sentence, and on `/metrics`.**
+      - **The reading.** `sensorsOwedRedecision` comes from `ProbeReachability.stats()`, which
+        `main.ts` already hands Core Health whole, so the wiring needed no change. It is declared
+        beside `probesSilent` with no counter and no limit, as `streamResyncsOwed` has none: the
+        sweep is already retrying every pass, and the `error` log names the cause, which an
+        alarm could not. Above zero, Core Health's message adds "N sensors owed a re-decision".
+        It is exported as the gauge `ms_core_sensors_owed_redecision`.
+      - **Docs.** `sensor-reference.md`, `administration.md` and the regenerated
+        `api-reference.md`.
+      - **Tests.**
+        - `probe-offline.test.ts`: a failed re-evaluation raises the reading to what
+          `givenUp()` counts, and the sweep lowers it to zero.
+        - `core-health.test.ts`: the number passes through, is a level and not a counter, and is
+          named in the message.
+        - `health-types.test.ts`: the declaration, and its place after `probesSilent`.
+        - `metrics.test.ts`: the gauge.
+      - **Mutants 6/6:** the stats leave it out; the reading drops it; the message is silent; it
+        is declared a counter, or not declared; it is not exported.
 
 - [ ] **P-401 — nothing stops a `catch` inside a transaction that swallows without a savepoint**
       · M · P-253 · Found 2026-10-04 by `P-249`'s review, left by `P-253`. A failed statement
@@ -8608,6 +8627,22 @@ because each is a decision rather than a defect:
 
       **Done when** the check runs in `build-hygiene.test.ts` with a floor and planted cases,
       and it reports only the allow-listed sites on the current tree.
+
+- [ ] **P-402 — a declared channel created at ingestion is named by its key, with no unit** · S ·
+      P-306 · Found 2026-10-13 by `P-400`'s review. A sensor's channels are written from its
+      type's declaration when the sensor is created. A channel first seen later, such as one a
+      newer build added to the type, is created by ingestion from the reading:
+      `ChannelResolver` takes `reading.name ?? reading.key` and `reading.unit ?? ''`
+      (`ingestion/channels.ts`), and `ChannelShape` carries only the lookup and counter width.
+      Core Health's and Probe Health's readings carry neither name nor unit (each `readingsFrom`,
+      in `health/core-health.ts` and `health/probe-health.ts`). So on an installation whose `ms.core.health` sensor predates a
+      build, every channel that build added (`probesSilent`, `streamResyncsOwed`,
+      `sensorsOwedRedecision` and others) shows its raw key and no unit in the channel table,
+      the history panel and the series table. Nothing corrects the row: the edit-time
+      redeclaration moves a name only when the declaration changes, and a parameterless type's
+      never does. The numbers are right; only the label and unit are wrong. **Done when** a
+      channel whose key the type declares is created with the declared name and unit, and
+      existing rows created so are repaired at start-up, with a test of each.
 
 - [x] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
       S · T-06, T-20 · Found 2026-10-04 by `H-15`

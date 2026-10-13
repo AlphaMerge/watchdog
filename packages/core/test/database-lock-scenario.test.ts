@@ -264,7 +264,7 @@ describe(
           unplaced: 0,
           resyncsOwed: 0,
         }),
-        probes: () => ({ probesDown: 0, probesSilent: 0 }),
+        probes: () => ({ probesDown: 0, probesSilent: 0, sensorsOwedRedecision: 0 }),
         alarms: () => ({ fired: 0, overdueMs: 0 }),
         queries: () => ({ refused: 0, unfit: 0 }),
         ingestionDiscards: () => ({

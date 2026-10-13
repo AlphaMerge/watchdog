@@ -56,7 +56,7 @@ export function fixedCoreHealth(
         unplaced: 0,
         resyncsOwed: 0,
       }),
-      probes: () => ({ probesDown: 1, probesSilent: 2 }),
+      probes: () => ({ probesDown: 1, probesSilent: 2, sensorsOwedRedecision: 0 }),
       alarms: () => ({ fired: 6, overdueMs: 0 }),
       ...(options.reporting === false
         ? {}

@@ -188,6 +188,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       for (const name of [
         'ms_core_ingestion_queue_rows',
         'ms_core_alarm_sweep_overdue_seconds',
+        'ms_core_sensors_owed_redecision',
         'ms_core_db_oldest_statement_seconds',
       ]) {
         assert.match(body, new RegExp(`# TYPE ${name} gauge`), name);

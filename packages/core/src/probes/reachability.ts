@@ -188,6 +188,7 @@ export class ProbeReachability {
     probesSilent: number;
     sensorsUnknown: number;
     outages: number;
+    sensorsOwedRedecision: number;
   } {
     // **Split by reason** (`P-80`). `probesDown` is published to Core Health as 'Probes not
     // connected', and `P-74` began putting `reason: 'silence'` entries into this same map — for
@@ -201,6 +202,8 @@ export class ProbeReachability {
       probesSilent: silent,
       sensorsUnknown: this.#unreachable.size,
       outages: this.#outages,
+      // Core Health's reading of them (`P-400`): the same number `givenUp()` answers.
+      sensorsOwedRedecision: this.#givenUp.size,
     };
   }
 

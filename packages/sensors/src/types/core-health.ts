@@ -353,6 +353,14 @@ const CHANNELS: readonly ChannelDef[] = [
   // `ms.probe.delivery` on that probe's own sensor, and a second one here for the same outage is
   // what `CLAUDE.md` forbids. This is the installation-wide number an operator reads beside it.
   { key: 'probesSilent', name: 'Probes not delivering', unit: 'probes' },
+  // **Sensors owed a re-decision** (`P-400`): ones whose state a failed re-evaluation, or a tree
+  // move that rolled back, left to be decided again against which probes are lost (`P-249`,
+  // `P-253`). Until then such a sensor's stored state may not match whether its probe is lost.
+  // The delivery sweep re-decides them every pass, so it is zero again within one; a number that
+  // stays up is that re-decision failing, and the core log says why at `error`. A level with no
+  // limit, as `streamResyncsOwed` has none: the sweep is already retrying, and the log names the
+  // cause an alarm could not.
+  { key: 'sensorsOwedRedecision', name: 'Sensors owed a re-decision', unit: 'sensors' },
   // **The alarm scheduler's own two numbers** (`P-22`). It had a `stats()` like every other
   // subsystem and nothing read it, which is how a counter that was wrong stayed wrong through
   // `P-12` — `P-20` found it by hand.

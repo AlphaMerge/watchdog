@@ -285,6 +285,11 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Approved probes the core currently has no connection from.',
   },
   {
+    key: 'sensorsOwedRedecision',
+    name: 'ms_core_sensors_owed_redecision',
+    help: 'Sensors a failed re-evaluation or a rolled-back tree move left to be decided again against the probes that are lost. The delivery sweep re-decides them every pass.',
+  },
+  {
     key: 'alarmOverdue',
     name: 'ms_core_alarm_sweep_overdue_seconds',
     help: 'How late the alarm scheduler is for the sweep it said it would run. Zero when idle.',
