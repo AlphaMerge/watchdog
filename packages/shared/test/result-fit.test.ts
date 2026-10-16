@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import fc from 'fast-check';
 import { parseProbeToCore, type CheckResult, type UnfitResults } from '../src/protocol/messages.js';
-import { fitResult, RESULT_LIMITS } from '../src/protocol/result-fit.js';
+import { fitLabel, fitResult, RESULT_LIMITS } from '../src/protocol/result-fit.js';
 
 /**
  * `fitResult` (`P-277`): a check result made to fit the wire schema and PostgreSQL before a runner
@@ -337,6 +337,57 @@ describe('fitResult', () => {
         },
       ),
       { numRuns: 300 },
+    );
+  });
+});
+
+/**
+ * `fitLabel` (`P-402`, `P-405`): a declared channel name or unit as a `channel` row holds it. The
+ * column counts code points (`length()`), so this does too — `clip`'s UTF-16 count would cut a
+ * name over 200 UTF-16 units that fits 200 code points, which one character outside the Basic
+ * Multilingual Plane can make, and that a create writes whole.
+ */
+describe('fitLabel', () => {
+  const { name } = RESULT_LIMITS;
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it('clips a long declaration to the limit, ending in an ellipsis', () => {
+    const path = `/${'a'.repeat(2_047)}`;
+    assert.equal(fitLabel(path, name), `${path.slice(0, name - 1)}…`);
+    assert.equal(fitLabel('a'.repeat(name), name), 'a'.repeat(name), 'one that fits is kept');
+  });
+
+  it('counts code points, as the column does, and never cuts a pair in half', () => {
+    const wide = '😀'.repeat(150);
+    assert.equal(fitLabel(wide, name), wide, '300 UTF-16 units, 150 characters: it fits');
+    const over = fitLabel('😀'.repeat(name + 1), name);
+    assert.equal(over, `${'😀'.repeat(name - 1)}…`);
+    assert.equal(codePoints(over), name);
+  });
+
+  it('takes out a NUL and mends a lone surrogate, as a reading’s words are', () => {
+    assert.equal(fitLabel('\u0000', name), '');
+    assert.equal(fitLabel('a\u0000b', name), 'ab');
+    assert.equal(fitLabel('a\uD800b', name), 'a\uFFFDb');
+  });
+
+  it('gives what the column holds for any text, and gives it back unchanged', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ unit: 'binary', maxLength: 600 }),
+        fc.integer({ min: 1, max: 250 }),
+        (text, limit) => {
+          const fitted = fitLabel(text, limit);
+          assert.ok(
+            codePoints(fitted) <= limit,
+            `${String(codePoints(fitted))} > ${String(limit)}`,
+          );
+          assert.ok(!fitted.includes('\u0000'));
+          assert.ok(!LONE_SURROGATE.test(fitted), 'no lone surrogate');
+          assert.equal(fitLabel(fitted, limit), fitted, 'fitting twice changes nothing');
+        },
+      ),
+      { numRuns: 500 },
     );
   });
 });

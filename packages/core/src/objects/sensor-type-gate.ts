@@ -6,6 +6,7 @@ import {
   type SensorReference,
 } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
+import { declaredLabel } from '../state/declared-limits.js';
 import {
   errorKindOf,
   errorWithoutParamValues,
@@ -269,15 +270,19 @@ function structuralProblem(
 }
 
 function draftsOf(defs: readonly ChannelDef[]): readonly ChannelDraft[] {
-  return defs.map((def) => ({
-    key: def.key,
-    name: def.name,
-    ...(def.unit === undefined ? {} : { unit: def.unit }),
-    ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
-    ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
-    ...(def.counter === undefined ? {} : { counterBits: def.counter.bits }),
-    ...(def.limits === undefined ? {} : { limits: def.limits }),
-  }));
+  return defs.map((def) => {
+    // Fitted to the row as ingestion fits it, for every writer of these drafts (`P-405`).
+    const label = declaredLabel(def.key, def.name, def.unit);
+    return {
+      key: def.key,
+      name: label.name,
+      ...(def.unit === undefined ? {} : { unit: label.unit }),
+      ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
+      ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
+      ...(def.counter === undefined ? {} : { counterBits: def.counter.bits }),
+      ...(def.limits === undefined ? {} : { limits: def.limits }),
+    };
+  });
 }
 
 /**

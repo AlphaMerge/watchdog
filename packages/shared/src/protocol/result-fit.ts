@@ -187,14 +187,25 @@ function fitsKey(key: string): boolean {
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
- * A channel's display name or unit as a `channel` row can hold it (`P-402`): what `fitResult`
- * makes of a reading's, for one the core takes from a type's declaration instead. Nothing checks
- * a declaration against the column — `http.transaction` names a step with no name by its path,
- * which may be 2,048 characters — and a row that broke the column's CHECK would refuse the batch
- * that created it. Empty when nothing is left; the caller decides what stands in.
+ * A channel's display name or unit as a `channel` row can hold it (`P-402`, `P-405`): what
+ * `fitResult` makes of a reading's, for one the core takes from a type's declaration instead.
+ * Nothing checks a declaration against the column — `http.transaction` names a step with no name
+ * by its path, which may be 2,048 characters — and a row that broke the column's CHECK refused
+ * the write that made it. **Counted in code points**, as the column's `length()` and the wire
+ * schema's `maxLength` count them, where `clip` counts UTF-16 units to keep a result inside the
+ * wire's limits however it is cut: every writer of a declaration fits it here, so counting as the
+ * column does is what makes them write the same. Empty when nothing is left; the caller decides
+ * what stands in.
  */
 export function fitLabel(text: string, limit: number): string {
-  return clip(textOf(text), limit);
+  const whole = textOf(text);
+  // No more UTF-16 units than the limit is no more code points: the common case, with no array.
+  if (whole.length <= limit) return whole;
+  // `textOf` leaves no lone surrogate, so no code point here is half a pair.
+  const points = Array.from(whole);
+  return points.length <= limit
+    ? whole
+    : points.slice(0, limit - ELLIPSIS.length).join('') + ELLIPSIS;
 }
 
 /**

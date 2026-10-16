@@ -538,6 +538,77 @@ describe(
       );
     });
 
+    it('names an unnamed step by its path fitted to the column, at a create, a tree create and an edit (P-405)', async () => {
+      const transaction = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'http.transaction');
+      assert.ok(transaction !== undefined);
+      const web = await buildHarness(db, { types: [transaction] });
+      // A step with no name is named by its path, which may be 2,048 characters, and the column
+      // holds 200. Unfitted, each of these refused the sensor on the column's CHECK.
+      const long = `/${'a'.repeat(2_047)}`;
+      // 151 characters in 301 UTF-16 units: the column holds it whole, so it is written whole.
+      const wide = `/${'😀'.repeat(150)}`;
+      const steps = [{ path: long }, { path: wide }];
+      const fitted = {
+        totalTime: 'Transaction time',
+        step1: `${long.slice(0, 199)}…`,
+        step2: wide,
+      };
+      const names = async (id: number): Promise<Record<string, string>> =>
+        Object.fromEntries(
+          (
+            await db.query<{ key: string; name: string }>(
+              'SELECT key, name FROM channel WHERE sensor_id = $1',
+              [id],
+            )
+          ).map((row) => [row.key, row.name]),
+        );
+
+      const made = await web.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'long paths',
+        sensorType: 'http.transaction',
+        params: { steps },
+      });
+      assert.deepEqual(await names(made.id), fitted);
+
+      const tree = await web.service.createTree(testActor, {
+        parentId: deviceId,
+        nodes: [
+          {
+            kind: 'sensor',
+            name: 'long paths, in a tree',
+            sensorType: 'http.transaction',
+            params: { steps },
+          },
+        ],
+      });
+      assert.deepEqual(
+        await names(tree.objects[0]?.id ?? assert.fail('no sensor in the tree')),
+        fitted,
+      );
+
+      const edited = await web.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'short paths',
+        sensorType: 'http.transaction',
+        params: { steps: [{ path: '/one' }, { path: '/two' }] },
+      });
+      assert.deepEqual(await names(edited.id), {
+        totalTime: 'Transaction time',
+        step1: '/one',
+        step2: '/two',
+      });
+      await web.service.update(
+        testActor,
+        edited.id,
+        { kind: 'sensor', params: { steps } },
+        { kind: 'none' },
+      );
+      assert.deepEqual(await names(edited.id), fitted);
+    });
+
     // ── the registry over HTTP ──────────────────────────────────────────────────────────────
 
     it('publishes the catalogue the add-sensor form is generated from', async () => {

@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
+import { rateUnit, SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 import { MAX_PATTERN } from '../support/pattern.js';
 // Type-only, and therefore erased: no `net-snmp` reaches the core, which loads this catalogue
 // for schemas and channel declarations and never runs a check.
@@ -271,7 +271,7 @@ export const snmpTable: SensorType = {
       name: column.name,
       // The stored sample for a counter is a rate (`T-02`), so a channel labelled with the raw
       // unit would be labelled wrong on its own axis.
-      unit: column.counting && column.unit !== '' ? `${column.unit}/s` : column.unit,
+      unit: column.counting ? rateUnit(column.unit) : column.unit,
       // The first column, because the operator ordered them and the first is the one they led
       // with. A sensor is judged by one channel and this is the only defensible guess.
       ...(at === 0 ? { isPrimary: true } : {}),

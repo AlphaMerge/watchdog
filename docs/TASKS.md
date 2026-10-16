@@ -8729,7 +8729,7 @@ because each is a decision rather than a defect:
       says something of its own (`channelLabel`), audited; or the type guide says a build
       renames for new sensors only, and why.
 
-- [ ] **P-405 — a declared channel name over 200 characters, or empty, refuses the sensor** · S ·
+- [x] **P-405 — a declared channel name over 200 characters, or empty, refuses the sensor** · S ·
       P-402 · Found 2026-10-17 by `P-402`'s review. `channel.name` holds 1 to 200 characters
       (its CHECK), and nothing checks a type's declaration against that. `P-402` fits a declared
       name and unit where ingestion creates the row (`channelLabel`, `fitLabel`). Every other
@@ -8740,16 +8740,63 @@ because each is a decision rather than a defect:
       So an `http.transaction` step with no name, which is named by its path (up to 2,048
       characters), fails the create with a CHECK violation rather than a 400 that says why, and
       an edit that moves a step to such a path fails the same way. A type that declares an empty
-      name fails it too. A unit has no CHECK, and no shipped type lets one exceed 50
-      characters, so a unit refuses nothing yet. They already differ in one case. `fitLabel`
-      counts UTF-16 units, as `clip` does for the wire. The CHECK counts code points. So a
-      declared name of more than 100 characters outside the Basic Multilingual Plane (an
-      `ssh.script` name allows 200 code points) is written whole by a create and clipped by
-      ingestion. **Done when** every writer of a declared name or unit fits it as
+      name fails it too. A unit has no CHECK, so a unit refuses nothing. They already differ in
+      one case. `fitLabel` counts UTF-16 units, as `clip` does for the wire. The CHECK counts
+      code points. So a declared name over 200 UTF-16 units that fits in 200 code points — one
+      character outside the Basic Multilingual Plane is enough (an `ssh.script` name allows 200
+      code points) — is written whole by a create and clipped by ingestion. **Done when** every writer of a declared name or unit fits it as
       `channelLabel` does (an empty one standing aside for the key), counting as the column
       does, the ingestion path and the create path cannot drift (one function), and a test
       creates and edits an `http.transaction` sensor whose unnamed step has a 2,048-character
       path.
+
+      **P-405 outcome. One rule for every writer, counted as the column counts.**
+      - **The rule.** `declaredLabel(key, name, unit)` in `state/declared-limits.ts` fits the
+        name to 200 and the unit to 50 (`fitLabel`), and makes an empty name the key.
+        - `draftsOf` (`objects/sensor-type-gate.ts`) calls it. That covers a create, a tree
+          create and an edit's re-declaration, which all write from those drafts.
+        - `channelLabel` calls it too. That covers ingestion and `P-402`'s repair.
+        - So one function names a channel whichever of them writes it.
+        - The catalogue still returns exactly what a type declared. Fitting is the core's
+          concern, for its column.
+      - **Code points.** `fitLabel` now counts as the column's `length()` and the wire's
+        `maxLength` do, and never cuts a pair. `clip` still counts UTF-16 units for the wire,
+        where that is the safe side and changing it would move every probe's messages.
+      - **SNMP counters keep their "/s".** `snmp.custom` and `snmp.table` append "/s" to a
+        unit the operator may make 50 characters long, so they could declare 52. A create
+        wrote all of it, since the unit has no CHECK. Fitted at 50, the "/s" would be what was
+        cut, and it is what says the stored value is a rate (`T-02`). `rateUnit`
+        (`support/snmp/schema.ts`) cuts the operator's part to 48 before the suffix. A sensor
+        created before this keeps the 51 or 52 characters it has: nothing rewrites a
+        declaration that did not move.
+      - **Nothing to repair for the CHECK.** No row can hold what the CHECK refused.
+        - Since `P-402` landed earlier today, ingestion and its repair clipped in UTF-16 units.
+          Such a row differs from what a create now writes only where the declared name was
+          over 200 UTF-16 units and either fits 200 code points or has a character outside the
+          Basic Multilingual Plane in its first 199.
+        - Those rows are left. The difference is in a name's tail, and nothing rewrites a
+          declaration that has not moved (`P-404`).
+      - **Tests.**
+        - `result-fit.test.ts`: `fitLabel` on a 2,048-character path, on 150 and 201 emoji, a
+          NUL and a lone surrogate. Plus a property: no more than the limit, no NUL, no lone
+          surrogate, and fitting twice changes nothing.
+        - `declared-labels.test.ts`: a create and ingestion write the same five labels for a
+          long name, an empty one and a long unit. The `P-402` fit test now creates its
+          sensors rather than storing parameters behind the type's back.
+        - `sensor-types.test.ts`: the real `http.transaction`, with an unnamed step of a
+          2,048-character path and one of 150 emoji, at a create, a tree create and an edit.
+        - `snmp-custom.test.ts` and `snmp-table.test.ts`: a counter's unit at 48 and 50
+          characters keeps its "/s".
+      - **Mutants 9/9:**
+        - The drafts keeping the declared name, or the declared unit.
+        - An empty name not made the key.
+        - The declared unit not fitted.
+        - Ingestion bypassing `declaredLabel`.
+        - `fitLabel` counting UTF-16 units, keeping one code point too many, or keeping a NUL.
+        - `rateUnit` not cutting before the suffix.
+      - **Keys need no ticket.** The column holds 1 to 100, and every type whose keys come from
+        its parameters bounds them in its schema: `rest.custom` and `flow` to 40, `ssh.script`
+        to 100, and `exe.script.advanced`'s `primaryChannel` to 40.
 
 - [x] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
       S · T-06, T-20 · Found 2026-10-04 by `H-15`

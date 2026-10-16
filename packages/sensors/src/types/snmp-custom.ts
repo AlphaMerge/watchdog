@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
+import { rateUnit, SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 
 /**
  * One arbitrary numeric OID (`T-03`).
@@ -91,7 +91,7 @@ export const snmpCustom: SensorType = {
       {
         key: 'value',
         name,
-        unit: counting && unit !== '' ? `${unit}/s` : unit,
+        unit: counting ? rateUnit(unit) : unit,
         isPrimary: true,
         // 64 declared, and the reading corrects it — the device may return a Counter32
         // (`T-02`). A 32-bit wrap read as a 64-bit counter looks exactly like a reset.

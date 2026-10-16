@@ -1,3 +1,4 @@
+import { clipText, RESULT_LIMITS } from '@ms/shared';
 import type { JsonSchema } from '../../contract.js';
 
 /**
@@ -156,4 +157,16 @@ export function snmpParamsSchema(
       ...own,
     },
   };
+}
+
+const RATE = '/s';
+
+/**
+ * A counter's unit as its channel declares it: the operator's, per second, since the stored
+ * sample is a rate (`T-02`), so "octets" reads "octets/s". The parameter holds 50 characters and
+ * so does a channel's unit, which the core fits by cutting the tail (`P-405`): a long unit is cut
+ * here instead, before the suffix, so that what goes is never the "/s" that says it is a rate.
+ */
+export function rateUnit(unit: string): string {
+  return unit === '' ? '' : `${clipText(unit, RESULT_LIMITS.unit - RATE.length)}${RATE}`;
 }

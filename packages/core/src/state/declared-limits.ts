@@ -67,23 +67,42 @@ export interface ChannelShape {
  * it") declares its key there because a name is required, and the reading's words are kept.
  * Otherwise the reading's, and otherwise the key and no unit, as before.
  *
- * **Fitted as a reading's words are** (`fitLabel`, `P-402` review): the column holds a name of 1
- * to 200 characters and no NUL, and nothing checks a declaration against it. A declared name over
- * the limit is clipped with an ellipsis, as a reading's is, and an empty one says nothing of its
- * own. Unfitted, one `http.transaction` step named by a long path broke the INSERT, and the probe
- * offered that batch again every second, with every result behind it held back.
+ * **Fitted as a create fits it** (`declaredLabel`, `P-405`). Unfitted, one `http.transaction`
+ * step named by a long path broke the INSERT, and the probe offered that batch again every
+ * second, with every result behind it held back. An empty declared name is the key there, so it
+ * says nothing of its own here either.
  */
 export function channelLabel(
   key: string,
   shape: ChannelShape,
   sent: { readonly name: string | undefined; readonly unit: string | undefined },
 ): { name: string; unit: string } {
-  const name = shape.name === null ? '' : fitLabel(shape.name, RESULT_LIMITS.name);
-  const unit = shape.unit === null ? '' : fitLabel(shape.unit, RESULT_LIMITS.unit);
+  const declared = shape.name === null ? null : declaredLabel(key, shape.name, shape.unit ?? '');
   return {
-    name: name !== '' && name !== key ? name : (sent.name ?? key),
-    unit: unit !== '' ? unit : (sent.unit ?? ''),
+    name: declared !== null && declared.name !== key ? declared.name : (sent.name ?? key),
+    unit: declared !== null && declared.unit !== '' ? declared.unit : (sent.unit ?? ''),
   };
+}
+
+/**
+ * A channel's name and unit as its type declares them, made to fit a `channel` row (`P-405`):
+ * each fitted (`fitLabel`: 200 and 50 code points, no NUL, no lone surrogate), and an empty name,
+ * which the column refuses, the key. Nothing checks a declaration against the column:
+ * `http.transaction` names a step with no name by its path, up to 2,048 characters, and a create
+ * of one refused the sensor on the column's CHECK, as a 409 that named the constraint rather than
+ * the step. **Every writer of a declaration goes through this** — a create and a tree create
+ * (`draftsOf`, for `createChannels` and `createChannelsFor`), an edit's re-declaration, from the
+ * same drafts, and ingestion and `P-402`'s repair (`channelLabel`) — so a declaration is
+ * written the same whichever of them writes it. Where it says nothing of its own, ingestion still
+ * keeps a reading's words (`channelLabel`), and a create has none to keep.
+ */
+export function declaredLabel(
+  key: string,
+  name: string,
+  unit: string | undefined,
+): { name: string; unit: string } {
+  const fitted = fitLabel(name, RESULT_LIMITS.name);
+  return { name: fitted === '' ? key : fitted, unit: fitLabel(unit ?? '', RESULT_LIMITS.unit) };
 }
 
 /**

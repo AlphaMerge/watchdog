@@ -31,6 +31,8 @@ const BROKEN = 99;
  * of its own (`temp`), a name and no unit (`mode`), a name that is only its key (`bare`), the same
  * with a unit (`rate`), and a primary whose name a parameter chooses and which is otherwise its
  * key, as `exe.script.advanced`'s is — "Empty uses whatever the program calls it" (`value`).
+ * `blankMode` and `tempUnit` declare what nothing checks against the column: an empty name, and a
+ * unit of any length (`P-405`).
  */
 const labelled: SensorType = {
   id: 'test.labelled',
@@ -44,6 +46,7 @@ const labelled: SensorType = {
       gen: { type: 'integer' },
       primaryName: { type: 'string' },
       blankMode: { type: 'boolean' },
+      tempUnit: { type: 'string' },
     },
   },
   channels: (params) => {
@@ -51,7 +54,11 @@ const labelled: SensorType = {
     const named = typeof params['primaryName'] === 'string' ? params['primaryName'] : '';
     return [
       { key: 'value', name: named === '' ? 'value' : named, isPrimary: true },
-      { key: 'temp', name: 'Temperature', unit: '°C' },
+      {
+        key: 'temp',
+        name: 'Temperature',
+        unit: typeof params['tempUnit'] === 'string' ? params['tempUnit'] : '°C',
+      },
       // Nothing stops a type declaring an empty name: the catalogue does not check names.
       { key: 'mode', name: params['blankMode'] === true ? '' : 'Mode' },
       { key: 'bare', name: 'bare' },
@@ -62,6 +69,13 @@ const labelled: SensorType = {
 };
 
 const KEYS = ['bare', 'mode', 'rate', 'temp', 'value'] as const;
+
+interface Params {
+  gen?: number;
+  primaryName?: string;
+  blankMode?: boolean;
+  tempUnit?: string;
+}
 
 interface Label {
   key: string;
@@ -124,14 +138,14 @@ describe(
      * A sensor of `labelled` with no channels yet, as before its first reading. A `gen` of
      * `BROKEN` is stored behind the type's back, as an earlier build could have left it.
      */
-    async function sensor(params: { gen?: number; primaryName?: string } = {}): Promise<number> {
+    async function sensor(params: Params = {}): Promise<number> {
       made += 1;
       const created = await harness.service.create(testActor, {
         kind: 'sensor',
         parentId: deviceId,
         name: `labelled-${String(made)}`,
         sensorType: 'test.labelled',
-        params: params.gen === BROKEN ? { gen: 1 } : params,
+        params: params.gen === BROKEN ? { gen: 1 } : { ...params },
       });
       if (params.gen === BROKEN) {
         await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
@@ -145,7 +159,7 @@ describe(
     }
 
     /** A sensor whose channels an earlier build's ingestion created and named by their keys. */
-    async function namedByKey(params: { gen?: number; primaryName?: string } = {}) {
+    async function namedByKey(params: Params = {}) {
       const id = await sensor(params);
       await db.query(
         `INSERT INTO channel (sensor_id, key, name, unit, is_primary)
@@ -291,13 +305,8 @@ describe(
       it('fits a declared name to what a channel row holds, as a reading’s is fitted', async () => {
         // Nothing checks a declaration against the column's 1 to 200 characters. Unfitted, a
         // long one broke the INSERT, and the probe offered that batch again every second.
-        // Stored behind the type's back: the create path does not fit it either (`P-405`).
         const long = 'p'.repeat(210);
-        const id = await sensor();
-        await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
-          id,
-          JSON.stringify({ primaryName: long, blankMode: true }),
-        ]);
+        const id = await sensor({ primaryName: long, blankMode: true });
         const outcome = await read(id, [
           [
             { key: 'value', value: 1 },
@@ -312,17 +321,38 @@ describe(
         ]);
 
         // And the repair writes the same, so its page does not fail on every start.
-        const old = await namedByKey();
-        await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
-          old,
-          JSON.stringify({ primaryName: long, blankMode: true }),
-        ]);
+        const old = await namedByKey({ primaryName: long, blankMode: true });
         const report = await repair();
         assert.equal(report.failedPages, 0);
         const value = (await labels(old)).find((one) => one.key === 'value');
         assert.equal(value?.name, `${'p'.repeat(199)}…`);
         const mode = (await labels(old)).find((one) => one.key === 'mode');
         assert.deepEqual(mode, { key: 'mode', name: 'mode', unit: '' });
+      });
+
+      it('names each channel at a create as ingestion names it from a reading that sent nothing (P-405)', async () => {
+        // One rule for both (`declaredLabel`): a long name or unit clipped, an empty name the
+        // key. Before, a create wrote the declaration as it was and the column refused it.
+        const params = { primaryName: 'p'.repeat(210), blankMode: true, tempUnit: 'u'.repeat(60) };
+        const created = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: 'created',
+          sensorType: 'test.labelled',
+          params,
+        });
+        const fromReadings = await sensor(params);
+        const outcome = await read(fromReadings, [KEYS.map((key) => ({ key, value: 1 }))]);
+        assert.equal(outcome.created, KEYS.length);
+        const expected: Label[] = [
+          { key: 'bare', name: 'bare', unit: '' },
+          { key: 'mode', name: 'mode', unit: '' },
+          { key: 'rate', name: 'rate', unit: '/s' },
+          { key: 'temp', name: 'Temperature', unit: `${'u'.repeat(49)}…` },
+          { key: 'value', name: `${'p'.repeat(199)}…`, unit: '' },
+        ];
+        assert.deepEqual(await labels(created.id), expected);
+        assert.deepEqual(await labels(fromReadings), expected);
       });
 
       it('keeps the words an earlier reading of the batch sent', async () => {

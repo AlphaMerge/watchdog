@@ -82,6 +82,12 @@ describe('snmp.custom — an arbitrary numeric OID', () => {
     // wrong on its own axis.
     assert.equal(snmpCustom.channels({ mode: 'counter', unit: 'octets' })[0]?.unit, 'octets/s');
     assert.equal(snmpCustom.channels({ mode: 'gauge', unit: 'octets' })[0]?.unit, 'octets');
+    // The unit holds 50, as the parameter does: a long one loses its own tail, never the "/s"
+    // (`P-405`), which the core's fitting would have cut.
+    const unitOf = (unit: string) => snmpCustom.channels({ mode: 'counter', unit })[0]?.unit;
+    assert.equal(unitOf('o'.repeat(48)), `${'o'.repeat(48)}/s`);
+    assert.equal(unitOf('o'.repeat(50)), `${'o'.repeat(47)}…/s`);
+    assert.equal(unitOf(''), '');
   });
 
   it('declares a counter channel only in counter mode', () => {

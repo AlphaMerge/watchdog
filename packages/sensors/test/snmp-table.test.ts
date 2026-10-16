@@ -362,6 +362,11 @@ describe('the columns themselves', () => {
     assert.equal(failures.unit, 'failures/s');
     assert.equal(used.counter, undefined);
     assert.equal(used.unit, 'blocks');
+    // At the parameter's 50, the column's own tail goes and the "/s" stays (`P-405`).
+    const [long] = snmpTable.channels({
+      columns: [{ column: '7', name: 'Failures', unit: 'f'.repeat(50), mode: 'counter' }],
+    });
+    assert.equal(long?.unit, `${'f'.repeat(47)}…/s`);
   });
 
   it('declares the lookup a column names, and none when it names nothing', () => {
