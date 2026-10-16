@@ -4,7 +4,7 @@ import type { LookupCatalogue } from '../lookups/catalogue.js';
 import type { LookupDefinition } from '../lookups/definition.js';
 import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
 import type { ChannelDeclaration } from '../objects/redeclare.js';
-import type { ChannelShape, DeclaredShapes } from '../state/declared-limits.js';
+import { channelLabel, type ChannelShape, type DeclaredShapes } from '../state/declared-limits.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
 import { parseTransform, type ReadingTransform } from './scaling.js';
 
@@ -137,8 +137,9 @@ interface SensorDeclaring {
 interface WantedChannel {
   readonly sensorId: number;
   readonly key: string;
-  readonly name: string;
-  readonly unit: string;
+  /** What a reading of it sent, if any did; `channelLabel` decides what is stored (`P-402`). */
+  readonly name: string | undefined;
+  readonly unit: string | undefined;
   /** Epoch milliseconds of the newest reading naming it in the batch; `NaN` when unreadable. */
   readonly at: number;
 }
@@ -151,7 +152,7 @@ interface WantedChannel {
  */
 export const DECLARATION_SETTLE_MS = 60_000;
 
-const NO_SHAPE: ChannelShape = { lookup: null, counterBits: null };
+const NO_SHAPE: ChannelShape = { lookup: null, counterBits: null, name: null, unit: null };
 
 /** What a channel outside its type's promised declaration is likely to mean (`P-321`). */
 const OUTSIDE_DECLARATION =
@@ -420,14 +421,15 @@ export class ChannelResolver {
           continue;
         }
         const at = Date.parse(result.at);
-        const before = missing.get(cacheKey)?.at;
+        const earlier = missing.get(cacheKey);
+        const before = earlier?.at;
         missing.set(cacheKey, {
           sensorId: result.sensorId,
           key: reading.key,
-          // A probe sends display metadata only on a channel's first appearance; falling back to
-          // the key keeps `channel.name` valid rather than rejecting the whole batch.
-          name: reading.name ?? reading.key,
-          unit: reading.unit ?? '',
+          // A probe may send display metadata only on a channel's first appearance, so a later
+          // reading of it in the batch that sends none does not lose what an earlier one sent.
+          name: reading.name ?? earlier?.name,
+          unit: reading.unit ?? earlier?.unit,
           // The newest of the batch's readings of it, whatever order they came in (`P-321`).
           at: before === undefined || Number.isNaN(before) ? at : Math.max(before, at),
         });
@@ -593,6 +595,11 @@ export class ChannelResolver {
       : new Map<string, SensorDeclaring>();
     const limits = this.#declaredFor(sensors, absent);
     const { shapes, undeclared, primaries, outside, later } = this.#shapesFor(sensors, absent);
+    // **Named as a create names it** (`P-402`): a key the type declares gets its declared name
+    // and unit, where the declaration says something of its own; otherwise what the reading
+    // sent, and otherwise the key and no unit, which keeps `channel.name` valid rather than
+    // rejecting the batch.
+    const labels = absent.map((row, i) => channelLabel(row.key, shapes[i] ?? NO_SHAPE, row));
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
@@ -614,8 +621,8 @@ export class ChannelResolver {
       [
         absent.map((row) => row.sensorId),
         absent.map((row) => row.key),
-        absent.map((row) => row.name),
-        absent.map((row) => row.unit),
+        labels.map((label) => label.name),
+        labels.map((label) => label.unit),
         limits,
         shapes.map((shape) => shape.lookup),
         shapes.map((shape) => shape.counterBits),

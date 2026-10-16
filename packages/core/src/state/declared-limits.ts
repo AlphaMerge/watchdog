@@ -1,5 +1,5 @@
 import type { ChannelDef, SensorCatalogue } from '@ms/sensors';
-import type { Logger } from '@ms/shared';
+import { fitLabel, RESULT_LIMITS, type Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import { passIsDue, recordPass, rulesDigest, type StartupPassRules } from '../db/startup-pass.js';
 import { errorKindOf, errorWithoutParamValues } from '../support/param-values.js';
@@ -36,10 +36,54 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  * whose digest matches the stored one does nothing at all.
  */
 
-/** A channel's lookup and counter width, as its sensor's type declares them (`P-80`). */
+/**
+ * A channel's lookup and counter width, as its sensor's type declares them (`P-80`), and its name
+ * and unit (`P-402`).
+ *
+ * **The name and unit are null when the answer is a fallback**: a type that threw for the
+ * sensor's stored parameters, whose `{}` answer may name the key differently, or a type this build
+ * does not register. The channel then keeps the reading's words, or its key, as before. One named
+ * by its key with no unit is given the declared ones by `repairDeclaredLabels` at the first start
+ * of a build that can answer; one whose reading sent a name or a unit keeps them. A row named from
+ * a placeholder's answer would look right and never be looked at again.
+ */
 export interface ChannelShape {
   readonly lookup: string | null;
   readonly counterBits: number | null;
+  readonly name: string | null;
+  readonly unit: string | null;
+}
+
+/**
+ * The name and unit a channel is created with (`P-402`), from its declaration and the reading
+ * that created it.
+ *
+ * **The declaration's, where it says something of its own.** A create writes them
+ * (`createChannels`), so a channel ingestion creates later must too: before this, one a later
+ * build added to a type was named by its key, with no unit, wherever its readings carry none —
+ * Core Health's and Probe Health's never do. **A declared name that is only the key, or an empty
+ * unit, says nothing of its own**: a type that names a channel after whatever its program prints
+ * (`exe.script.advanced`'s primary, whose `primaryName` "Empty uses whatever the program calls
+ * it") declares its key there because a name is required, and the reading's words are kept.
+ * Otherwise the reading's, and otherwise the key and no unit, as before.
+ *
+ * **Fitted as a reading's words are** (`fitLabel`, `P-402` review): the column holds a name of 1
+ * to 200 characters and no NUL, and nothing checks a declaration against it. A declared name over
+ * the limit is clipped with an ellipsis, as a reading's is, and an empty one says nothing of its
+ * own. Unfitted, one `http.transaction` step named by a long path broke the INSERT, and the probe
+ * offered that batch again every second, with every result behind it held back.
+ */
+export function channelLabel(
+  key: string,
+  shape: ChannelShape,
+  sent: { readonly name: string | undefined; readonly unit: string | undefined },
+): { name: string; unit: string } {
+  const name = shape.name === null ? '' : fitLabel(shape.name, RESULT_LIMITS.name);
+  const unit = shape.unit === null ? '' : fitLabel(shape.unit, RESULT_LIMITS.unit);
+  return {
+    name: name !== '' && name !== key ? name : (sent.name ?? key),
+    unit: unit !== '' ? unit : (sent.unit ?? ''),
+  };
 }
 
 /**
@@ -146,11 +190,21 @@ export function declaredChannelLookup(
   };
   const messageOf = (cause: unknown, sensorType: string): string =>
     cause instanceof Error ? cause.message : `${sensorType} threw ${typeof cause}`;
-  const shapesOf = (defs: readonly ChannelDef[]): ReadonlyMap<string, ChannelShape> =>
+  // Labelled for the sensor's own answer only: see `ChannelShape` for why a fallback's are not.
+  const shapesOf = (
+    defs: readonly ChannelDef[],
+    labelled: boolean,
+  ): ReadonlyMap<string, ChannelShape> =>
     new Map(
       defs.map((def) => [
         def.key,
-        { lookup: def.lookup ?? null, counterBits: def.counter?.bits ?? null },
+        {
+          lookup: def.lookup ?? null,
+          counterBits: def.counter?.bits ?? null,
+          // `?? ''` as `createChannels` writes it.
+          name: labelled ? def.name : null,
+          unit: labelled ? (def.unit ?? '') : null,
+        },
       ]),
     );
   const none: ReadonlyMap<string, ChannelShape> = new Map();
@@ -180,7 +234,7 @@ export function declaredChannelLookup(
   const bare = new Map<string, ReadonlyMap<string, ChannelShape>>();
   for (const id of catalogue.ids()) {
     try {
-      bare.set(id, shapesOf(catalogue.channelsFor(id, {})));
+      bare.set(id, shapesOf(catalogue.channelsFor(id, {}), false));
     } catch {
       // A type whose channels need parameters: it has no answer to fall back on.
     }
@@ -193,7 +247,7 @@ export function declaredChannelLookup(
     try {
       const defs = catalogue.channelsFor(sensorType, params);
       return {
-        shapes: shapesOf(defs),
+        shapes: shapesOf(defs, true),
         undeclared: false,
         // The first, so one row at most is promoted whatever a broken type answers: the index
         // allows one, and the catalogue refuses only a `{}` answer that declares two.

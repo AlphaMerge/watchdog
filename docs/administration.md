@@ -2284,7 +2284,7 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   answers with its default one. A device given by name is as it was, and so is a TLS sensor
   with a *Server name* set.
 - **The first start of a build brings stored rows up to it; a restart does not read them again**
-  (`P-333`). Two start-up passes apply what sensor types declare to rows an earlier build wrote,
+  (`P-333`). Three start-up passes apply what sensor types declare to rows an earlier build wrote,
   and each records, in `startup_pass` (migration 077), the rules it last finished under:
   - **Declared channel limits** (`S-18`, `P-291`), before the API opens: a digest of every
     declaration and every registered type. It runs when a build declares something different.
@@ -2292,6 +2292,15 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
     build — commit, profile and dependency lock. It runs once per build. A build that is not
     exactly one commit, such as a working tree or a package with uncommitted changes, runs it at
     every start and records nothing.
+  - **Declared channel names and units** (`P-402`), in the background after the repair of channels
+    created without their declared shape, keyed on the build in the same way. It reads only
+    channels named by their key with no unit, which is how ingestion named a channel first seen in
+    a reading that carried no name and no unit, before `P-402`. That includes every channel a
+    later build added to Core Health and Probe Health. Each one whose type declares a name or a
+    unit of its own gets them, as ingestion now creates them. A unit a reading sent, or a name
+    other than the channel's key, is never rewritten. Each change is audited as `channel.redeclared` by
+    `declared-label-startup-repair` and moves the sensor's version. A sensor whose type cannot
+    answer for its stored parameters is left, and its type is named in the pass's line.
 
   A pass records only once it has finished. One that stopped at shutdown, lost a page, or left a
   sensor someone else held runs again at the next start. Three passes run at every start and

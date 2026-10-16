@@ -187,6 +187,17 @@ function fitsKey(key: string): boolean {
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
+ * A channel's display name or unit as a `channel` row can hold it (`P-402`): what `fitResult`
+ * makes of a reading's, for one the core takes from a type's declaration instead. Nothing checks
+ * a declaration against the column — `http.transaction` names a step with no name by its path,
+ * which may be 2,048 characters — and a row that broke the column's CHECK would refuse the batch
+ * that created it. Empty when nothing is left; the caller decides what stands in.
+ */
+export function fitLabel(text: string, limit: number): string {
+  return clip(textOf(text), limit);
+}
+
+/**
  * Text as PostgreSQL will store it and give it back: no NUL, which it refuses, and every lone
  * surrogate replaced by U+FFFD, which is what `pg`'s encoding would have made of it anyway, so
  * what is sent is what is stored. `String.prototype.toWellFormed`, which the `ES2023` lib this

@@ -305,6 +305,9 @@ describe(
         // And the repair of channels created undeclared (`P-312`), with nothing marked here.
         const undeclaredHook = hookDone('undeclared-channel-repair');
         assert.ok(undeclaredHook >= 0 && undeclaredHook < databaseHook, said(core));
+        // And the one after it, naming channels created by their key (`P-402`).
+        const labelHook = hookDone('declared-label-repair');
+        assert.ok(labelHook >= 0 && labelHook < databaseHook, said(core));
       } finally {
         if (!released) await lock.release();
         await core.stop();

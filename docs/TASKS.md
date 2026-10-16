@@ -8628,7 +8628,7 @@ because each is a decision rather than a defect:
       **Done when** the check runs in `build-hygiene.test.ts` with a floor and planted cases,
       and it reports only the allow-listed sites on the current tree.
 
-- [ ] **P-402 — a declared channel created at ingestion is named by its key, with no unit** · S ·
+- [x] **P-402 — a declared channel created at ingestion is named by its key, with no unit** · S ·
       P-306 · Found 2026-10-13 by `P-400`'s review. A sensor's channels are written from its
       type's declaration when the sensor is created. A channel first seen later, such as one a
       newer build added to the type, is created by ingestion from the reading:
@@ -8643,6 +8643,113 @@ because each is a decision rather than a defect:
       never does. The numbers are right; only the label and unit are wrong. **Done when** a
       channel whose key the type declares is created with the declared name and unit, and
       existing rows created so are repaired at start-up, with a test of each.
+
+      **P-402 outcome. Created as a create names it, and the old rows renamed once per build.**
+      - **The rule** (`channelLabel` in `state/declared-limits.ts`, used by ingestion and the
+        repair).
+        - The declared name wins where it is more than the key, and the declared unit where it
+          is not empty, each fitted first as a reading's is (`fitLabel`: 200 and 50 characters,
+          no NUL, no lone surrogate). Unfitted, a declared name over 200 characters broke the
+          INSERT, and the probe offered that batch again every second.
+        - Otherwise what the reading sent is kept, and otherwise the key and no unit, as before.
+        - The exception is deliberate. `exe.script.advanced` declares its primary's name as its
+          key unless `primaryName` is set, and that field promises "Empty uses whatever the
+          program calls it". Declaration-first would have broken that on the one path that keeps
+          it. Reading-first would have let the program's words override an operator's
+          `primaryName`, which the old ingestion did.
+      - **The shape.** `ChannelShape` carries `name` and `unit` from the sensor's own answer, and
+        null from a fallback. The `{}` answer of a type that threw may name a key otherwise, and
+        a row named from it would look right and never be looked at again. Such a row keeps the
+        reading's words or its key, and a build that can answer renames it, unless a reading of
+        it sent a name or a unit.
+      - **Also kept:** the words an earlier reading in the same batch sent. A later reading of
+        the same new key that sent none used to replace them with the key.
+      - **The repair.** `repairDeclaredLabels` (`state/declared-labels.ts`) runs in the
+        background after `P-312`'s repair, once per exact build (`P-333`, marker
+        `declared-label`).
+        - It reads only channels named by their key with no unit, the old rule's output for a
+          reading that sent nothing, and writes what ingestion now creates for one.
+        - It is locked and paged as `P-323`'s pass is, with `SKIP LOCKED`.
+        - Each change is a `channel.redeclared` entry by `declared-label-startup-repair`, and the
+          version moves, since a reader sees a name and the resolver caches it.
+        - No migration. SQL cannot run a type's code, so a mark could only have marked the same
+          rows. No route lets an operator set a channel's name or unit, so nobody's choice is
+          overridden.
+      - **Tests.** `declared-labels.test.ts`, 13 cases.
+        - Creation: from a reading with no words; with words where the declaration has none,
+          and not where it has; an undeclared key; a fallback and an unregistered type, still
+          named by the key; a declared name over 200 characters clipped, and an empty one
+          standing aside, at creation and in the repair; a batch's earlier words kept; a Core
+          Health sensor older than `probesSilent`.
+        - The repair: paged, audited and versioned; a reading's name and a channel with a unit
+          left; an undeclared key left; a type that cannot answer, or is not registered, left
+          and named; a held sensor skipped and the marker not recorded; once per build.
+        - `channel-provisioning.test.ts` now pins that a fallback's shape names nothing.
+        - `core-startup.test.ts` checks that the new shutdown hook runs before the database
+          closes.
+      - **Mutants 17/17:**
+        - The rule: the declared name ignored, winning even when it is only the key or empty,
+          losing to the reading's, or not fitted; the declared unit ignored, or an empty one
+          winning.
+        - A fallback labelled.
+        - A batch's earlier words dropped.
+        - The INSERT ignoring the label.
+        - The repair's page, or its locked read, ignoring the name or the unit filter.
+        - The marker recorded despite a skipped sensor, or not consulted.
+        - No audit entry.
+      - **Left to new tickets:**
+        - `P-403`: an `exe.script.advanced` primary created with its sensor is named by its key,
+          and no later reading renames it.
+        - `P-404`: a decision. A name or unit a later build changes reaches new sensors only.
+        - `P-405`: a create, a tree create and an edit write a declared name unfitted, so one
+          over 200 characters, or empty, refuses the sensor.
+
+- [ ] **P-403 — `exe.script.advanced`'s primary never takes the program's name** · XS · P-402 ·
+      Found 2026-10-17 by `P-402`. `primaryName` says "Empty uses whatever the program calls
+      it". The channel is created with its sensor, before any program has run, so it is named by
+      its key (`createChannels` writes the declaration, whose name is the key when `primaryName`
+      is empty). Ingestion never renames an existing row. So only a primary whose row a reading
+      creates — after an edit that changes `primaryChannel` — ever takes the program's name.
+      **Done when** decided: let the first reading that names an existing primary still named by
+      its key rename it (a write on the ingestion path, audited), or change the description to
+      say the key is used.
+
+- [ ] **P-404 — a channel name or unit a later build changes reaches new sensors only** · S ·
+      P-402 · Found 2026-10-17 by `P-402`. A create writes the declared name and unit. An edit
+      re-declares them only when the sensor's own declaration moved between its old and new
+      parameters, both asked of the running build (`planRedeclaration`), or when the type cannot
+      answer for the stored parameters, where any name or unit that differs is rewritten.
+      `P-402`'s repair renames only channels named by their key with no unit. So when a build
+      changes a channel's declared name or unit, for example "Response time" to "Round-trip
+      time", existing sensors keep the old one until an edit happens to move it, and new sensors
+      get the new one, side by side in one list. Limits have `S-18`'s pass and primaries
+      `P-323`'s; names and units have nothing. Renaming on upgrade changes what notifications,
+      maps and exported series call a channel, which is why it is a decision and not a fix.
+      **Done when** decided: a once-per-build pass that writes every declared name and unit that
+      says something of its own (`channelLabel`), audited; or the type guide says a build
+      renames for new sensors only, and why.
+
+- [ ] **P-405 — a declared channel name over 200 characters, or empty, refuses the sensor** · S ·
+      P-402 · Found 2026-10-17 by `P-402`'s review. `channel.name` holds 1 to 200 characters
+      (its CHECK), and nothing checks a type's declaration against that. `P-402` fits a declared
+      name and unit where ingestion creates the row (`channelLabel`, `fitLabel`). Every other
+      writer passes the declaration as it is.
+      - `createChannels` and `createChannelsFor` (`objects/repository.ts`): a create and a
+        tree create (`createTree`).
+      - The edit's re-declaration (`planRedeclaration`), which writes `after.name`.
+      So an `http.transaction` step with no name, which is named by its path (up to 2,048
+      characters), fails the create with a CHECK violation rather than a 400 that says why, and
+      an edit that moves a step to such a path fails the same way. A type that declares an empty
+      name fails it too. A unit has no CHECK, and no shipped type lets one exceed 50
+      characters, so a unit refuses nothing yet. They already differ in one case. `fitLabel`
+      counts UTF-16 units, as `clip` does for the wire. The CHECK counts code points. So a
+      declared name of more than 100 characters outside the Basic Multilingual Plane (an
+      `ssh.script` name allows 200 code points) is written whole by a create and clipped by
+      ingestion. **Done when** every writer of a declared name or unit fits it as
+      `channelLabel` does (an empty one standing aside for the key), counting as the column
+      does, the ingestion path and the create path cannot drift (one function), and a test
+      creates and edits an `http.transaction` sensor whose unnamed step has a 2,048-character
+      path.
 
 - [x] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
       S · T-06, T-20 · Found 2026-10-04 by `H-15`

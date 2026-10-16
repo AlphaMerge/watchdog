@@ -47,6 +47,7 @@ import {
 } from './state/declared-limits.js';
 import { declaredPrimaryRules, repairDeclaredPrimaries } from './state/declared-primary.js';
 import { repairUndeclaredChannels } from './state/undeclared-channels.js';
+import { declaredLabelRules, repairDeclaredLabels } from './state/declared-labels.js';
 import { StoredParamsCheck } from './objects/stored-params-check.js';
 import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
@@ -799,6 +800,39 @@ async function serve(): Promise<void> {
     name: 'undeclared-channel-repair',
     timeoutMs: 5_000,
     run: () => undeclaredRepair,
+  });
+
+  // **A channel ingestion named by its key gets the name and unit its type declares** (`P-402`):
+  // the rows an earlier build's ingestion created from a reading that carried no words of its
+  // own, as every Core Health and Probe Health reading does. Once per build, keyed on the build
+  // as the primary repair is (`P-333`). Not awaited, locked and stopped by shutdown as the
+  // repairs above are, and after them for the same reason: all three take sensors `SKIP LOCKED`
+  // at the first start of a build.
+  const labelRepair = undeclaredRepair
+    .then(() =>
+      repairDeclaredLabels({
+        db,
+        logger,
+        catalogue,
+        audit: ingestionAudit,
+        signal: lifecycle.signal,
+        rules: declaredLabelRules(BUILD),
+      }),
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => {
+        logger.error(
+          describeError(error),
+          'could not finish naming the channels created by their key at startup; the next ' +
+            'start tries again',
+        );
+      },
+    );
+  lifecycle.onShutdown({
+    name: 'declared-label-repair',
+    timeoutMs: 5_000,
+    run: () => labelRepair,
   });
 
   // **Stored parameters a later build's schema refuses are named at every start** (`P-358`):

@@ -14,7 +14,11 @@ import { Ingestor } from '../src/ingestion/ingestor.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import type { Actor, AuditSink } from '../src/objects/audit.js';
-import { declaredChannelLookup, declaredLimitsLookup } from '../src/state/declared-limits.js';
+import {
+  declaredChannelLookup,
+  declaredLimitsLookup,
+  type ChannelShape,
+} from '../src/state/declared-limits.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -952,6 +956,10 @@ interface Shape {
   counterBits: number | null;
 }
 
+/** A shape's lookup and counter width, which the table below is about; its labels are `P-402`'s. */
+const lookupAndWidth = (shape: ChannelShape | undefined): Shape | undefined =>
+  shape === undefined ? undefined : { lookup: shape.lookup, counterBits: shape.counterBits };
+
 /**
  * What `declaredChannelLookup` answers for one sensor (`P-297`), against the shipped catalogue.
  *
@@ -1049,7 +1057,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       assert.ok(catalogue.has(one.type), `${one.type} is not a shipped type`);
       assert.equal(catalogue.declaration(one.type).fixedChannels, undefined, 'not a fixed type');
       const answer = shipped(one.type, one.params, 1);
-      assert.deepEqual(answer.shapes.get(one.key), one.shape, 'the sensor');
+      assert.deepEqual(lookupAndWidth(answer.shapes.get(one.key)), one.shape, 'the sensor');
       assert.equal(answer.undeclared, false, 'answered for its own parameters (`P-306`)');
       assert.equal(answer.primary, one.primary, 'its primary (`P-314`)');
       assert.equal(
@@ -1057,7 +1065,11 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
         catalogue.declaration(one.type).declaresEveryChannel === true,
         'whether it promises every key (`P-321`)',
       );
-      assert.deepEqual(shipped(one.type, {}, 1).shapes.get(one.key), one.bare, '`{}`');
+      assert.deepEqual(
+        lookupAndWidth(shipped(one.type, {}, 1).shapes.get(one.key)),
+        one.bare,
+        '`{}`',
+      );
     });
   }
 
@@ -1101,7 +1113,9 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     catalogue.register(unanswerable);
     const shapes = declaredChannelLookup(catalogue.seal());
 
-    const bare: Shape = { lookup: null, counterBits: 64 };
+    // **A fallback names nothing** (`P-402`): its `{}` answer may name a key otherwise than the
+    // sensor's own would, and a row named from it would look right and never be looked at again.
+    const bare: ChannelShape = { lookup: null, counterBits: 64, name: null, unit: null };
     const broken = shapes('test.fragile', { broken: true }, 1);
     const limited = shapes('test.fragile', { limited: true }, 1);
     assert.deepEqual(broken.shapes.get('total'), bare);
@@ -1122,7 +1136,8 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     assert.equal(nothing.undeclared, true);
     assert.equal(nothing.primary, null);
     const answered = shapes('test.unanswerable', { columns: [] }, 1);
-    assert.deepEqual(answered.shapes.get('one'), bare);
+    // The sensor's own answer carries its declared name, and its unit as a create writes it.
+    assert.deepEqual(answered.shapes.get('one'), { ...bare, name: 'One', unit: '' });
     assert.equal(answered.undeclared, false);
     assert.equal(answered.primary, 'one');
   });
