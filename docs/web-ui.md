@@ -220,8 +220,8 @@ Above the catalogue, **Channels without the lookup their type declares** opens
 `/channels/without-lookup` (`P-308`): status channels judged by nothing, because they do not hold
 the lookup their sensor's type declares, on the sensors you can see. Most lost it in a clone made
 before `P-302`; some may have been cleared on purpose, so the page lists them and fills nothing
-in. Each row names the sensor, the channel and the declared lookup. The lookup is set through the
-API, since the channel table shows a channel's lookup but cannot yet set one (`U-82`). A status
+in. Each row names the sensor, the channel and the declared lookup, and goes to the sensor, whose
+channel table sets the lookup and offers the declared one first (`U-82`). A status
 line says how many there are, and says the list is the first thousand of more when the core cut
 it; a line under it counts the sensors whose type could not say what it declares.
 
@@ -335,6 +335,20 @@ channels, and Windows CPU's per-processor and Windows Volume's per-drive channel
 was read, so no channel of those three types is ever called retired. Nor is a channel
 with a reading newer than the last change to the sensor's parameters (`P-340`): a probe running a newer build than the core
 may still read a key the core's build no longer declares (`P-322`).
+
+**Setting a channel's lookup** (`U-82`). For an account that may write the sensor, each row's
+**Judged by** has a list of lookups and **Set lookup** under what judges it now. The list offers
+the lookup the sensor's type declares for that channel first, marked as declared by its type, then
+**None**, which judges the channel by its limits, then every loaded lookup by name. A lookup the
+channel names that is not loaded is offered as it is, marked, so the list shows what the channel
+has. Choosing in the list sets nothing until **Set lookup** is pressed: a lookup can turn the
+sensor Down, and arrow keys move a closed list's choice in some browsers. The new lookup judges
+the channel from its next reading, and the line under the row says so. A refusal is said there
+too, with its correlation id; one refused because the sensor changed since the page was read says
+to reload first. Setting a lookup moves the sensor's version, and the page reads the sensor again;
+anything typed in **Parameters** and not yet saved stays, since its parameters did not move. An
+account that may only read the sensor is shown the lookup and no list. Retired channels are
+offered the list too, for the day their key is put back.
 
 Add a sensor beneath a device at `/objects/:id/add-sensor`. Everything after "which type" is
 generated from the type's `paramsSchema`, which is what keeps adding a sensor type a one-file job.

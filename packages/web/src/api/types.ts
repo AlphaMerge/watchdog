@@ -205,6 +205,12 @@ export interface ChannelRecord {
    */
   lookupId: string | null;
   /**
+   * The lookup the sensor's type declares for this channel (`U-82`), or `null`. The channel table
+   * offers it first when a lookup is set: a channel created before its type declared one, or one
+   * somebody cleared, has none.
+   */
+  declaredLookup: string | null;
+  /**
    * Nothing will read this channel again (`P-310`): an edit took its key out of the sensor's
    * parameters, and its type reports no channel it does not declare. History kept. `false` also
    * where the core cannot say, so never read it as "being read".

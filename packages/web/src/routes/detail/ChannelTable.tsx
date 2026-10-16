@@ -4,6 +4,7 @@ import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '.
 import { Empty } from '../../components/Panels';
 import { channelLinkFor } from './channel-links';
 import { HideRetired } from './HideRetired';
+import { LookupControl, type LookupEditing } from './LookupControl';
 import { formatValue, howLongAgo } from './model';
 
 /**
@@ -31,6 +32,7 @@ export function ChannelTable({
   now,
   hideRetired,
   onHideRetiredChange,
+  editing,
 }: {
   channels: readonly ChannelRecord[];
   /** The sensor's type, for a channel whose number has a page that lists what it counts. */
@@ -45,6 +47,11 @@ export function ChannelTable({
    */
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
+  /**
+   * Given only to a caller who may write the sensor: each row then sets its channel's lookup
+   * (`U-82`), a retired one included, for the day its key is put back.
+   */
+  editing?: LookupEditing | undefined;
 }): React.JSX.Element {
   // Before the early return: a hook is called on every render or on none.
   const retiredNote = useId();
@@ -145,6 +152,9 @@ export function ChannelTable({
               </td>
               <td className="py-2 pr-3 align-top">
                 <Judgement channel={channel} lookups={lookups} />
+                {editing !== undefined && (
+                  <LookupControl channel={channel} lookups={lookups} editing={editing} />
+                )}
               </td>
             </tr>
           ))}

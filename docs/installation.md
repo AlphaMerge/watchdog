@@ -524,15 +524,18 @@ curl -s "${auth[@]}" http://127.0.0.1:8080/api/v1/channels/without-lookup
 
 The list names only sensors you can see, the first thousand of them with `total` counting the
 rest, and never fills anything in. Set the ones that should be judged, one channel at a time,
-with the lookup the list names (`ms.snmp.if-oper-status` for an interface status), by the API;
-the web UI shows a channel's lookup but cannot set one yet:
+with the lookup the list names (`ms.snmp.if-oper-status` for an interface status). In the web UI,
+open the sensor from the list; in its channel table, under **Judged by**, choose the lookup marked
+as declared by its type and press **Set lookup** (`U-82`). It needs write on the sensor. Or by
+the API:
 
 ```bash
 curl -s "${auth[@]}" -X PATCH http://127.0.0.1:8080/api/v1/objects/<sensor id>/channels/status \
   -d '{"lookupId": "ms.snmp.if-oper-status"}'
 ```
 
-It takes effect at the sensor's next scan. A port whose status should stay unjudged needs nothing.
+It judges the channel from its next reading. A port whose status should stay unjudged needs
+nothing.
 
 ## Uninstalling
 

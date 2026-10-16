@@ -367,6 +367,7 @@ export const channelRecordSchema = {
     'showInGraph',
     'showInTable',
     'lookupId',
+    'declaredLookup',
     'retired',
   ],
   properties: {
@@ -386,6 +387,14 @@ export const channelRecordSchema = {
     showInGraph: { type: 'boolean' },
     showInTable: { type: 'boolean' },
     lookupId: { type: ['string', 'null'] },
+    declaredLookup: {
+      type: ['string', 'null'],
+      description:
+        'The lookup the sensor’s type declares for this channel, for its stored parameters, or ' +
+        '`null`: none declared, or a type that cannot answer for them or is not registered. A ' +
+        'channel created before its type declared one has `lookupId` null beside it; set it with ' +
+        '`PATCH /objects/{id}/channels/{key}`. Worked out from the type on every read.',
+    },
     retired: {
       type: 'boolean',
       description:

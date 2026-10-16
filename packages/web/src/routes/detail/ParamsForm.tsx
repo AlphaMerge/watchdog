@@ -47,11 +47,25 @@ export function ParamsForm({
   // to be put back to what the core now holds — a value the core normalised, a secret now
   // stored — or the form would call itself changed the moment it was saved. Set while rendering,
   // as React's guide has a prop-derived reset done, so no render shows the stale values.
+  //
+  // **Only after this form's save, or when the parameters themselves moved** (`U-82`). A
+  // channel's lookup set in the table above moves the sensor's version and nothing here, and
+  // starting again from that threw away whatever had been typed. Keeping it cannot save over an
+  // edit this form did not see: the next save is held to the new version, and parameters that
+  // moved start the form again.
   const [basis, setBasis] = useState(detail.version);
+  const [basisParams, setBasisParams] = useState(() => JSON.stringify([stored, redacted]));
+  /** This form's own save, read back: the version it moves starts the form again. */
+  const [readingBack, setReadingBack] = useState(false);
   if (basis !== detail.version) {
+    const now = JSON.stringify([stored, redacted]);
     setBasis(detail.version);
-    setValues(stored);
-    setReplacing(new Set());
+    setBasisParams(now);
+    setReadingBack(false);
+    if (readingBack || now !== basisParams) {
+      setValues(stored);
+      setReplacing(new Set());
+    }
   }
 
   // Memoised on the type rather than derived inline: a fresh `{}` every render would rebuild the
@@ -102,6 +116,7 @@ export function ParamsForm({
         setReplacing(new Set());
         setLookupsKept(reply.lookupsKept ?? []);
         setSaved(true);
+        setReadingBack(true);
         onSaved();
       })
       .catch((error: unknown) => {
@@ -229,8 +244,8 @@ export function ParamsForm({
  * older build, say — so a lookup set by hand on the channel cannot be told from the one the type
  * set, and the core leaves the lookup as it is rather than overwrite an operator's choice. Said
  * after *Saved*, in text and not by colour alone, naming each channel, with the way forward: the
- * operator who made the edit is the one who knows whether the kept lookup is still right. No form
- * here sets a channel's lookup, so it says where one is set.
+ * operator who made the edit is the one who knows whether the kept lookup is still right. The
+ * Channels table above is where a channel's lookup is set (`U-82`), so it says so.
  */
 function LookupsKept({ channels }: { channels: readonly string[] }): React.JSX.Element {
   const one = channels.length === 1;
@@ -243,11 +258,8 @@ function LookupsKept({ channels }: { channels: readonly string[] }): React.JSX.E
         : this sensor’s stored parameters can no longer be read by its type, so a lookup chosen by
         hand could not be told from the one the type set, and the edit left {one ? 'it' : 'them'} as{' '}
         {one ? 'it was' : 'they were'}. The Channels table shows the lookup{' '}
-        {one ? 'it has' : 'each has'}; a channel’s lookup is set through the API, at{' '}
-        <code className="font-mono">
-          PATCH /api/v1/objects/{'{id}'}/channels/{'{key}'}
-        </code>
-        .
+        {one ? 'it has' : 'each has'}, and is where an account that may change this sensor sets
+        another, or none.
       </p>
       <ul className="mt-1 list-disc pl-5">
         {channels.map((key) => (

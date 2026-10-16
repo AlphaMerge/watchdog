@@ -231,6 +231,7 @@ describe('Core Health’s count of sensors with invalid parameters', () => {
     spikeMin: null,
     spikeMax: null,
     lookupId: null,
+    declaredLookup: null,
     retired: false,
   });
 

@@ -1089,7 +1089,7 @@ export class ObjectRepository {
     q: Queryable,
     sensorId: ObjectId,
     reportable: ReadonlySet<string> | null,
-  ): Promise<ChannelRecord[]> {
+  ): Promise<(StoredChannelRecord & Pick<ChannelRecord, 'retired'>)[]> {
     return (await this.#channelRows(q, sensorId, reportable)).map((row) => ({
       ...storedChannelOf(row),
       retired: row.retired,

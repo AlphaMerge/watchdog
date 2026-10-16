@@ -1227,6 +1227,7 @@ describe('Core Health’s count of sets without bounds', () => {
     spikeMin: null,
     spikeMax: null,
     lookupId: null,
+    declaredLookup: null,
     retired: false,
   });
   const CHANNELS = [

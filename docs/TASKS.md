@@ -29063,13 +29063,68 @@ because each is a decision rather than a defect:
       - **The bar.** The whole file 52 runs in a row with four copies running at once — the load
         that reproduced it once in 48 before the fix — all passed. Full web suite 1,106 passed.
 
-- [ ] **U-82 — a channel's lookup cannot be set from the web UI** · S · P-308 · Found 2026-10-12
+- [x] **U-82 — a channel's lookup cannot be set from the web UI** · S · P-308 · Found 2026-10-12
       in `P-308`. The list of channels without their declared lookup tells an operator which to
       set, and the channel table shows a channel's lookup, but setting one takes
       `PATCH /objects/{id}/channels/{key}` with `lookupId`. **Done when** the channel table can
       set and clear a channel's lookup for a caller with write on the sensor, offering the
       declared one first, and the list's page and `installation.md` say so instead of the API
       call.
+
+      **U-82 outcome. Set from the channel table, the declared lookup offered first.**
+      - **The record says what is declared.** A channel record had no word of its type's
+        declared lookup, so the table could not offer it first.
+        - `ChannelRecord.declaredLookup` is now on `ms:channelRecord`, derived on every read
+          from `storedChannelsFor`, as `retired` is. It is `null` where the type cannot answer
+          or is not registered.
+        - `ObjectService.#channelRecords` makes it for the list, the detail and a set's answer.
+        - The detail's tag folds it in beside `retired` (`derivedOf`), only when there is one.
+          A build that changes a declaration moves no version. The tag's salt (`H-11`) already
+          moves it across commits; the fold keeps it honest where the salt does not, such as
+          the same commit packaged with another profile.
+      - **The control** (`LookupControl.tsx`), under each row's *Judged by*.
+        - It is offered only where the page decides the caller may write the sensor:
+          `mayWrite` over `…/access/effective`, as the credentials tab asks it.
+        - It lists the declared lookup first, then *None*, then every loaded lookup by name. A
+          lookup the channel has that is not loaded is offered as it is, marked.
+        - *Set lookup* sends `PATCH` with the sensor's version as `If-Match`. Nothing is set on
+          a change of the list, since a lookup can turn the sensor Down.
+        - The button is `aria-disabled`, not `disabled`, while it sets and when there is nothing
+          to set (`U-73`): pressed, it holds focus, and a disabled one dropped it to the page.
+          Its name starts with the words on it, *Setting lookup* while out.
+        - A status line and an alert sit under the row. A 412 says to reload.
+        - The page then reads the channels and the sensor again. Every row holds its set until
+          those reads land (`pending`): the write moved the version, the answer does not carry
+          it, and a set before the sensor is read again was refused as somebody else's.
+      - **The parameters form keeps what was typed.** A lookup set moves the sensor's version,
+        and the form used to start again on any move, which threw away unsaved typing. It now
+        starts again only after its own save or when the stored parameters moved. Its next save
+        is held to the new version either way.
+      - **Words.** The list page, `installation.md`, `web-ui.md`, the form's *kept lookups*
+        note and the API description of `/channels/without-lookup` now point at the table.
+      - **Tests.**
+        - Core: `channel-declared-lookup.test.ts`. The record says the declared lookup beside
+          the one held, on the list, the detail, a set's answer and the service; `null` where
+          the type cannot answer or is not registered; and the tag moves when a build declares
+          another.
+        - Web: `channel-lookup.test.tsx` covers the order of the choices, nothing set before
+          the button, the PATCH and its `If-Match`, the next set held to the moved version, the
+          key as a path segment, a 412, and who the page offers it to. It also covers focus kept
+          on the button through a set, a set held while the page reads again, and, on the page
+          itself, a set then a second held until the sensor is read, sent with the new version.
+        - `params-form-saved.test.tsx` covers typing kept through a lookup set, the form
+          starting again from moved parameters, and from its own save even when the parameters
+          read back unchanged.
+      - **Mutants 15/15:**
+        - Core: the declared lookup always null, a set's answer without it, the tag ignoring it.
+        - Web: none offered before the declared lookup, a set on a change of the list, no
+          `If-Match`, the key not encoded, the page not told of a set, the list offered to any
+          session, and the form starting again on any version or not after its own save.
+        - Web, from the review: `pending` ignored by the control or never set by the page, the
+          button `disabled` rather than `aria-disabled`, and the page not reading the sensor
+          again after a set.
+      - **Not seen in a browser.** Reaching the page means signing in, a credential this session
+        does not enter.
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.

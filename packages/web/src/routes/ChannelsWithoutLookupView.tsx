@@ -11,8 +11,8 @@ import { summary, WITHOUT_LOOKUP_PATH } from './channels-without-lookup';
  *
  * **Listed, never filled, and the page says why.** Most are channels a clone made before
  * `P-302` lost, but an empty lookup may also be one somebody cleared so that a shut port stays
- * quiet, and nothing recorded tells the two apart. Each row goes to its sensor. A lookup is set
- * through the API: the channel table shows one and has no control to set it yet (`U-82`).
+ * quiet, and nothing recorded tells the two apart. Each row goes to its sensor, whose channel
+ * table sets a lookup, offering the declared one first (`U-82`).
  *
  * **Only the sensors this reader can see**, and at most the core's first thousand, with the
  * total said when the list is cut.
@@ -29,10 +29,10 @@ export function ChannelsWithoutLookupView(): React.JSX.Element {
         lookup their type declares, so their values are judged by nothing. Most lost it when they
         were cloned by an earlier release. Somebody may also have cleared one on purpose, so that a
         port nobody uses stays quiet, and nothing recorded tells the two apart, so none is filled in
-        for you. Set the lookup listed here on the ones that should be judged, through the API with{' '}
-        <code className="font-mono text-xs">PATCH /api/v1/objects/:id/channels/:key</code>; the
-        channel table shows a lookup but cannot set one yet. One that should stay quiet needs
-        nothing.
+        for you. Set the lookup listed here on the ones that should be judged: open the sensor, and
+        in its channel table under <span className="font-medium">Judged by</span> choose the lookup
+        marked as declared by its type, then <span className="font-medium">Set lookup</span>.
+        Setting one needs write on the sensor. One that should stay quiet needs nothing.
       </p>
 
       {list.status === 'loading' && <Loading what="the channels without their lookup" />}

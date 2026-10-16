@@ -45,6 +45,7 @@ const channel = (id: number, name: string, retired: boolean): ChannelRecord => (
   spikeMin: null,
   spikeMax: null,
   lookupId: null,
+  declaredLookup: null,
   retired,
 });
 

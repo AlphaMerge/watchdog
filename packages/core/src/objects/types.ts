@@ -325,6 +325,14 @@ export interface ChannelRecord {
    */
   readonly lookupId: string | null;
   /**
+   * The lookup this channel's sensor type declares for it, for the sensor's stored parameters
+   * (`U-82`), or `null`: none declared, or a type that cannot answer for them or is not
+   * registered in this build. What the channel table offers first when an operator sets a
+   * lookup, since a channel created before its type declared one (`P-308`), or one somebody
+   * cleared, has none. **Derived on every read, never stored**, as `retired` is.
+   */
+  readonly declaredLookup: string | null;
+  /**
    * Nothing will read this channel again (`P-310`): its sensor's type declares every channel it
    * reports, the sensor's stored parameters no longer declare this key, and it has no reading
    * newer than the last change to the sensor's parameters (`P-322`, `P-340`). An edit took it out (a table
@@ -346,7 +354,7 @@ export interface ChannelRecord {
 }
 
 /** A channel as its row holds it: everything but what is derived on read. */
-export type StoredChannelRecord = Omit<ChannelRecord, 'retired'>;
+export type StoredChannelRecord = Omit<ChannelRecord, 'retired' | 'declaredLookup'>;
 
 /** No secret, no key id, no length, no hash. There is no field a secret could occupy. */
 export interface CredentialView {

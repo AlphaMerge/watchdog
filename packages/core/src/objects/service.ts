@@ -401,13 +401,35 @@ export class ObjectService {
         { context: { objectId: id, phase: 'channels' }, details: { storedKind: object.kind } },
       );
     }
-    // Retired (`P-310`) is the type's declaration for those parameters not naming the key and no
-    // reading since they last changed (`P-322`), worked out in the query that reads the rows.
-    return this.#repo.channelsWithRetirement(
-      this.#db,
+    return this.#channelRecords(this.#db, id, object.sensorType, object.params);
+  }
+
+  /**
+   * A sensor's channels with what is derived on read. Retired (`P-310`) is the type's declaration
+   * for its parameters not naming the key and no reading since they last changed (`P-322`),
+   * worked out in the query that reads the rows. The declared lookup (`U-82`) is the same
+   * declaration's, as `channelsWithoutLookup` reads it.
+   */
+  async #channelRecords(
+    q: Queryable,
+    id: ObjectId,
+    sensorType: string,
+    params: Record<string, unknown>,
+  ): Promise<ChannelRecord[]> {
+    const rows = await this.#repo.channelsWithRetirement(
+      q,
       id,
-      this.#sensorTypes.reportableKeys(object.sensorType, object.params),
+      this.#sensorTypes.reportableKeys(sensorType, params),
     );
+    const declaration = this.#sensorTypes.storedChannelsFor(sensorType, params);
+    const declared = new Map(
+      declaration.kind === 'declared'
+        ? declaration.channels.flatMap((one) =>
+            one.lookup === undefined ? [] : [[one.key, one.lookup] as const],
+          )
+        : [],
+    );
+    return rows.map((row) => ({ ...row, declaredLookup: declared.get(row.key) ?? null }));
   }
 
   /**
@@ -559,13 +581,9 @@ export class ObjectService {
       // record read before it carries an ETag that is already stale (the trap S-16 documented).
       // A retired channel can still be set, for the day its key is put back; the answer says it
       // is retired as the list does, from the same query.
-      const updated = (
-        await this.#repo.channelsWithRetirement(
-          q,
-          id,
-          this.#sensorTypes.reportableKeys(object.sensorType, object.params),
-        )
-      ).find((channel) => channel.key === key);
+      const updated = (await this.#channelRecords(q, id, object.sensorType, object.params)).find(
+        (channel) => channel.key === key,
+      );
       if (updated === undefined) throw notFound(id);
       return updated;
     });

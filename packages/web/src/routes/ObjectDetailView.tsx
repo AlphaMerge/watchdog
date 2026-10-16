@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { sameWords, useApi, type ApiError } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
@@ -7,6 +7,7 @@ import type {
   AuditEntry,
   AuditPage,
   ChannelRecord,
+  EffectiveAccess,
   LookupSummary,
   ObjectDetail,
   PauseView,
@@ -14,12 +15,15 @@ import type {
   SensorValues,
   SettingView,
 } from '../api/types';
+import { SessionContext } from '../auth/session';
 import { HeldListFailure } from '../components/HeldListFailure';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { TabPanel, Tabs } from '../components/Tabs';
 import { rollup, stateFor } from '../tree/model';
 import { ChannelTable } from './detail/ChannelTable';
+import { asksForRight, mayWrite } from './detail/credentials-model';
+import type { LookupEditing } from './detail/LookupControl';
 import { CredentialsPanel } from './detail/CredentialsPanel';
 import { HistoryPanel } from './detail/HistoryPanel';
 import { SettingsPanel } from './detail/SettingsPanel';
@@ -269,6 +273,16 @@ export function ObjectDetailView(): React.JSX.Element {
   const pause = useApi<PauseView>(shownObject === null ? null : `/objects/${id}/pause`);
   const types = useApi<{ items: SensorTypeSummary[] }>(isSensor ? '/sensor-types' : null);
   const lookups = useApi<{ items: LookupSummary[] }>(isSensor ? '/lookups' : null);
+  // Whether the channel table offers to set a channel's lookup (`U-82`): write on the sensor, as
+  // the credentials tab asks it. From the session's context, not `useSession`, which throws
+  // without one: the page is drawn in tests with no session, and there it offers nothing.
+  const session = useContext(SessionContext)?.session;
+  const access = useApi<EffectiveAccess>(
+    isSensor && session !== undefined && asksForRight(session)
+      ? `/objects/${id}/access/effective`
+      : null,
+  );
+  const setsLookups = session !== undefined && mayWrite(session, access);
 
   // Live, over the stream. For a container this is every sensor beneath it, which is what the
   // header badge rolls up — the same computation the tree does, from the same source.
@@ -361,6 +375,21 @@ export function ObjectDetailView(): React.JSX.Element {
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                   hideRetired={hideRetired}
                   onHideRetiredChange={setHideRetired}
+                  editing={
+                    setsLookups
+                      ? {
+                          sensorId: detail.id,
+                          version: detail.version,
+                          pending: object.status === 'loading' || channels.status === 'loading',
+                          // The write moved the sensor's version: both, or the next save of
+                          // the parameters below would be refused as somebody else's change.
+                          onSaved: () => {
+                            channels.reload();
+                            object.reload();
+                          },
+                        }
+                      : undefined
+                  }
                 />
               </Card>
             )}
@@ -598,6 +627,7 @@ function LiveChannels({
   lookups,
   hideRetired,
   onHideRetiredChange,
+  editing,
 }: {
   sensorType: string | undefined;
   channels: readonly ChannelRecord[] | null;
@@ -623,6 +653,8 @@ function LiveChannels({
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
+  /** Given to a caller who may write the sensor: the table then sets lookups (`U-82`). */
+  editing: LookupEditing | undefined;
 }): React.JSX.Element {
   if (channels === null) {
     return (
@@ -673,6 +705,7 @@ function LiveChannels({
         now={Date.now()}
         hideRetired={hideRetired}
         onHideRetiredChange={onHideRetiredChange}
+        editing={editing}
       />
     </>
   );

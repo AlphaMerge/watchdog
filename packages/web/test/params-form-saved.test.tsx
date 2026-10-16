@@ -147,3 +147,107 @@ describe('a save the core accepted (U-36)', () => {
     expect(screen.getByRole('status')).toBe(region);
   });
 });
+
+/**
+ * The page, with the sensor's version moved by something other than this form: a channel's
+ * lookup set in the table above it (`U-82`), or somebody else's edit of the parameters.
+ */
+function Moved({
+  reread = { unit: 'C' },
+}: {
+  /** The parameters the re-read after this form's save answers. */
+  reread?: Record<string, unknown>;
+}): React.JSX.Element {
+  const [detail, setDetail] = useState(DETAIL);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setDetail((was) => ({ ...was, version: was.version + 1 }));
+        }}
+      >
+        A lookup set
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setDetail((was) => ({ ...was, version: was.version + 1, params: { unit: 'K' } }));
+        }}
+      >
+        The parameters edited elsewhere
+      </button>
+      <ParamsForm
+        detail={detail}
+        type={TYPE}
+        onSaved={() => {
+          setDetail((was) => ({ ...was, version: was.version + 1, params: reread }));
+        }}
+      />
+    </>
+  );
+}
+
+describe('a version moved by something other than this form (U-82)', () => {
+  const unit = (): HTMLInputElement =>
+    screen.getByRole('textbox', { name: 'Unit' }) as unknown as HTMLInputElement;
+
+  it('keeps what was typed when the parameters did not move, and saves it held to the new version', async () => {
+    const tags: (string | null)[] = [];
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      tags.push(new Headers(init?.headers).get('if-match'));
+      return Promise.resolve(
+        new Response(JSON.stringify({ ...DETAIL, version: 3, params: { unit: 'F' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    render(<Moved />);
+    fireEvent.change(unit(), { target: { value: 'F' } });
+    fireEvent.click(screen.getByRole('button', { name: 'A lookup set' }));
+    expect(unit().value).toBe('F');
+    fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
+    await waitFor(() => {
+      expect(tags).toEqual(['W/"2"']);
+    });
+  });
+
+  it('starts again from parameters that moved, as from a save', () => {
+    render(<Moved />);
+    fireEvent.change(unit(), { target: { value: 'F' } });
+    fireEvent.click(screen.getByRole('button', { name: 'The parameters edited elsewhere' }));
+    expect(unit().value).toBe('K');
+  });
+
+  it('starts again from its own save, and keeps what is typed after it through a lookup set', async () => {
+    core();
+    render(<Moved />);
+    fireEvent.change(unit(), { target: { value: 'C' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toBe(SAVED);
+    });
+    expect(unit().value).toBe('C');
+    fireEvent.change(unit(), { target: { value: 'D' } });
+    fireEvent.click(screen.getByRole('button', { name: 'A lookup set' }));
+    expect(unit().value).toBe('D');
+  });
+
+  it('starts again from its own save when the core kept the parameters as they were', async () => {
+    // A value the core normalised back to what it held: the version moved and the parameters did
+    // not, and the form shows what is stored rather than calling itself changed.
+    core();
+    render(<Moved reread={{ unit: '' }} />);
+    fireEvent.change(unit(), { target: { value: 'C' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toBe(SAVED);
+    });
+    expect(unit().value).toBe('');
+    expect(screen.getByRole('button', { name: 'Save parameters' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+  });
+});

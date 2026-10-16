@@ -499,15 +499,25 @@ const parseInclude = (raw: string | undefined): Set<IncludeToken> =>
   parseTokens(raw, INCLUDE_TOKENS);
 
 /**
- * The ids of a sensor's retired channels, sorted, for the detail's validator (`P-322` review):
- * the one part of `?include=channels` that a reading, rather than a write, can change.
+ * What `?include=channels` carries that no write versions, for the detail's validator: the ids of
+ * a sensor's retired channels (`P-322` review), which a reading can change, and each channel's
+ * declared lookup (`U-82`), which a build can. Sorted, so one answer reads one way.
  */
-const retiredOf = (channels: readonly ChannelRecord[]): string =>
-  channels
+const derivedOf = (channels: readonly ChannelRecord[]): string => {
+  const retired = channels
     .filter((channel) => channel.retired)
     .map((channel) => channel.id)
     .sort((a, b) => a - b)
     .join(',');
+  const declared = channels
+    .flatMap((channel) =>
+      channel.declaredLookup === null ? [] : [`${String(channel.id)}=${channel.declaredLookup}`],
+    )
+    .sort()
+    .join(',');
+  // Only when there is one, so a sensor whose type declares none keeps the tag it had.
+  return declared === '' ? retired : `${retired}|declared:${declared}`;
+};
 
 // eslint-disable-next-line @typescript-eslint/require-await -- Fastify plugins are async by contract
 export async function objectRoutes(
@@ -550,18 +560,18 @@ export async function objectRoutes(
       : await service.visibleChildCount(id, visibility);
     if (childCount !== undefined) body['childCount'] = childCount;
     if (include.has('settings')) body['settings'] = await service.settings(id);
-    let retired: string | undefined;
+    let derived: string | undefined;
     if (include.has('channels') && object.kind === 'sensor') {
       const channels = await service.channels(id);
       body['channels'] = channels;
-      retired = retiredOf(channels);
+      derived = derivedOf(channels);
     }
     if (include.has('credentials')) body['credentials'] = await service.credentials(id, true);
     if (include.has('ancestors')) body['ancestors'] = await service.ancestors(id, visibility);
 
     await reply
       .status(status)
-      .header('ETag', await detailTag(request, object, include, visibility, childCount, retired))
+      .header('ETag', await detailTag(request, object, include, visibility, childCount, derived))
       .header('cache-control', PRIVATE)
       .send(body);
   };
@@ -601,26 +611,27 @@ export async function objectRoutes(
     visibility: Visibility,
     childCount: number | undefined,
     /**
-     * `retiredOf` the channels the answer carries, when it carries them (`P-322` review).
+     * `derivedOf` the channels the answer carries, when it carries them (`P-322` review).
      * `retired` is derived from `sample` on every read, and a reading moves it without moving
      * the object's version or chain, so without this a client revalidating `?include=channels`
      * kept a 304 on a channel a reading had made live again, and retention dropping the reading
      * that kept one live left it shown live. Folded into the chain as a view is (`A-32`), so the
-     * tag stays one `If-Match` reads.
+     * tag stays one `If-Match` reads. A channel's declared lookup is folded in the same way
+     * (`U-82`): a build that changes a type's declaration moves no version either.
      */
-    retired?: string,
+    derived?: string,
   ): Promise<string> => {
     const inheritsHidden = include.has('settings') || include.has('credentials');
     const chain =
       include.size === 0
         ? undefined
         : await validatorFor(object.id, inheritsHidden ? undefined : visibility);
-    const derived = retired === undefined ? '' : `|retired:${retired}`;
+    const folded = derived === undefined ? '' : `|retired:${derived}`;
     if (visibility.everything) {
-      return etagFor(object.version, viewedChain(chain, `#${String(object.childCount)}${derived}`));
+      return etagFor(object.version, viewedChain(chain, `#${String(object.childCount)}${folded}`));
     }
     const view =
-      `${sightOf(request).key}@${String(visibility.epoch)}#${String(childCount)}` + derived;
+      `${sightOf(request).key}@${String(visibility.epoch)}#${String(childCount)}` + folded;
     return etagFor(object.version, viewedChain(chain, view));
   };
 
@@ -911,13 +922,13 @@ export async function objectRoutes(
         const childCount = visibility.everything
           ? undefined
           : await service.visibleChildCount(id, visibility);
-        // `retired` is read, not versioned (`P-322`), so it is asked here too: one query of the
-        // sensor's channels, still short of the full render.
-        const retired =
+        // `retired` and the declared lookups are read, not versioned (`P-322`, `U-82`), so they
+        // are asked here too: one query of the sensor's channels, still short of the full render.
+        const derived =
           include.has('channels') && object.kind === 'sensor'
-            ? retiredOf(await service.channels(id))
+            ? derivedOf(await service.channels(id))
             : undefined;
-        const current = await detailTag(request, object, include, visibility, childCount, retired);
+        const current = await detailTag(request, object, include, visibility, childCount, derived);
         if (ifNoneMatch === current) {
           await reply.status(304).header('ETag', current).header('cache-control', PRIVATE).send();
           return;
@@ -2100,7 +2111,8 @@ export async function objectRoutes(
           'nothing. Most are channels a clone made before `P-302` lost, which migration 073 ' +
           'left empty; but an operator may also have cleared one on purpose, and nothing ' +
           'recorded tells the two apart, so nothing is filled: set the ones that should be ' +
-          'judged with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the ' +
+          'judged in the sensor’s channel table, or with `PATCH /objects/{id}/channels/{key}` ' +
+          'and `lookupId`. **Only sensors the ' +
           'caller can see**, by sensor id and then key, at most ' +
           `${String(MAX_CHANNELS_WITHOUT_LOOKUP)}; \`total\` counts all of them. ` +
           '`unanswered` counts sensors whose type could not say what it declares for their ' +

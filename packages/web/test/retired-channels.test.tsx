@@ -44,6 +44,7 @@ function channel(id: number, key: string, over: Partial<ChannelRecord> = {}): Ch
     spikeMin: null,
     spikeMax: null,
     lookupId: null,
+    declaredLookup: null,
     retired: false,
     ...over,
   };

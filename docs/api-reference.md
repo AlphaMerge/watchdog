@@ -471,7 +471,7 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 - `limits`: at least 1 field must be given
 - `processing`: at least 1 field must be given
 
-**200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId, retired }
+**200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId, declaredLookup, retired }
 
 **200** is [ms:channelRecord](#schema-ms-channelrecord)
 
@@ -2495,7 +2495,7 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 
 Channels without the lookup their type declares
 
-The channels whose sensor type declares a lookup, for the sensor’s stored parameters, that the channel does not hold (`P-308`), so its value is judged by nothing. Most are channels a clone made before `P-302` lost, which migration 073 left empty; but an operator may also have cleared one on purpose, and nothing recorded tells the two apart, so nothing is filled: set the ones that should be judged with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the caller can see**, by sensor id and then key, at most 1000; `total` counts all of them. `unanswered` counts sensors whose type could not say what it declares for their parameters, or is not in this build: those are not judged either way.
+The channels whose sensor type declares a lookup, for the sensor’s stored parameters, that the channel does not hold (`P-308`), so its value is judged by nothing. Most are channels a clone made before `P-302` lost, which migration 073 left empty; but an operator may also have cleared one on purpose, and nothing recorded tells the two apart, so nothing is filled: set the ones that should be judged in the sensor’s channel table, or with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the caller can see**, by sensor id and then key, at most 1000; `total` counts all of them. `unanswered` counts sensors whose type could not say what it declares for their parameters, or is not in this build: those are not judged either way.
 
 **200** { items, total, unanswered }
 
@@ -4116,6 +4116,7 @@ one of 4 shapes, by `kind`
 | `showInGraph` | boolean | **required** |  |
 | `showInTable` | boolean | **required** |  |
 | `lookupId` | string | **required** nullable |  |
+| `declaredLookup` | string | **required** nullable | The lookup the sensor’s type declares for this channel, for its stored parameters, or `null`: none declared, or a type that cannot answer for them or is not registered. A channel created before its type declared one has `lookupId` null beside it; set it with `PATCH /objects/{id}/channels/{key}`. Worked out from the type on every read. |
 | `retired` | boolean | **required** | Nothing will read this channel again: the sensor’s type declares every channel it reports, and the sensor’s parameters no longer declare this one (an edit took it out), and it has no reading newer than the last change to the sensor’s parameters, which a probe running a newer build than the core could still send. A reading is timed by the probe’s clock, so after each change such a channel can read `true` for one scan interval plus however far that probe’s clock runs behind the core’s database. Its history is kept, and putting it back makes it live again. Worked out from the type on every read. `false` also where the type cannot say: one whose readings can name channels it does not declare, such as a script’s. |
 
 <a id="schema-ms-channelvalue"></a>
