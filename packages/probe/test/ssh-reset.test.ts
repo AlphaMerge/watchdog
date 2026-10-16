@@ -25,9 +25,10 @@ import { pollWithin, within } from './support/within.js';
  *
  * **What is stored is what an operator reads**, so that is what is asserted: the exec phase's own
  * sentence (the connection lost *while running* the command, which no connect, authentication or
- * host-key failure says), the host, the command and the socket error. The `SshError`'s `phase`
- * field does not cross the worker — no error's does, since a `CheckResult` carries a message — so
- * the sentence is where the phase is.
+ * host-key failure says), the host, the command and the socket error. **And since `P-285`, the
+ * phase and the host as fields**: the `SshError`'s own did not cross the worker, whose clone kept
+ * only its message, and now the worker copies them out and the result carries them as `failure`.
+ * The command does not cross: it is the error's, and nothing scrubs it.
  */
 
 const silent = pino({ level: 'silent' });
@@ -161,6 +162,11 @@ describe('an SSH device that resets the connection mid-command, through a probe'
       script.message,
     );
     assert.deepEqual(script.channels, []);
+    // **Where each failed, as fields** (`P-285`): the phase the sentence names, and the host.
+    assert.deepEqual(load.failure, { phase: 'exec', target: '127.0.0.1' });
+    assert.deepEqual(script.failure, { phase: 'exec', target: '127.0.0.1' });
+    assert.equal('failure' in next, false, 'a success has nowhere it failed');
+    assert.doesNotMatch(JSON.stringify(load.failure), /loadavg/, 'and never the command');
     assert.equal(
       next.channels.find((channel) => channel.key === 'processors')?.value,
       4,

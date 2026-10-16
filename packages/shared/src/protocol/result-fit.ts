@@ -1,4 +1,4 @@
-import type { ChannelReading, CheckResult } from './messages.js';
+import type { ChannelReading, CheckFailure, CheckResult } from './messages.js';
 
 /**
  * The bounds the wire schema puts on one check result (`P-277`), here so that the schema and
@@ -16,6 +16,22 @@ export const RESULT_LIMITS = {
   /** Characters of a channel's unit. */
   unit: 50,
 } as const;
+
+/**
+ * `CheckFailure.phase` (`P-285`): a word, as a transport or the runner names a phase — `connect`,
+ * `host-key`, `getBulk`, `worker-crash`. Open, so a new transport needs no protocol bump; bounded,
+ * so it cannot carry a sentence.
+ */
+export const FAILURE_PHASE = /^[a-z][a-zA-Z0-9-]{0,31}$/;
+
+/**
+ * `CheckFailure.target` (`P-285`): a plain host — a name, an IPv4 or IPv6 address (bracketed or
+ * not, with a zone), either with a port. **Listed, not excluded**: a target is taken from an
+ * error, and the characters a URL puts a user, a password or a token behind (`@`, `/`, `?`, `#`,
+ * `=`) are none of these, so what passes cannot carry a credential. A name outside ASCII is left
+ * off with the rest; the device's host still says it.
+ */
+export const FAILURE_TARGET = /^[A-Za-z0-9._:%[\]-]{1,255}$/;
 
 /** `ChannelReading.counter`: decimal text, as the schema has it. */
 const COUNTER = /^[0-9]{1,20}$/;
@@ -67,7 +83,8 @@ export interface FittedResult {
  * which leaves the value. A name or unit is clipped, and a name left empty is left off. The
  * channels past `RESULT_LIMITS.channels` are dropped. When any channel is dropped, the message
  * ends by saying how many (`withDropped`, `P-292`). A `durationMs` that is not a finite number
- * of zero or more is 0. Fields the schema does not know are not copied.
+ * of zero or more is 0. A `failure` is kept on a failed check only, bounded by `fitFailure`
+ * (`P-285`). Fields the schema does not know are not copied.
  */
 export function fitResult(result: CheckResult): FittedResult {
   const problems: string[] = [];
@@ -98,10 +115,34 @@ export function fitResult(result: CheckResult): FittedResult {
       channels,
       ...(result.withheld === true ? { withheld: true as const } : {}),
       ...(result.notStarted === true ? { notStarted: true as const } : {}),
+      ...failureFor(result),
     },
     problems,
     dropped,
   };
+}
+
+/**
+ * Where a check failed, bounded for the wire (`P-285`): a `phase` that is a word, and a `target`
+ * that is a plain host, or `null` when there is no phase to say. A target that is not plain is
+ * left off and the phase kept; nothing is clipped or replaced, since either would name another
+ * phase or another host. What every runner sends and what the core keeps, so a probe built with
+ * looser rules loses only what this drops.
+ */
+export function fitFailure(raw: unknown): CheckFailure | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const failure = raw as Record<string, unknown>;
+  const phase = failure['phase'];
+  if (typeof phase !== 'string' || !FAILURE_PHASE.test(phase)) return null;
+  const target = failure['target'];
+  return typeof target === 'string' && FAILURE_TARGET.test(target) ? { phase, target } : { phase };
+}
+
+/** `failure`, fitted, on a failed check only: what the schema's rule takes and nothing else. */
+function failureFor(result: CheckResult): { failure?: CheckFailure } {
+  if (result.outcome !== 'error' || result.failure === undefined) return {};
+  const failure = fitFailure(result.failure);
+  return failure === null ? {} : { failure };
 }
 
 /**

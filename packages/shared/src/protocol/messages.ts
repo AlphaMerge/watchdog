@@ -1,7 +1,7 @@
 import { Ajv, type ErrorObject } from 'ajv';
 import { AppError } from '../errors/app-error.js';
 import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
-import { fitResult, RESULT_LIMITS } from './result-fit.js';
+import { FAILURE_PHASE, FAILURE_TARGET, fitResult, RESULT_LIMITS } from './result-fit.js';
 import {
   PATTERN_MESSAGE,
   patternMessageKeyword,
@@ -60,6 +60,12 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * the hello's client certificate is not the one the probe's identity is bound to. A probe keeps
  * checking and keeps its key on it, as on `internal-error`, which is what a probe below 34 is told
  * instead, with the same sentence (`rejectCodeForPeer`): a newer code would fail its validation.
+ *
+ * Version 35 adds `failure` on a check result, under `failurePhase` (`P-285`): the phase a failed
+ * check failed in — the transport's (`connect`, `authenticate`, `exec`, `walk`) or else the
+ * runner's (`timeout`, `startup`) — and the host it was acting on, when it is a plain host. Only
+ * beside `outcome: 'error'`. Until 35 the phase reached the core only inside the message's prose.
+ * A core below 35 is sent the result without it, and keeps the prose, which still says it.
  *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
@@ -191,7 +197,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 34;
+export const PROTOCOL_VERSION = 35;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -344,6 +350,37 @@ export interface CheckResult {
    * Protocol 33; never beside `withheld`.
    */
   notStarted?: true;
+  /**
+   * Where a failed check failed (`P-285`), as a field rather than only in `message`'s prose. Only
+   * beside `outcome: 'error'`, and only when the probe can name it; absent is "not named", which
+   * an older probe and every check that throws a plain error leave. It may stand beside
+   * `withheld` or `notStarted`: a refusal names its phase too. **Descriptive, never a cause**: the
+   * core decides nothing on it. Protocol 35.
+   */
+  failure?: CheckFailure;
+}
+
+/**
+ * The phase a check failed in and what it was acting on (`P-285`). Both are bounded by
+ * `fitFailure`, which every runner and the core apply, so neither can carry more than it says.
+ */
+export interface CheckFailure {
+  /**
+   * The transport's phase when the error named one (`connect`, `authenticate`, `host-key`,
+   * `exec`, `get`, `walk`, `query`, `resolve`, `check`), else the runner's (`timeout`, `aborted`,
+   * `worker-crash`, `startup`, `pool-disabled`, `pool-stopped`, `unknown-type`). **An open word,
+   * not an enum**: a sensor type's new transport names its own phases, and a closed list would
+   * make each of them a protocol bump. A lower-case letter, then letters, digits and hyphens, 32
+   * at most (`FAILURE_PHASE`).
+   */
+  phase: string;
+  /**
+   * The host the phase was acting on — a name, an address, or either with a port — when the error
+   * named one. **A plain host or nothing** (`FAILURE_TARGET`): no `@`, `/`, `?`, `#` or space can
+   * pass, so a target built from a URL cannot carry a user, a password or a token to a reader of
+   * the sensor (credentials are write-only, CLAUDE.md). One that is not plain is left off.
+   */
+  target?: string;
 }
 
 /**
@@ -1223,6 +1260,26 @@ const CHECK_RESULT_SCHEMA = {
     withheld: { const: true },
     // Only `true` (`P-265`): a check the probe could not start.
     notStarted: { const: true },
+    // Where a failed check failed (`P-285`): bounded as `fitFailure` bounds it.
+    failure: {
+      type: 'object',
+      properties: {
+        phase: {
+          type: 'string',
+          pattern: FAILURE_PHASE.source,
+          [PATTERN_MESSAGE]:
+            'must be a lower-case letter followed by at most 31 letters, digits or hyphens',
+        },
+        target: {
+          type: 'string',
+          pattern: FAILURE_TARGET.source,
+          [PATTERN_MESSAGE]:
+            'must be a host, an address or either with a port: 1 to 255 letters, digits and . _ - : % [ ]',
+        },
+      },
+      required: ['phase'],
+      additionalProperties: false,
+    },
     channels: {
       type: 'array',
       maxItems: RESULT_LIMITS.channels,
@@ -1277,6 +1334,12 @@ const CHECK_RESULT_SCHEMA = {
         // error to the one that says it is not an object.
         not: { type: 'object', required: ['withheld'] },
       },
+    },
+    // **Where a check failed, only on a check that failed** (`P-285`). Not held to no readings:
+    // the field describes the failure and decides nothing, so it marks no result for a hold.
+    {
+      if: { properties: { failure: true }, required: ['failure'] },
+      then: { properties: { outcome: { const: 'error' } } },
     },
   ],
 } as const;
@@ -1950,7 +2013,8 @@ interface ResultError {
  * Whether `fitResult` makes what this error names fit by the same rules a probe applies before it
  * sends (`P-277`): anything inside a channel (a key or value that cannot be sent drops the
  * channel; a counter, width, name or unit is left off or clipped; an unknown field is not
- * copied), too many channels, a message too long, a negative duration. **Not** a field missing,
+ * copied), too many channels, a message too long, a negative duration, a `failure` that is not
+ * bounded as `fitFailure` bounds it (`P-285`). **Not** a field missing,
  * a field of the wrong type, or anything about the result's identity: `sensorId`, `at`,
  * `outcome`, `withheld`, a field the schema does not know, or the `withheld` rule, which is
  * reported at the result itself. Fitting those would be inventing a result rather than fitting
@@ -1961,6 +2025,9 @@ function fittable(error: ErrorObject, within: string): boolean {
   if (within === '/channels') return error.keyword === 'maxItems';
   if (within === '/message') return error.keyword === 'maxLength';
   if (within === '/durationMs') return error.keyword === 'minimum';
+  // Where it failed (`P-285`): a phase that is not a word drops the failure, and a target that is
+  // not a plain host drops the target. Describing, never deciding, so dropping invents nothing.
+  if (within === '/failure' || within.startsWith('/failure/')) return true;
   return false;
 }
 

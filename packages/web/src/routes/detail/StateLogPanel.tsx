@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { useApi } from '../../api/client';
 import type { StateLogEntry, StateLogPage } from '../../api/types';
+import { FailurePhase } from '../../components/FailurePhase';
 import { Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { StatusBadge } from '../../components/StatusBadge';
 import { formatDuration } from './model';
@@ -146,7 +147,28 @@ function Row({ entry, isSensor }: { entry: StateLogEntry; isSensor: boolean }): 
           formatDuration(entry.durationMs)
         )}
       </td>
-      <td className="py-2 align-top text-xs text-text-muted">{entry.message}</td>
+      <td className="py-2 align-top text-xs text-text-muted">
+        <MessageOf entry={entry} />
+      </td>
     </tr>
+  );
+}
+
+/**
+ * A transition's words, after where its check failed when the probe named it (`P-285`). In the
+ * Message cell rather than a column of its own: the table keeps its headers and its width, and
+ * the phase reads as the start of what the check said. `!= null`, so a row from a core older than
+ * the field, which has none, reads as its words alone rather than ending the page.
+ */
+export function MessageOf({ entry }: { entry: StateLogEntry }): React.JSX.Element {
+  return (
+    <>
+      {entry.failure != null && (
+        <span className="block">
+          <FailurePhase failure={entry.failure} />
+        </span>
+      )}
+      {entry.message}
+    </>
   );
 }

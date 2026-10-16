@@ -381,6 +381,38 @@ describe(
       assert.equal(event.sensorName, 'Ping');
     });
 
+    it('says where the check failed, in the frame and in the snapshot (P-285)', async () => {
+      const seen = recorder();
+      stream.subscribe(seen.subscriber, null, EVERYONE);
+      const states = h.states;
+      assert.ok(states !== undefined);
+      const failure = { phase: 'connect', target: '192.0.2.30:7' };
+      const decisions = await states.decide([
+        {
+          sensorId,
+          at: new Date(),
+          outcome: 'error',
+          message: 'no ICMP reply',
+          failure,
+        },
+      ]);
+      await db.tx(async (q) => {
+        await writeStateHistory(q, decisions.transitions, publishTo(stream));
+        await writeRuntimes(q, decisions.runtimes);
+      });
+      await settled();
+      const [event] = seen.events;
+      assert.ok(event !== undefined);
+      assert.deepEqual(event.failure, failure);
+      const { snapshot } = await stream.snapshot(db, deviceId, Visibility.EVERYTHING);
+      assert.deepEqual(snapshot.entries[0]?.failure, failure);
+      // A success has nowhere it failed, in the frame and in the snapshot alike.
+      await scan([sensorId], true, new Date(Date.now() + 1_000));
+      assert.equal(seen.events.at(-1)?.failure, null);
+      const after = await stream.snapshot(db, deviceId, Visibility.EVERYTHING);
+      assert.equal(after.snapshot.entries[0]?.failure, null);
+    });
+
     it('numbers nothing, because its only number would be the installation’s (A-21)', async () => {
       // A count kept here is one per change anywhere, and a subscriber that sees part of the tree
       // would read the rest in its gaps. The route numbers what each socket is sent.

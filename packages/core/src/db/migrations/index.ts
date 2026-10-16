@@ -78,6 +78,7 @@ import { migration077 } from './077-startup-pass.js';
 import { migration078 } from './078-probe-certificate.js';
 import { migration079 } from './079-channel-undeclared.js';
 import { migration080 } from './080-sensor-params-changed-at.js';
+import { migration081 } from './081-failure-phase.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -167,6 +168,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration078,
   migration079,
   migration080,
+  migration081,
 ];
 
 export type { Migration } from './types.js';

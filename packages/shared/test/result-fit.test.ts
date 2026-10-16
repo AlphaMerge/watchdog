@@ -1,8 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import fc from 'fast-check';
-import { parseProbeToCore, type CheckResult, type UnfitResults } from '../src/protocol/messages.js';
-import { fitLabel, fitResult, RESULT_LIMITS } from '../src/protocol/result-fit.js';
+import {
+  parseProbeToCore,
+  type CheckFailure,
+  type CheckResult,
+  type UnfitResults,
+} from '../src/protocol/messages.js';
+import { fitFailure, fitLabel, fitResult, RESULT_LIMITS } from '../src/protocol/result-fit.js';
 
 /**
  * `fitResult` (`P-277`): a check result made to fit the wire schema and PostgreSQL before a runner
@@ -60,6 +65,25 @@ describe('fitResult', () => {
     const refused = fitResult({ ...base, outcome: 'error', channels: [], withheld: true });
     assert.equal(refused.result.withheld, true);
     assert.equal('withheld' in fitResult(base).result, false);
+  });
+
+  it('keeps where a failed check failed, bounded, and on a failed check only (P-285)', () => {
+    const failed: CheckResult = { ...base, outcome: 'error', message: 'no reply', channels: [] };
+    const named = { phase: 'connect', target: '192.0.2.7:161' };
+    assert.deepEqual(fitResult({ ...failed, failure: named }).result.failure, named);
+    // A target that is not a plain host is left off; a phase that is not a word takes it all.
+    assert.deepEqual(
+      fitResult({ ...failed, failure: { phase: 'connect', target: 'u:p@192.0.2.7' } }).result
+        .failure,
+      { phase: 'connect' },
+    );
+    assert.equal(
+      'failure' in fitResult({ ...failed, failure: { phase: 'Connect to', target: 'h' } }).result,
+      false,
+    );
+    // A success has nowhere it failed, and the schema refuses one that says so.
+    assert.equal('failure' in fitResult({ ...base, failure: named }).result, false);
+    assert.equal('failure' in fitResult(failed).result, false);
   });
 
   it('clips a long message to the limit, ending in an ellipsis', () => {
@@ -301,17 +325,33 @@ describe('fitResult', () => {
       ),
       fc.anything(),
     );
+    // Words and hosts near their bounds as well as anything at all (`P-285`).
+    const failure = fc.oneof(
+      fc.record(
+        {
+          phase: fc.oneof(text, fc.stringMatching(/^[a-z][a-zA-Z0-9_ -]{0,33}$/), fc.integer()),
+          target: fc.oneof(text, fc.stringMatching(/^[A-Za-z0-9.:@/?#%[\] -]{0,257}$/)),
+          other: fc.anything(),
+        },
+        { requiredKeys: [] },
+      ),
+      fc.anything(),
+    );
     fc.assert(
       fc.property(
         text,
         fc.oneof(fc.double(), fc.integer()),
         fc.array(channel, { maxLength: 520 }),
-        (message, durationMs, channels) => {
+        fc.constantFrom('ok' as const, 'error' as const),
+        failure,
+        (message, durationMs, channels, outcome, failed) => {
           const { result, dropped } = fitResult({
             ...base,
+            outcome,
             message,
             durationMs,
             channels: channels as CheckResult['channels'],
+            failure: failed as CheckFailure,
           });
           coreTakes(result);
           // `P-283`: every channel given is sent or counted as dropped, never both or neither.
@@ -334,9 +374,86 @@ describe('fitResult', () => {
           for (const one of texts) {
             assert.ok((one as unknown as { isWellFormed(): boolean }).isWellFormed(), one);
           }
+          // Where it failed is kept exactly when `fitFailure` keeps it, and never on a success.
+          const bounded = outcome === 'error' ? fitFailure(failed) : null;
+          assert.deepEqual(result.failure, bounded ?? undefined);
         },
       ),
       { numRuns: 300 },
+    );
+  });
+});
+
+/**
+ * `fitFailure` (`P-285`): the phase a check failed in and the host it was acting on, as the wire
+ * carries them. The target is listed rather than filtered: what could carry a credential cannot
+ * pass, whatever an error put in it.
+ */
+describe('fitFailure', () => {
+  it('keeps a phase that is a word and a target that is a plain host', () => {
+    for (const target of [
+      '192.0.2.7',
+      '192.0.2.7:22',
+      'switch-3.example.net',
+      'switch_3:161',
+      '[2001:db8::7]:443',
+      '2001:db8::7',
+      'fe80::1%eth0',
+      'a'.repeat(255),
+    ]) {
+      assert.deepEqual(fitFailure({ phase: 'host-key', target }), { phase: 'host-key', target });
+    }
+    for (const phase of ['connect', 'getBulk', 'worker-crash', 'tls13', 'a'.repeat(32)]) {
+      assert.deepEqual(fitFailure({ phase }), { phase });
+    }
+  });
+
+  it('leaves off a target that could carry more than a host, and keeps the phase', () => {
+    for (const target of [
+      'admin:secret@192.0.2.7',
+      'https://192.0.2.7/',
+      '192.0.2.7/status',
+      '192.0.2.7?token=abc',
+      'host#frag',
+      'key=value',
+      'two words',
+      'tab\there',
+      'nul\u0000',
+      '',
+      'a'.repeat(256),
+      'b\u00fccher.example',
+      7,
+      null,
+    ]) {
+      assert.deepEqual(
+        fitFailure({ phase: 'connect', target }),
+        { phase: 'connect' },
+        String(target),
+      );
+    }
+  });
+
+  it('gives nothing for a phase that is not a word, or for what is not a failure', () => {
+    for (const phase of [
+      '',
+      'Connect',
+      '1connect',
+      'get_bulk',
+      'connect to h',
+      'a'.repeat(33),
+      7,
+    ]) {
+      assert.equal(fitFailure({ phase, target: '192.0.2.7' }), null, String(phase));
+    }
+    for (const raw of [undefined, null, 'exec', 7, ['exec'], { target: '192.0.2.7' }]) {
+      assert.equal(fitFailure(raw), null);
+    }
+  });
+
+  it('copies nothing else an error held: no command, no address it was pinned to', () => {
+    assert.deepEqual(
+      fitFailure({ phase: 'exec', target: '192.0.2.7', command: 'cat secret', cause: 'x' }),
+      { phase: 'exec', target: '192.0.2.7' },
     );
   });
 });

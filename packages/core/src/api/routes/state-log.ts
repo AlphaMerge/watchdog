@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import type { SensorState, SensorStateCause } from '../../state/tables.js';
 import { onQueryObject, visibilityOf } from '../authorization.js';
+import { failureField } from '../schemas/state.js';
 import {
   StateLogError,
   STATE_LOG_CAUSES,
@@ -60,6 +61,7 @@ const entrySchema = {
     'previousState',
     'cause',
     'message',
+    'failure',
     'durationMs',
     'carried',
   ],
@@ -72,6 +74,8 @@ const entrySchema = {
     previousState: { enum: [...STATE_LOG_STATES, null] },
     cause: { enum: [...STATE_LOG_CAUSES] },
     message: { type: 'string' },
+    /** Where the check behind this transition failed (`P-285`), or `null`. */
+    failure: failureField,
     /** `null` on the state a sensor is still in. */
     durationMs: { type: ['integer', 'null'] },
     /**

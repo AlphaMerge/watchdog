@@ -1066,6 +1066,8 @@ export class IngestionService {
         at: new Date(at),
         outcome: result.outcome,
         message: result.message,
+        // Where it failed, as the probe named it (`P-285`); fitted by `parseProbeToCore`.
+        ...(result.failure === undefined ? {} : { failure: result.failure }),
         channels: outcomes.get(result) ?? null,
       });
     }

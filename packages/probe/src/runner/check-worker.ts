@@ -2,6 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import {
   CREDENTIALS_WITHHELD,
   UNKNOWN_SENSOR_TYPE,
+  failureSaid,
   type CheckRegistry,
   type CheckTarget,
   type ReceivedBatch,
@@ -95,6 +96,8 @@ async function run(message: RunMessage): Promise<void> {
       unknownType: (error as { code?: unknown } | null)?.code === UNKNOWN_SENSOR_TYPE,
       withheld: (error as { code?: unknown } | null)?.code === CREDENTIALS_WITHHELD,
       message: error instanceof Error ? error.message : String(error),
+      // Where it failed (`P-285`), copied out: the clone would keep only the message.
+      failure: failureSaid(error),
       ...sessions(),
     });
   } finally {

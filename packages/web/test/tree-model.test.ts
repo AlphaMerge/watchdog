@@ -30,6 +30,7 @@ function live(sensorId: number, path: number[], state: SensorState): LiveState {
     state,
     cause: 'scan',
     message: '',
+    failure: null,
     at: '',
   };
 }

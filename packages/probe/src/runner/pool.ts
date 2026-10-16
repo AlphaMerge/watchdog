@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { describeError, fitResult, type CheckResult, type Logger } from '@ms/shared';
 import type { MemoryCapReading } from './memory-cap.js';
+import { failureField } from './failure.js';
 import { STARTUP_TIMEOUT_MS, unfit } from './process-runner.js';
 import { RefusalLog } from './refusal-log.js';
 import {
@@ -1280,6 +1281,8 @@ export class CheckPool {
         unknownType?: boolean;
         withheld?: boolean;
         message: string;
+        /** What the error said of where it failed (`failureSaid`); bounded by `failureOf`. */
+        failure?: unknown;
         channels?: { key: string; value: number; name?: string; unit?: string }[];
         sessions?: SessionCounters;
       };
@@ -1309,6 +1312,7 @@ export class CheckPool {
           channels: [],
           // Refused over where its credentials may go (`A-41c`), which is not a failed scan.
           ...(result.withheld === true ? { withheld: true as const } : {}),
+          said: result.failure,
         });
       }
     }
@@ -1666,6 +1670,8 @@ export class CheckPool {
       durationMs: number;
       channels: { key: string; value: number; name?: string; unit?: string }[];
       withheld?: true;
+      /** What the check's error said of where it failed, for `failureOf` (`P-285`). */
+      said?: unknown;
     },
   ): void {
     job.settled = true;
@@ -1688,6 +1694,8 @@ export class CheckPool {
       // **A check the pool gave up on before it ran** (`P-265`): the device was never asked, so
       // the core holds the sensor behind the probe's one alarm instead of failing it.
       ...(parts.outcome === 'error' && notStarted(phase) ? { notStarted: true as const } : {}),
+      // Where it failed (`P-285`): the error's phase, else this pool's when it is not `execute`.
+      ...failureField(parts.outcome, phase, parts.said),
     } satisfies CheckResult);
     if (problems.length > 0) unfit(this.#logger, job.request, problems);
     // Counted for Probe Health (`P-283`): the log names the sensor, and this says how often.

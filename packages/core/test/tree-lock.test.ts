@@ -488,6 +488,7 @@ describe('P-229: the tree lock', { skip: available ? false : 'no database' }, ()
           state: 'down',
           cause: 'scan',
           message: '',
+          failure: null,
           since: at,
           consecutiveFailures: 0,
           channel: null,

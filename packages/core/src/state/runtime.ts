@@ -8,6 +8,7 @@
  * without the state change they caused, is a history that disagrees with itself.
  */
 
+import type { CheckFailure } from '@ms/shared';
 import type { Visibility } from '../auth/access.js';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
@@ -21,6 +22,11 @@ export interface SensorRuntime {
   readonly state: SensorState;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /**
+   * Where the check whose words `message` holds failed (`P-285`), or `null`. Beside the message
+   * and by its rule: what explains the state, never what decides it.
+   */
+  readonly failure: CheckFailure | null;
   readonly since: Date;
   /**
    * Who acknowledged the alarm (`M-13`), when anybody has.
@@ -56,6 +62,12 @@ export interface StateTransition {
   readonly previousState: SensorState | null;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /**
+   * Where the check behind it failed (`P-285`), when the transition is a result's and its words
+   * are the scan's. Absent on every other path — a pause, an acknowledgement, a hold — whose
+   * words are not a check's, and absent is stored as NULL.
+   */
+  readonly failure?: CheckFailure | null;
 }
 
 /** Where one sensor ended up. Exactly one per sensor per batch, or the UPDATE is ambiguous. */
@@ -65,6 +77,8 @@ export interface RuntimeWrite {
   readonly state: SensorState;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /** Where the check `message` speaks for failed (`P-285`); held by a pause with the message. */
+  readonly failure: CheckFailure | null;
   readonly since: Date;
   readonly consecutiveFailures: number;
   /**
@@ -97,6 +111,9 @@ interface RuntimeRow {
   state: SensorState;
   cause: SensorStateCause;
   message: string;
+  /** Both or neither of a failure; a target never without its phase (migration 081). */
+  failure_phase: string | null;
+  failure_target: string | null;
   since: Date;
   consecutive_failures: number;
   last_result_at: Date | null;
@@ -118,7 +135,7 @@ interface RuntimeRow {
 }
 
 const RUNTIME_COLUMNS = `
-  object_id::text AS object_id, state, cause, message, since,
+  object_id::text AS object_id, state, cause, message, failure_phase, failure_target, since,
   consecutive_failures, last_result_at,
   paused_by_parent, paused_by_dependency, paused_by_schedule, paused_manually,
   acknowledged_at, acknowledged_until, simulated_error,
@@ -152,12 +169,24 @@ function channelVerdict(row: RuntimeRow): ChannelVerdict | null {
   return state === 'up' || state === 'warning' || state === 'down' ? { state, cause } : null;
 }
 
+/** A row's failure, or null when it names no phase (`P-285`). */
+export function failureOf(row: {
+  readonly failure_phase: string | null;
+  readonly failure_target: string | null;
+}): CheckFailure | null {
+  if (row.failure_phase === null) return null;
+  return row.failure_target === null
+    ? { phase: row.failure_phase }
+    : { phase: row.failure_phase, target: row.failure_target };
+}
+
 function toRuntime(row: RuntimeRow): SensorRuntime {
   return {
     sensorId: Number(row.object_id),
     state: row.state,
     cause: row.cause,
     message: row.message,
+    failure: failureOf(row),
     since: row.since,
     acknowledgedBy:
       row.acknowledged_by_kind == null
@@ -265,10 +294,12 @@ export async function writeStateHistory(
   const ordered =
     stamping === 'as-measured' ? await asMeasured(q, changes) : await orderedAfterLast(q, changes);
   const rows = await q.query<{ sensor_id: string; time: Date }>(
-    `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
+    `INSERT INTO sensor_state (
+       time, sensor_id, state, previous_state, cause, message, failure_phase, failure_target
+     )
      SELECT * FROM unnest(
        $1::timestamptz[], $2::bigint[], $3::sensor_state_kind[],
-       $4::sensor_state_kind[], $5::sensor_state_cause[], $6::text[]
+       $4::sensor_state_kind[], $5::sensor_state_cause[], $6::text[], $7::text[], $8::text[]
      )
      -- Still here, and now it means only one thing: a genuine replay. orderedAfterLast above
      -- has already moved any transition that would have displaced a *different* row, so what
@@ -283,6 +314,8 @@ export async function writeStateHistory(
       ordered.map((write) => write.previousState),
       ordered.map((write) => write.cause),
       ordered.map((write) => write.message),
+      ordered.map((write) => write.failure?.phase ?? null),
+      ordered.map((write) => write.failure?.target ?? null),
     ],
   );
 
@@ -501,6 +534,10 @@ export async function writeRuntimes(
      SET state = CASE WHEN w.held THEN r.state ELSE w.state END,
          cause = CASE WHEN w.held THEN r.cause ELSE w.cause END,
          message = CASE WHEN w.held THEN r.message ELSE w.message END,
+         -- Where the check failed goes with the words (P-285): a pause's words stay, and so
+         -- does what they were written beside.
+         failure_phase = CASE WHEN w.held THEN r.failure_phase ELSE w.failure_phase END,
+         failure_target = CASE WHEN w.held THEN r.failure_target ELSE w.failure_target END,
          since = CASE WHEN w.held THEN r.since ELSE w.since END,
          consecutive_failures = w.consecutive_failures,
          last_result_at = w.at,
@@ -533,9 +570,9 @@ export async function writeRuntimes(
        FROM unnest(
          $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
          $5::text[], $6::timestamptz[], $7::int[], $8::boolean[],
-         $9::sensor_state_kind[], $10::sensor_state_cause[]
+         $9::sensor_state_kind[], $10::sensor_state_cause[], $11::text[], $12::text[]
        ) AS t(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged,
-              channel_state, channel_cause)
+              channel_state, channel_cause, failure_phase, failure_target)
      ) AS w
      WHERE r.object_id = w.sensor_id
        -- Both floors (P-97). GREATEST ignores nulls, so a sensor that has never reported and
@@ -554,6 +591,8 @@ export async function writeRuntimes(
       writes.map((write) => write.acknowledged),
       writes.map((write) => write.channel?.state ?? null),
       writes.map((write) => write.channel?.cause ?? null),
+      writes.map((write) => write.failure?.phase ?? null),
+      writes.map((write) => write.failure?.target ?? null),
     ],
   );
   return rows.length;
@@ -579,6 +618,8 @@ export async function readSensorState(
             coalesce(r.state, 'unknown') AS state,
             coalesce(r.cause, 'scan') AS cause,
             coalesce(r.message, '') AS message,
+            r.failure_phase,
+            r.failure_target,
             coalesce(r.since, o.created_at) AS since,
             coalesce(r.consecutive_failures, 0) AS consecutive_failures,
             r.last_result_at,
@@ -784,6 +825,10 @@ export async function writeStateChanges(
      SET state = w.state,
          cause = w.cause,
          message = w.message,
+         -- Never a check's words (P-285): a pause's, an acknowledgement's, a hold's, a release's.
+         -- What a check said of where it failed went with the words it was written beside.
+         failure_phase = NULL,
+         failure_target = NULL,
          since = w.since,
          -- last_result_at is never cleared (P-97): it is the high-water mark that makes the
          -- at-least-once probe protocol safe, and nulling it turned every duplicate into a

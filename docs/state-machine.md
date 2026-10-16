@@ -458,7 +458,7 @@ Implemented by `M-04` in `packages/core/src/state/limits.ts`. Four thresholds pe
 upper and lower, for each of error and warning — plus an `enabled` flag and a custom message per
 severity, stored in the `channel.limits` jsonb column migration 001 already provisioned.
 
-Four things this settles, none of which `WORKFLOW.MD` states:
+Five things this settles, none of which `WORKFLOW.MD` states:
 
 - **The comparison is strict.** A reading exactly *at* a limit has not exceeded it. An upper
   error limit of 100 on a percentage has to be reachable, and one that fired at 100 would make
@@ -483,6 +483,14 @@ Four things this settles, none of which `WORKFLOW.MD` states:
   `%lastmessage`, so a digest whose subject carries it has longer lines, and the §5.2 caps split
   it into more parts; no notification is added. New words from the check while the breach
   stands are stored and send nothing, as before.
+- **Where the check failed goes with the words, by the same rule** (`P-285`). A failed result may
+  name the phase it failed in and the plain host it was acting on (`failure`, protocol 35). The
+  core keeps it beside the message on the current state and on each transition: the scan's own
+  when the scan's words explain the state, nothing beside a limit's or a lookup's, what is stored
+  when a person decided the state, and nothing once a pause, an acknowledgement, a hold or a
+  release writes words of its own. **Descriptive, never a cause**: nothing decides on it, so a
+  phase that moves while the state and the cause stand records no transition (invariant 10) and
+  cannot add an alarm.
 
 Limits that contradict each other — a warning limit past its error limit, or a lower limit above
 an upper one — are refused when they are set, with the reason. A threshold that could never fire

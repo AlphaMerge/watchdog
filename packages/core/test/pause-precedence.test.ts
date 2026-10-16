@@ -224,6 +224,7 @@ describe(
             state,
             cause: 'scan',
             message: '',
+            failure: null,
             since: OUTSIDE,
             consecutiveFailures: 0,
             channel: null,

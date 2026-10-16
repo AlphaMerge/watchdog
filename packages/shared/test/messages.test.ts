@@ -1325,16 +1325,24 @@ describe('a pattern on the wire says what it wants (P-376)', () => {
       assert.deepEqual(unsaidPatterns(schema), [], name);
     }
     // The control: with the sentences gone, the walk finds every pattern this protocol has, so
-    // the empty lists above are the sentences' doing. The counter is in `results` and in
-    // `query-result`, which share the check result's schema.
+    // the empty lists above are the sentences' doing. The counter and where a check failed
+    // (`P-285`) are in `results` and in `query-result`, which share the check result's schema.
     assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['probeToCore'])).sort(), [
       'address',
       'counter',
       'counter',
       'instanceId',
+      'phase',
+      'phase',
+      'target',
+      'target',
     ]);
     assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['coreToProbe'])), ['addresses']);
-    assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['checkResult'])), ['counter']);
+    assert.deepEqual(fieldsOf(unsaid(PROTOCOL_SCHEMAS['checkResult'])).sort(), [
+      'counter',
+      'phase',
+      'target',
+    ]);
   });
 
   /** Asserts a reason says the sentence, and neither the expression nor the value refused. */

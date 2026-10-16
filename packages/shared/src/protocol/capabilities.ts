@@ -223,6 +223,11 @@ export interface ProbeCapabilities {
    * (`rejectCodeForPeer`).
    */
   certificateBinding: boolean;
+  /**
+   * Says where a failed check failed as `failure` on its result (`P-285`): the phase and, when
+   * it is a plain host, the target. Stripped below; the message's prose still says it.
+   */
+  failurePhase: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -266,6 +271,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'say which checks it could not start, so their sensors are held rather than failed',
   certificateBinding:
     'be told that it presented a certificate other than the one its identity is bound to',
+  failurePhase: 'say where a failed check failed, as a phase and a host beside its message',
 };
 
 /**
@@ -420,6 +426,12 @@ export function resultForPeer(result: CheckResult, peerVersion: number): CheckRe
   // marks them whatever it was sent.
   if (sent.notStarted !== undefined && !capabilities.checkNotStarted) {
     const { notStarted: _notStarted, ...older } = sent;
+    sent = older;
+  }
+  // **Where a check failed, to a core below 35** (`P-285`): its schema is closed, and would refuse
+  // every failed result that said it. The message says the same in prose, as it always did.
+  if (sent.failure !== undefined && !capabilities.failurePhase) {
+    const { failure: _failure, ...older } = sent;
     sent = older;
   }
   return sent;

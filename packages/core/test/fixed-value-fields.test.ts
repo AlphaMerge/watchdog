@@ -732,6 +732,8 @@ describe('acknowledgedBy.kind in ms:sensorState', () => {
     state: 'down_acknowledged',
     cause: 'scan',
     message: 'timed out',
+    failure_phase: null,
+    failure_target: null,
     since: new Date('2026-10-09T08:00:00.000Z'),
     consecutive_failures: 3,
     last_result_at: new Date('2026-10-09T08:05:00.000Z'),

@@ -215,6 +215,7 @@ describe(
             state,
             cause,
             message: '',
+            failure: null,
             since: NOW,
             consecutiveFailures: 0,
             channel: null,

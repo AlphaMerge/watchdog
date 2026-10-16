@@ -64,6 +64,25 @@ const registry: CheckRegistry = {
       case 'test.throw':
         throw new Error('the check failed on purpose');
 
+      case 'test.phase':
+        // A transport's error, as `SnmpError` and `SshError` are (`P-285`): a phase, a host, and a
+        // command nothing scrubs. Their own fields, so the runners must copy them out by shape.
+        throw Object.assign(new Error('SNMP walk of 1.3.6.1.2.1.2 on 192.0.2.7:161 timed out'), {
+          phase: context.params['phase'] ?? 'walk',
+          host: context.params['host'] ?? '192.0.2.7:161',
+          command: 'snmpwalk -c secret 192.0.2.7',
+          oid: '1.3.6.1.2.1.2',
+        });
+
+      case 'test.phase-at-timeout':
+        // A transport that honours its abort and says where it was when the time ran out, as an
+        // `SnmpError` from a walk does (`P-285`): the check's own phase, not the runner's.
+        await abortable(60_000, context.signal).catch(() => undefined);
+        throw Object.assign(new Error('SNMP walk on 192.0.2.7:161 was stopped at its timeout'), {
+          phase: 'walk',
+          host: '192.0.2.7:161',
+        });
+
       case 'test.withheld':
         // What `@ms/sensors` raises when a check may not use its credentials where its device
         // points (`A-41c`). The same code, so the runners classify it the same way.

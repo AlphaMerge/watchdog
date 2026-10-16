@@ -58,6 +58,7 @@ export function stateRoutes(app: FastifyInstance, options: StateRoutesOptions): 
         state: runtime.state,
         cause: runtime.cause,
         message: runtime.message,
+        failure: runtime.failure,
         since: runtime.since.toISOString(),
         lastResultAt: facts.lastResultAt?.toISOString() ?? null,
         consecutiveFailures: facts.scan.kind === 'failed' ? facts.scan.consecutiveFailures : 0,

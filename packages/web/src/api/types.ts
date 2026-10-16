@@ -469,11 +469,22 @@ export interface ChannelLimits {
   warningMessage: string;
 }
 
+/**
+ * Where a failed check failed, as the probe named it (`P-285`): a phase, and the plain host it was
+ * acting on when it named one. `null` beside it wherever nothing was named, or where the state is
+ * not the check's to explain.
+ */
+export interface CheckFailure {
+  readonly phase: string;
+  readonly target?: string;
+}
+
 export interface SensorStateView {
   sensorId: number;
   state: SensorState;
   cause: string;
   message: string;
+  failure: CheckFailure | null;
   since: string;
   lastResultAt: string | null;
   consecutiveFailures: number;
@@ -546,6 +557,8 @@ export interface StateLogEntry {
   previousState: SensorState | null;
   cause: string;
   message: string;
+  /** Where the check behind this transition failed (`P-285`), or `null`. */
+  failure: CheckFailure | null;
   /** How long the *previous* state lasted. `null` on the newest entry — it has not ended. */
   durationMs: number | null;
   /**

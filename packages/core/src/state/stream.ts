@@ -1,4 +1,4 @@
-import { describeError, type Logger } from '@ms/shared';
+import { describeError, type CheckFailure, type Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Visibility } from '../auth/access.js';
@@ -9,6 +9,7 @@ import {
   type Lapse,
 } from '../auth/credentials.js';
 import type { ObjectId } from '../objects/types.js';
+import { failureOf } from './runtime.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
 /**
@@ -40,6 +41,8 @@ export interface StateEvent {
   readonly previousState: SensorState | null;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /** Where the check behind the change failed, beside the message and by its rule (`P-285`). */
+  readonly failure: CheckFailure | null;
   readonly at: string;
 }
 
@@ -51,6 +54,8 @@ export interface StateSnapshotEntry {
   readonly state: SensorState;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /** Where the check the message speaks for failed (`P-285`), or `null`. */
+  readonly failure: CheckFailure | null;
   readonly since: string;
 }
 
@@ -1492,6 +1497,7 @@ export class StateBroadcaster {
       readonly previousState: SensorState | null;
       readonly cause: SensorStateCause;
       readonly message: string;
+      readonly failure?: CheckFailure | null;
       readonly at: Date;
     }[],
   ): Promise<number> {
@@ -1570,6 +1576,7 @@ export class StateBroadcaster {
         previousState: change.previousState,
         cause: change.cause,
         message: change.message,
+        failure: change.failure ?? null,
         at: change.at.toISOString(),
       };
       sent += this.#deliver(event, horizon);
@@ -1606,6 +1613,8 @@ export class StateBroadcaster {
       state: SensorState;
       cause: SensorStateCause;
       message: string;
+      failure_phase: string | null;
+      failure_target: string | null;
       since: Date;
       epoch: string;
     }>(
@@ -1633,7 +1642,8 @@ export class StateBroadcaster {
         WHERE covered.depth < ${String(MAX_WALK_DEPTH)}
       ),
       picked AS (
-        SELECT covered.id, o.name, covered.path, sr.state, sr.cause, sr.message, sr.since
+        SELECT covered.id, o.name, covered.path, sr.state, sr.cause, sr.message,
+               sr.failure_phase, sr.failure_target, sr.since
         FROM covered
         JOIN object o ON o.id = covered.id
         JOIN sensor_runtime sr ON sr.object_id = covered.id
@@ -1643,7 +1653,8 @@ export class StateBroadcaster {
       )
       -- One row even when nothing is picked, so an empty snapshot still says when it was read.
       SELECT picked.id::text AS sensor_id, picked.name, picked.path::text[] AS path,
-             picked.state, picked.cause, picked.message, picked.since,
+             picked.state, picked.cause, picked.message,
+             picked.failure_phase, picked.failure_target, picked.since,
              (SELECT value::text FROM access_epoch) AS epoch
       FROM (SELECT 1) AS one
       LEFT JOIN picked ON true
@@ -1678,6 +1689,7 @@ export class StateBroadcaster {
           state: row.state,
           cause: row.cause,
           message: row.message,
+          failure: failureOf(row),
           since: row.since.toISOString(),
         })),
       },

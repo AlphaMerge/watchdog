@@ -68,6 +68,7 @@ describe('what a protocol version can do', () => {
       unsendableReadings: false,
       checkNotStarted: false,
       certificateBinding: false,
+      failurePhase: false,
     });
   });
 
@@ -138,6 +139,7 @@ describe('what a protocol version can do', () => {
       unsendableReadings: 32,
       checkNotStarted: 33,
       certificateBinding: 34,
+      failurePhase: 35,
     };
     const names = Object.keys(ARRIVED) as (keyof ProbeCapabilities)[];
     assert.deepEqual(
@@ -692,7 +694,7 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 34);
+    assert.equal(PROTOCOL_VERSION, 35);
     assert.deepEqual(healthForPeer(health, 32), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
@@ -781,7 +783,7 @@ describe('the health a peer can be sent', () => {
   it('names the listeners’ counters at 13, and strips them for no core it can meet (P-294)', () => {
     // Named after the fact: protocol 13 added them, and only a comment on `P-64` held the number
     // until the add-sensor form needed it. Nothing on the wire changes for the name.
-    assert.equal(PROTOCOL_VERSION, 34, 'naming an old version does not bump the protocol');
+    assert.equal(PROTOCOL_VERSION, 35, 'naming an old version does not bump the protocol');
     assert.equal(versionFor('listenerCounters'), 13);
     assert.equal(capabilitiesFor(12).listenerCounters, false);
     assert.equal(capabilitiesFor(13).listenerCounters, true);
@@ -895,6 +897,7 @@ describe('the health a peer can be sent', () => {
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -930,6 +933,7 @@ describe('the child start-up counters (`P-260`)', () => {
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
   });
 });
@@ -947,6 +951,7 @@ describe('the check workers not started (`P-263`)', () => {
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
   });
 });
@@ -966,11 +971,13 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
     assert.deepEqual(missingCapabilities(31), [
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
   });
 });
@@ -984,6 +991,7 @@ describe('the readings a probe could not send (`P-283`)', () => {
     assert.deepEqual(missingCapabilities(32), [
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
   });
 });
@@ -995,6 +1003,7 @@ describe('a check the probe could not start (`P-265`)', () => {
     assert.equal(capabilitiesFor(33).checkNotStarted, true);
     assert.deepEqual(missingCapabilities(33), [
       'be told that it presented a certificate other than the one its identity is bound to',
+      'say where a failed check failed, as a phase and a host beside its message',
     ]);
   });
 });
@@ -1004,7 +1013,9 @@ describe('a certificate other than the bound one (`P-326`)', () => {
     assert.equal(versionFor('certificateBinding'), 34);
     assert.equal(capabilitiesFor(33).certificateBinding, false);
     assert.equal(capabilitiesFor(34).certificateBinding, true);
-    assert.deepEqual(missingCapabilities(34), []);
+    assert.deepEqual(missingCapabilities(34), [
+      'say where a failed check failed, as a phase and a host beside its message',
+    ]);
   });
 
   it('is said as `internal-error` to a probe below 34, which keeps checking and its key', () => {
@@ -1017,6 +1028,15 @@ describe('a certificate other than the bound one (`P-326`)', () => {
     }
     assert.equal(rejectionStopsMonitoring('certificate-not-bound'), false);
     assert.equal(rejectionStopsMonitoring('internal-error'), false);
+  });
+});
+
+describe('where a failed check failed (`P-285`)', () => {
+  it('is said from 35, and by nothing older', () => {
+    assert.equal(versionFor('failurePhase'), 35);
+    assert.equal(capabilitiesFor(34).failurePhase, false);
+    assert.equal(capabilitiesFor(35).failurePhase, true);
+    assert.deepEqual(missingCapabilities(35), []);
   });
 });
 
@@ -1049,6 +1069,23 @@ describe('the check result a peer can be sent (`A-41c`)', () => {
     // The failed check an older core always read, with the reason still in its message.
     assert.deepEqual(resultForPeer(unstarted, 32), older);
     assert.equal('notStarted' in resultForPeer(unstarted, 24), false);
+  });
+
+  it('keeps `failure` for a core at 35 and takes it out below (P-285)', () => {
+    const failed = {
+      ...plain,
+      message: 'SSH exec on 192.0.2.7:22 failed: read ECONNRESET',
+      failure: { phase: 'exec', target: '192.0.2.7:22' },
+    };
+    assert.deepEqual(resultForPeer(failed, 35), failed);
+    assert.deepEqual(resultForPeer(failed, 36), failed);
+    const { failure: _failure, ...older } = failed;
+    // The prose an older core always read, which still names the phase.
+    assert.deepEqual(resultForPeer(failed, 34), older);
+    // Beside an older mark, each goes at its own version.
+    const both = { ...failed, notStarted: true as const, failure: { phase: 'startup' } };
+    assert.deepEqual(resultForPeer(both, 34), { ...older, notStarted: true });
+    assert.deepEqual(resultForPeer(both, 32), older);
   });
 
   it('hands back the very result when there is nothing to take out', () => {
@@ -1115,5 +1152,77 @@ describe('the check result a peer can be sent (`A-41c`)', () => {
       assert.deepEqual(kept, [], JSON.stringify(refused));
       assert.equal(unfit?.refused.length, 1, JSON.stringify(refused));
     }
+  });
+
+  it('takes `failure` on a failed check, and keeps the result without what is not bounded (P-285)', () => {
+    const batch = (result: unknown): unknown => ({
+      type: 'results',
+      batchId: 'b',
+      results: [result],
+    });
+    const told = (result: unknown) => {
+      const said: { unfit?: UnfitResults } = {};
+      const parsed = parseProbeToCore(batch(result), {
+        onUnfitResults: (unfit) => (said.unfit = unfit),
+      });
+      assert.ok(parsed.type === 'results');
+      return { kept: parsed.results, unfit: said.unfit };
+    };
+    for (const sent of [
+      { ...plain, failure: { phase: 'exec', target: '192.0.2.7:22' } },
+      { ...plain, failure: { phase: 'getBulk', target: '[2001:db8::7]:161' } },
+      { ...plain, failure: { phase: 'timeout' } },
+      // A refusal names where it was refused, and a check not started where it stopped.
+      {
+        ...plain,
+        withheld: true as const,
+        failure: { phase: 'resolve', target: 'printer.example' },
+      },
+      { ...plain, notStarted: true as const, failure: { phase: 'startup' } },
+    ]) {
+      const { kept, unfit } = told(sent);
+      assert.deepEqual(kept, [sent], JSON.stringify(sent));
+      assert.equal(unfit, undefined, JSON.stringify(unfit));
+    }
+    // **Mended, never refused**: the field describes and decides nothing, so a probe that bounds
+    // it more loosely loses it, or its target, and the failed check is counted as it was.
+    const mended = (failure: unknown, kept: unknown): void => {
+      const said = told({ ...plain, failure });
+      assert.deepEqual(said.kept, [{ ...plain, ...(kept === null ? {} : { failure: kept }) }]);
+      assert.equal(said.unfit?.refused.length, 0, JSON.stringify(failure));
+      assert.equal(said.unfit.fitted.length, 1, JSON.stringify(failure));
+      assert.match(said.unfit.fitted[0]?.reason ?? '', /^\/failure/);
+    };
+    // A target that could carry a user, a password or a token is left off, the phase kept.
+    for (const target of [
+      'admin:secret@192.0.2.7',
+      '192.0.2.7/status?token=abc',
+      'host#frag',
+      'two words',
+      '',
+      'a'.repeat(256),
+      'b\u00fccher.example',
+    ]) {
+      mended({ phase: 'connect', target }, { phase: 'connect' });
+    }
+    // A phase that is not a word takes the failure with it.
+    for (const phase of ['Connect', 'connect to 192.0.2.7', '', 'a'.repeat(33), 'get_bulk', 7]) {
+      mended({ phase, target: '192.0.2.7' }, null);
+    }
+    mended({ target: '192.0.2.7' }, null);
+    mended('exec', null);
+    mended(
+      { phase: 'exec', target: '192.0.2.7', command: 'cat /etc/shadow' },
+      {
+        phase: 'exec',
+        target: '192.0.2.7',
+      },
+    );
+    // **Only on a failed check**: a success has nowhere it failed, and a probe that says one
+    // is told at the boundary, as `withheld` beside `ok` is.
+    const success = { ...plain, outcome: 'ok', failure: { phase: 'exec' } };
+    const { kept, unfit } = told(success);
+    assert.deepEqual(kept, []);
+    assert.equal(unfit?.refused.length, 1);
   });
 });

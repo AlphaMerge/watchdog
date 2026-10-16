@@ -306,6 +306,13 @@ so a link to a sensor's triggers is a link somebody can send.
 | **Triggers**    | The notification triggers on this object                                          |
 | **Changes**     | The audit trail for this object                                                   |
 
+Where a failed check failed is said in words beside its cause, on the Overview's state line and
+at the start of each **Log** row's message (`P-285`): "Failed while connecting to 192.0.2.7:22",
+or "Did not finish within its timeout" when the probe settled it. It is there when the probe
+named a phase (protocol 35) and the state is the check's to explain; a limit's breach, a pause
+or an acknowledgement shows its own words alone. A phase the page does not know is shown as
+itself, and the host is in the face the device's Host field uses. It is text, not a tooltip.
+
 A channel an edit took out of a sensor's parameters — a `snmp.table` column removed — keeps its
 row and its history and is no longer read. The channel table marks it **retired** beside its name
 and says **not read** where the reading goes, rather than *no recent reading*, which would read

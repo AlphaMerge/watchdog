@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { confirmSession, sessionEnded } from './client';
-import type { SensorState } from './types';
+import type { CheckFailure, SensorState } from './types';
 
 /** One sensor's state, as the stream last reported it. */
 export interface LiveState {
@@ -11,6 +11,8 @@ export interface LiveState {
   readonly state: SensorState;
   readonly cause: string;
   readonly message: string;
+  /** Where the check the message speaks for failed (`P-285`), or `null`. */
+  readonly failure: CheckFailure | null;
   /**
    * When this state began.
    *
@@ -89,6 +91,8 @@ interface SnapshotEntry {
   state?: SensorState;
   cause?: string;
   message?: string;
+  /** Read as a claim (`failureFrom`): a core below `P-285` sends none. */
+  failure?: unknown;
   since?: string;
 }
 
@@ -111,6 +115,7 @@ interface ServerFrame {
   state?: SensorState;
   cause?: string;
   message?: string;
+  failure?: unknown;
   at?: string;
 }
 
@@ -367,6 +372,7 @@ export class StateStream {
             state: entry.state,
             cause: entry.cause ?? '',
             message: entry.message ?? '',
+            failure: failureFrom(entry.failure),
             at: entry.since ?? '',
           });
         }
@@ -383,6 +389,7 @@ export class StateStream {
           state: frame.state,
           cause: frame.cause ?? '',
           message: frame.message ?? '',
+          failure: failureFrom(frame.failure),
           at: frame.at ?? '',
         });
         this.#heard(next);
@@ -574,4 +581,16 @@ export function useSettledReload(
       window.clearTimeout(handle);
     };
   }, [frames, reload, first]);
+}
+
+/**
+ * Where a check failed, from a frame (`P-285`): a phase that is text, and a target only when it
+ * is text too; anything else, or nothing, is `null`. Nothing on this wire is checked at compile
+ * time, and a field this build reads as an object must not take a string for one.
+ */
+export function failureFrom(raw: unknown): CheckFailure | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const { phase, target } = raw as { phase?: unknown; target?: unknown };
+  if (typeof phase !== 'string' || phase === '') return null;
+  return typeof target === 'string' && target !== '' ? { phase, target } : { phase };
 }

@@ -182,6 +182,56 @@ describe('the live state stream', () => {
     expect(stream.states.get(11)?.state, 'the other sensor is untouched').toBe('down');
   });
 
+  it('reads where a check failed from both frames, and nothing it cannot read as one (P-285)', () => {
+    const { stream, latest } = harness();
+    stream.subscribe(1);
+    latest().open();
+    const failure = { phase: 'connect', target: '192.0.2.7:22' };
+    latest().deliver({
+      ...SNAPSHOT,
+      entries: [{ ...SNAPSHOT.entries[1], failure }, SNAPSHOT.entries[0]],
+    });
+    expect(stream.states.get(11)?.failure).toEqual(failure);
+    // A core below `P-285` sends none: `null`, never `undefined` and never a guess.
+    expect(stream.states.get(10)?.failure).toBeNull();
+    latest().deliver({
+      type: 'state',
+      seq: 8,
+      sensorId: 10,
+      sensorName: 'Ping',
+      path: [1, 2, 10],
+      state: 'down',
+      cause: 'scan',
+      message: 'timed out',
+      failure: { phase: 'timeout' },
+      at: 'y',
+    });
+    expect(stream.states.get(10)?.failure).toEqual({ phase: 'timeout' });
+    for (const [sent, read] of [
+      ['connect', null],
+      [{ target: '192.0.2.7' }, null],
+      [{ phase: '' }, null],
+      [{ phase: 7 }, null],
+      [['connect'], null],
+      [{ phase: 'exec', target: 5 }, { phase: 'exec' }],
+      [{ phase: 'exec', target: '' }, { phase: 'exec' }],
+    ] as const) {
+      latest().deliver({
+        type: 'state',
+        seq: 9,
+        sensorId: 10,
+        sensorName: 'Ping',
+        path: [1, 2, 10],
+        state: 'down',
+        cause: 'scan',
+        message: '',
+        failure: sent,
+        at: 'z',
+      });
+      expect(stream.states.get(10)?.failure, JSON.stringify(sent)).toEqual(read);
+    }
+  });
+
   it('keeps showing the last states when the connection drops', () => {
     // Blanking the tree would be the honest-looking mistake: it says "nothing is wrong" about a
     // subtree nobody is hearing from. `status` is how the UI says the states may be stale.

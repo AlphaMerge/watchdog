@@ -1,4 +1,4 @@
-import type { CheckResult } from '@ms/shared';
+import type { CheckFailure, CheckResult } from '@ms/shared';
 
 /**
  * What a check is handed, and what it gives back, come from `@ms/sensors` — the package that
@@ -38,8 +38,10 @@ export interface CheckRequest {
 }
 
 /**
- * Where a check got to. Not on the wire — the protocol carries a message, not a taxonomy — but
- * it is what the probe logs, and "ETIMEDOUT" alone is not a diagnosis (CLAUDE.md).
+ * Where a check got to, as the runner saw it, and what the probe logs: "ETIMEDOUT" alone is not a
+ * diagnosis (CLAUDE.md). **On the wire since `P-285`**, as a failed result's `failure.phase` when
+ * the error the check threw named no phase of its own (`failureOf`); `execute` never is, since it
+ * says only that the check ran and threw.
  */
 export type CheckPhase =
   | 'execute'
@@ -120,6 +122,27 @@ export interface CheckRegistry {
   sessionCounters?(): SessionCounters;
 }
 
+/**
+ * Where a thrown error said it failed (`P-285`), as plain values a worker can post and a check
+ * process can print: an error's own fields survive neither `postMessage`'s structured clone nor
+ * JSON, which keep only its message. Sniffed by shape, as `UNKNOWN_SENSOR_TYPE` is, so neither
+ * needs `@ms/sensors`: `SshError`, `SnmpError`, `DbError`, `CredentialsWithheldError` and
+ * `TargetRefusedError` carry a `phase`, and a `target` or a `host`. **Nothing else of the error**
+ * — no `command`, `oid`, refused `address` or cause — since `scrubbedError` scrubs only the
+ * message and the stack. Bounded again by the runner (`failureOf`), which keeps a target only
+ * when it is a plain host.
+ */
+export function failureSaid(error: unknown): CheckFailure | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const { phase, target, host } = error as { phase?: unknown; target?: unknown; host?: unknown };
+  // The bounds `fitFailure` holds them to, so that nothing longer is posted or printed.
+  if (typeof phase !== 'string' || phase === '' || phase.length > 32) return undefined;
+  const where = typeof target === 'string' && target !== '' ? target : host;
+  return typeof where === 'string' && where !== '' && where.length <= 255
+    ? { phase, target: where }
+    : { phase };
+}
+
 /** The shape the worker sniffs for. Kept structural so a test registry need not import one. */
 export const UNKNOWN_SENSOR_TYPE = 'UNKNOWN_SENSOR_TYPE';
 
@@ -166,4 +189,4 @@ export const READY_MARKER = 'ms-check-ready';
  */
 export const GROUP_MARKER = 'ms-check-group:';
 
-export type { CheckResult };
+export type { CheckFailure, CheckResult };

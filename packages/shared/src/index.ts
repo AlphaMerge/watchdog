@@ -120,10 +120,19 @@ export {
   unsaidPatterns,
 } from './schema/pattern-message.js';
 export type { UnsaidPattern } from './schema/pattern-message.js';
-export { clip as clipText, fitLabel, fitResult, RESULT_LIMITS } from './protocol/result-fit.js';
+export {
+  clip as clipText,
+  FAILURE_PHASE,
+  FAILURE_TARGET,
+  fitFailure,
+  fitLabel,
+  fitResult,
+  RESULT_LIMITS,
+} from './protocol/result-fit.js';
 export type { FittedResult } from './protocol/result-fit.js';
 export type {
   ChannelReading,
+  CheckFailure,
   CheckResult,
   CoreToProbeMessage,
   NackReason,

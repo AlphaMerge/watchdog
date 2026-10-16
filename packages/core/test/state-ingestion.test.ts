@@ -358,6 +358,43 @@ describe(
       assert.equal(Number(samples[0]?.count), 1, 'only the successful scan left a reading');
     });
 
+    it('keeps where each failure failed, as the probe named it, beside its words (P-285)', async () => {
+      const { service, ingestor } = build();
+      const failure = (minutes: number, phase?: string): CheckResult =>
+        result({
+          at: at(minutes),
+          outcome: 'error',
+          message: `failed at minute ${String(minutes)}`,
+          channels: [],
+          ...(phase === undefined ? {} : { failure: { phase, target: '192.0.2.30:22' } }),
+        });
+
+      await deliver(service, ingestor, [
+        result(),
+        failure(1, 'connect'),
+        failure(2, 'exec'),
+        failure(3, 'authenticate'),
+      ]);
+
+      const rows = await db.query<{ state: string; phase: string | null; target: string | null }>(
+        `SELECT state, failure_phase AS phase, failure_target AS target
+         FROM sensor_state WHERE sensor_id = $1 ORDER BY time`,
+        [sensorId],
+      );
+      assert.deepEqual(rows, [
+        { state: 'up', phase: null, target: null },
+        { state: 'warning', phase: 'connect', target: '192.0.2.30:22' },
+        { state: 'down', phase: 'exec', target: '192.0.2.30:22' },
+      ]);
+      // The third failed elsewhere and moved nothing but where: the row says the last.
+      const [current] = await db.query<{ phase: string | null; target: string | null }>(
+        `SELECT failure_phase AS phase, failure_target AS target
+         FROM sensor_runtime WHERE object_id = $1`,
+        [sensorId],
+      );
+      assert.deepEqual(current, { phase: 'authenticate', target: '192.0.2.30:22' });
+    });
+
     it('dates the state from when it changed, not from the last result that confirmed it', async () => {
       const { service, ingestor } = build();
       await deliver(service, ingestor, [

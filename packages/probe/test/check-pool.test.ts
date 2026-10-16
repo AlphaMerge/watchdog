@@ -135,6 +135,30 @@ describe('check pool', () => {
     assert.equal('withheld' in failed, false, 'an ordinary failure carries no mark at all');
   });
 
+  it('says where a check failed when its error named a phase, and nothing when it did not (P-285)', async () => {
+    const { pool, seen } = await poolOf();
+    pool.submit(request(7, 'test.phase'));
+    pool.submit(request(8, 'test.phase', { phase: 'connect', host: 'admin:secret@192.0.2.7' }));
+    pool.submit(request(9, 'test.phase', { phase: 'connect to 192.0.2.7' }));
+    pool.submit(request(10, 'test.throw'));
+    pool.submit(request(11, 'test.ok'));
+    await until(() => seen.length === 5, 'the five checks');
+    const of = (id: number) => seen.find((one) => one.result.sensorId === id);
+    // The error's phase and host, copied out of the worker: its clone kept only the message.
+    assert.deepEqual(of(7)?.result.failure, { phase: 'walk', target: '192.0.2.7:161' });
+    // A host that could carry a credential is left off, and the phase kept.
+    assert.deepEqual(of(8)?.result.failure, { phase: 'connect' });
+    // **Absent is not named.** A phase that is not a word, and a plain `Error`, fall back to the
+    // pool's own phase, and `execute` says only that the check threw.
+    for (const id of [9, 10, 11]) {
+      assert.equal(of(id)?.meta.phase, 'execute');
+      assert.equal('failure' in (of(id)?.result ?? {}), false, String(id));
+    }
+    // Nothing else of the error crosses: not its command, not its OID, not a refused host.
+    assert.doesNotMatch(JSON.stringify(seen.map((one) => one.result)), /secret|snmpwalk/);
+    assert.doesNotMatch(JSON.stringify(seen.map((one) => one.result.failure)), /1\.3\.6/);
+  });
+
   it('sends what can be sent of readings no core would take (`P-277`)', async () => {
     // A worker runs this probe's own code, but a check's readings are a device's words and a
     // script's numbers. One result the core's schema refuses used to close the connection on
@@ -178,6 +202,8 @@ describe('check pool', () => {
     const result = refused.result;
     assert.equal(result.outcome, 'error');
     assert.equal(result.withheld, true, result.message);
+    // The refusal's own phase and the name it would not resolve (`P-285`).
+    assert.deepEqual(result.failure, { phase: 'resolve', target: 'switch.invalid' });
     assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 3000 ms/);
     assert.doesNotMatch(result.message, /did not finish within/);
     assert.deepEqual(result.channels, []);
@@ -232,6 +258,8 @@ describe('check pool', () => {
     assert.ok(entry);
     assert.equal(entry.result.outcome, 'error');
     assert.equal(entry.meta.phase, 'timeout');
+    // Settled by the pool, so the check's own error never arrives: the pool's phase (`P-285`).
+    assert.deepEqual(entry.result.failure, { phase: 'timeout' });
     // Against the alternative, the check giving up at `abortGraceMs` (10 s), and at half of it
     // rather than an absolute budget, so a loaded machine cannot fail it (`P-234`).
     assert.ok(elapsed < 5_000, `the result arrived after ${String(elapsed)} ms`);
@@ -275,6 +303,7 @@ describe('check pool', () => {
     assert.equal(crashed.result.sensorId, 50);
     assert.equal(crashed.result.outcome, 'error');
     assert.equal(crashed.meta.phase, 'worker-crash');
+    assert.deepEqual(crashed.result.failure, { phase: 'worker-crash' });
 
     pool.submit(request(51, 'test.ok'));
     await until(() => seen.length === 2, 'the pool to recycle', 8_000);
@@ -569,6 +598,7 @@ describe('check pool', () => {
     assert.ok(entry);
     assert.equal(entry.meta.phase, 'unknown-type');
     assert.equal(entry.result.outcome, 'error');
+    assert.deepEqual(entry.result.failure, { phase: 'unknown-type' });
     assert.match(entry.result.message, /test\.nonexistent/, 'names the type it could not find');
     assert.deepEqual(entry.result.channels, [], 'a failed check records no channel values');
   });

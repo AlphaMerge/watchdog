@@ -10915,12 +10915,147 @@ because each is a decision rather than a defect:
           in `SINCE`, the schema taking a UUID and gapping anything else.
           `probe-health-report.test.ts`: `PROCESS_INSTANCE` on every report, injectable.
 
-- [ ] **P-285 — a check's failure phase reaches the stored result only as prose** · S · P-279 ·
+- [x] **P-285 — a check's failure phase reaches the stored result only as prose** · S · P-279 ·
       Found 2026-10-07 in `P-279`. `check-worker.ts` passes on only an error's message, so its
       `phase`, target and cause never reach the stored result, which has no field for them.
       `CLAUDE.md` asks every failure to carry its phase. **Done when** a result carries a
       structured failure phase (and target) end to end, shown in the UI, with a protocol number
       and tests.
+
+      **P-285 outcome. Migration 081, protocol 35. Where a check failed is a field beside its
+      message, kept by the message's rule.**
+      - **Decisions, taken by the orchestrator** and named in the push question:
+        1. **An open, bounded word, not an enum.** `failure.phase` is a lower-case letter, then
+           letters, digits and hyphens, 32 at most (`FAILURE_PHASE`). A new transport's phase
+           needs no protocol bump; a closed list would have made each one a bump, as
+           `RejectCode` did for `P-326`.
+        2. **The check's own phase first.** The error's `phase` when it names one, else the
+           runner's when that is not `execute`, else no `failure`: `execute` says only that the
+           check threw. A check process that runs out of time throws from where it was (`walk`,
+           `exec`), and that is sent, with its message saying the time ran out. The pool's own
+           timeout settles the check before its error arrives, so there it is `timeout`.
+        3. **A plain host or nothing.** `target` is taken from the error's `target` or `host`
+           and kept only when it is letters, digits and `. _ - : % [ ]`, up to 255
+           (`FAILURE_TARGET`): a name, an address (IPv6 bracketed or not, with a zone), or
+           either with a port. Listed, not filtered, so `@`, `/`, `?`, `#`, `=` and spaces cannot
+           pass, and a host built from a URL cannot carry a user, a password or a token to a
+           reader of the sensor. A name outside ASCII is left off; the device's host says it.
+        4. **Both tables.** `failure_phase` and `failure_target` on `sensor_runtime` and on
+           `sensor_state`, nullable, a target never without its phase (a CHECK on each).
+        5. **The error code stays in the message.** `ECONNRESET` is in the prose, and the
+           ticket's Done-when names the phase and the target.
+        6. **Beside the message, by its rule** (`state-machine.md` §2.2). The scan's own when
+           the scan failed and its words explain the state; what is stored when a person or a
+           hold decided the state; nothing once a pause, an acknowledgement, a hold or a release
+           writes words of its own (`writeStateChanges` clears both); held with the message by a
+           pause that committed while the result was in flight (`P-147`). **Never a cause**: a
+           phase that moves while the state and the cause stand records no transition.
+      - **Protocol 35.** `CheckResult.failure?: { phase, target? }`, under `failurePhase`, only
+        beside `outcome: 'error'` (an `allOf` rule). It may stand beside `withheld` or
+        `notStarted`. `resultForPeer` takes it out for a core below 35, which also covers a
+        spooled result replayed to an older core. `fitFailure` bounds it; `fitResult` keeps it
+        on a failed check only. **The core mends, never refuses, for it**: a phase that is not
+        a word drops the failure and a target that is not plain drops the target (`fittable`
+        takes `/failure`), since the field decides nothing and refusing would lose a failed
+        check.
+      - **Probe.** A custom error's fields survive neither `postMessage`'s clone nor JSON, so
+        the worker and the check process copy `phase` and `target` or `host` off the thrown error
+        (`failureSaid`, by shape, as `UNKNOWN_SENSOR_TYPE` is) and nothing else: no command, no
+        OID, no refused address, no cause, none of which `scrubbedError` scrubs. Both runners
+        choose by decision 2 (`failureOf`, `runner/failure.ts`). `readAnswer` does not refuse an
+        answer for its `failure`: what a script that holds the check process's stdout claims is
+        bounded and kept or dropped, and the failed check stays a failed check. The `CheckPhase`
+        comment no longer says the runner's phases are not on the wire.
+      - **Core.** Migration 081. `SensorResult.failure`, from ingestion. `decide` chooses it
+        beside the message; the transition and the runtime row carry it; `readSensorState` and
+        `loadRuntimes` read it (`runtime-row.test.ts` holds the two lists together); the live
+        stream's frames and snapshots carry it.
+      - **API.** `failure` (`ms:checkFailure` or `null`, a `oneOf` as `nowInherited` has, so
+        the reference says nullable) on `GET /sensors/{id}/state`, each `GET /state-log` entry,
+        and the check-now answer, where it is `null` rather than absent on a success.
+        `api-reference.md` regenerated.
+      - **UI.** "Failed while connecting to 192.0.2.7:22" on the sensor page's state line,
+        between the cause and the check's words, and at the start of each state-log row's
+        Message cell on the Log tab and the Logs page (`FailurePhase`, `failureWords`). The
+        runner's phases read as what happened ("Did not finish within its timeout"), and a phase
+        the page does not know as itself ("Failed in “handshake” on mail.example"). Visible
+        text, never a tooltip; the host in the Host field's monospace. `worker-crash` reads as
+        what all its cases share, "The probe got no answer it could use from the check": the
+        check process names it for a process it could not start and an answer it could not read
+        as well as for one that died. A state-log row with no `failure` at all, from a core
+        older than the field, reads as its words alone.
+      - **Docs.** `state-machine.md` §2.2, `adding-a-sensor-type.md` (give an error `phase` and
+        `host`; never a URL), `web-ui.md`.
+      - **Not done, filed.** Half the transports name no phase (`P-406`), and a result the
+        core holds rather than decides keeps its words but not its failure (`P-407`). The
+        fix review found `P-260`'s start-up race, where a check that never began reads as
+        stopped at its timeout (`P-408`).
+      - **Tests.**
+        - `capabilities.test.ts`: the version table, stripping below 35, beside `notStarted`;
+          the core keeps a bounded failure, mends an unbounded one without refusing the result,
+          and refuses one beside `ok`.
+        - `result-fit.test.ts`: `fitFailure` on plain hosts, IPv6 with a zone, credentials in a
+          URL, NUL, tab, 256 characters, a non-ASCII name; the property now draws outcomes and
+          failures, and holds `fitResult` to `fitFailure` and the core's parser.
+        - Probe: both runners name a fixture error's phase and host and drop a credentialled
+          host; a plain error, a success and an unworded phase name nothing; the pool's
+          timeout, crash and unknown type, the child's abort, kill, crash, start-up failure and
+          unknown type each name their runner phase; a check process that times out in a walk
+          says `walk`; a forged answer's failure is bounded and never refused;
+          `ssh-reset.test.ts` stores `exec` and `127.0.0.1` from the real `SshError`.
+        - Core: migration 081 forward and back, with its CHECKs; `failure-phase.test.ts` (the
+          scan's words, both APIs, no transition on a phase change, nothing beside a limit,
+          cleared by an acknowledgement and kept so while a person decides, held by a racing
+          pause); ingestion; the stream's frame and snapshot; check-now.
+        - Web: `failure-phase.test.tsx` (the words, `worker-crash`'s among them, the
+          component, the Log tab and the Logs page rows, a row without the field),
+          `detail-failure.test.tsx` (the state line), the stream parsing both frames.
+      - **Review.** Seven findings, four confirmed and fixed: `worker-crash`'s words were false
+        of three of the check process's four uses; §2.2 counted four settled things and listed
+        five; the reference showed `failure` as never null; a log row without the field ended
+        the page. Three refuted: the target is the device's host, which the device API and the
+        messages already show; a runner phase carries no target; and a check process at its
+        timeout says the time ran out in its message.
+      - **Mutants 34/34.**
+        - Shared (6): the strip below 35; the capability's version; a failure kept on a
+          success; a target kept unbounded; a looser phase; the core refusing an unbounded
+          failure rather than mending it.
+        - Probe (7): the worker or the check process not copying; either runner not passing it
+          on; a target not taken from `target`; `execute` sent; the runner's phase put first.
+        - Core (14): the pause guard; a rewrite not clearing it; a person's state taking the
+          result's; a failure not kept; ingestion dropping it; the history row; the stream's
+          frame and snapshot; the state route; the state log; check-now; the CHECK's target
+          without a phase; a target not read back; the replies' schema not allowing `null`.
+        - Web (7): a target that is not text; a snapshot's failure; the state line; the Log
+          tab; the Logs page; a phase read off the prototype; a row without the field.
+
+- [ ] **P-406 — half the transports name no phase, so their failures say none** · S · P-285 ·
+      Found 2026-10-17 in `P-285`. A result says where it failed only when the error the check
+      threw has a `phase`. `SnmpError`, `SshError`, `CredentialsWithheldError`,
+      `TargetRefusedError` and some `DbError`s do. `TlsError` has a host and no phase.
+      `MailError` and `WindowsError` have neither. `describeDbError` passes its phase on only
+      for a timeout and the IPv6 case, so a refused password (`28P01`), a refused connection, a
+      failed lookup and a missing database name none. Ping, HTTP and the script types throw plain
+      errors. **Done when** each of these names its phase and, where it has one, its host, as
+      `adding-a-sensor-type.md` now asks, with a test per transport against its simulator.
+
+- [ ] **P-407 — a held result keeps its words but not where it failed** · XS · P-285 · Found
+      2026-10-17 in `P-285`. A refusal (`withheld`, `A-41c`) and a check the probe could not start
+      (`notStarted`, `P-265`) are not decided: the core holds the sensor through `reevaluate`
+      with the result's message, and `writeStateChanges` clears the failure beside it, so the
+      `resolve` or `startup` the probe named is not stored. **Done when** a held result's
+      failure is stored beside its held words and cleared with them, with tests for both holds.
+
+- [ ] **P-408 — a check process ready as its start-up bound fires is settled at its timeout** ·
+      XS · P-260 · Found 2026-10-17 in `P-285`'s review. If the start-up timer
+      (`process-runner.ts`, `giveUp`) runs after the child has written its ready line but before
+      the parent has read it, it aborts `deadline` and `onStdout` then ignores the ready line.
+      A child that has already installed its SIGTERM handler answers `aborted`, and that answer
+      wins: the check is counted in `#timedOut` and settled as `aborted`, which the UI reads as
+      "Stopped at its timeout". In fact it was a check that never began, which should be
+      `startup` and `notStarted`. The window is one event-loop turn at the 30 s start-up bound.
+      **Done when** a check process whose start-up bound fired is settled as not started
+      whatever it answers, with a test that holds the ready line back across the bound.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as

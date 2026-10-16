@@ -1,3 +1,5 @@
+import { failureField } from './state.js';
+
 /**
  * What an on-demand check answers with (`R-09`).
  *
@@ -29,12 +31,14 @@ export const checkResultSchema = {
   $id: 'ms:checkResult',
   type: 'object',
   additionalProperties: false,
-  required: ['sensorId', 'at', 'outcome', 'message', 'durationMs', 'channels', 'stored'],
+  required: ['sensorId', 'at', 'outcome', 'message', 'failure', 'durationMs', 'channels', 'stored'],
   properties: {
     sensorId: { type: 'integer' },
     at: { type: 'string' },
     outcome: { type: 'string', enum: ['ok', 'error'] },
     message: { type: 'string' },
+    /** Where the check failed, when the probe named it (`P-285`); `null` on a success. */
+    failure: failureField,
     durationMs: { type: 'number' },
     channels: { type: 'array', items: { $ref: 'ms:checkChannel' } },
     /**

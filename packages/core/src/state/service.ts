@@ -12,7 +12,7 @@
  * interval issues no state queries at all.
  */
 
-import type { Logger } from '@ms/shared';
+import type { CheckFailure, Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import type { ActorKind } from '../objects/audit.js';
 import { SCAN_RETRY_WARNINGS } from '../settings/registry.js';
@@ -54,6 +54,12 @@ export interface SensorResult {
   readonly outcome: 'ok' | 'error';
   /** The probe's message: what the check itself had to say. */
   readonly message: string;
+  /**
+   * Where the check failed, as the probe named it (`P-285`): absent from a probe below 35, from a
+   * check that threw a plain error, and from every success. Kept beside `message` when the
+   * message is the scan's own; it never decides anything.
+   */
+  readonly failure?: CheckFailure;
   /**
    * What this result's readings were worth (`M-04`), or `null` when there were none to judge.
    *
@@ -407,11 +413,26 @@ export class SensorStateService {
         // an operator cannot make sense of and which `U-06` puts on the home screen. The rule is
         // `operatorDecided`, the same one `reevaluate` uses; the difference is that there are no
         // fresh operator words here, so what is already stored is what stays.
+        const withheldWords = operatorDecided(applied.decision)
+          ? this.#withheldMessage(sensorId, applied.decision)
+          : undefined;
         const message = operatorDecided(applied.decision)
-          ? (this.#withheldMessage(sensorId, applied.decision) ?? runtime.message)
+          ? (withheldWords ?? runtime.message)
           : applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
             ? readingMessage(result.channels?.message ?? '', result.message)
             : result.message;
+        // **Where it failed goes with the words, by the same rule** (`P-285`): the check's own
+        // when it failed, what is stored when a person's or a hold's words explain the state,
+        // and nothing beside a voucher's. Nothing beside a limit's or a lookup's either: those
+        // judge readings, which only a success has. Never a cause, so a phase that moves while
+        // the state and the cause do not records no transition.
+        const failure = operatorDecided(applied.decision)
+          ? withheldWords === undefined
+            ? runtime.failure
+            : null
+          : result.outcome === 'error'
+            ? (result.failure ?? null)
+            : null;
 
         const changed =
           applied.decision.state !== runtime.state || applied.decision.cause !== runtime.cause;
@@ -423,6 +444,7 @@ export class SensorStateService {
             previousState: runtime.state,
             cause: applied.decision.cause,
             message,
+            failure,
           });
         }
 
@@ -431,6 +453,7 @@ export class SensorStateService {
           state: applied.decision.state,
           cause: applied.decision.cause,
           message,
+          failure,
           // The clock on "Down for 2h 15m" starts when the state did, and does not restart
           // because the sensor failed again in the same way.
           since: changed ? result.at : runtime.since,
@@ -446,6 +469,7 @@ export class SensorStateService {
         state: runtime.state,
         cause: runtime.cause,
         message: runtime.message,
+        failure: runtime.failure,
         since: runtime.since,
         consecutiveFailures:
           runtime.facts.scan.kind === 'failed' ? runtime.facts.scan.consecutiveFailures : 0,

@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { describeError, fitResult, runProgram, type CheckResult, type Logger } from '@ms/shared';
+import { failureField } from './failure.js';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
 import { notStarted, READY_MARKER, RESULT_MARKER } from './types.js';
@@ -172,6 +173,11 @@ interface ChildAnswer {
   withheld?: boolean;
   /** The child could not load the probe's sensor types, so no check ran (`P-260`). */
   startup?: boolean;
+  /**
+   * What the check's error said of where it failed (`failureSaid`, `P-285`). Not read here:
+   * `failureOf` bounds it, and one it cannot use leaves the runner's phase or nothing.
+   */
+  failure?: unknown;
 }
 
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -534,6 +540,7 @@ export class ProcessRunner {
         durationMs: answer.durationMs,
         // Refused over where its credentials may go (`A-41c`), which is not a failed scan.
         ...(answer.withheld === true ? { withheld: true as const } : {}),
+        said: answer.failure,
       });
       return;
     }
@@ -691,7 +698,14 @@ export class ProcessRunner {
           durationMs: number;
           channels: { key: string; value: number; name?: string; unit?: string }[];
         }
-      | { outcome: 'error'; message: string; durationMs: number; withheld?: true },
+      | {
+          outcome: 'error';
+          message: string;
+          durationMs: number;
+          withheld?: true;
+          /** What the check's error said of where it failed, for `failureOf` (`P-285`). */
+          said?: unknown;
+        },
   ): void {
     if (job.settled) return;
     job.settled = true;
@@ -708,6 +722,8 @@ export class ProcessRunner {
       // **A check whose process never got as far as running it** (`P-265`): the device was never
       // asked, so the core holds the sensor behind the probe's one alarm instead of failing it.
       ...(parts.outcome === 'error' && notStarted(phase) ? { notStarted: true as const } : {}),
+      // Where it failed (`P-285`): the error's phase, else this runner's when it is not `execute`.
+      ...failureField(parts.outcome, phase, parts.outcome === 'error' ? parts.said : undefined),
     } satisfies CheckResult);
     if (problems.length > 0) unfit(this.#logger, job.request, problems);
     // Counted for Probe Health (`P-283`): the log names the sensor, and this says how often.

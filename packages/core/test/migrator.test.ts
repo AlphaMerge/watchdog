@@ -2195,6 +2195,151 @@ describe(
       }
     });
 
+    it('keeps where a check failed beside its message, both or neither, and rolls back to none (081)', async () => {
+      // `P-285`: a failed check's phase and host, as fields on the current state and on each
+      // transition. Nullable, never backfilled from the prose, and a target never alone.
+      const fresh = await createScratchDatabase('failure_phase');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 81),
+        );
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 80),
+        ).up();
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const sensor = await insert('sensor', 'sensor', device);
+        await q.query(`INSERT INTO sensor_config (object_id, type) VALUES ($1, 'ssh.load')`, [
+          sensor,
+        ]);
+        await q.query(
+          `UPDATE sensor_runtime SET state = 'down', message = 'the connection was lost while running uptime'
+           WHERE object_id = $1`,
+          [sensor],
+        );
+        await q.query(
+          `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message)
+           VALUES ('2026-10-17T08:00:00Z', $1, 'down', 'up', 'scan', 'the connection was lost')`,
+          [sensor],
+        );
+        await all.up();
+
+        const stored = async (): Promise<unknown[]> => [
+          ...(await q.query(
+            'SELECT failure_phase, failure_target FROM sensor_runtime WHERE object_id = $1',
+            [sensor],
+          )),
+          ...(await q.query(
+            'SELECT failure_phase, failure_target FROM sensor_state WHERE sensor_id = $1 ORDER BY time',
+            [sensor],
+          )),
+        ];
+        // Not named, on every row before it: nothing is read back out of the prose.
+        assert.deepEqual(await stored(), [
+          { failure_phase: null, failure_target: null },
+          { failure_phase: null, failure_target: null },
+        ]);
+
+        await q.query(
+          `UPDATE sensor_runtime SET failure_phase = 'exec', failure_target = '192.0.2.7:22'
+           WHERE object_id = $1`,
+          [sensor],
+        );
+        await q.query(
+          `INSERT INTO sensor_state
+             (time, sensor_id, state, previous_state, cause, message, failure_phase)
+           VALUES ('2026-10-17T08:05:00Z', $1, 'warning', 'down', 'scan', 'timed out', 'timeout')`,
+          [sensor],
+        );
+        assert.deepEqual(await stored(), [
+          { failure_phase: 'exec', failure_target: '192.0.2.7:22' },
+          { failure_phase: null, failure_target: null },
+          { failure_phase: 'timeout', failure_target: null },
+        ]);
+
+        // Refused by both tables: a target with no phase, and either past the wire's bounds.
+        for (const [phase, target] of [
+          [null, '192.0.2.7'],
+          ['', null],
+          ['p'.repeat(33), null],
+          ['exec', ''],
+          ['exec', 't'.repeat(256)],
+        ] as const) {
+          await assert.rejects(
+            q.query(
+              'UPDATE sensor_runtime SET failure_phase = $2, failure_target = $3 WHERE object_id = $1',
+              [sensor, phase, target],
+            ),
+            /violates check constraint "sensor_runtime_failure_ck"/,
+            `${String(phase)} / ${String(target)}`,
+          );
+          await assert.rejects(
+            q.query(
+              `INSERT INTO sensor_state
+                 (time, sensor_id, state, cause, message, failure_phase, failure_target)
+               VALUES ('2026-10-17T09:00:00Z', $1, 'down', 'scan', '', $2, $3)`,
+              [sensor, phase, target],
+            ),
+            /violates check constraint "sensor_state_failure_ck"/,
+            `${String(phase)} / ${String(target)}`,
+          );
+        }
+
+        await all.down(1);
+        const columns = await q.query(
+          `SELECT table_name, column_name FROM information_schema.columns
+           WHERE table_name IN ('sensor_runtime', 'sensor_state')
+             AND column_name IN ('failure_phase', 'failure_target')`,
+        );
+        assert.deepEqual(columns, []);
+        const checks = await q.query(
+          `SELECT conname FROM pg_constraint
+           WHERE conname IN ('sensor_runtime_failure_ck', 'sensor_state_failure_ck')`,
+        );
+        assert.deepEqual(checks, []);
+        assert.equal(
+          (
+            await q.query(
+              `SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'sensor_config' AND column_name = 'params_changed_at'`,
+            )
+          ).length,
+          1,
+          'and nothing else: 080 stays',
+        );
+        // The rows stay, with their messages: the prose still says it.
+        assert.deepEqual(
+          await q.query('SELECT message FROM sensor_state WHERE sensor_id = $1 ORDER BY time', [
+            sensor,
+          ]),
+          [{ message: 'the connection was lost' }, { message: 'timed out' }],
+        );
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [81],
+        );
+        assert.deepEqual(await stored(), [
+          { failure_phase: null, failure_target: null },
+          { failure_phase: null, failure_target: null },
+          { failure_phase: null, failure_target: null },
+        ]);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

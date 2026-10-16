@@ -155,7 +155,13 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
         return reply;
       }
 
-      return { ...outcome.result, sensorId, stored: false };
+      // `null` rather than absent where the probe named nothing (`P-285`): the schema says both.
+      return {
+        ...outcome.result,
+        failure: outcome.result.failure ?? null,
+        sensorId,
+        stored: false,
+      };
     },
   );
 }

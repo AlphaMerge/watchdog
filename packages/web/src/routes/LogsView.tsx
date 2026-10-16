@@ -16,6 +16,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { TabPanel, Tabs } from '../components/Tabs';
 import type { TabDefinition } from '../components/tabs-model';
 import { formatDuration } from './detail/model';
+import { MessageOf } from './detail/StateLogPanel';
 import { PageTitle } from '../components/PageTitle';
 import { PAGE, usePaged, auditQueryFor } from './logs-model';
 
@@ -312,7 +313,9 @@ function StatusChanges({
                           formatDuration(entry.durationMs)
                         )}
                       </td>
-                      <td className="py-2 align-top text-xs text-text-muted">{entry.message}</td>
+                      <td className="py-2 align-top text-xs text-text-muted">
+                        <MessageOf entry={entry} />
+                      </td>
                     </tr>
                   ))}
                 </tbody>

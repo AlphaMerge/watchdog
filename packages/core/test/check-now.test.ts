@@ -389,6 +389,29 @@ describe(
       assert.deepEqual(body.channels, [], 'a failed check reports no channel values');
     });
 
+    it('says where the check failed when the probe named it, and null when it did not (P-285)', async () => {
+      sender.answer = {
+        result: {
+          ...ok(),
+          outcome: 'error',
+          message: 'the connection to 192.0.2.70 was lost while running uptime',
+          channels: [],
+          failure: { phase: 'exec', target: '192.0.2.70:22' },
+        },
+      };
+      const failed = await check();
+      assert.equal(failed.statusCode, 200);
+      assert.deepEqual(failed.json<{ failure: unknown }>().failure, {
+        phase: 'exec',
+        target: '192.0.2.70:22',
+      });
+      // Said as null rather than left out, on a success and on a failure nothing named.
+      sender.answer = { result: ok() };
+      assert.equal((await check()).json<{ failure: unknown }>().failure, null);
+      sender.answer = { result: { ...ok(), outcome: 'error', channels: [] } };
+      assert.equal((await check()).json<{ failure: unknown }>().failure, null);
+    });
+
     it('is a 503 when the probe is not connected, and says which', async () => {
       sender.delivery = { kind: 'offline' };
       const response = await check();

@@ -137,6 +137,7 @@ describe('process runner', () => {
     runner.submit(request(4, 'test.crash'));
     await until(() => seen.length === 1, 'the exit to be reported');
     assert.match(seen[0]?.result.message ?? '', /exited with code 7/);
+    assert.deepEqual(seen[0]?.result.failure, { phase: 'worker-crash' });
   });
 
   it('records no channel values for a failed check', async () => {
@@ -148,6 +149,33 @@ describe('process runner', () => {
     assert.equal(seen[0].result.message, 'the check failed on purpose');
     assert.deepEqual(seen[0].result.channels, []);
     assert.equal(seen[0].result.notStarted, undefined, 'it started, and failed');
+    // A plain `Error` names no phase, and `execute` is never sent (`P-285`).
+    assert.equal('failure' in seen[0].result, false);
+  });
+
+  it('says where a check failed when its error named a phase, from a process of its own (P-285)', async () => {
+    const { runner, seen } = runnerOf();
+    runner.submit(request(9, 'test.phase'));
+    runner.submit(request(10, 'test.phase', { phase: 'connect', host: 'admin:secret@192.0.2.7' }));
+    await until(() => seen.length === 2, 'both failures');
+    const of = (id: number) => seen.find((one) => one.result.sensorId === id);
+    // Copied out of the error before JSON, which would have kept only its message.
+    assert.deepEqual(of(9)?.result.failure, { phase: 'walk', target: '192.0.2.7:161' });
+    assert.equal(of(9)?.meta.phase, 'execute');
+    assert.deepEqual(of(10)?.result.failure, { phase: 'connect' });
+    assert.doesNotMatch(JSON.stringify(seen.map((one) => one.result)), /secret|snmpwalk/);
+  });
+
+  it('says the check’s own phase when it ran out of time in one, not the runner’s (P-285)', async () => {
+    // The child aborts the check at its timeout, and a transport that honours the abort throws
+    // from where it was. That is what tells a walk that stalled from a device that is gone; the
+    // message says the time ran out.
+    const { runner, seen } = runnerOf();
+    runner.submit(request(11, 'test.phase-at-timeout', { timeoutMs: 800 }));
+    await until(() => seen.length === 1, 'the timeout', 20_000);
+    assert.equal(seen[0]?.meta.phase, 'aborted');
+    assert.deepEqual(seen[0].result.failure, { phase: 'walk', target: '192.0.2.7:161' });
+    assert.match(seen[0].result.message, /stopped at its timeout/);
   });
 
   it('lets a check that honours its signal report its own diagnosis', async () => {
@@ -158,6 +186,8 @@ describe('process runner', () => {
     await until(() => seen.length === 1, 'the timeout', 20_000);
     assert.equal(seen[0]?.result.outcome, 'error');
     assert.equal(seen[0].meta.phase, 'aborted');
+    // Its error named no phase, so the runner's (`P-285`).
+    assert.deepEqual(seen[0].result.failure, { phase: 'aborted' });
     assert.match(seen[0].result.message, /exceeded its timeout/);
     assert.equal(runner.stats().timedOut, 1);
   });
@@ -167,6 +197,7 @@ describe('process runner', () => {
     runner.submit(request(7, 'test.stuck', { timeoutMs: 500 }));
     await until(() => seen.length === 1, 'the kill', 20_000);
     assert.equal(seen[0]?.meta.phase, 'timeout');
+    assert.deepEqual(seen[0].result.failure, { phase: 'timeout' });
     assert.match(seen[0].result.message, /did not finish within 500 ms and its process was/);
   });
 
@@ -188,6 +219,7 @@ describe('process runner', () => {
     runner.submit(request(8, 'test.nonexistent'));
     await until(() => seen.length === 1, 'the unknown type');
     assert.equal(seen[0]?.meta.phase, 'unknown-type');
+    assert.deepEqual(seen[0].result.failure, { phase: 'unknown-type' });
   });
 
   it('marks a check refused over its credentials’ targets, and no other failure', async () => {
@@ -225,6 +257,7 @@ describe('process runner', () => {
     const result = seen[0]?.result;
     assert.ok(result !== undefined);
     assert.equal(result.withheld, true, result.message);
+    assert.deepEqual(result.failure, { phase: 'resolve', target: 'switch.invalid' });
     assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 10000 ms/);
     assert.doesNotMatch(result.message, /did not finish within/);
   });
@@ -399,6 +432,7 @@ describe('process runner', () => {
         'this probe could not load its sensor types to run the check: the catalogue is half-copied',
       );
       assert.equal(result.notStarted, true);
+      assert.deepEqual(result.failure, { phase: 'startup' });
       const stats = runner.stats();
       assert.equal(stats.startupFailed, 1);
       assert.equal(stats.failed, 1);
@@ -547,6 +581,41 @@ describe('process runner', () => {
       } finally {
         process.off('unhandledRejection', onRejection);
       }
+    });
+
+    it('takes where a check failed as a claim too, bounded, and never refuses the answer for it (P-285)', async () => {
+      // A script that has the check process's stdout can say any phase and any host. What it
+      // says is bounded as the core bounds it; the answer is not refused, which would make a
+      // failed check a crash.
+      const lines: readonly [string, unknown][] = [
+        ['{"phase":"exec","target":"192.0.2.9"}', { phase: 'exec', target: '192.0.2.9' }],
+        ['{"phase":"exec","target":"root:pw@192.0.2.9"}', { phase: 'exec' }],
+        ['{"phase":"rm -rf /","target":"192.0.2.9"}', undefined],
+        ['"exec"', undefined],
+        ['[1]', undefined],
+      ];
+      const { runner, seen } = runnerOf({ maxConcurrent: 4 });
+      for (const [at, [failure]] of lines.entries()) {
+        const line = `{"ok":false,"durationMs":1,"message":"m","failure":${failure}}`;
+        assert.equal(runner.submit(request(330 + at, 'test.forge-answer', { line })), 'accepted');
+      }
+      // On a success it is dropped with everything else a success cannot say.
+      runner.submit(
+        request(339, 'test.forge-answer', {
+          line: '{"ok":true,"durationMs":1,"message":"m","failure":{"phase":"exec"}}',
+        }),
+      );
+      await until(() => seen.length === lines.length + 1, 'every claimed failure');
+      for (const [at, [failure, kept]] of lines.entries()) {
+        const entry = seen.find((one) => one.result.sensorId === 330 + at);
+        assert.ok(entry !== undefined, failure);
+        assert.equal(entry.meta.phase, 'execute', failure);
+        assert.deepEqual(entry.result.failure, kept, failure);
+      }
+      const success = seen.find((one) => one.result.sensorId === 339)?.result;
+      assert.equal(success?.outcome, 'ok');
+      assert.equal('failure' in success, false);
+      assert.equal(runner.stats().crashed, 0, 'no answer refused');
     });
 
     it('answers a check whose result could not be handed on, rather than ending the probe', async () => {

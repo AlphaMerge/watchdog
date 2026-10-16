@@ -3460,7 +3460,7 @@ Asks the probe that owns the sensor to run **exactly** the check a scheduled sca
 | --- | --- | --- | --- |
 | `timeoutMs` | integer, 1000–120000 |  | How long to wait. Bounded well below the sensor’s own timeout allowance because a person is waiting: a check that may run for an hour is not something to hold an HTTP request open for. The probe is told the same number and abandons the work when it expires. |
 
-**200** { sensorId, at, outcome, message, durationMs, channels, stored }
+**200** { sensorId, at, outcome, message, failure, durationMs, channels, stored }
 
 **200** is [ms:checkResult](#schema-ms-checkresult)
 
@@ -3472,7 +3472,7 @@ A sensor’s current state, why it is in it, and since when. `pausedBy` lists ev
 | --- | --- | --- | --- |
 | `id` | path | integer, 1–9007199254740991 | **required** |
 
-**200** { sensorId, state, cause, message, since, lastResultAt, consecutiveFailures, pausedBy, acknowledged, acknowledgedUntil, acknowledgedBy, simulatedError }
+**200** { sensorId, state, cause, message, failure, since, lastResultAt, consecutiveFailures, pausedBy, acknowledged, acknowledgedUntil, acknowledgedBy, simulatedError }
 
 **200** is [ms:sensorState](#schema-ms-sensorstate)
 
@@ -4147,6 +4147,17 @@ one of 4 shapes, by `kind`
 | `counter` | string |  |  |
 | `counterBits` | integer |  |  |
 
+<a id="schema-ms-checkfailure"></a>
+
+### `ms:checkFailure`
+
+Where a failed check failed, as the probe named it (protocol 35): the phase, and the plain host it was acting on when it named one. The message says the same in prose.
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `phase` | string | **required** | A word, open rather than an enum: a transport’s (`connect`, `authenticate`, `host-key`, `exec`, `walk`, `query`) or the probe’s own (`timeout`, `startup`). |
+| `target` | string |  | A host, an address, or either with a port. Never a URL, a user name or a password. |
+
 <a id="schema-ms-checkresult"></a>
 
 ### `ms:checkResult`
@@ -4157,6 +4168,7 @@ one of 4 shapes, by `kind`
 | `at` | string | **required** |  |
 | `outcome` | `ok` · `error` | **required** |  |
 | `message` | string | **required** |  |
+| `failure` | [ms:checkFailure](#schema-ms-checkfailure) | **required** nullable | `null` where nothing was named — a success, an older probe, a check that threw a plain error — and where the state is not the check’s to explain: a limit, a lookup, a pause, an acknowledgement. |
 | `durationMs` | number | **required** |  |
 | `channels` | [ms:checkChannel](#schema-ms-checkchannel)[] | **required** |  |
 | `stored` | boolean | **required** |  |
@@ -4721,6 +4733,7 @@ one of 2 shapes, by `kind`
 | `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** |  |
 | `cause` | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated` | **required** |  |
 | `message` | string | **required** |  |
+| `failure` | [ms:checkFailure](#schema-ms-checkfailure) | **required** nullable | `null` where nothing was named — a success, an older probe, a check that threw a plain error — and where the state is not the check’s to explain: a limit, a lookup, a pause, an acknowledgement. |
 | `since` | string | **required** |  |
 | `lastResultAt` | string | **required** nullable |  |
 | `consecutiveFailures` | integer | **required** |  |
@@ -4805,6 +4818,7 @@ one of 3 shapes, by `kind`
 | `previousState` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** nullable |  |
 | `cause` | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated` | **required** |  |
 | `message` | string | **required** |  |
+| `failure` | [ms:checkFailure](#schema-ms-checkfailure) | **required** nullable | `null` where nothing was named — a success, an older probe, a check that threw a plain error — and where the state is not the check’s to explain: a limit, a lookup, a pause, an acknowledgement. |
 | `durationMs` | integer | **required** nullable |  |
 | `carried` | boolean | **required** |  |
 

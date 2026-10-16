@@ -1,7 +1,8 @@
-import type { Logger } from '@ms/shared';
+import type { CheckFailure, Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Visibility } from '../auth/access.js';
+import { failureOf } from '../state/runtime.js';
 import {
   SENSOR_STATE_CAUSES,
   SENSOR_STATES,
@@ -19,6 +20,8 @@ export interface StateLogEntry {
   readonly previousState: SensorState | null;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /** Where the check behind it failed, when its words are the check's (`P-285`). */
+  readonly failure: CheckFailure | null;
   /**
    * How long the sensor stayed in `state`, in milliseconds.
    *
@@ -165,12 +168,15 @@ export class StateLogService {
       previous_state: SensorState | null;
       cause: SensorStateCause;
       message: string;
+      failure_phase: string | null;
+      failure_target: string | null;
       carried: boolean;
       duration_ms: string | null;
     }>(
       `
       WITH page AS (
-        SELECT s.time, s.sensor_id, s.state, s.previous_state, s.cause, s.message, s.carried
+        SELECT s.time, s.sensor_id, s.state, s.previous_state, s.cause, s.message,
+               s.failure_phase, s.failure_target, s.carried
         FROM sensor_state s
         ${filter}
         ORDER BY s.time DESC, s.sensor_id DESC
@@ -179,7 +185,8 @@ export class StateLogService {
       SELECT page.time AS at,
              page.sensor_id::text AS sensor_id,
              coalesce(o.name, '') AS sensor_name,
-             page.state, page.previous_state, page.cause, page.message, page.carried,
+             page.state, page.previous_state, page.cause, page.message,
+             page.failure_phase, page.failure_target, page.carried,
              (EXTRACT(EPOCH FROM (next.time - page.time)) * 1000)::bigint::text AS duration_ms
       FROM page
       -- Left, on purpose: the transition most worth reading may be the last one a deleted
@@ -209,6 +216,7 @@ export class StateLogService {
       previousState: row.previous_state,
       cause: row.cause,
       message: row.message,
+      failure: failureOf(row),
       durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
       carried: row.carried,
     }));

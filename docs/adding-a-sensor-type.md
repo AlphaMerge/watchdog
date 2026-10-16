@@ -418,7 +418,16 @@ than from the form.
   records *no channel values* — a Down sensor does not report zero (CLAUDE.md). Do not return
   `{ channels: [] }` to mean failure; throw, and say what failed.
 - **Errors carry context.** "ETIMEDOUT" alone is not a diagnosis. Say what you were connecting
-  to and what phase you were in.
+  to and what phase you were in. **And give the error a `phase` and a `host` field** (`P-285`), as
+  `SnmpError`, `SshError` and `CredentialsWithheldError` do: the probe copies those two off the
+  error it was thrown (`failureSaid`), and the result carries them as `failure` beside the
+  message, so the sensor page says "Failed while connecting to 192.0.2.7:22" without parsing
+  your sentence. A `phase` is a word — a lower-case letter, then letters, digits and hyphens, 32
+  at most — and a new one needs no change anywhere else. A `host` (or `target`) is kept only when
+  it is a plain host, an address, or either with a port: anything with `@`, `/`, `?`, `#` or a
+  space is left off, so never put a URL there. Nothing else of the error crosses: not a command,
+  not an OID, not a cause. An error with no `phase` leaves no `failure`, and the message alone
+  says it.
 
 ### `preview(input)` (optional)
 

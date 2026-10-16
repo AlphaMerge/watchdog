@@ -16,6 +16,7 @@ import type {
   SettingView,
 } from '../api/types';
 import { SessionContext } from '../auth/session';
+import { FailurePhase } from '../components/FailurePhase';
 import { HeldListFailure } from '../components/HeldListFailure';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
@@ -568,6 +569,13 @@ function SinceAndCause({ live }: { live: LiveState }): React.JSX.Element {
           <time dateTime={live.at} title={live.at}>
             {new Date(live.at).toLocaleString()}
           </time>
+        </span>
+      )}
+      {/* Where its check failed (`P-285`), between why and what the check said: the part an
+          operator acts on. Not live: this line changes with every frame. */}
+      {live.failure !== null && (
+        <span>
+          · <FailurePhase failure={live.failure} />
         </span>
       )}
       {live.message !== '' && <span className="text-text-muted">— {live.message}</span>}
