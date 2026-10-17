@@ -8347,6 +8347,13 @@ because each is a decision rather than a defect:
       - reported as "max" and budgeted as a maximum.
       The entry says which, and why.
 
+      **Measured 2026-10-17 in a quiet window** (`findings/2026-10-17-batch-sweep-quiet-window.md`).
+      Even quiet, the shipped size's "p99", its slowest write, went over 100 ms in two sweeps of
+      five (102.3 and 200.7 ms), while its median stayed at 14 to 20 ms. Over 300 writes at the
+      shipped size, a real p99 held three of three, at 35.6 to 49.4 ms. A maximum costs no wall
+      time but cannot keep the 100 ms number. A real percentile at the shipped size alone costs
+      about 2 to 4 s. The findings recommend the second.
+
 - [x] **P-252 — `notification-timers` reads an idle sample the database pool can spoil** ·
       S · P-229 · Found 2026-10-04 by `P-229`. Its "2 timers with 2000 pending, 1 idle" case
       failed twice under load and passed on `main` and on `P-229` alike with nothing else
@@ -8714,6 +8721,10 @@ because each is a decision rather than a defect:
       its key rename it (a write on the ingestion path, audited), or change the description to
       say the key is used.
 
+      **Decided 2026-10-17 by the user:** the first reading that names an existing primary still
+      named by its key renames it, a write on the ingestion path, audited. **Done when** that
+      rename is in place, with a test, rather than a change to the description.
+
 - [ ] **P-404 — a channel name or unit a later build changes reaches new sensors only** · S ·
       P-402 · Found 2026-10-17 by `P-402`. A create writes the declared name and unit. An edit
       re-declares them only when the sensor's own declaration moved between its old and new
@@ -8728,6 +8739,13 @@ because each is a decision rather than a defect:
       **Done when** decided: a once-per-build pass that writes every declared name and unit that
       says something of its own (`channelLabel`), audited; or the type guide says a build
       renames for new sensors only, and why.
+
+      **Decided 2026-10-17 by the user:** the once-per-build pass. It writes every declared name
+      and unit that says something of its own (`channelLabel`), audited, behind a
+      `startup_pass` marker as `P-333`'s passes are. `patchChannel` cannot rename a channel, so
+      no operator's edit is overwritten. **Done when** the pass is in place with a test, and
+      `docs/adding-a-sensor-type.md` says a build's rename reaches existing sensors once, at the
+      first start of that build.
 
 - [x] **P-405 — a declared channel name over 200 characters, or empty, refuses the sensor** · S ·
       P-402 · Found 2026-10-17 by `P-402`'s review. `channel.name` holds 1 to 200 characters
@@ -11250,6 +11268,10 @@ because each is a decision rather than a defect:
       person's state reached by letting go of a hold says the person's words or the result's
       (the rule to be decided), never the hold's, with a test for each hold.
 
+      **Decided 2026-10-17 by the user:** the person's words, the acknowledgement's message,
+      never the hold's. **Done when** so, with one test per hold: a lost link, a silence, a
+      frozen clock, a factory's unreached inputs, a check not started.
+
 - [x] **P-412 — a decide that straddles a move can cache a hold's overlay after the move let it
       go** · S · P-253 · Found 2026-10-17 in `P-409`'s review. `#warm` lays the live overlay over
       a runtime it loads and only remembers it after `Promise.all`, which also waits on the
@@ -13631,11 +13653,19 @@ because each is a decision rather than a defect:
         both; rethrowing a page's failure fails the failing-page test; re-reading every sensor
         instead of only those held fails the delete test.
 
-- [ ] **P-324 — a channel `PATCH` now takes `FOR UPDATE` on its sensor** · XS · P-314 · Found
+- [x] **P-324 — a channel `PATCH` now takes `FOR UPDATE` on its sensor** · XS · P-314 · Found
       2026-10-08 in `P-314`. The lock that fixed the deadlock with a reading briefly blocks a
       concurrent results transaction's key-share lock on that sensor. **Done when** measured, and
       either a `FOR NO KEY UPDATE` helper is used or the measurement says it does not matter,
       committed to `docs/findings/`.
+
+      **P-324 outcome. Measured, and it does not matter: the `FOR UPDATE` stays.** In a quiet
+      window at 5,000 sensors (`findings/2026-10-17-channel-reads-and-patch-lock.md`), a results
+      write beside a loop of PATCHes on its sensor took no longer than beside the same loop on a
+      sibling (−0.06 and −0.30 ms at the median, two runs). Nothing in it locks the sensor's
+      `object` row. Only a foreign key check on the sensor, such as an alarm being armed, waits,
+      and for about one PATCH: +1.8 and +4.0 ms against a PATCH of 2.2 and 4.1 ms. The test is
+      `test/perf/channel-patch-lock-performance.test.ts`.
 
 - [x] **P-325 — `somebodyWaits` in `channel-redeclaration.test.ts` loops after its bound** · XS ·
       P-314 · Found 2026-10-08 in `P-314`. The helper keeps polling after `within` expires; the copy
@@ -14221,11 +14251,21 @@ because each is a decision rather than a defect:
         touch trigger left off; a voucher moving the column (in the migration's test and in the
         resolver's and `retired`'s).
 
-- [ ] **P-341 — the channel list and a conditional GET now cost more** · XS · P-322 · Found
+- [x] **P-341 — the channel list and a conditional GET now cost more** · XS · P-322 · Found
       2026-10-09 in `P-322`. The list plans against `sample` even when no key needs it (about 0.9 ms
       warm, 13 ms cold), and a conditional GET with `?include=channels` now reads the channels.
       **Done when** measured at the v1 target and either the subquery is dropped when nothing needs
       it or the numbers say it does not matter, committed to `docs/findings/`.
+
+      **P-341 outcome. Measured at the v1 target, and it does not matter: the statement stays.**
+      The fixture was 5,000 sensors, 15,000 channels and the shipped 40 days of raw retention in
+      41 chunks, 33 of them compressed (`findings/2026-10-17-channel-reads-and-patch-lock.md`).
+      The subquery that is never run is still planned against every chunk. It adds 2.5 ms warm
+      and 19 ms on a new connection. A 304 with `?include=channels` took 5.3 and 6.0 ms at the
+      median, with p95 under 11 ms, against the 250 ms an operator's page has (`A-12`). The cost
+      grows with the chunk count, which retention bounds, not with the readings. The test is
+      `test/perf/channel-list-performance.test.ts`, which also measures the statement without
+      the subquery for whoever needs the 2.5 ms.
 
 - [x] **P-342 — more fixed-value fields are plain strings** · S · P-335 · Found 2026-10-09 in
       `P-335`. `ms:alarm.cause`, the discovery summary's `level` and `found.byKind[].kind`, and
@@ -15474,12 +15514,21 @@ because each is a decision rather than a defect:
         ends. The sizing poll asked for 1,000,000: "timed out after 30000 ms waiting for enough
         completed checks to fill the window, 1,000; 1016 completed".
 
-- [ ] **P-374 — `/values` now reads the object and its channels on every poll** · XS · U-38 ·
+- [x] **P-374 — `/values` now reads the object and its channels on every poll** · XS · U-38 ·
       Found 2026-10-09 in `U-38`. Carrying `retired` adds two queries per 15-second poll of an
       open sensor, roughly doubling the route's database time (2–3 ms on the dev database, whose
       busiest sensor has two channels). **Done when** measured at the v1 target with the result
       in `docs/findings/`, and, if it matters, a path that reads only `sensor_type` and `params`
       instead of the whole object.
+
+      **P-374 outcome. Measured at the v1 target, and it does not matter: no slim path.** At
+      5,000 sensors, with 8 channels on each polled one
+      (`findings/2026-10-17-channel-reads-and-patch-lock.md`), a poll took 6.3 to 7.0 ms at the
+      median with no auth and 8.3 to 8.9 ms signed in. `U-38`'s two reads are 3.8 to 4.2 ms of
+      that. The object read is 0.8 ms of it, and a read of `sensor_type` and `params` alone would
+      save 0.4 ms. Most of the rest is `P-341`'s planning. Signed in, the route sustained 399 and
+      455 polls/s against the 40 that 30 accounts with 20 sensors open each need. The test is
+      `test/perf/values-poll-performance.test.ts`.
 
 - [x] **P-375 — the sensors past the cap are named nowhere** · XS · P-368 · Found 2026-10-09 in
       `P-368`. The set of sensors whose parameters their type now refuses is held in memory, but
