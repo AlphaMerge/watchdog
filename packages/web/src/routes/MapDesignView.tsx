@@ -2,12 +2,13 @@ import { useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { send, useApi } from '../api/client';
 import type { MapSummary, ResolvedMap } from '../api/types';
-import { Card, ErrorPanel, Loading } from '../components/Panels';
+import { Card } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { MapDesigner } from '../maps/MapDesigner';
 import { MapPriority } from '../maps/MapPriority';
 import { MapSharePanel } from '../maps/MapSharePanel';
 import { readCanvas, writeLayout, type Canvas } from '../maps/canvas';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * One map, open in its designer (`G-03`).
@@ -42,8 +43,7 @@ export function MapDesignView(): React.JSX.Element {
           </Link>
         )}
       </div>
-      {map.status === 'loading' && <Loading what="the map" />}
-      {map.status === 'error' && <ErrorPanel error={map.error} retry={map.retry} />}
+      <ReadState read={map} what="the map" />
       {map.status === 'ready' && (
         <Designer
           key={map.data.id}

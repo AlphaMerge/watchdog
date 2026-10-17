@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { type ApiError, sameWords, useApi } from '../api/client';
 import type { SharedMap } from '../api/types';
-import { CorrelationId, ErrorPanel, Loading } from '../components/Panels';
+import { CorrelationId } from '../components/Panels';
+import { ReadRegion } from '../components/ReadRegion';
 import { MapCanvas } from '../maps/MapBoard';
 import { useClock } from '../maps/clock';
 import { sharedBackgroundUrl, sharedMapPath } from '../maps/shareUrl';
@@ -112,19 +113,24 @@ export function SharedMapView(): React.JSX.Element {
   return (
     <div className="min-h-screen bg-bg p-4">
       <main id="main" className="mx-auto max-w-full space-y-3">
-        {map === null && broken === null && <Loading what="the map" />}
-        {broken !== null && (
-          <div className="mx-auto max-w-xl space-y-3">
-            <h1 className="text-xl tracking-[-0.02em] text-text">This link does not work</h1>
-            {/*
-              The core answers the same 404 for expired, revoked and never-existed, so this page
-              cannot say which — and should not: the difference is the only useful thing a
-              guesser could learn here.
-            */}
-            <p className="text-sm text-text-muted">
-              It may have expired, or been revoked by whoever made it. Ask them for a new one.
-            </p>
-            <ErrorPanel error={broken} />
+        {/* The loading line and what takes its place when there is no map, one region from the
+            first read on (`U-58`), so the failure lands in a node that was there. */}
+        {map === null && (
+          <div className={broken === null ? undefined : 'mx-auto max-w-xl space-y-3'}>
+            {broken !== null && (
+              <>
+                <h1 className="text-xl tracking-[-0.02em] text-text">This link does not work</h1>
+                {/*
+                  The core answers the same 404 for expired, revoked and never-existed, so this
+                  page cannot say which — and should not: the difference is the only useful thing
+                  a guesser could learn here.
+                */}
+                <p className="text-sm text-text-muted">
+                  It may have expired, or been revoked by whoever made it. Ask them for a new one.
+                </p>
+              </>
+            )}
+            <ReadRegion error={broken} loading="the map" />
           </div>
         )}
         {map !== null && (

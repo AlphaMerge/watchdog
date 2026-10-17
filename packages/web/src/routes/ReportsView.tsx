@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type { ReportKind, ReportSummary } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
+import { Card, Empty, RefusalPanel } from '../components/Panels';
+import { ReadState } from '../components/ReadRegion';
 import { PageTitle } from '../components/PageTitle';
 import { REPORT_KINDS, labelOfKind, nextRunText, whyItCannotRun } from './reports-model';
 import { listedName, sharedNames } from './names';
@@ -106,8 +107,7 @@ export function ReportsView(): React.JSX.Element {
       </Card>
 
       <Card title="Reports">
-        {reports.status === 'loading' && <Loading what="reports" />}
-        {reports.status === 'error' && <ErrorPanel error={reports.error} retry={reports.retry} />}
+        <ReadState read={reports} what="reports" />
         {reports.status === 'ready' && reports.data.items.length === 0 && (
           <Empty because="A report is a saved question about a period — make one above.">
             No reports yet.

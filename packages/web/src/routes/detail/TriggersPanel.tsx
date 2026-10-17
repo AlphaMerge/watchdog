@@ -2,10 +2,11 @@ import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, send, useApi } from '../../api/client';
 import type { TemplateView, TriggerKind, TriggerView } from '../../api/types';
-import { CorrelationId, Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { CorrelationId, Empty } from '../../components/Panels';
 import { SchemaForm } from '../../forms/SchemaForm';
 import type { JsonSchema } from '../../forms/schema';
 import { seedFrom } from './model';
+import { ReadState } from '../../components/ReadRegion';
 
 interface TriggersResponse {
   objectId: number;
@@ -46,12 +47,9 @@ export function TriggersPanel({
     reload();
   }, [reload]);
 
-  if (triggers.status === 'loading' || kinds.status === 'loading')
-    return <Loading what="triggers" />;
-  if (triggers.status === 'error') {
-    return <ErrorPanel error={triggers.error} retry={triggers.retry} />;
+  if (triggers.status !== 'ready' || kinds.status !== 'ready') {
+    return <ReadState read={[triggers, kinds]} what="triggers" />;
   }
-  if (kinds.status === 'error') return <ErrorPanel error={kinds.error} retry={kinds.retry} />;
 
   const items = triggers.data.items;
   const own = items.filter((trigger) => !trigger.inherited);

@@ -1,9 +1,10 @@
 import { Link, useParams } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type { ResolvedMap } from '../api/types';
-import { Card, ErrorPanel, Loading } from '../components/Panels';
+import { Card } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { MapBoard } from '../maps/MapBoard';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * A map, as it is meant to be looked at (`G-04`).
@@ -34,8 +35,7 @@ export function MapView(): React.JSX.Element {
         )}
       </div>
 
-      {view.status === 'loading' && <Loading what="the map" />}
-      {view.status === 'error' && <ErrorPanel error={view.error} retry={view.retry} />}
+      <ReadState read={view} what="the map" />
       {view.status === 'ready' && (
         <>
           {/*

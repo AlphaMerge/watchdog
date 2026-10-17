@@ -36,6 +36,7 @@ import { ParamsForm } from './detail/ParamsForm';
 import { TargetPolicyException } from './detail/TargetPolicyException';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';
+import { ReadRegion, ReadState } from '../components/ReadRegion';
 
 /** How often the channel table re-reads its values. */
 const VALUES_POLL_MS = 15_000;
@@ -289,8 +290,17 @@ export function ObjectDetailView(): React.JSX.Element {
   // header badge rolls up — the same computation the tree does, from the same source.
   const live = useStateStream(Number.isFinite(numericId) ? numericId : null);
 
-  if (object.status === 'error') return <ErrorPanel error={object.error} retry={object.retry} />;
-  if (shownObject === null) return <Loading what="the object" />;
+  // One region from the first read to its failure (`U-58`); a failed re-read gives way to it as
+  // it always did.
+  if (object.status === 'error' || shownObject === null) {
+    return (
+      <ReadRegion
+        error={object.status === 'error' ? object.error : null}
+        retry={object.retry}
+        loading="the object"
+      />
+    );
+  }
 
   const detail = shownObject;
   // In the URL, as the alarm list's filters are (`U-38` review): the channel table was swapped for
@@ -404,8 +414,7 @@ export function ObjectDetailView(): React.JSX.Element {
             )}
             {detail.kind === 'sensor' && (
               <Card title="Parameters">
-                {types.status === 'loading' && <Loading what="the sensor type" />}
-                {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}
+                <ReadState read={types} what="the sensor type" />
                 {types.status === 'ready' && (
                   <ParamsForm
                     detail={detail}
@@ -445,10 +454,7 @@ export function ObjectDetailView(): React.JSX.Element {
       {active === 'settings' && (
         <TabPanel id="settings" keepsFocus>
           <Card title="Settings">
-            {settings.status === 'loading' && <Loading what="settings" />}
-            {settings.status === 'error' && (
-              <ErrorPanel error={settings.error} retry={settings.retry} />
-            )}
+            <ReadState read={settings} what="settings" />
             {settings.status === 'ready' && (
               <SettingsPanel
                 objectId={detail.id}
@@ -684,12 +690,14 @@ function LiveChannels({
     );
   }
   // No readings held for this sensor: its first read failed, and that is all there is to say.
-  if (readings === null && readingsError !== null) {
-    return <ErrorPanel error={readingsError} retry={onRetryReadings} />;
-  }
+  const firstFailed = readings === null && readingsError !== null;
 
   return (
     <>
+      {/* No readings held for this sensor and its first read failed: that is all there is to say,
+          in the table's place. Said in a region there, empty, while that read is out (`U-58`), so
+          the failure lands in a node that was; it takes no space while it is empty. */}
+      {readings === null && <ReadRegion error={readingsError} retry={onRetryReadings} />}
       {/* A poll that failed with readings held (`U-71`): said beside them, which stay, rather than
           an error panel in the table's place. There, empty, from the moment readings are held, so
           a failure lands in a node that was (`U-67`). When a good read takes *Try again* from
@@ -706,16 +714,18 @@ function LiveChannels({
           }}
         />
       )}
-      <ChannelTable
-        channels={channels}
-        sensorType={sensorType}
-        values={readings}
-        lookups={lookups}
-        now={Date.now()}
-        hideRetired={hideRetired}
-        onHideRetiredChange={onHideRetiredChange}
-        editing={editing}
-      />
+      {!firstFailed && (
+        <ChannelTable
+          channels={channels}
+          sensorType={sensorType}
+          values={readings}
+          lookups={lookups}
+          now={Date.now()}
+          hideRetired={hideRetired}
+          onHideRetiredChange={onHideRetiredChange}
+          editing={editing}
+        />
+      )}
     </>
   );
 }
@@ -736,10 +746,7 @@ function AuditPanel({ objectId }: { objectId: number }): React.JSX.Element {
     (cursor) => `${base}&before=${encodeURIComponent(cursor)}`,
   );
 
-  if (audit.status === 'loading') return <Loading what="the audit log" />;
-  if (audit.status === 'error' && audit.error !== null) {
-    return <ErrorPanel error={audit.error} retry={audit.retry} />;
-  }
+  if (audit.status !== 'ready') return <ReadState read={audit} what="the audit log" />;
   if (audit.items.length === 0) {
     return <Empty>Nothing has changed this object.</Empty>;
   }

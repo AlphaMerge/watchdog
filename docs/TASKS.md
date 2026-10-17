@@ -29492,13 +29492,51 @@ because each is a decision rather than a defect:
       - **Not done.** `ParamsForm`, `SettingsPanel`, `AddSensor` and `CredentialsPanel` still
         write the span out themselves; `ErrorPanel` says the id on a line of its own.
 
-- [ ] **U-58 — should a failed read be announced?** · XS · U-54 · Found 2026-10-09 in `U-54`.
+- [x] **U-58 — should a failed read be announced?** · XS · U-54 · Found 2026-10-09 in `U-54`.
       About thirty `ErrorPanel`s are mounted with their text already in them when a read fails.
       **Done when** decided (load failures announced through an always-present region, or left
       as they are because the page has nothing else to say), and done if adopted.
 
       **Decided 2026-10-11 by the user:** announce them. Load failures go through an
       always-present region, about thirty panels, with tests.
+
+      **U-58 outcome. A read's loading line and its failure are one polite region, there from the
+      read's start, so the failure comes into a node that existed.** Web only; no route, no
+      migration.
+      - **Where.** `components/ReadRegion.tsx`: `ReadRegion` is a `role="status"` holding the
+        *Loading …* line until there is a failure, then the `ErrorPanel` (`inRegion`, so not an
+        alert of its own) with its correlation id and *Try again*; `ReadState` is the same for a
+        `useApi` read, or several a page waits on together — loading while any is out, as the
+        pages' early returns had it, then the first failure in the order given — and nothing once
+        they have answered, so the content follows as before. All 42 `ErrorPanel`s that said a
+        failed read are now one of the two (37 sites, 24 files: every route, the object page's
+        cards and tabs, the map share panel, the rediscovery rules, and the *Cannot reach the
+        core* page). None is left outside a region.
+      - **Polite, not an alert.** The decision named the region and not its politeness; this
+        follows every read failure decided before it — `U-56`'s first read of a run, `U-60`'s
+        channel list, `U-67`'s held lists: nothing the operator asked for was refused, and it is
+        the same kind of news as the loading line it takes the place of.
+      - **A region that has to come onto the page already failed** — the unreachable core, a
+        History tab whose failure gives way to a series held for another range, the credentials
+        list that could not be read again after a save — mounts empty and is filled `PLACED_MS`
+        later (`U-78`'s rule), rather than both at once and nothing said. The credentials one is
+        on the page, empty, while the list is, and its sentence comes with the failure.
+      - **A shared map's** failed first read (the *This link does not work* page) has no *Try
+        again*, as before: it reads again by itself.
+      - **Tests.** `read-failure-region.test.tsx` (23): for 18 reads across 16 pages and panels,
+        and the object page's Settings and Changes tabs, the read is held, the region holding its
+        loading line is taken, the read is refused, and the failure, the id and *Try again* are in
+        that node, polite, with no alert anywhere saying it; a region mounted with its failure is
+        empty until 100 ms; one that fails later is said at once in the same node; several reads
+        say loading while one is out and then the first failure. `try-again.ts`'s round trip (`U-68`'s
+        pages) now finds the failure in a status region with no alert inside;
+        `credentials-panel`, `readings-held`, `map-share`, `invalid-params`,
+        `retired-history-page`, `try-again-focus` follow. 62 web files reaching the change, 662
+        tests. **Mutations** (restored byte for byte), each failing: the region an alert 34; the
+        loading line outside the region 21; no `PLACED_MS` wait 1; the last failure rather than
+        the first 4; a failure said while another read is out 4; no *Try again* 31; the state log
+        drawing its own loading line again 1.
+      - **Not done.** A failure repeated by an automatic re-read is said again each time (`U-72`).
 - [x] **U-60 — a failed channel-list read says "Loading channels…" for good** · XS · U-55 ·
       Found 2026-10-09 in `U-55`. If the first read of a sensor's channel list fails — on opening
       the page or after moving from another sensor — `LiveChannels` shows its loading line forever

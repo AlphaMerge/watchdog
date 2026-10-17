@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { ApiError, send, useApi } from '../api/client';
 import type { MapShare } from '../api/types';
-import { ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
+import { RefusalPanel } from '../components/Panels';
+import { ReadState } from '../components/ReadRegion';
 import { shareLinkFor } from './shareUrl';
 
 /**
@@ -147,8 +148,7 @@ export function MapSharePanel({ mapId }: { readonly mapId: number }): React.JSX.
         </div>
       )}
 
-      {shares.status === 'loading' && <Loading what="links" />}
-      {shares.status === 'error' && <ErrorPanel error={shares.error} retry={shares.retry} />}
+      <ReadState read={shares} what="links" />
       {shares.status === 'ready' && live.length === 0 && (
         <p className="text-xs text-text-muted">No public links.</p>
       )}

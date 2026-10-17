@@ -1,11 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Stream from '../src/api/stream';
 import type { ChannelRecord } from '../src/api/types';
 import { ChannelTable } from '../src/routes/detail/ChannelTable';
 import { TreeView } from '../src/routes/TreeView';
-import { expectQuiet, speaking } from './support/refusal-region';
+import { expectQuiet, speaking, statusSaying } from './support/refusal-region';
 
 // The tree opens a socket for live states, and none of that is what this file is about.
 vi.mock('../src/api/stream', async (importOriginal) => ({
@@ -588,10 +588,11 @@ describe('the tree’s invalid-parameters filter', () => {
       { status: 500, body: { error: { code: 'INTERNAL', message: 'boom', correlationId: 'r-1' } } },
     ]);
     renderTree('/tree?invalidParams=true');
-    await waitFor(() => {
-      expect(speaking()).toHaveLength(1);
-    });
-    expect(speaking()[0]?.textContent).toContain('INTERNAL');
+    // Said as a failed read is (`U-58`): politely, in the results' own region, not an alert.
+    const said = await statusSaying('INTERNAL');
+    expect(said).not.toBe(region());
+    expect(within(said).getByRole('button', { name: 'Try again' })).toBeDefined();
+    expect(speaking()).toEqual([]);
     expect(region().textContent).toBe('');
   });
 });

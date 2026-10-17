@@ -5,7 +5,7 @@ import type { MapShare } from '../src/api/types';
 import { MapSharePanel } from '../src/maps/MapSharePanel';
 import { shareLinkFor, sharedBackgroundUrl, sharedMapPath } from '../src/maps/shareUrl';
 import { SharedMapView } from '../src/routes/SharedMapView';
-import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
+import { alertSaying, expectQuiet, speaking, statusSaying } from './support/refusal-region';
 
 /**
  * Publishing a map, and reading one that was published (`G-06`).
@@ -400,7 +400,7 @@ describe('the page a stranger opens', () => {
       await minute(notFound);
       await screen.findByRole('heading', { name: 'This link does not work' });
       expect(screen.queryByText('Router')).toBeNull();
-      const alert = await alertSaying('this link is not valid');
+      const alert = await statusSaying('this link is not valid');
       const records = watch();
 
       // Later minutes (`U-66` review, `U-74`): the link is not asked for again, the map does not

@@ -2,11 +2,12 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
 import { offerOf, useSubsystems } from '../build/subsystems';
 import type { MapSummary, SensorState, SensorTypeSummary, SubtreeCounts } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
+import { Card, Empty, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { PageTitle } from '../components/PageTitle';
 import { HOME_PRIORITY, starredMaps } from './home-maps';
 import { listedName, sharedNames } from './names';
+import { ReadState } from '../components/ReadRegion';
 
 interface OpenApi {
   info: { version: string };
@@ -93,8 +94,7 @@ export function Overview(): React.JSX.Element {
       </div>
 
       <Card title="Sensor health">
-        {counts.status === 'loading' && <Loading what="the totals" />}
-        {counts.status === 'error' && <ErrorPanel error={counts.error} retry={counts.retry} />}
+        <ReadState read={counts} what="the totals" />
         {states !== null &&
           (sensorCount === 0 ? (
             <Empty because="Add a device and a sensor, or see the Tree.">
@@ -145,8 +145,7 @@ export function Overview(): React.JSX.Element {
             </Link>
           }
         >
-          {types.status === 'loading' && <Loading what="sensor types" />}
-          {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}
+          <ReadState read={types} what="sensor types" />
           {types.status === 'ready' &&
             (typeCount === 0 ? (
               <Empty because="P-05 shipped the contract and the registry; P-08 through P-11 are the first four types.">

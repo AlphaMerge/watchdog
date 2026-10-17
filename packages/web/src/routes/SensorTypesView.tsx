@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type { SensorTypeSummary } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, Empty } from '../components/Panels';
 import { Combobox, type ComboboxOption } from '../components/Combobox';
 import { PageTitle } from '../components/PageTitle';
 import { WITHOUT_LOOKUP_PATH } from './channels-without-lookup';
@@ -15,6 +15,7 @@ import {
   type SuggestionKind,
   type TypeMatch,
 } from './sensor-types-model';
+import { ReadState } from '../components/ReadRegion';
 
 /** Stable empty catalogue — see the note where it is used. */
 const NONE: readonly SensorTypeSummary[] = [];
@@ -95,8 +96,7 @@ export function SensorTypesView(): React.JSX.Element {
         </Link>
       </p>
 
-      {types.status === 'loading' && <Loading what="the catalogue" />}
-      {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}
+      <ReadState read={types} what="the catalogue" />
 
       {types.status === 'ready' &&
         (catalogue.length === 0 ? (

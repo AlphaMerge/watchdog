@@ -3,11 +3,12 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import { SETTLE_MS, useSettledReload, useStateStream } from '../api/stream';
 import type { Alarm, AlarmKind, AlarmPage, HeldReturn } from '../api/types';
-import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty } from '../components/Panels';
 import { RecoveringBadge, StatusBadge } from '../components/StatusBadge';
 import { formatDuration } from './detail/model';
 import { kindOf, useConfirmReload, whereSteps } from './alarms-model';
 import { PageTitle } from '../components/PageTitle';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * The severities, worst first — the same five `WORKFLOW.MD §7` names and the core returns — and a
@@ -115,8 +116,9 @@ export function AlarmsView(): React.JSX.Element {
         onChange={set}
       />
 
-      {alarms.status === 'error' && <ErrorPanel error={alarms.error} retry={alarms.retry} />}
-      {alarms.status === 'loading' && showing === null && <Loading what="alarms" />}
+      {/* The first read's loading line and failure in one region (`U-58`); a re-read that fails
+          with alarms held gives way to it, mounted with its failure and said a moment after. */}
+      {(alarms.status === 'error' || showing === null) && <ReadState read={alarms} what="alarms" />}
       {showing !== null && alarms.status !== 'error' && (
         <div
           className={alarms.status === 'loading' ? 'opacity-60 transition-opacity' : undefined}

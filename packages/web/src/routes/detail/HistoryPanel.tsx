@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/client';
 import type { ChannelRecord, HistoryChannel, HistorySeries } from '../../api/types';
 import { HeldListFailure } from '../../components/HeldListFailure';
-import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { Card, Empty } from '../../components/Panels';
 import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '@ms/shared/charts';
 import { SeriesLegend } from '../../charts/SeriesLegend';
 import { SeriesTable } from '../../charts/SeriesTable';
@@ -18,6 +18,7 @@ import {
   summarise,
   type RangeId,
 } from './model';
+import { ReadRegion } from '../../components/ReadRegion';
 
 /**
  * Historic data, as charts (`U-05`).
@@ -159,10 +160,17 @@ export function HistoryPanel({
         )}
       </div>
 
-      {history.status === 'error' && !kept && (
-        <ErrorPanel error={history.error} retry={history.retry} />
+      {/* The loading line and the failure that takes its place, one region (`U-58`). A failure
+          with a series held for another range gives way to it as before, mounted with its
+          failure and said a moment after. */}
+      {((history.status === 'error' && !kept) ||
+        (history.status === 'loading' && showing === null)) && (
+        <ReadRegion
+          error={history.status === 'error' ? history.error : null}
+          retry={history.retry}
+          loading="history"
+        />
       )}
-      {history.status === 'loading' && showing === null && <Loading what="history" />}
       {showing !== null && (history.status !== 'error' || kept) && (
         <div
           className={history.status === 'loading' ? 'opacity-50 transition-opacity' : undefined}

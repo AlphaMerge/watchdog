@@ -16,7 +16,13 @@ import { ChannelTable } from '../src/routes/detail/ChannelTable';
 import { CredentialsPanel } from '../src/routes/detail/CredentialsPanel';
 import { OUTSIDE_MEANS } from '../src/routes/detail/credentials-model';
 import { UnboundedCredentialsView } from '../src/routes/UnboundedCredentialsView';
-import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
+import {
+  alertSaying,
+  expectCorrelation,
+  expectQuiet,
+  speaking,
+  statusSaying,
+} from './support/refusal-region';
 
 /**
  * The Credentials tab, rendered (`U-21`).
@@ -738,9 +744,12 @@ describe('the credentials tab', () => {
         write: written(),
         listing: (read) => (read === 1 || !failing ? [OWN_SNMP] : UNREADABLE),
       });
+      // The region the failure is said in is on the tab before it (`U-58`).
+      const before = screen.getAllByRole('status');
       narrow(form);
 
-      const alert = await alertSaying('the database went away');
+      const alert = await statusSaying('the database went away');
+      expect(before).toContain(alert);
       // The save was made, and the tab still says so, with the list it had.
       expect(screen.getByText('Saved the SNMP set on Rack A.').getAttribute('role')).toBe('status');
       expect(screen.getByRole('heading', { name: 'Credential sets' })).toBeDefined();
@@ -754,8 +763,10 @@ describe('the credentials tab', () => {
       failing = false;
       fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
       await waitFor(() => {
-        expect(speaking()).toEqual([]);
+        expect(alert.textContent).toBe('');
       });
+      expect(alert.isConnected).toBe(true);
+      expect(speaking()).toEqual([]);
       expect(editButton('SNMP').disabled).toBe(false);
       expect(screen.getByText('Saved the SNMP set on Rack A.')).toBeDefined();
       expect(
@@ -1125,7 +1136,7 @@ describe('the credentials tab', () => {
       });
       fireEvent.click(within(confirm).getByRole('button', { name: 'Remove the set' }));
 
-      const alert = await alertSaying('the database went away');
+      const alert = await statusSaying('the database went away');
       expect(within(alert).getByRole('button', { name: 'Try again' })).toBeDefined();
       expect(
         screen.getByText(

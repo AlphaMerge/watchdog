@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type { ReportRun, ReportSubjects, ReportSummary } from '../api/types';
-import { Card, ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
+import { Card, RefusalPanel } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { ReportSettings } from '../reports/ReportSettings';
 import {
@@ -15,6 +15,7 @@ import {
   sizeText,
   whyItCannotRun,
 } from './reports-model';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * One report: what it covers, when it runs, and what it has produced (`E-11`).
@@ -83,8 +84,7 @@ export function ReportView(): React.JSX.Element {
         <RefusalPanel error={runFailure} className="mt-4 empty:mt-0" />
       </div>
 
-      {report.status === 'loading' && <Loading what="the report" />}
-      {report.status === 'error' && <ErrorPanel error={report.error} retry={report.retry} />}
+      <ReadState read={report} what="the report" />
 
       {report.status === 'ready' && (
         <>
@@ -157,8 +157,7 @@ export function ReportView(): React.JSX.Element {
           </Card>
 
           <Card title="Runs">
-            {runs.status === 'loading' && <Loading what="runs" />}
-            {runs.status === 'error' && <ErrorPanel error={runs.error} retry={runs.retry} />}
+            <ReadState read={runs} what="runs" />
             {runs.status === 'ready' && runs.data.items.length === 0 && (
               <p className="text-sm text-text-muted">
                 This report has not run yet. “Run now” renders it against the period above.

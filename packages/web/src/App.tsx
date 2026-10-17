@@ -5,7 +5,7 @@ import { LoginView } from './auth/LoginView';
 import { mustChangePassword, showsLoginForm, useSession } from './auth/session';
 import { Offered, SubsystemsProvider } from './build/SubsystemsProvider';
 import { Layout } from './components/Layout';
-import { ErrorPanel } from './components/Panels';
+import { ReadRegion } from './components/ReadRegion';
 import { AlarmsView } from './routes/AlarmsView';
 import { AddSensor } from './routes/AddSensor';
 import { LogsView } from './routes/LogsView';
@@ -65,7 +65,7 @@ export function App(): React.JSX.Element {
     return (
       <AuthPage title="Cannot reach the core">
         <div className="mt-4">
-          <ErrorPanel error={session.error} retry={refresh} />
+          <ReadRegion error={session.error} retry={refresh} />
         </div>
       </AuthPage>
     );

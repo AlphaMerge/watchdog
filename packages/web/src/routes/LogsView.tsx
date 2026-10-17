@@ -11,7 +11,7 @@ import type {
   StateLogEntry,
   StateLogPage,
 } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, Empty } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { TabPanel, Tabs } from '../components/Tabs';
 import type { TabDefinition } from '../components/tabs-model';
@@ -19,6 +19,7 @@ import { formatDuration } from './detail/model';
 import { MessageOf } from './detail/StateLogPanel';
 import { PageTitle } from '../components/PageTitle';
 import { PAGE, usePaged, auditQueryFor } from './logs-model';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * `CAPABILITIES.MD §6`'s three categories, spelled the way it spells them.
@@ -243,8 +244,7 @@ function StatusChanges({
         <ScopeChip params={params} set={set} />
       </div>
 
-      {log.status === 'loading' && <Loading what="the status log" />}
-      {log.error !== null && <ErrorPanel error={log.error} retry={log.retry} />}
+      <ReadState read={log} what="the status log" />
       {log.status === 'ready' && (
         <Card>
           {log.items.length === 0 ? (
@@ -404,8 +404,7 @@ function ObjectHistory({
         <ActorChip params={params} set={set} />
       </div>
 
-      {log.status === 'loading' && <Loading what="the object history" />}
-      {log.error !== null && <ErrorPanel error={log.error} retry={log.retry} />}
+      <ReadState read={log} what="the object history" />
       {log.status === 'ready' && (
         <Card>
           {log.items.length === 0 ? (
@@ -591,8 +590,7 @@ function SystemEvents({
         are later phases, and each will land here rather than in a view of its own.
       </p>
 
-      {log.status === 'loading' && <Loading what="system events" />}
-      {log.error !== null && <ErrorPanel error={log.error} retry={log.retry} />}
+      <ReadState read={log} what="system events" />
       {log.status === 'ready' && (
         <Card>
           {log.items.length === 0 ? (

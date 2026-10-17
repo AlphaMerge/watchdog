@@ -30,6 +30,23 @@ export async function alertSaying(text: string | RegExp): Promise<HTMLElement> {
 }
 
 /**
+ * The polite region that says `text`, once one does: where a failed read is said (`U-58`). Not an
+ * alert — a read nobody asked for again is not a refusal — so this finds `role="status"` only,
+ * and a read failure said as an alert again fails here.
+ */
+export async function statusSaying(text: string | RegExp): Promise<HTMLElement> {
+  return waitFor(() => {
+    const found = screen
+      .getAllByRole('status')
+      .find((one) =>
+        typeof text === 'string' ? one.textContent.includes(text) : text.test(one.textContent),
+      );
+    if (found === undefined) throw new Error(`no status region says ${String(text)}`);
+    return found;
+  });
+}
+
+/**
  * An empty region, as it must be while it says nothing: `:empty`, an alert by its role, in the
  * accessibility tree, and taking no space. `spacing` is what does that: its margin and the
  * `empty:` twin that takes it away (`mt-3`, `empty:mt-0`), or `empty:absolute` for one that has

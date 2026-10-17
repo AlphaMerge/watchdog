@@ -9,7 +9,7 @@ import {
 import { request, useApi, ApiError, type Loadable } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
 import type { ObjectPage, ObjectRef, ObjectSummary, SensorState } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, Empty, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { VirtualList } from '../components/VirtualList';
 import {
@@ -30,6 +30,7 @@ import {
 } from '../tree/invalid-params';
 import { filtersKey, filtersOf, withFilters, type TreeFilters } from '../tree/filters';
 import { ADDRESS_PAUSE_MS, useAddressLater, useSettled } from '../tree/address-later';
+import { ReadRegion, ReadState } from '../components/ReadRegion';
 
 const KIND_GLYPH: Record<string, string> = {
   root: '⌂',
@@ -260,8 +261,7 @@ export function TreeView(): React.JSX.Element {
         </p>
       </div>
 
-      {tops.status === 'error' && <ErrorPanel error={tops.error} retry={tops.retry} />}
-      {tops.status === 'loading' && <Loading what="the tree" />}
+      <ReadState read={tops} what="the tree" />
       {start?.kind === 'nothing' && (
         <Empty because="An administrator grants access to parts of the tree.">
           Nothing in the tree has been shared with this account.
@@ -491,8 +491,9 @@ function Branches({
   );
 
   if (failed !== null) {
+    // Mounted with its failure, so said a moment after it is placed (`U-58`).
     return (
-      <ErrorPanel
+      <ReadRegion
         error={failed}
         retry={() => {
           // Read again from the first level with the panel kept, so the button keeps focus and a
@@ -665,13 +666,18 @@ function SearchResults({
   live: ReadonlyMap<number, LiveState>;
 }): React.JSX.Element | null {
   if (found.status === 'loading') {
-    return retrying ? <RetryCheck busy onRetry={retry} /> : <Loading what="matching objects" />;
+    return retrying ? (
+      <RetryCheck busy onRetry={retry} />
+    ) : (
+      <ReadRegion error={null} loading="matching objects" />
+    );
   }
   if (found.status === 'error') {
     const pass = invalidParams ? notChecked(found.error) : null;
     if (pass === 'stopped') return null;
     if (pass === 'checking') return <RetryCheck busy={false} onRetry={retry} />;
-    return <ErrorPanel error={found.error} retry={reload} />;
+    // The node the loading line was in (`U-58`).
+    return <ReadRegion error={found.error} retry={reload} />;
   }
   if (found.data.items.length === 0) {
     if (invalidParams) return null;

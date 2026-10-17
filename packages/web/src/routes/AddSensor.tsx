@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, problemPath, send, useApi } from '../api/client';
 import { useProbeStream, useSettledReload } from '../api/stream';
 import type { AncestorsView, ObjectDetail, ProbeHealthView, SensorTypeSummary } from '../api/types';
-import { Card, CorrelationId, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId } from '../components/Panels';
 import { MappingPreview } from '../forms/MappingPreview';
 import { SchemaForm } from '../forms/SchemaForm';
 import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
@@ -17,6 +17,7 @@ import {
   type HealthAnswer,
   type ListenerNotice,
 } from './add-sensor-model';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * Adding a sensor (`U-08`).
@@ -128,9 +129,9 @@ export function AddSensor(): React.JSX.Element {
     });
   }, []);
 
-  if (parent.status === 'loading' || types.status === 'loading') return <Loading what="the form" />;
-  if (parent.status === 'error') return <ErrorPanel error={parent.error} retry={parent.retry} />;
-  if (types.status === 'error') return <ErrorPanel error={types.error} retry={types.retry} />;
+  if (parent.status !== 'ready' || types.status !== 'ready') {
+    return <ReadState read={[parent, types]} what="the form" />;
+  }
 
   const catalogue = types.data.items;
   const ready = name.trim() !== '' && typeId !== '' && problems.length === 0;

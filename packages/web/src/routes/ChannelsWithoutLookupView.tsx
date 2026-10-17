@@ -2,8 +2,9 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type { ChannelsWithoutLookup } from '../api/types';
 import { PageTitle } from '../components/PageTitle';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, Empty } from '../components/Panels';
 import { summary, WITHOUT_LOOKUP_PATH } from './channels-without-lookup';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * The channels without the lookup their type declares (`P-308`): status channels judged by
@@ -35,8 +36,7 @@ export function ChannelsWithoutLookupView(): React.JSX.Element {
         Setting one needs write on the sensor. One that should stay quiet needs nothing.
       </p>
 
-      {list.status === 'loading' && <Loading what="the channels without their lookup" />}
-      {list.status === 'error' && <ErrorPanel error={list.error} retry={list.retry} />}
+      <ReadState read={list} what="the channels without their lookup" />
       {list.status === 'ready' && (
         <Card>
           {list.data.items.length === 0 ? (

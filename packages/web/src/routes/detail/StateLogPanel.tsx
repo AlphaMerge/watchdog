@@ -2,9 +2,10 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../../api/client';
 import type { StateLogEntry, StateLogPage } from '../../api/types';
 import { FailurePhase } from '../../components/FailurePhase';
-import { Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { Empty } from '../../components/Panels';
 import { StatusBadge } from '../../components/StatusBadge';
 import { formatDuration } from './model';
+import { ReadState } from '../../components/ReadRegion';
 
 const LIMIT = 50;
 
@@ -32,8 +33,7 @@ export function StateLogPanel({
     `/state-log?objectId=${String(objectId)}&limit=${String(LIMIT)}`,
   );
 
-  if (log.status === 'loading') return <Loading what="the state log" />;
-  if (log.status === 'error') return <ErrorPanel error={log.error} retry={log.retry} />;
+  if (log.status !== 'ready') return <ReadState read={log} what="the state log" />;
   if (log.data.items.length === 0) {
     return (
       <Empty because="A row is written when a state changes, so a sensor that has never changed state has none.">

@@ -255,7 +255,17 @@ describe('hiding retired channels on the History tab', () => {
     // panel. The next read that answers brings them back still hidden.
     historyUp = false;
     fireEvent.click(screen.getByRole('button', { name: '30 days' }));
-    expect(await screen.findByRole('alert')).toBeDefined();
+    // Said in the History tab's polite region (`U-58`), not an alert.
+    expect(
+      await waitFor(() => {
+        const said = screen
+          .getAllByRole('status')
+          .find((one) => within(one).queryByRole('button', { name: 'Try again' }) !== null);
+        if (said === undefined) throw new Error('no region holds the failure');
+        return said;
+      }),
+    ).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
     historyUp = true;
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('Column a')).toBeDefined();

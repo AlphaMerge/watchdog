@@ -516,8 +516,13 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
 - The layout reflows to 320px.
 - **Dark theme** is a toggle in the header. It keeps one name and reports its state, rather than
   renaming itself underneath the state it is reporting.
+- **A failed read is announced.** A page's *Loading…* line is in a polite live region that is on
+  the page from the moment the read starts, and if the read fails, the failure, its correlation
+  id and **Try again** come into that same region, so a screen reader says them. Polite rather
+  than an alert, since nothing you asked for was refused. A region that has to come onto the page
+  already holding a failure comes on empty and is filled a moment after (`U-58`).
 - **Try again keeps focus.** A failed read's **Try again** stays where it is while it asks again,
-  saying *Trying again…*; a second failure is said again in the same alert, and a read that
+  saying *Trying again…*; a second failure is said again in the same region, and a read that
   succeeds puts focus on the page's heading rather than dropping it to the page. On an object's
   page focus goes to the tab it was in instead, the panel under the tab strip, rather than back
   above the header and every card (`U-76`), and on the Logs page to the tab's panel rather than

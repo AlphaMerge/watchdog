@@ -7,7 +7,8 @@ import type {
   RediscoveryRule,
   ScheduleSummary,
 } from '../api/types';
-import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty } from '../components/Panels';
+import { ReadState } from '../components/ReadRegion';
 import {
   PROBE_ABOVE,
   PROBE_ABOVE_LABEL,
@@ -86,8 +87,7 @@ export function RediscoveryPanel({
     [rules],
   );
 
-  if (rules.status === 'loading') return <Loading what="rediscovery rules" />;
-  if (rules.status === 'error') return <ErrorPanel error={rules.error} retry={rules.retry} />;
+  if (rules.status !== 'ready') return <ReadState read={rules} what="rediscovery rules" />;
   const windowList = windows.status === 'ready' ? windows.data.items : [];
 
   return (

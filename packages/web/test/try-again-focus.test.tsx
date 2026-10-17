@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, useApi } from '../src/api/client';
 import type { ObjectKind, ObjectSummary, SensorTypeSummary } from '../src/api/types';
 import { ErrorPanel, Loading } from '../src/components/Panels';
+import { ReadState } from '../src/components/ReadRegion';
 import { TabPanel } from '../src/components/Tabs';
 import { AddSensor } from '../src/routes/AddSensor';
 import { LogsView } from '../src/routes/LogsView';
@@ -214,8 +215,8 @@ describe('the error panel’s own part', () => {
 describe('useApi’s retry', () => {
   function Reader(): React.JSX.Element {
     const read = useApi<{ name: string }>('/thing');
-    if (read.status === 'loading') return <Loading what="the thing" />;
-    if (read.status === 'error') return <ErrorPanel error={read.error} retry={read.retry} />;
+    // As every caller has it since `U-58`: the loading line and the failure in one region.
+    if (read.status !== 'ready') return <ReadState read={read} what="the thing" />;
     return <p>{read.data.name}</p>;
   }
 

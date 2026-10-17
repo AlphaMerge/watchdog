@@ -2,8 +2,9 @@ import { Link } from 'react-router-dom';
 import { useApi } from '../api/client';
 import type { CredentialKindSummary, UnboundedCredential } from '../api/types';
 import { PageTitle } from '../components/PageTitle';
-import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, Empty } from '../components/Panels';
 import { kindName } from './detail/credentials-model';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * The credential sets with no bounds (`U-21`): what Core Health's **Credential sets without
@@ -31,8 +32,7 @@ export function UnboundedCredentialsView(): React.JSX.Element {
         Give a set allowed targets on its object’s Credentials tab and it leaves this list.
       </p>
 
-      {sets.status === 'loading' && <Loading what="the sets without bounds" />}
-      {sets.status === 'error' && <ErrorPanel error={sets.error} retry={sets.retry} />}
+      <ReadState read={sets} what="the sets without bounds" />
       {sets.status === 'ready' && (
         <Card>
           {sets.data.items.length === 0 ? (

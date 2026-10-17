@@ -8,7 +8,7 @@ import type {
   DiscoverySummary,
   ObjectPage,
 } from '../api/types';
-import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty, Loading } from '../components/Panels';
 import { useRefusal } from '../components/refusal';
 import { PageTitle } from '../components/PageTitle';
 import { Field, INPUT, SELECT, TemplatePicker } from './discovery-fields';
@@ -32,6 +32,7 @@ import {
   whyNotStartable,
   type DiscoveryDraft,
 } from './discovery-model';
+import { ReadState } from '../components/ReadRegion';
 
 /** How long to wait after a keystroke before asking the core what a range means. */
 const PREVIEW_DEBOUNCE_MS = 400;
@@ -66,17 +67,8 @@ export function DiscoveryView(): React.JSX.Element {
   const [startedId, setStartedId] = useState<number | null>(null);
   const [startError, setStartError] = useState<ApiError | null>(null);
 
-  if (
-    probes.status === 'loading' ||
-    groups.status === 'loading' ||
-    templates.status === 'loading'
-  ) {
-    return <Loading what="discovery" />;
-  }
-  if (probes.status === 'error') return <ErrorPanel error={probes.error} retry={probes.retry} />;
-  if (groups.status === 'error') return <ErrorPanel error={groups.error} retry={groups.retry} />;
-  if (templates.status === 'error') {
-    return <ErrorPanel error={templates.error} retry={templates.retry} />;
+  if (probes.status !== 'ready' || groups.status !== 'ready' || templates.status !== 'ready') {
+    return <ReadState read={[probes, groups, templates]} what="discovery" />;
   }
 
   return (
@@ -640,8 +632,7 @@ function RecentRuns({
 }): React.JSX.Element {
   const runs = useApi<{ items: DiscoveryRun[] }>(`/objects/${String(groupId)}/discovery?limit=10`);
 
-  if (runs.status === 'loading') return <Loading what="earlier runs" />;
-  if (runs.status === 'error') return <ErrorPanel error={runs.error} retry={runs.retry} />;
+  if (runs.status !== 'ready') return <ReadState read={runs} what="earlier runs" />;
 
   const others = runs.data.items.filter((run) => run.id !== watching);
   if (others.length === 0) {

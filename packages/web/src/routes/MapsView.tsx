@@ -2,9 +2,10 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type { MapSummary } from '../api/types';
-import { Card, Empty, ErrorPanel, Loading, RefusalPanel } from '../components/Panels';
+import { Card, Empty, RefusalPanel } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { listedName, sharedNames } from './names';
+import { ReadState } from '../components/ReadRegion';
 
 /**
  * The maps this account may see, and the button that makes another (`G-01`, `G-03`).
@@ -73,8 +74,7 @@ export function MapsView(): React.JSX.Element {
       </Card>
 
       <Card title="Maps">
-        {maps.status === 'loading' && <Loading what="maps" />}
-        {maps.status === 'error' && <ErrorPanel error={maps.error} retry={maps.retry} />}
+        <ReadState read={maps} what="maps" />
         {maps.status === 'ready' && maps.data.items.length === 0 && (
           <Empty because="A map is a canvas of widgets — make one above.">No maps yet.</Empty>
         )}

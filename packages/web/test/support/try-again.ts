@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { expect, vi } from 'vitest';
-import { alertSaying } from './refusal-region';
+import { statusSaying } from './refusal-region';
 
 /**
  * *Try again* keeps focus (`U-68`): a scripted core, a focus watcher, and the round every caller
@@ -88,10 +88,13 @@ function added(records: MutationRecord[], region: HTMLElement, text: string): bo
 
 /**
  * The whole round, from a page whose read failed: *Try again* re-reads with the same button
- * focused and unavailable, the message out of the alert and no loading line; a second failure in
- * the same words puts the message back in the same alert, focus still on the button; and a
+ * focused and unavailable, the message out of the region and no loading line; a second failure in
+ * the same words puts the message back in the same region, focus still on the button; and a
  * read that succeeds puts focus on the page's heading, or on `landsOn` for a panel that names
  * something nearer (`U-76`). Never the body, from the first press on.
+ *
+ * The region is polite (`U-58`): a `role="status"` that was on the page while the read was out,
+ * the panel inside it with no role of its own.
  */
 export async function roundTrip({
   heading,
@@ -105,7 +108,9 @@ export async function roundTrip({
   answered: () => HTMLElement;
   reads: () => number;
 }): Promise<void> {
-  const alert = await alertSaying(FAILED);
+  const alert = await statusSaying(FAILED);
+  expect(alert.getAttribute('role')).toBe('status');
+  expect(alert.querySelector('[role="alert"]')).toBeNull();
   const button = within(alert).getByRole('button', { name: 'Try again' });
   act(() => {
     button.focus();

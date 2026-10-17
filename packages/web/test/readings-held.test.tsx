@@ -6,7 +6,7 @@ import type * as Stream from '../src/api/stream';
 import type { ChannelRecord, ObjectDetail, SensorValues } from '../src/api/types';
 import { formatValue } from '../src/routes/detail/model';
 import { ObjectDetailView } from '../src/routes/ObjectDetailView';
-import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
+import { expectCorrelation, expectQuiet, speaking, statusSaying } from './support/refusal-region';
 import { watchFocus } from './support/try-again';
 
 // The page opens a socket for its live state, and none of that is what this file is about.
@@ -474,7 +474,7 @@ describe('the readings, kept while the next are read (U-71)', () => {
         release('fail');
       });
       // Refused with nothing held for sensor 12: its error panel, not sensor 9's readings.
-      expect(await alertSaying('restarting')).toBeDefined();
+      expect(await statusSaying('restarting')).toBeDefined();
     } finally {
       for (const _ of observer.takeRecords()) texts.push(document.body.textContent);
       observer.disconnect();
@@ -489,7 +489,7 @@ describe('the poll and the values’ error panel (U-71)', () => {
     // The first read is refused; Try again's read is slow, and then answers.
     valuesReply = (_id, read) => (read === 1 ? 'fail' : read === 2 ? 'hold' : 'answer');
     mount('/objects/9');
-    const alert = await alertSaying('restarting');
+    const alert = await statusSaying('restarting');
     const button = within(alert).getByRole('button', { name: 'Try again' });
     act(() => {
       button.focus();
@@ -528,7 +528,7 @@ describe('the poll and the values’ error panel (U-71)', () => {
     try {
       valuesReply = (_id, read) => (read === 1 ? 'fail' : read === 2 ? 'hold' : 'answer');
       mount('/objects/9');
-      const alert = await alertSaying('restarting');
+      const alert = await statusSaying('restarting');
       const button = within(alert).getByRole('button', { name: 'Try again' });
       act(() => {
         button.focus();
@@ -559,7 +559,7 @@ describe('the poll and the values’ error panel (U-71)', () => {
   it('keeps the panel through a poll that fails again, until a read answers', async () => {
     valuesReply = (_id, read) => (read <= 2 ? 'fail' : 'answer');
     mount('/objects/9');
-    const alert = await alertSaying('restarting');
+    const alert = await statusSaying('restarting');
     const removed: Node[] = [];
     const observer = new MutationObserver((records) => {
       for (const record of records) removed.push(...record.removedNodes);

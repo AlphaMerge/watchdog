@@ -13,7 +13,7 @@ import type {
   TemplateView,
 } from '../api/types';
 import { HeldListFailure } from '../components/HeldListFailure';
-import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, Empty } from '../components/Panels';
 import { useRefusal } from '../components/refusal';
 import { SchemaForm } from '../forms/SchemaForm';
 import type { JsonSchema } from '../forms/schema';
@@ -22,6 +22,7 @@ import { initial, seed } from './templates-model';
 import { RecipientsEditor } from './RecipientsEditor';
 import { mayChoosePeople } from './recipients-model';
 import { useSession } from '../auth/session';
+import { ReadState } from '../components/ReadRegion';
 
 /** How long to wait after a keystroke before asking the core what the draft renders as. */
 const PREVIEW_DEBOUNCE_MS = 500;
@@ -83,14 +84,11 @@ export function TemplatesView(): React.JSX.Element {
   }, [templates]);
   const items = templates.status === 'ready' ? templates.data.items : heldTemplates.current;
 
-  if ((templates.status === 'loading' && items === null) || methods.status === 'loading') {
-    return <Loading what="templates" />;
+  // One region from the first read to its failure (`U-58`). A list held through a re-read is not
+  // waited on: its failure is said beside it (`U-67`).
+  if (items === null || methods.status !== 'ready') {
+    return <ReadState read={items === null ? [templates, methods] : methods} what="templates" />;
   }
-  if (templates.status === 'error' && items === null) {
-    return <ErrorPanel error={templates.error} retry={templates.retry} />;
-  }
-  if (methods.status === 'error') return <ErrorPanel error={methods.error} retry={methods.retry} />;
-  if (items === null) return <Loading what="templates" />;
 
   const chosen = editing === null ? undefined : items.find((t) => String(t.id) === editing);
 

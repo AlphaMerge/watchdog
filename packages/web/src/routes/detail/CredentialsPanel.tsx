@@ -10,7 +10,7 @@ import type {
   ObjectRef,
 } from '../../api/types';
 import { useSession } from '../../auth/session';
-import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { Card, CorrelationId, Empty } from '../../components/Panels';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt } from '../../forms/schema';
 import { allProblems, type FieldProblem } from '../../forms/validate';
@@ -38,6 +38,7 @@ import {
   secretLabels,
   type Owner,
 } from './credentials-model';
+import { ReadRegion, ReadState } from '../../components/ReadRegion';
 
 const BUTTON =
   'border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50';
@@ -117,11 +118,16 @@ export function CredentialsPanel({
     [reload],
   );
 
-  if (sets.status === 'loading' || kinds.status === 'loading') {
-    return <Loading what="credentials" />;
+  if (sets.status !== 'ready' || kinds.status !== 'ready') {
+    // One region from the first reads to their failure (`U-58`). The sets' *Try again* is the
+    // hook's own read, which keeps the failure in hand while it asks, as `useApi`'s `retry` does.
+    const setsRead = {
+      status: sets.status,
+      error: sets.status === 'error' ? sets.error : null,
+      retry: reload,
+    };
+    return <ReadState read={[setsRead, kinds]} what="credentials" />;
   }
-  if (sets.status === 'error') return <ErrorPanel error={sets.error} retry={reload} />;
-  if (kinds.status === 'error') return <ErrorPanel error={kinds.error} retry={kinds.retry} />;
 
   const items = sets.data;
   const catalogue = kinds.data.items;
@@ -165,15 +171,13 @@ export function CredentialsPanel({
 
         {/* A save or a removal that was made, and a list that could not be read after it. What
             happened stays said above; this says the list is the old one, and offers to read it. */}
-        {stale !== null && (
-          <div className="mt-3 space-y-2">
-            <p className="text-sm text-text">
-              The list below could not be read again, so it may not show the last change. Nothing
-              can be changed here until it has been.
-            </p>
-            <ErrorPanel error={stale} retry={reload} />
-          </div>
-        )}
+        {/* In a region there, empty, while the list is (`U-58`), so the failure is said. */}
+        <ReadRegion error={stale} retry={reload} className="mt-3 empty:mt-0">
+          <p className="text-sm text-text">
+            The list below could not be read again, so it may not show the last change. Nothing can
+            be changed here until it has been.
+          </p>
+        </ReadRegion>
 
         {/* Not while the core is still being asked: the sentence would be up for a moment in
             front of every account that may write. */}
