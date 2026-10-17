@@ -11819,6 +11819,22 @@ because each is a decision rather than a defect:
       several logins, so that one stall cannot decide it, and the claim (the decoy verification
       happens at all) stands.
 
+- [ ] **P-431 — two sensor tests time a bound with no room for a loaded machine** · XS · A-62,
+      P-07 · Found 2026-10-17 in the full suite for `P-408`, `P-406` and `P-397` together, on a VM
+      that at times carried three runs.
+      - **The database case.** `db-checked-target.test.ts`'s connect-bound case for `db.mysql`
+        has a 900 ms lookup and a 2,000 ms connect timeout, and asserts under 2,500 ms. It took
+        3,274 ms. That is more than either outcome the case separates (about 2,000 ms with the
+        lookup inside the bound, about 2,900 ms outside it), so read why before widening it.
+      - **The jitter case.** `jitter-range.test.ts`'s "passes the interval it was given to
+        ping" sends five packets at 0.2 s and asserts under 2,500 ms. It took 2,569 ms, where
+        the default interval would take over four seconds.
+      - Both passed three times out of three alone on the same tree, and the first full suite
+        on `P-406` passed both.
+
+      **Done when** each upper bound sits where the distance between its two outcomes puts it,
+      not half a second over the expected one, and the `db.mysql` overrun is explained.
+
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
       `#retire` and `#startTimedOut` do, so a memory reading during a slow terminate treats that
