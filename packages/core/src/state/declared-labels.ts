@@ -7,51 +7,63 @@ import type { ChannelDeclaration } from '../objects/redeclare.js';
 import { channelLabel, declaredChannelLookup, type DeclaredShapes } from './declared-limits.js';
 
 /**
- * **A channel ingestion named by its key is given the name and unit its type declares**
- * (`P-402`).
+ * **Every channel is given the name and unit its type declares, where the declaration says
+ * something of its own, once per build** (`P-402`, `P-404`).
  *
- * **What it repairs.** A create writes each channel's declared name and unit (`createChannels`).
- * A channel first seen in a reading is created by ingestion, which until `P-402` took only the
- * reading's own words and, with none, the key and no unit. Core Health's and Probe Health's
- * readings carry none, so on an installation whose health sensors predate a build, every channel
- * that build added to them read `probesSilent` where it should read "Probes not delivering", with
- * no unit — in the channel table, the history panel, which also draws a channel with its
- * same-unit siblings and so drew this one apart from them, and the series table. Nothing mended
- * it: a channel's name and unit are written by a create, ingestion, a clone and an edit's
- * re-declaration, which writes them only when the declaration itself changed, or when the type
- * cannot answer for the stored parameters, and a type with no parameters never changes it.
+ * **What it brings up to date.** A create writes each channel's declared name and unit
+ * (`createChannels`), and ingestion names a channel it creates the same way (`channelLabel`). An
+ * edit re-declares them only where the edit itself moved the declaration (`planRedeclaration`).
+ * So a row keeps what was declared when it was written, and two kinds of row fall behind:
+ * - **one an earlier build's ingestion named by its key, with no unit** (`P-402`). Before
+ *   `P-402` ingestion took only a reading's words, and Core Health's and Probe Health's readings
+ *   carry none, so every channel a build added to them read `probesSilent` where it should read
+ *   "Probes not delivering", with no unit — in the channel table, the history panel, which draws
+ *   a channel with its same-unit siblings and so drew this one apart from them, and the series
+ *   table;
+ * - **one whose declaration a later build changed** (`P-404`): "Response time" to "Round-trip
+ *   time", or a unit added. Without this, existing sensors kept the old words until an edit
+ *   happened to move them, and new sensors got the new ones, side by side in one list.
  *
- * **Which rows.** Only those named by their key with no unit — what ingestion wrote when a
- * reading sent nothing. A row whose reading sent a name or a unit is left, even where ingestion
- * would name it otherwise today (an `exe.script.advanced` primary created after an edit, with
- * `primaryName` set): its words came from somewhere, and this cannot tell where. A name a reading
- * sent, a script channel's own words, is never rewritten; and no route lets an operator choose a
- * channel's name or unit (`patchChannel` takes limits, a lookup and processing), so nobody's
- * decision is overridden. Each gets what ingestion now creates for a reading that sent nothing
- * (`channelLabel`): its declared name where that is more than its key, and its declared unit
- * where there is one. So a row this repairs and a row created today agree, and one whose
- * declaration says nothing of its own is left. A row an older build's create named by its key,
- * where this build's declaration names it, is renamed too: what a create writes today. A key the
- * sensor's own answer does not name is left, and so is a sensor whose type cannot answer for its
- * stored parameters or is not registered in this build: counted, and the types named in the
- * pass's line.
+ * **What it writes.** For each channel the sensor's own answer declares, what ingestion would
+ * create today from a reading that sent the row's own words (`channelLabel`): the declared name
+ * where it is more than the key, the declared unit where there is one, and otherwise what the
+ * row holds. So a row this writes and a row created today agree, and a name or a unit the
+ * declaration says nothing of — a script's channel named by the program (`P-403`), a key the
+ * answer does not name — is left as it is. A declared name or unit wins over a reading's words,
+ * as it does when ingestion creates a row.
+ *
+ * **Nobody's choice is overwritten.** No route writes a channel's name or unit (`patchChannel`
+ * takes limits, a lookup and processing). A person names a channel through a parameter
+ * (`exe.script.advanced`'s `primaryName`, a table column's name), and that is the declaration
+ * itself, asked here with the sensor's own stored parameters: what this writes is the person's
+ * name. A sensor whose type cannot answer for its stored parameters, or is not registered in this
+ * build, is left — its `{}` answer is a placeholder's (`ChannelShape`) — counted, and the types
+ * named in the pass's line.
+ *
+ * **What the rename reaches.** The row, so everything that reads it when it shows a channel: the
+ * channel table, the history panel and its series, a report rendered after it, a map, and the
+ * next message a limit raises. Series are stored by channel id, so the history is one series
+ * under the new name. What was written down before keeps the old words: a sensor's message and
+ * its state log, a queued or sent notification (which carry that message), and a report already
+ * rendered. No notification placeholder names a channel.
  *
  * **Once per build** (`P-333`), keyed on the exact build as `P-323`'s pass is
  * (`declaredLabelRules`): a declaration is a type's code run on each sensor's parameters, so only
- * a new build can change one, and a new build is when a type gains channels. Rows that are right
- * as they are — a declared name that is only its key, a script's channel named by its key — stay
- * candidates, read again only when the build changes. Recorded only by a run that read every
- * candidate and left none for later.
+ * a new build can change one, and the first start of that build brings every row to it. Recorded
+ * only by a run that read every sensor and left none for later; a build that is not exactly one
+ * commit runs it at every start and records nothing.
  *
- * **Locked as `P-323`'s and `P-312`'s repairs are**: object, then `sensor_config`, then `channel`,
- * the edit's order, `SKIP LOCKED` so it waits on nothing, and everything decided again under the
- * lock, so a channel an edit renamed meanwhile is not a candidate any more. A sensor somebody else
- * holds is left for the next start. Each write moves the sensor's version — a name and a unit are
- * what a reader sees, and the resolver caches both — and is a `channel.redeclared` entry by its
- * own system actor through `ingestionAuditSinks`, so the resolver forgets the sensor (`M-04`).
+ * **Paged and locked as `P-323`'s and `P-312`'s passes are**: every `sensor_config` row in keyset
+ * pages, each an unlocked read and, only where something would change, a short transaction that
+ * takes object, then `sensor_config`, then `channel`, the edit's order, `SKIP LOCKED` so it waits
+ * on nothing, and decides everything again under the lock, so a channel an edit renamed meanwhile
+ * is not renamed back. A sensor somebody else holds is left for the next start. Each write moves
+ * the sensor's version — a name and a unit are what a reader sees, and the resolver caches both —
+ * and is a `channel.redeclared` entry by its own system actor through `ingestionAuditSinks`, so
+ * the resolver forgets the sensor (`M-04`).
  */
 
-/** Who names a channel at start-up: nobody did, ingestion had only the key to go on. */
+/** Who names a channel at start-up: nobody did, the build's declaration did. */
 export const DECLARED_LABEL_REPAIR: Actor = {
   kind: 'system',
   component: 'declared-label-startup-repair',
@@ -79,7 +91,7 @@ export interface DeclaredLabelRepairOptions {
 export interface DeclaredLabelRepairReport {
   /** False when this exact build already finished a run: nothing was read. */
   readonly ran: boolean;
-  /** Sensors with a channel named by its key and no unit, read. */
+  /** Sensors read. Every sensor in the installation, unless `complete` is false. */
   readonly sensors: number;
   /** Channels whose name or unit this pass wrote. */
   readonly relabelled: number;
@@ -110,8 +122,8 @@ interface SensorRow {
   readonly params: unknown;
 }
 
-/** A channel named by its key with no unit, with what its `channel.redeclared` entry records. */
-interface CandidateRow {
+/** A channel of a sensor read, with what its `channel.redeclared` entry records. */
+interface ChannelRow {
   readonly id: number;
   readonly sensor_id: string;
   readonly key: string;
@@ -123,7 +135,7 @@ interface CandidateRow {
 }
 
 interface Relabel {
-  readonly row: CandidateRow;
+  readonly row: ChannelRow;
   readonly name: string;
   readonly unit: string;
 }
@@ -140,12 +152,14 @@ export async function repairDeclaredLabels(
   } catch (error) {
     logger.warn(
       { ...describeError(error), phase: 'read-marker' },
-      'could not read whether this build has named the channels created by their key; naming ' +
-        'them again',
+      'could not read whether this build has given every channel its declared name and unit; ' +
+        'giving them again',
     );
   }
   if (!due) {
-    logger.debug('this build has already named every channel created by its key; not read again');
+    logger.debug(
+      'this build has already given every channel its declared name and unit; not read again',
+    );
     return {
       ran: false,
       sensors: 0,
@@ -178,21 +192,16 @@ export async function repairDeclaredLabels(
     let page: SensorRow[];
     try {
       page = await options.db.query<SensorRow>(
-        `SELECT s.object_id::text AS id, s.type, s.params
-         FROM sensor_config s
-         WHERE s.object_id IN (
-           SELECT c.sensor_id FROM channel c
-           WHERE c.name = c.key AND c.unit = '' AND c.sensor_id > $1::bigint
-           GROUP BY c.sensor_id ORDER BY c.sensor_id LIMIT $2)
-         ORDER BY s.object_id`,
+        `SELECT object_id::text AS id, type, params FROM sensor_config
+         WHERE object_id > $1::bigint ORDER BY object_id LIMIT $2`,
         [after, batchSize],
       );
     } catch (error) {
       // Nothing to go on to: the next page is not known. Stopped, said, and never rejected.
       logger.warn(
         { ...describeError(error), afterSensorId: after, phase: 'read-page' },
-        'could not read the next page of sensors with channels named by their key; the rest ' +
-          'waits for the next start',
+        'could not read the next page of sensors to give their channels the declared name and ' +
+          'unit; the rest waits for the next start',
       );
       complete = false;
       break;
@@ -210,9 +219,9 @@ export async function repairDeclaredLabels(
     // **A failure is the page's, not the pass's**, as in `P-323`'s: logged with its range and
     // counted, and the pages after it go on; the next start tries it again.
     try {
-      // Unlocked, and empty for a page whose candidates are all right as they are: only the
-      // sensors with a channel to rename are locked below.
-      const stale = relabelsOf(await candidatesOf(options.db, [...answers.keys()]), answers);
+      // Unlocked, and empty for a page whose channels are all as declared: only the sensors with
+      // a channel to rename are locked below.
+      const stale = relabelsOf(await channelsOf(options.db, [...answers.keys()]), answers);
       if (stale.length === 0) continue;
       const done = await options.db.tx((q) =>
         relabelLocked(
@@ -233,8 +242,8 @@ export async function repairDeclaredLabels(
           lastSensorId: last.id,
           phase: 'relabel-page',
         },
-        'could not name the channels created by their key of one page of sensors; the pages ' +
-          'after it go on, and the next start tries this one again',
+        'could not give the channels of one page of sensors their declared name and unit; the ' +
+          'pages after it go on, and the next start tries this one again',
       );
     }
   }
@@ -252,12 +261,12 @@ export async function repairDeclaredLabels(
   if (relabelled > 0 || skipped > 0 || failedPages > 0 || undeclared > 0 || !complete) {
     logger.info(
       report,
-      'wrote the name and unit their types declare onto channels ingestion had named by their ' +
-        'key; sensors another transaction held, and sensors whose type could not answer for ' +
-        'their stored parameters, were left as they are',
+      'wrote the name and unit their types declare onto existing channels whose rows said ' +
+        'otherwise; sensors another transaction held, and sensors whose type could not answer ' +
+        'for their stored parameters, were left as they are',
     );
   } else {
-    logger.debug(report, 'every channel named by its key is named as its type declares');
+    logger.debug(report, 'every channel already has the name and unit its type declares');
   }
   // Recorded only when nothing is left for the next start to do.
   if (complete && failedPages === 0 && skipped === 0) {
@@ -266,8 +275,8 @@ export async function repairDeclaredLabels(
     } catch (error) {
       logger.warn(
         { ...describeError(error), phase: 'record-marker' },
-        'could not record that this build named the channels created by their key; the next ' +
-          'start reads them again',
+        'could not record that this build gave every channel its declared name and unit; the ' +
+          'next start reads them again',
       );
     }
   }
@@ -277,11 +286,14 @@ export async function repairDeclaredLabels(
 /** The `startup_pass` row this pass keeps. */
 export const DECLARED_LABEL_PASS = 'declared-label';
 
-/** Bumped when what the pass does with a declaration changes; a new build reruns it anyway. */
-const DECLARED_LABEL_RULES_VERSION = 1;
+/**
+ * Bumped when what the pass does with a declaration changes; a new build reruns it anyway. 2:
+ * every channel, not only those named by their key with no unit (`P-404`).
+ */
+const DECLARED_LABEL_RULES_VERSION = 2;
 
 /**
- * What a run of the repair under this build records (`P-333`), or null for a build that is not
+ * What a run of the pass under this build records (`P-333`), or null for a build that is not
  * exactly one commit, as `declaredPrimaryRules` is: then every start runs it.
  */
 export function declaredLabelRules(build: BuildStamp): string | null {
@@ -309,32 +321,33 @@ function answersOf(
   return answers;
 }
 
-/** The channels of these sensors named by their key with no unit. */
-async function candidatesOf(
+/** The channels of these sensors. */
+async function channelsOf(
   q: Pick<Queryable, 'query'>,
   sensorIds: readonly string[],
-): Promise<CandidateRow[]> {
+): Promise<ChannelRow[]> {
   if (sensorIds.length === 0) return [];
-  return q.query<CandidateRow>(
+  return q.query<ChannelRow>(
     `SELECT id, sensor_id::text AS sensor_id, key, name, unit, lookup_id, counter_bits, is_primary
      FROM channel
-     WHERE name = key AND unit = '' AND sensor_id = ANY($1::bigint[])
+     WHERE sensor_id = ANY($1::bigint[])
      ORDER BY channel.sensor_id, channel.key`,
     [sensorIds],
   );
 }
 
-/** Of the candidates, those whose declaration names them otherwise, with what it names them. */
+/** Of the rows, those whose declaration names them otherwise, with what it names them. */
 function relabelsOf(
-  rows: readonly CandidateRow[],
+  rows: readonly ChannelRow[],
   answers: ReadonlyMap<string, DeclaredShapes>,
 ): Relabel[] {
   const relabels: Relabel[] = [];
   for (const row of rows) {
     const shape = answers.get(row.sensor_id)?.shapes.get(row.key);
     if (shape === undefined) continue;
-    // What ingestion creates today for a reading that sent nothing, which is what this row got.
-    const label = channelLabel(row.key, shape, { name: undefined, unit: undefined });
+    // What ingestion creates today from a reading that sent the row's own words: the
+    // declaration's where it says something of its own, and the row's elsewhere.
+    const label = channelLabel(row.key, shape, { name: row.name, unit: row.unit });
     if (label.name === row.name && label.unit === row.unit) continue;
     relabels.push({ row, name: label.name, unit: label.unit });
   }
@@ -367,7 +380,7 @@ async function relabelLocked(
   );
   // Counted on the unlocked read already; not twice.
   const answers = answersOf(fresh, declared, () => undefined);
-  const relabels = relabelsOf(await candidatesOf(q, [...answers.keys()]), answers);
+  const relabels = relabelsOf(await channelsOf(q, [...answers.keys()]), answers);
   if (relabels.length === 0) return { relabelled: 0, skipped };
 
   const mutations: Mutation[] = relabels.map(({ row, name, unit }) => {

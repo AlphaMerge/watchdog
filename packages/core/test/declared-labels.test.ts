@@ -78,6 +78,38 @@ const labelled: SensorType = {
 
 const KEYS = ['bare', 'mode', 'rate', 'temp', 'value'] as const;
 
+/**
+ * Two builds of one type (`P-404`): the later one renames its primary's default name, which a
+ * `label` parameter replaces, and renames `loss` and gives it a unit. `queue` says nothing of its
+ * own, as a channel a program names does.
+ */
+function renamedType(build: 'older' | 'later'): SensorType {
+  return {
+    id: 'test.renamed',
+    category: 'Custom',
+    costHint: 'light',
+    channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
+    paramsSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { gen: { type: 'integer' }, label: { type: 'string' } },
+    },
+    channels: (params) => {
+      if (params['gen'] === BROKEN) throw new TypeError('generation not understood');
+      const label = typeof params['label'] === 'string' ? params['label'] : '';
+      const fallback = build === 'older' ? 'Response time' : 'Round-trip time';
+      return [
+        { key: 'latency', name: label === '' ? fallback : label, unit: 'ms', isPrimary: true },
+        build === 'older'
+          ? { key: 'loss', name: 'Loss' }
+          : { key: 'loss', name: 'Packet loss', unit: '%' },
+        { key: 'queue', name: 'queue' },
+      ];
+    },
+    execute: () => Promise.resolve({ channels: [] }),
+  };
+}
+
 interface Params {
   gen?: number;
   primaryName?: string;
@@ -208,7 +240,7 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('declared_labels');
       db = scratch.db;
-      harness = await buildHarness(db, { types: [labelled] });
+      harness = await buildHarness(db, { types: [labelled, renamedType('older')] });
       const probe = await harness.service.create(testActor, {
         kind: 'probe',
         parentId: harness.rootId,
@@ -743,7 +775,7 @@ describe(
       });
     });
 
-    describe('named by its key by an earlier build, and repaired at start-up', () => {
+    describe('named otherwise by an earlier build, and named as declared at its first start (P-404)', () => {
       it('writes the declared name and unit, page by page, audited by the system, moving the version', async () => {
         const first = await namedByKey();
         const second = await namedByKey();
@@ -794,40 +826,104 @@ describe(
         assert.deepEqual(redeclared(), []);
       });
 
-      it('leaves a name a reading sent, and a channel with a unit, beside one it renames', async () => {
-        // `rate` puts the sensor in a page; the others are read with it, and only it is renamed.
+      it('writes a declared name or unit over a reading’s words, and keeps the words where the declaration says nothing', async () => {
+        // `P-402` left these, since a reading's words "came from somewhere". A declaration of its
+        // own wins when ingestion creates a row today, and the pass writes what it creates.
         const id = await sensor();
         await db.query(
           `INSERT INTO channel (sensor_id, key, name, unit) VALUES
              ($1, 'temp', 'Celsius', ''), ($1, 'mode', 'mode', 'x'),
-             ($1, 'value', 'Free Space', ''), ($1, 'rate', 'rate', '')`,
+             ($1, 'value', 'Free Space', 'GB'), ($1, 'rate', 'Rate', ''),
+             ($1, 'bare', 'Bare one', 'kB')`,
           [id],
-        );
-        // And a sensor with nothing of the kind is not read at all.
-        const unitOnly = await sensor();
-        await db.query(
-          `INSERT INTO channel (sensor_id, key, name, unit)
-           VALUES ($1, 'mode', 'mode', 'x'), ($1, 'temp', 'Celsius', '')`,
-          [unitOnly],
         );
         const report = await repair();
         assert.deepEqual(
           { sensors: report.sensors, relabelled: report.relabelled },
-          {
-            sensors: 1,
-            relabelled: 1,
-          },
+          { sensors: 1, relabelled: 3 },
         );
         assert.deepEqual(await labels(id), [
-          { key: 'mode', name: 'mode', unit: 'x' },
-          { key: 'rate', name: 'rate', unit: '/s' },
-          { key: 'temp', name: 'Celsius', unit: '' },
-          { key: 'value', name: 'Free Space', unit: '' },
+          // Its name and unit are only its key and nothing: the reading's words stay.
+          { key: 'bare', name: 'Bare one', unit: 'kB' },
+          { key: 'mode', name: 'Mode', unit: 'x' },
+          { key: 'rate', name: 'Rate', unit: '/s' },
+          { key: 'temp', name: 'Temperature', unit: '°C' },
+          // A primary the program named (`P-403`), whose declaration is its key: kept.
+          { key: 'value', name: 'Free Space', unit: 'GB' },
         ]);
-        assert.deepEqual(await labels(unitOnly), [
-          { key: 'mode', name: 'mode', unit: 'x' },
-          { key: 'temp', name: 'Celsius', unit: '' },
+      });
+
+      it('renames existing sensors’ channels when a build changes what it declares, and keeps a person’s own name', async () => {
+        const created = async (): Promise<number> => {
+          made += 1;
+          const sensor = await harness.service.create(testActor, {
+            kind: 'sensor',
+            parentId: deviceId,
+            name: `renamed-${String(made)}`,
+            sensorType: 'test.renamed',
+            params: {},
+          });
+          return sensor.id;
+        };
+        const plain = await created();
+        const chosen = await created();
+        // A person names a channel through the parameter that names it, by an edit: the only way.
+        await harness.service.update(
+          testActor,
+          chosen,
+          { kind: 'sensor', params: { label: 'Gateway ping' } },
+          { kind: 'none' },
+        );
+        // And a program named `queue`, which the type names by its key.
+        await db.query(
+          "UPDATE channel SET name = 'Backlog', unit = 'jobs' WHERE sensor_id = $1 AND key = 'queue'",
+          [plain],
+        );
+        assert.deepEqual(await labels(plain), [
+          { key: 'latency', name: 'Response time', unit: 'ms' },
+          { key: 'loss', name: 'Loss', unit: '' },
+          { key: 'queue', name: 'Backlog', unit: 'jobs' },
         ]);
+        assert.equal((await labels(chosen))[0]?.name, 'Gateway ping');
+        const before = await versionOf(plain);
+        harness.audit.recorded.length = 0;
+        actors.length = 0;
+
+        const later = testCatalogue([labelled, renamedType('later')]);
+        const report = await repair({ catalogue: later, rules: 'later' });
+        assert.deepEqual(
+          {
+            relabelled: report.relabelled,
+            undeclared: report.undeclared,
+            complete: report.complete,
+          },
+          { relabelled: 3, undeclared: 0, complete: true },
+        );
+        assert.deepEqual(await labels(plain), [
+          { key: 'latency', name: 'Round-trip time', unit: 'ms' },
+          { key: 'loss', name: 'Packet loss', unit: '%' },
+          { key: 'queue', name: 'Backlog', unit: 'jobs' },
+        ]);
+        assert.deepEqual(await labels(chosen), [
+          { key: 'latency', name: 'Gateway ping', unit: 'ms' },
+          { key: 'loss', name: 'Packet loss', unit: '%' },
+          { key: 'queue', name: 'queue', unit: '' },
+        ]);
+        assert.deepEqual(redeclared(), [
+          `${String(plain)}/latency: Response time>Round-trip time ms>ms`,
+          `${String(plain)}/loss: Loss>Packet loss >%`,
+          `${String(chosen)}/loss: Loss>Packet loss >%`,
+        ]);
+        assert.deepEqual(actors, [DECLARED_LABEL_REPAIR], 'one page, one transaction');
+        assert.ok((await versionOf(plain)) > before, 'a reader sees it, so the version moves');
+
+        // Once: the same build reads nothing again, and another with the same words writes none.
+        assert.equal((await repair({ catalogue: later, rules: 'later' })).ran, false);
+        const again = await repair({ catalogue: later, rules: 'later-still' });
+        assert.deepEqual(
+          { ran: again.ran, relabelled: again.relabelled },
+          { ran: true, relabelled: 0 },
+        );
       });
 
       it('leaves a key its sensor’s answer does not name', async () => {
@@ -849,6 +945,10 @@ describe(
 
       it('leaves a sensor whose type cannot answer, or is not registered, and names the type', async () => {
         const broken = await namedByKey({ gen: BROKEN });
+        await db.query(
+          "UPDATE channel SET name = 'Old temperature', unit = 'F' WHERE sensor_id = $1 AND key = 'temp'",
+          [broken],
+        );
         const report = await repair();
         assert.deepEqual(
           {
@@ -858,7 +958,13 @@ describe(
           },
           { relabelled: 0, undeclared: 1, types: ['test.labelled'] },
         );
-        assert.deepEqual(await labels(broken), BY_KEY, 'not from the `{}` answer’s placeholder');
+        assert.deepEqual(
+          await labels(broken),
+          BY_KEY.map((one) =>
+            one.key === 'temp' ? { key: 'temp', name: 'Old temperature', unit: 'F' } : one,
+          ),
+          'not from the `{}` answer’s placeholder',
+        );
 
         const answering = await namedByKey();
         const unregistered = await repair({ catalogue: testCatalogue([]) });
@@ -911,7 +1017,7 @@ describe(
         assert.equal((await repair({ rules: 'held-build' })).ran, false, 'and this one did');
       });
 
-      it('reads the candidates once per exact build, and every time with none (P-333)', async () => {
+      it('reads every sensor once per exact build, and every time with none (P-333)', async () => {
         const markerOf = async (): Promise<string | undefined> =>
           (
             await db.query<{ rules: string }>('SELECT rules FROM startup_pass WHERE name = $1', [

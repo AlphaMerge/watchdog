@@ -805,12 +805,12 @@ async function serve(): Promise<void> {
     run: () => undeclaredRepair,
   });
 
-  // **A channel ingestion named by its key gets the name and unit its type declares** (`P-402`):
-  // the rows an earlier build's ingestion created from a reading that carried no words of its
-  // own, as every Core Health and Probe Health reading does. Once per build, keyed on the build
-  // as the primary repair is (`P-333`). Not awaited, locked and stopped by shutdown as the
-  // repairs above are, and after them for the same reason: all three take sensors `SKIP LOCKED`
-  // at the first start of a build.
+  // **Every channel gets the name and unit its type declares, where they say something of their
+  // own** (`P-402`, `P-404`): a name or unit a new build changed, and the rows an earlier build's
+  // ingestion named by their key from a reading that carried no words, as every Core Health and
+  // Probe Health reading does. Once per build, keyed on the build as the primary repair is
+  // (`P-333`). Not awaited, locked and stopped by shutdown as the repairs above are, and after
+  // them for the same reason: all three take sensors `SKIP LOCKED` at the first start of a build.
   const labelRepair = undeclaredRepair
     .then(() =>
       repairDeclaredLabels({

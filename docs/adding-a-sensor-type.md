@@ -294,12 +294,22 @@ channel the sensor is judged by.
   ingestion all do this (`declaredLabel`, `P-405`), so a long one costs only its tail, but keep them
   short: a clipped name is a worse one. If you add to an operator's text, as an SNMP counter adds
   "/s" to the unit they chose, cut their part yourself first, so that the core's cut never takes
-  what you added (`rateUnit`). A channel created from your `{}` answer, because `channels()` threw,
-  takes no name from it, and a build whose `channels()` answers names it at its first start, unless
-  a reading of it sent a name or a unit, which it keeps. Before `P-402` a reading that sent no name
-  created the channel named by its key, and one that sent no unit created it with none, as every
-  Core Health and Probe Health reading did: the first start of a build that has it writes the
-  declared name and unit onto each row named by its key with no unit, once.
+  what you added (`rateUnit`). **A build that changes a declared `name` or `unit` renames the
+  channels of the sensors that already exist, once, at its first start** (`P-404`), so rename when
+  a better word comes along, knowing every sensor follows and none is left with the old one beside
+  a new sensor with the new. Each channel whose row differs from what its sensor's own answer
+  declares gets the declared name where it is more than the key and the declared unit where there
+  is one, audited as `channel.redeclared` by `declared-label-startup-repair`. Where your answer says
+  nothing of its own the row keeps what it has, a program's words included, and a name the operator
+  chose through a parameter is your answer, so it stays. Everything that reads a channel when it
+  shows one follows: the channel table, graphs and history, maps, a report rendered afterwards,
+  the next message a limit raises. History is kept by channel, not by name, so it reads as one
+  series under the new name. What was written down before keeps the old words: a sensor's last
+  message and state log, notifications already queued or sent, reports already rendered. A name
+  or unit you take away, by declaring the key or no unit, stays on existing sensors (`P-434`).
+  The same pass names a channel created from your `{}` answer, because `channels()` threw, once a
+  build whose `channels()` answers starts; and a row an older build's ingestion named by its key
+  with no unit, as every Core Health and Probe Health reading left them before `P-402`.
 - **`limits` on a channel declares default thresholds** (`S-18`). Almost no channel should have
   one: a threshold on a monitored device's response time depends on that device and belongs to the
   operator. Declare one only where the number means the same thing on every installation, which in

@@ -8823,7 +8823,7 @@ because each is a decision rather than a defect:
       - **Docs.** `adding-a-sensor-type.md`, and `channel.redeclared`'s comment lists its system
         writers. `primaryName`'s description needed no change: it is true now.
 
-- [ ] **P-404 — a channel name or unit a later build changes reaches new sensors only** · S ·
+- [x] **P-404 — a channel name or unit a later build changes reaches new sensors only** · S ·
       P-402 · Found 2026-10-17 by `P-402`. A create writes the declared name and unit. An edit
       re-declares them only when the sensor's own declaration moved between its old and new
       parameters, both asked of the running build (`planRedeclaration`), or when the type cannot
@@ -8844,6 +8844,58 @@ because each is a decision rather than a defect:
       no operator's edit is overwritten. **Done when** the pass is in place with a test, and
       `docs/adding-a-sensor-type.md` says a build's rename reaches existing sensors once, at the
       first start of that build.
+
+      **P-404 outcome. `P-402`'s pass, widened to every channel, once per build.**
+      - **One pass, not two.** The rows `P-402`'s repair read, named by their key with no unit,
+        are a subset of the rows whose declaration says something they do not. So
+        `repairDeclaredLabels` (`state/declared-labels.ts`) now reads every sensor in keyset
+        pages, as `P-323`'s pass does. Each channel its sensor's own answer declares gets
+        `channelLabel(key, shape, the row's own words)`: the declared name where it is more than
+        the key, the declared unit where there is one, and the row's words elsewhere. A row
+        it writes and a row ingestion creates today agree. Its marker (`declared-label`), its
+        actor (`declared-label-startup-repair`) and its place in `main.ts` are `P-402`'s. Its rules
+        version moves to 2.
+      - **Once per build**, as `P-323`'s: the marker is the exact build (`declaredLabelRules`).
+        It records only after a run that read every sensor and skipped none, and a working tree
+        runs it at every start. `S-18`'s digest of declarations cannot serve, because a name is a
+        type's code run on each sensor's parameters.
+      - **A person's name is kept, because it is the declaration.** No route writes a channel's
+        name. A parameter that names one (`primaryName`, a column's name) is asked with the
+        sensor's own stored parameters, so what the pass writes is the person's name. A
+        program's name (`P-403`), where the declaration names the channel by its key, is left.
+      - **A reading's words give way to a declaration of its own.** `P-402` had left them,
+        because "its words came from somewhere". Ingestion creates a row that way today, and the
+        decision was every declared name and unit.
+      - **Left:** a sensor whose type cannot answer or is not registered (counted, its type
+        named); a key the answer does not name; a sensor somebody holds (`SKIP LOCKED`, tried at
+        the next start).
+      - **What the rename reaches.** Everything that reads the row when it shows a channel: the
+        channel table, graphs and the history table and API (series keyed by channel id, so one
+        series under the new name), maps (read live, `maps/resolver.ts`), a report rendered
+        afterwards and its CSV or XML headings, and the next message a limit raises
+        (`state/limits.ts`). What was written before keeps the old words: `sensor_runtime.message`
+        and the `sensor_state` log, `notification_request.message` (queued or sent), and stored
+        `report_output`. No notification placeholder looks a channel's name up (`%lastvalue` is a
+        bare number; `%lastmessage` is the sensor's message as written), and no `/metrics` series
+        is labelled by a channel's name.
+      - **No migration.**
+      - **Tests.** `declared-labels.test.ts`, the start-up cases:
+        - a build that renames the primary's default and gives `loss` a name and a unit renames
+          both on existing sensors; a person's name, set by an edit, and a program's words are
+          kept. It is audited by the pass's actor, one entry a channel, and the version moves. The
+          same build does not read again, and another build with the same words writes nothing;
+        - a declared name or unit is written over a reading's words, which stay where the
+          declaration says nothing of its own;
+        - a type that cannot answer keeps an older build's words as well as its key's;
+        - `P-402`'s cases, unchanged: paged and audited, an undeclared key left, a held sensor
+          skipped and the marker not recorded, once per exact build.
+      - **Mutants 8/8:** the read narrowed back to channels named by their key with no unit
+        (`P-402`'s rule); the row's own words not kept where the declaration says nothing; a
+        declared unit, or a declared name, not written; the marker not consulted, or recorded
+        despite a skipped sensor; the lock waiting instead of `SKIP LOCKED`; no audit entry.
+      - **Left to a new ticket:** `P-434`, a name or unit a build takes away.
+      - **Docs.** `adding-a-sensor-type.md` (a build's rename reaches existing sensors once, at
+        its first start, and what follows it) and `administration.md`'s upgrade notes.
 
 - [x] **P-405 — a declared channel name over 200 characters, or empty, refuses the sensor** · S ·
       P-402 · Found 2026-10-17 by `P-402`'s review. `channel.name` holds 1 to 200 characters
@@ -12143,6 +12195,19 @@ because each is a decision rather than a defect:
 
       **Done when** each upper bound sits where the distance between its two outcomes puts it,
       not half a second over the expected one, and the `db.mysql` overrun is explained.
+
+- [ ] **P-434 — a channel name or unit a build takes away stays on existing sensors** · XS ·
+      P-404 · Found 2026-10-17 by `P-404`. The start-up pass writes a declared name and unit only
+      where they say something of their own (`channelLabel`): a name more than the key, a unit
+      that is not empty. A build that stops naming a channel, declaring it by its key so that
+      readings may name it, or that drops its unit, leaves the old words on every existing
+      sensor. New sensors get the key or no unit, side by side with them: `P-404`'s problem in
+      the other direction, as `P-291` was `S-18`'s. Nothing on the row says whether its words
+      came from an older declaration or from a reading, which is why the pass cannot take them
+      away. **Done when** decided: record where each channel's name and unit came from (a
+      migration, as `limits_source` did for limits), so that a withdrawn declaration is taken
+      back without touching a reading's words; or the type guide says a build cannot take a name
+      or a unit away from existing sensors, and why.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as

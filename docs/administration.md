@@ -2324,15 +2324,30 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
     build — commit, profile and dependency lock. It runs once per build. A build that is not
     exactly one commit, such as a working tree or a package with uncommitted changes, runs it at
     every start and records nothing.
-  - **Declared channel names and units** (`P-402`), in the background after the repair of channels
-    created without their declared shape, keyed on the build in the same way. It reads only
-    channels named by their key with no unit, which is how ingestion named a channel first seen in
-    a reading that carried no name and no unit, before `P-402`. That includes every channel a
-    later build added to Core Health and Probe Health. Each one whose type declares a name or a
-    unit of its own gets them, as ingestion now creates them. A unit a reading sent, or a name
-    other than the channel's key, is never rewritten. Each change is audited as `channel.redeclared` by
+  - **Declared channel names and units** (`P-402`, `P-404`), in the background after the repair
+    of channels created without their declared shape, keyed on the build in the same way. It reads
+    every sensor's channels and gives each the name and unit its type declares for that sensor's
+    parameters, wherever the declaration says something of its own: a name that is more than the
+    channel's key, a unit that is not empty. **So a build that renames a channel renames it on the
+    sensors you already have, at its first start**, not only on new ones, and so does one that
+    gives a channel a unit. It also names the channels an older build's ingestion named by their
+    key with no unit, as it did every channel a later build added to Core Health and Probe Health
+    before `P-402`. Where the declaration says nothing of its own the channel keeps what it has, a
+    script channel named by its program for one. A name you chose through a sensor's settings,
+    such as a script sensor's *Primary channel name*, is the declaration, so it stays; no setting
+    renames a channel directly. Each change is audited as `channel.redeclared` by
     `declared-label-startup-repair` and moves the sensor's version. A sensor whose type cannot
     answer for its stored parameters is left, and its type is named in the pass's line.
+    - **What a renamed channel looks like afterwards.** Everything that reads a channel when it
+      shows one uses the new name: the channel table, graphs and the history table, maps, the
+      history API, a report rendered afterwards and its CSV or XML headings, and the next message
+      a limit raises. History is stored by channel, not by name, so it stays one series under the
+      new name. What was written down before keeps the old words: a sensor's last message and its
+      state log, notifications already queued or sent (their text is the sensor's message as it
+      was), and reports already rendered. No notification placeholder looks up a channel's name,
+      and no `/metrics` series is labelled by one, so templates and scrapes need no change.
+    - A name or a unit a build takes away, declaring the channel by its key or with no unit,
+      stays on existing sensors (`P-434`).
 
   A pass records only once it has finished. One that stopped at shutdown, lost a page, or left a
   sensor someone else held runs again at the next start. Three passes run at every start and

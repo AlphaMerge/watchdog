@@ -42,10 +42,10 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  *
  * **The name and unit are null when the answer is a fallback**: a type that threw for the
  * sensor's stored parameters, whose `{}` answer may name the key differently, or a type this build
- * does not register. The channel then keeps the reading's words, or its key, as before. One named
- * by its key with no unit is given the declared ones by `repairDeclaredLabels` at the first start
- * of a build that can answer; one whose reading sent a name or a unit keeps them. A row named from
- * a placeholder's answer would look right and never be looked at again.
+ * does not register. The channel then keeps the reading's words, or its key, as before, and
+ * `repairDeclaredLabels` gives it the declared name and unit, where they say something of their
+ * own, at the first start of a build that can answer (`P-404`). A row named from a placeholder's
+ * answer would look right and never be looked at again.
  */
 export interface ChannelShape {
   readonly lookup: string | null;
