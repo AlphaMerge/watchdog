@@ -36445,7 +36445,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       warning: shown once (flowListener.enabled on a v1 probe)". That is the last of this
       ticket's done-when, from the one place `H-27` left printing it.
 
-- [ ] **H-27 — a package upgrade does not show a passing config check's warnings** · S · H-26 ·
+- [x] **H-27 — a package upgrade does not show a passing config check's warnings** · S · H-26 ·
       Found 2026-10-02 by `H-26`. `deploy/setup.sh` runs the same check for the `.deb` and the
       `.rpm`, which never go through `place-release.sh`, and keeps a passing check's output.
       Printing it there as well would show a tarball upgrade the warning twice. **Done when**
@@ -36500,7 +36500,12 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       on boxes that have no database, and only the upgrade's last four lines are kept. That
       is not a small change, and it is the part of the Done-when nothing here meets.
 
-- [ ] **H-28 — the upgrade warnings have not been through a smoke install** · S · H-26, H-27 ·
+      **Ticked 2026-10-17, on `H-28`'s run.** `smoke-packages.sh` now upgrades the probe host's
+      package, `.deb` and `.rpm`, with the check and the start running, and each showed the
+      warning once under its heading; the tarball showed it on 2026-10-02 (`H-26`). Both halves
+      of the Done-when are met.
+
+- [x] **H-28 — the upgrade warnings have not been through a smoke install** · S · H-26, H-27 ·
       Found 2026-10-02. `smoke-install.sh` carries an assertion for the tarball path that has
       never run. `smoke-packages.sh` upgrades under `MS_SETUP_NO_START=1`, which skips the
       check, and keeps four lines of output, so no package upgrade can show a warning there.
@@ -36509,6 +36514,36 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       done: `smoke-install.sh` ran on 2026-10-02 with the assertion passing, and `H-26` is
       ticked on it. `deploy/windows/ms-setup.ps1` gets
       the same question in Release 1.1.
+
+      **H-28 outcome. The probe host's package, `ms-probe`, upgraded with its check and its start,
+      on both boxes, shows the warning once.**
+      - **Why that package.** Every upgrade `smoke-packages.sh` already ran is under
+        `MS_SETUP_NO_START=1`, which skips the check, because a start follows it — the core's
+        among them — and these boxes have no database by design (TimescaleDB has no aarch64 EL9
+        packages, so a Rocky box with one cannot exist on this hardware). `ms-probe` runs the same
+        `postinst`/`%post` and the same `ms-setup`, and a probe starts without a core (it spools),
+        so its upgrade is one that runs whole on both boxes. A `.deb` of the full package with a
+        database is possible on the Debian box only; that would have tested the two formats
+        differently, for a code path that does not depend on which components there are.
+      - **The script.** `smoke-packages.sh` stages `package.sh --probe-only` beside the full tree
+        (reused, or both rebuilt with `MS_SMOKE_REBUILD=1`), packages it with
+        `package-deb.sh --probe-only` and `package-rpm.sh --probe-only`, and at the end of each
+        box: installs `ms-probe` as an operator does (its first install starts the probe — a
+        probe-only host creates no `core.json`); sets `flowListener.enabled` in `probe.json`; then
+        upgrades in place without `MS_SETUP_NO_START` (`dpkg -i`, `rpm -U --force`) and fails
+        unless that exits 0, its output has `==> /etc/ms/probe.json is valid for <version>. The
+        check says:` and `    warning: flowListener.enabled` exactly once, the probe is active
+        after, and dpkg says `ii`; then puts the setting back and removes `ms-probe`. The full
+        `.rpm` is picked as `ms-[0-9]*.rpm`, since `ms-*.rpm` is the probe's too when that was
+        built last.
+      - **The run** (2026-10-17, arm64, both trees rebuilt at the commit): *package smoke test
+        passed*. Debian 12, *dpkg -i /pkg/ms-probe_1.0.0~rc.2_arm64.deb: exit 0, ms-probe active,
+        and the warning once*; Rocky 9, *rpm -U --force /pkg/ms-probe-1.0.0~rc.2-1.aarch64.rpm:
+        exit 0, ms-probe active, and the warning once*; each under *==> /etc/ms/probe.json is valid
+        for 1.0.0-rc.2. The check says:*, and every earlier assertion of both boxes as before.
+      - **Not done:** no mutant of the smoke (one would be another full run of both boxes); what
+        it asserts is `H-27`'s printing, which has its 12. The full package's own upgrade still
+        runs under `MS_SETUP_NO_START`.
 
 - [ ] **H-29 — the x86_64 package has not been installed on Ubuntu** · S · H-14 · Found
       2026-10-04. `H-14` proved the amd64 `.deb` on Debian 12 and Rocky 9 under emulation, and the

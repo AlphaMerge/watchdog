@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Package smoke test (TASKS.md H-05): install the .deb on Debian and the .rpm on Rocky, upgrade
-# each in place, and assert the things an upgrade is supposed to preserve.
+# each in place, and assert the things an upgrade is supposed to preserve. Then the probe host's
+# package, `ms-probe`, upgraded with its configuration check running (`H-28`).
 #
 #     ./scripts/smoke-packages.sh          # both
 #     ./scripts/smoke-packages.sh deb      # one
@@ -79,19 +80,27 @@ if git -C "${repo_root}" rev-parse --verify HEAD >/dev/null 2>&1; then
   }
   read -r build_commit build_dirty _ <<<"${build_state}"
 fi
-if [ -d "${repo_root}/build/ms-${version}" ] && [ "${MS_SMOKE_REBUILD:-0}" != "1" ]; then
-  echo "==> using the staged tree already at build/ms-${version}"
+# **Both trees: the full package's and the probe's** (`H-28`). The probe's package is the one whose
+# upgrade can run with its configuration check and its start on these boxes — see "the probe's
+# package" below.
+if [ -d "${repo_root}/build/ms-${version}" ] && [ -d "${repo_root}/build/ms-probe-${version}" ] \
+  && [ "${MS_SMOKE_REBUILD:-0}" != "1" ]; then
+  echo "==> using the staged trees already at build/ms-${version} and build/ms-probe-${version}"
 else
-  echo "==> building the release tree"
+  echo "==> building the release trees, the full one and the probe's"
   # In the toolchain container unless told otherwise, for the reason `smoke-install.sh` gives: a
   # host npm can be present and wrong, and `command -v npm` cannot tell.
-  if [ "${MS_SMOKE_HOST_NPM:-0}" = "1" ]; then
-    MS_BUILD_COMMIT="${build_commit}" MS_BUILD_DIRTY="${build_dirty}" \
-      "${repo_root}/scripts/package.sh" >/dev/null
-  else
-    "${repo_root}/scripts/dev.sh" \
-      "MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} ./scripts/package.sh" >/dev/null
-  fi
+  for only in '' --probe-only; do
+    if [ "${MS_SMOKE_HOST_NPM:-0}" = "1" ]; then
+      # shellcheck disable=SC2086 # empty, or the one flag
+      MS_BUILD_COMMIT="${build_commit}" MS_BUILD_DIRTY="${build_dirty}" \
+        "${repo_root}/scripts/package.sh" ${only} >/dev/null
+    else
+      "${repo_root}/scripts/dev.sh" \
+        "MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} ./scripts/package.sh ${only}" \
+        >/dev/null
+    fi
+  done
   if [ -n "${build_state}" ] && [ "$(ms_tree_state "${repo_root}" || true)" != "${build_state}" ]; then
     echo "the tree changed while it was being packaged, so the package is not what its stamp" \
       "says; run this again on a tree nobody is editing" >&2
@@ -102,6 +111,7 @@ fi
 one_format() {
   local format="$1" image container pkg install_cmd upgrade_cmd remove_cmd query_cmd
   local unping_cmd requires_cmd ping_pkg_cmd reinstall_cmd
+  local probe_pkg probe_upgrade_cmd probe_remove_cmd probe_query_cmd
   case "${format}" in
     deb)
       image=ms-smoke:bookworm
@@ -109,6 +119,11 @@ one_format() {
       docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/Dockerfile" "${repo_root}/scripts/smoke" >/dev/null
       "${repo_root}/scripts/package-deb.sh" >/dev/null
       pkg="$(ls -t "${repo_root}"/release/ms_*.deb | head -1)"
+      "${repo_root}/scripts/package-deb.sh" --probe-only >/dev/null
+      probe_pkg="$(ls -t "${repo_root}"/release/ms-probe_*.deb | head -1)"
+      probe_upgrade_cmd='dpkg -i /pkg/PKG'
+      probe_remove_cmd='dpkg -P ms-probe'
+      probe_query_cmd='dpkg -s ms-probe'
       # **Through apt, as `installation.md` §2 says to** (`H-31`): the package depends on
       # `iputils-ping`, which `dpkg -i` would refuse to resolve, and the box has had it removed
       # below so that the dependency, not the image, is what brings `ping`.
@@ -127,7 +142,13 @@ one_format() {
       container="$(ms_smoke_name rpm)"
       docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/Dockerfile.rocky" "${repo_root}/scripts/smoke" >/dev/null
       "${repo_root}/scripts/package-rpm.sh" >/dev/null
-      pkg="$(ls -t "${repo_root}"/release/ms-*.rpm | head -1)"
+      # `ms-<digit>`: `ms-*` would be the probe's as well, whichever was built last.
+      pkg="$(ls -t "${repo_root}"/release/ms-[0-9]*.rpm | head -1)"
+      "${repo_root}/scripts/package-rpm.sh" --probe-only >/dev/null
+      probe_pkg="$(ls -t "${repo_root}"/release/ms-probe-[0-9]*.rpm | head -1)"
+      probe_upgrade_cmd='rpm -U --force /pkg/PKG'
+      probe_remove_cmd='rpm -e ms-probe'
+      probe_query_cmd='rpm -q ms-probe'
       # Through dnf, which resolves `Requires: iputils`; the image has no `ping` of its own.
       install_cmd='dnf install -y /pkg/PKG'
       unping_cmd='! rpm -q iputils >/dev/null'
@@ -172,7 +193,8 @@ one_format() {
   # on an arm64 machine, and a test that only ran on x86_64 would be a test that did not run.
   local in="docker exec -e MS_SETUP_NO_START=1 ${container}"
   # **The first install is the operator's, with nothing set** (`H-30`): it used to start the core
-  # onto the example's empty password and leave the package half-configured.
+  # onto the example's empty password and leave the package half-configured. So is everything
+  # done with `ms-probe`, the probe host's package, at the end, whose services need no database.
   local fresh="docker exec ${container}"
   # Wait for systemd rather than sleeping at it.
   for _ in $(seq 1 30); do
@@ -489,6 +511,77 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
     || fail "${remove_cmd} kept the edited file without saying so: $(tr '\n' ' ' <"${remove_log}")"
   echo "    ${remove_cmd}: the edited ${ping_conf} kept, and named"
   rm -f "${remove_log}"
+
+  # --- the probe's package, upgraded with its configuration check running (H-28) -----------
+  #
+  # **Every upgrade above runs under MS_SETUP_NO_START, which skips the configuration check**, and
+  # the check is where an upgrade shows what a passing configuration had to say (`H-27`). The full
+  # package cannot be upgraded here with it running: a start follows the check, the core's
+  # included, and these boxes have no database, by the decision above. The probe's package runs
+  # the same `ms-setup` from the same scriptlets, and a probe starts without a core (it spools),
+  # so its upgrade is one that runs whole, check and start, on both boxes.
+  local probe_name probe_log probe_status probe_state shown
+  probe_name="$(basename "${probe_pkg}")"
+  probe_log="$(mktemp)"
+  echo "==> installing ms-probe, the probe host's package"
+  ${fresh} bash -c "${install_cmd/PKG/${probe_name}}" >"${probe_log}" 2>&1 \
+    || { cat "${probe_log}" >&2; fail "could not install ${probe_name}"; }
+  ${in} bash -c "${probe_query_cmd}" >/dev/null 2>&1 || fail "ms-probe is not registered as installed"
+  # A probe-only installation creates no core.json, so its first install starts the probe.
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  [ "${probe_state}" = active ] || {
+    cat "${probe_log}" >&2
+    fail "ms-probe is ${probe_state} after its package's first install, not active"
+  }
+  echo "    ${probe_name}: installed, and ms-probe started"
+
+  echo "==> upgrading ms-probe with the check running, over a setting it warns of (H-28)"
+  # `flowListener.enabled` on a build with no flow sensor type, which a v1 build is (`B-08`): the
+  # check passes, and says so. Written in place, so the file keeps its owner and its mode.
+  ${in} node -e '
+    const fs = require("node:fs");
+    const file = "/etc/ms/probe.json";
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    config.flowListener = { ...(config.flowListener ?? {}), enabled: true };
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+  '
+  probe_status=0
+  ${fresh} bash -c "${probe_upgrade_cmd/PKG/${probe_name}}" >"${probe_log}" 2>&1 || probe_status=$?
+  # `grep -c` prints 0 and exits 1 on none, which the comparison reads and `set -e` must not.
+  shown="$(grep -c '^    warning: flowListener.enabled' "${probe_log}" || true)"
+  if [ "${probe_status}" -ne 0 ]; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "the upgrade with the check running exited ${probe_status}"
+  elif ! grep -qF -- "==> /etc/ms/probe.json is valid for ${version}. The check says:" "${probe_log}" \
+    || [ "${shown}" != 1 ]; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "the upgrade did not show the passing check's warning once under its heading (${shown})"
+  fi
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  [ "${probe_state}" = active ] || fail "ms-probe is ${probe_state} after the upgrade, not active"
+  if [ "${format}" = deb ]; then
+    # shellcheck disable=SC2016 # dpkg-query's own field syntax, for dpkg-query to expand
+    status="$(${in} dpkg-query -W -f='${db:Status-Abbrev}' ms-probe 2>/dev/null | tr -d ' ' || true)"
+    [ "${status}" = "ii" ] || fail "dpkg says '${status}' for ms-probe after the upgrade, not ii"
+  fi
+  echo "    ${probe_upgrade_cmd/PKG/${probe_name}}: exit 0, ms-probe active, and the warning once:"
+  grep -F -A1 'The check says:' "${probe_log}" | cut -c1-110 | sed 's/^/      /'
+  ${in} node -e '
+    const fs = require("node:fs");
+    const file = "/etc/ms/probe.json";
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    config.flowListener = { ...config.flowListener, enabled: false };
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+  '
+
+  echo "==> removing ms-probe"
+  ${in} bash -c "${probe_remove_cmd}" >"${probe_log}" 2>&1 \
+    || { cat "${probe_log}" >&2; fail "could not remove ms-probe"; }
+  ${in} test ! -e /usr/lib/systemd/system/ms-probe.service || fail "the probe's unit survived its package"
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  [ "${probe_state}" != active ] || fail "ms-probe is still running after its package was removed"
+  echo "    ${probe_remove_cmd}: unit gone, ms-probe ${probe_state}"
+  rm -f "${probe_log}"
 
   docker rm -f "${container}" >/dev/null 2>&1 || true
   box=''
