@@ -7,6 +7,12 @@ import { failureField } from './failure.js';
 import { STARTUP_TIMEOUT_MS, unfit } from './process-runner.js';
 import { RefusalLog } from './refusal-log.js';
 import {
+  RESOLVE_FAULT,
+  type PoolResolver,
+  type ResolveAck,
+  type ResolveReply,
+} from '../resolver/protocol.js';
+import {
   notStarted,
   type CheckPhase,
   type CheckRequest,
@@ -325,6 +331,14 @@ export interface CheckPoolOptions {
    * still says, once per episode, when that setting is more than memory holds.
    */
   enforceMemoryCap?: boolean;
+  /**
+   * The probe's resolver (`P-426`). Given, this pool's workers ask it for every name a check
+   * resolves to check it, over their port, and it answers here. Absent, each worker resolves for
+   * itself, as a fixture pool's does.
+   */
+  resolver?: PoolResolver;
+  /** Whether those lookups ask the resolver rather than its cache: "Check now"'s pool. */
+  freshLookups?: boolean;
   onResult: (result: CheckResult, meta: ResultMeta) => void;
 }
 
@@ -499,6 +513,8 @@ export class CheckPool {
   readonly #startHangLimit: number;
   readonly #sessionReportMs: number;
   readonly #registryModule: string;
+  readonly #resolver: PoolResolver | undefined;
+  readonly #freshLookups: boolean;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
 
   readonly #slots: Slot[] = [];
@@ -628,6 +644,8 @@ export class CheckPool {
     this.#sessionReportMs = Math.max(1, options.sessionReportMs ?? SESSION_REPORT_MS);
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
+    this.#resolver = options.resolver;
+    this.#freshLookups = options.freshLookups ?? false;
     this.#onResult = options.onResult;
     this.#memoryCap = options.memoryCap;
     this.#enforceMemoryCap = options.enforceMemoryCap ?? true;
@@ -1291,11 +1309,51 @@ export class CheckPool {
     job.grace.unref();
   }
 
+  /**
+   * A worker asks the probe's resolver for a name (`P-426`). Answered on the worker's port, and
+   * never to a worker the pool has let go since. **Nothing here throws into the pool**: the
+   * resolver answers its own faults as failed lookups, and this answers one that escapes it.
+   */
+  #onResolve(slot: Slot, request: unknown): void {
+    const post = (reply: ResolveAck | ResolveReply): void => {
+      if (slot.retired || slot.gone) return;
+      slot.worker.postMessage(reply);
+    };
+    const id = (request as { id?: unknown }).id;
+    try {
+      if (this.#resolver === undefined) {
+        throw new Error('this pool was started without the probe’s resolver');
+      }
+      this.#resolver.handle(request, post);
+    } catch (error: unknown) {
+      this.#logger.error(
+        { err: describeError(error), workerId: slot.id },
+        'a worker’s lookup could not be handed to the probe’s resolver',
+      );
+      if (typeof id !== 'number') return;
+      try {
+        post({
+          type: 'resolved',
+          id,
+          ok: false,
+          code: RESOLVE_FAULT,
+          message: `the probe’s resolver failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      } catch {
+        // A worker gone between the check above and the post: its check is the pool's already.
+      }
+    }
+  }
+
   #onWorkerMessage(slot: Slot, message: unknown): void {
     const parsed = message as { type?: string; jobId?: string };
     // A worker the pool has let go: one that said ready just after its start-up bound passed
     // (`P-263`) must not end the streak of failed starts, and is no longer in `#slots` to serve.
     if (slot.retired) return;
+    if (parsed.type === 'resolve') {
+      this.#onResolve(slot, message);
+      return;
+    }
     if (parsed.type === 'ready') {
       slot.ready = true;
       if (this.#startFailures > 0) {
@@ -1657,6 +1715,9 @@ export class CheckPool {
       workerData: {
         registryModule: pathToFileURL(this.#registryModule).href,
         sessionReportMs: this.#sessionReportMs,
+        // Read by the worker's resolver client (`P-426`, `resolve-client.ts`).
+        resolveThroughPool: this.#resolver !== undefined,
+        freshLookups: this.#freshLookups,
       },
       resourceLimits: { maxYoungGenerationSizeMb: WORKER_YOUNG_GENERATION_MB },
     });

@@ -2,7 +2,13 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
 import { targetVerdict } from '@ms/shared';
 import { restrictionOf } from '../credentials/index.js';
-import { nameLookups, type LookupCount } from './lookups.js';
+import {
+  nameLookups,
+  notAnswered,
+  probeFailed,
+  tooManyAddresses,
+  type LookupCount,
+} from './lookups.js';
 
 /**
  * A device named by host name, checked against a credential set's address targets (`A-41c`).
@@ -41,11 +47,25 @@ export interface ResolvedAddress {
   readonly family: number;
 }
 
+/** What a caller tells the resolver about its lookup (`P-426`). */
+export interface ResolveOptions {
+  /**
+   * How long the check will wait for the answer: its `resolveBoundMs`. The probe's resolver stops
+   * holding a waiter past it, and a worker asking it settles its own wait shortly after.
+   */
+  readonly waitMs?: number;
+}
+
 /**
  * Every address a name has for a family: 4, 6, or 0 for both. Rejects when the name does not
- * resolve. The system resolver in production; a test hands in its own.
+ * resolve. On a probe, the probe's resolver (`P-426`); elsewhere the system's; a test hands in its
+ * own.
  */
-export type ResolveHost = (host: string, family: 0 | 4 | 6) => Promise<readonly ResolvedAddress[]>;
+export type ResolveHost = (
+  host: string,
+  family: 0 | 4 | 6,
+  options?: ResolveOptions,
+) => Promise<readonly ResolvedAddress[]>;
 
 /**
  * `getaddrinfo`, the resolver a socket handed the name would have used, so that the hosts file
@@ -128,6 +148,18 @@ export const PIN_REFUSALS = {
     `against the allowed targets of the ${kind} credentials it would use, and they are not ` +
     'sent. The probe’s resolver is not answering; it is scanned again when the name resolves ' +
     'inside them.',
+  resolveNotAnswered: (host: string, kind: string, why: string): string =>
+    `Not scanned: ${host} did not resolve (${why}), so it could not be checked against the ` +
+    `allowed targets of the ${kind} credentials it would use, and they are not sent. The ` +
+    'probe’s resolver is not answering; it is scanned again when the name resolves inside them.',
+  resolvedTooMany: (host: string, kind: string, why: string): string =>
+    `Not scanned: ${why}, so ${host} could not be checked against the allowed targets of the ` +
+    `${kind} credentials it would use, and they are not sent. Giving the device one of its ` +
+    'addresses, or a name with fewer, sends them again.',
+  resolveBusy: (host: string, kind: string, why: string): string =>
+    `Not scanned: ${host} could not be resolved (${why}), so it could not be checked against ` +
+    `the allowed targets of the ${kind} credentials it would use, and they are not sent. It is ` +
+    'scanned again when the name resolves inside them.',
   cancelled: (host: string): string =>
     `Not scanned: the check was cancelled while ${host} was being resolved to check it against ` +
     'the allowed targets of the credentials it would use.',
@@ -241,12 +273,21 @@ export async function pinTarget(
         phase: 'resolve',
         ...(withKind ? { kind: first } : {}),
       });
-    answers = await resolveWithin(resolve(host, family), signal, boundMs, {
+    answers = await resolveWithin(resolve(host, family, { waitMs: boundMs }), signal, boundMs, {
       cancelled: () => refusal(PIN_REFUSALS.cancelled(host), false),
       timedOut: () => refusal(PIN_REFUSALS.resolveTimedOut(host, first, boundMs), true),
     });
   } catch (error: unknown) {
     if (isCredentialsWithheld(error)) throw error;
+    // The resolver did not answer, or the probe failed to ask it (`P-426`): neither says
+    // the name resolves to nothing, which is what the refusal below would claim.
+    const why = error instanceof Error ? error.message : String(error);
+    if (notAnswered(error))
+      refuse(PIN_REFUSALS.resolveNotAnswered(host, first, why), 'resolve', first);
+    if (probeFailed(error)) refuse(PIN_REFUSALS.resolveBusy(host, first, why), 'resolve', first);
+    if (tooManyAddresses(error)) {
+      refuse(PIN_REFUSALS.resolvedTooMany(host, first, why), 'resolve', first);
+    }
     const code = (error as NodeJS.ErrnoException | null)?.code;
     return refuse(
       PIN_REFUSALS.resolvedNothing(
@@ -296,9 +337,10 @@ export async function pinTarget(
  * Shared by the two places that resolve a name in order to check it: `pinTarget` above, and the
  * HTTP transport's target-policy guard (`A-54`). Each says what its own refusal reads as.
  *
- * **And counted here, for Probe Health** (`A-66`): the lookup is in flight until the resolver
- * answers it, whether or not the check still waits, and one the check stops waiting for is given
- * up. `nameLookups` says why the lookup and not the check is what is counted.
+ * **And counted here, for Probe Health** (`A-66`, `P-426`): a lookup made outside the probe's
+ * resolver is in flight until it is answered, whether or not the check still waits, and a check
+ * that stops waiting, or whose lookup ends with the resolver not answering (`notAnswered`), is
+ * given up, once. `nameLookups` says what each number is.
  */
 export function resolveWithin(
   pending: Promise<readonly ResolvedAddress[]>,
@@ -315,28 +357,36 @@ export function resolveWithin(
     return Promise.reject(errors.cancelled());
   }
   return new Promise((resolve, reject) => {
-    const done = (): void => {
+    // Settled once, whichever comes first: a late answer or failure after the check stopped
+    // waiting is the resolver's business, and counting it again would count one check twice.
+    let settled = false;
+    const done = (): boolean => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      if (settled) return false;
+      settled = true;
+      return true;
     };
     const onAbort = (): void => {
-      done();
+      if (!done()) return;
       counted.gaveUp();
       reject(errors.cancelled());
     };
     const timer = setTimeout(() => {
-      done();
+      if (!done()) return;
       counted.gaveUp();
       reject(errors.timedOut());
     }, boundMs);
     signal?.addEventListener('abort', onAbort, { once: true });
     pending.then(
       (answers) => {
-        done();
-        resolve(answers);
+        if (done()) resolve(answers);
       },
       (error: unknown) => {
-        done();
+        if (!done()) return;
+        // The resolver said it did not answer (`P-426`): this check fails for want of an answer
+        // as surely as one that waited out its bound, and sooner.
+        if (notAnswered(error)) counted.gaveUp();
         reject(error instanceof Error ? error : new Error(String(error)));
       },
     );

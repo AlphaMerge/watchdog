@@ -421,17 +421,26 @@ export class ProbeHealthReporter {
 
 /**
  * Every name lookup the probe makes outside its scheduled pool's workers (`A-66`), for
- * `ProbeHealthSources.lookups`: this thread's own, which discovery's identification makes, and
- * the query runner's worker's, which "Check now" makes through the same registry as a scan. Each
- * waits on the one libuv thread pool the scheduled checks' lookups wait on.
+ * `ProbeHealthSources.lookups`: this thread's own, which discovery's identification makes, the
+ * query runner's worker's, which "Check now" makes through the same registry as a scan, and the
+ * probe's resolver's (`P-426`).
+ *
+ * **The resolver's running and queued lookups are in flight**, whoever asked for them: a scan's,
+ * "Check now"'s, discovery's, and the refreshes and retries it runs with nobody waiting. A worker
+ * waiting for one does not count it as well (`countedElsewhere`). Every lookup here runs on the one
+ * libuv thread pool, so this is how many of its lookup lanes the probe has asked for.
  */
-export function lookupsBesideThePool(queries: {
-  lookupCounters(): LookupCounters | undefined;
-}): () => LookupCounters {
+export function lookupsBesideThePool(
+  queries: { lookupCounters(): LookupCounters | undefined },
+  resolver?: { stats(): { readonly running: number; readonly queued: number } },
+): () => LookupCounters {
   return () => {
     const main = nameLookups.stats();
     const queried = queries.lookupCounters();
-    return queried === undefined ? main : sumOf(main, queried);
+    const beside = queried === undefined ? main : sumOf(main, queried);
+    if (resolver === undefined) return beside;
+    const { running, queued } = resolver.stats();
+    return { inFlight: beside.inFlight + running + queued, givenUp: beside.givenUp };
   };
 }
 

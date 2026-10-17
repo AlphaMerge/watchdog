@@ -1,6 +1,7 @@
 import { isIP, type LookupFunction } from 'node:net';
 import { excepts, refuses, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../contract.js';
+import { notAnswered, probeFailed, tooManyAddresses } from './lookups.js';
 import { PhasedError } from './phased-error.js';
 import {
   resolveBoundMs,
@@ -270,7 +271,7 @@ export async function checkedTarget(check: TargetCheck): Promise<CheckedTarget |
   let answers: Awaited<ReturnType<ResolveHost>>;
   try {
     answers = await resolveWithin(
-      (check.resolve ?? systemResolve)(host, family),
+      (check.resolve ?? systemResolve)(host, family, { waitMs: boundMs }),
       check.signal,
       boundMs,
       {
@@ -286,6 +287,31 @@ export async function checkedTarget(check: TargetCheck): Promise<CheckedTarget |
     );
   } catch (error: unknown) {
     if (error instanceof ResolveGivenUp) throw error;
+    // Not an answer about the name (`P-426`): the resolver did not answer it, or the probe failed
+    // to ask (too busy, or its resolver's own fault), in the probe's words. Neither is worded as
+    // a name that does not exist.
+    const why = error instanceof Error ? error.message : String(error);
+    if (notAnswered(error)) {
+      throw new ResolveGivenUp(
+        `the device’s host name did not resolve, ${check.doing} — the probe’s resolver is not ` +
+          `answering (${why})`,
+        resolving,
+      );
+    }
+    if (probeFailed(error)) {
+      throw new ResolveGivenUp(
+        `the device’s host name could not be resolved, ${check.doing} — ${why}`,
+        resolving,
+      );
+    }
+    // An answer, and the opposite of none: the resolver's own words name the count. Ahead of a
+    // transport's own words for a name that did not resolve, which would say the opposite.
+    if (tooManyAddresses(error)) {
+      throw new PhasedError(
+        `the device’s host name could not be used, ${check.doing} — ${why}`,
+        resolving,
+      );
+    }
     throw says(error);
   }
 

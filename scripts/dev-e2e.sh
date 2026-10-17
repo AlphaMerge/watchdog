@@ -19,7 +19,9 @@ trap cleanup EXIT
 node packages/core/dist/src/main.js --config dev/core.json > "${logs}/core-1.log" 2>&1 &
 CORE=$!
 sleep 1
-node packages/probe/dist/src/main.js --config dev/probe.json > "${logs}/probe.log" 2>&1 &
+# The probe's thread pool as the shipped unit and launcher set it (`P-426`).
+UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-16}" \
+  node packages/probe/dist/src/main.js --config dev/probe.json > "${logs}/probe.log" 2>&1 &
 PROBE=$!
 sleep 5
 

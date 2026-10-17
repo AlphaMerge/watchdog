@@ -46,7 +46,11 @@ core=$!
 sleep 3 &
 wait $!
 if alive "${core}"; then
-  node "${build}/packages/probe/dist/src/main.js" --config "${build}/dev/probe.json" &
+  # The probe's thread pool as the shipped unit and launcher set it (`P-426`): at libuv's default 4
+  # its resolver has 3 lanes on 2 of libuv's, and the instance kept to watch landed code would not
+  # behave as a shipped probe does. Not the core's, as in the units.
+  UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-16}" \
+    node "${build}/packages/probe/dist/src/main.js" --config "${build}/dev/probe.json" &
   probe=$!
 fi
 

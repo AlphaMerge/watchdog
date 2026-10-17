@@ -42,6 +42,13 @@ import { BUILD, VERSION } from './version.js';
 import { dispatchTables } from './catalogue.js';
 import { buildFindings, carriesFlow } from './config-problems.js';
 import { rootScripts } from './root-scripts.js';
+import {
+  lookupLanes,
+  NameResolver,
+  RESOLVER_LANES,
+  resolverLanes,
+  threadpoolSize,
+} from './resolver/name-resolver.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -217,6 +224,36 @@ async function main(): Promise<void> {
     );
   }
 
+  // The probe's one resolver (`P-426`): every name a check resolves to check it, from a scan, from
+  // "Check now" and from discovery's identification, asked here, kept 30 s, and run on a bounded
+  // share of libuv's lookup lanes. `UV_THREADPOOL_SIZE` is the launcher's and the unit's to set:
+  // libuv reads it once, before this line could change it.
+  const threads = threadpoolSize(process.env['UV_THREADPOOL_SIZE']);
+  const libuvLanes = lookupLanes(threads);
+  const resolver = new NameResolver({ logger, lanes: resolverLanes(libuvLanes) });
+  resolver.start();
+  lifecycle.onShutdown({
+    name: 'name-resolver',
+    timeoutMs: 1_000,
+    run: () => {
+      resolver.stop();
+      return Promise.resolve();
+    },
+  });
+  const lanesSaid = {
+    uvThreadpoolSize: threads,
+    lookupLanes: libuvLanes,
+    resolverLanes: resolverLanes(libuvLanes),
+  };
+  if (libuvLanes < RESOLVER_LANES + 2) {
+    logger.warn(
+      lanesSaid,
+      'UV_THREADPOOL_SIZE leaves the probe’s resolver fewer lookup lanes than it is built for: set it to 16, as bin/ms-probe and ms-probe.service do',
+    );
+  } else {
+    logger.info(lanesSaid, 'name lookups');
+  }
+
   const pool = new CheckPool({
     logger,
     size: config.probe.workerPoolSize,
@@ -229,6 +266,7 @@ async function main(): Promise<void> {
     // than memory holds.
     memoryCap: new MemoryCap(),
     enforceMemoryCap: config.probe.workerPoolSize <= 0,
+    resolver,
     onResult: spoolResult,
   });
   await pool.start();
@@ -474,6 +512,8 @@ async function main(): Promise<void> {
   const queries = new QueryRunner({
     logger,
     abortGraceMs: config.probe.checkAbortGraceMs,
+    // Asked fresh: "Check now" is how an operator sees a DNS fix take (`P-426`).
+    resolver,
     isolation: { types: isolated, runner: isolation },
     answer: (message) => {
       coreClient.sendQueryResult(message);
@@ -515,7 +555,8 @@ async function main(): Promise<void> {
   // lower concurrency, and the two resume independently.
   const identifications = new IdentifyRunner({
     logger,
-    sources: LIVE_SOURCES,
+    // A target given as a name is resolved by the probe's resolver, as a scan's is (`P-426`).
+    sources: { ...LIVE_SOURCES, resolve: resolver.resolveHost },
     queueDepth: () => pool.stats().queued,
     onProgress: (runId, cursor, found) => {
       coreClient.sendSweep({ type: 'identify-progress', runId, cursor, found });
@@ -545,10 +586,10 @@ async function main(): Promise<void> {
     // nobody, while a probe saturated by shell-outs looked healthy.
     children: () => processRunner.stats(),
     checkFlow: () => checkFlow.stats(),
-    // The name lookups beside the workers' the pool sums (`A-66`): this thread's, where
-    // discovery's identification resolves a named host, and the query runner's, where "Check
-    // now" does. All of them on the same libuv thread pool.
-    lookups: lookupsBesideThePool(queries),
+    // The name lookups beside the workers' the pool sums (`A-66`): this thread's, the query
+    // runner's, and the probe's resolver's running and queued (`P-426`), which every worker's
+    // lookup is. All of them on the same libuv thread pool.
+    lookups: lookupsBesideThePool(queries, resolver),
     // Only when this probe runs that listener. What the channels are for is `rejected`: a device
     // sending the wrong community has every message dropped before the ring, so the sensor reads
     // a quiet network rather than a receiver turning everything away (`P-64`).

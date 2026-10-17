@@ -1,12 +1,19 @@
 import { strict as assert } from 'node:assert';
-import { lookup } from 'node:dns/promises';
 import { stat } from 'node:fs/promises';
 import { availableParallelism, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { BroadcastChannel } from 'node:worker_threads';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
-import { ProbeHealthReporter } from '../../src/health/report.js';
+import { systemResolve, type ResolvedAddress } from '@ms/sensors';
+import { lookupsBesideThePool, ProbeHealthReporter } from '../../src/health/report.js';
+import {
+  ANSWER_MS,
+  lookupLanes,
+  NameResolver,
+  resolverLanes,
+  STALE_MS,
+  type Family,
+} from '../../src/resolver/name-resolver.js';
 import { CheckPool, defaultPoolSize } from '../../src/runner/pool.js';
 import { TimingWheel } from '../../src/scheduler/wheel.js';
 import {
@@ -14,70 +21,69 @@ import {
   V1_TARGET_INTERVAL_SECONDS,
   V1_TARGET_SENSORS,
 } from '../../src/measured.js';
-import {
-  LOOKUP_LANES_CHANNEL,
-  type LaneReply,
-  type LaneRequest,
-} from '../support/lookup-registry.js';
 import { pollWithin } from '../support/within.js';
 
 /**
- * What one lookup a scan costs (`A-66`).
+ * What a name lookup a scan costs once the probe's resolver keeps answers (`A-66`, `P-426`).
  *
- * **`A-57` made SNMP by name one `getaddrinfo` a scan in the probe**, where the socket had made one
- * a datagram, and the same lookup is what every transport that connects by name waits in. It is
- * bounded for the check (`resolveBoundMs`: half SNMP's five seconds) and cannot be cancelled for
- * the resolver: a check that gives up leaves its lookup on libuv's thread pool, which every check
- * worker and the probe's main thread share. This measures the 5,000-sensor class with every device
- * addressed by name: what the checks cost, what the thread pool does, and what Probe Health's two
- * new numbers read, with a resolver that answers and with ones that do not.
+ * **`A-57` made SNMP by name one `getaddrinfo` a scan in the probe**, and `A-66` measured what that
+ * cost at the 5,000-sensor class: a resolver answering in 100 ms, or one zone in ten not
+ * answering, held libuv's lookup lanes and took the probe down
+ * (`docs/findings/2026-10-17-name-lookups-a-scan.md`). `P-426` put every such lookup through one
+ * resolver in the probe's main thread, which keeps answers 30 s, serves an expired one for at most
+ * 5 minutes past its expiry while the resolver does not answer, holds a name it does not answer,
+ * and runs at most 6 lookups at once of libuv's 8. This measures the same load through it.
  *
  * **The check is the shipped resolution and nothing else** (`support/lookup-registry.ts`): a real
- * wheel, a real pool of worker threads at its shipped ceiling and queue, a real catalogue handing
- * each check its resolver and the probe's target policy, and `checkedTarget` called with SNMP's
- * family and timeout, so the lookup is bounded and counted where every transport's is. Then it
- * waits `MODEL_CHECK_MS` for an answer it does not ask for, as `P-15`'s model check does.
+ * wheel, a real pool of worker threads at its shipped ceiling and queue, each worker asking the
+ * real `NameResolver` in this thread over its port, a real catalogue handing each check that
+ * resolver and the probe's target policy, and `checkedTarget` called with SNMP's family and
+ * timeout. Then it waits `MODEL_CHECK_MS` for an answer it does not ask for, as `P-15`'s model
+ * check does.
  *
- * **The arms**, each on its own pool:
+ * **The arms**, each on its own pool and its own resolver, so each starts with nothing kept:
  *
- * | Arm | Devices | Resolved by |
- * | --- | --- | --- |
- * | addresses | 192.0.2.x | nothing: the baseline, `P-15`'s load with the guard in front |
- * | system resolver | `sys-*` | `getaddrinfo` for `localhost` in the worker: real, from the hosts file |
- * | lanes, answering | `lane-ok-*` | the same `getaddrinfo`, inside the lanes below |
- * | lanes, slow | `lane-slow-*` | `MS_DNS_SLOW_MS` a lookup inside the bound, in the lanes |
- * | lanes, not answering | `lane-hung-*` | `MS_DNS_HANG_MS` a lookup past the bound, then `EAI_AGAIN` |
- * | lanes, one zone in ten not answering | both | a tenth of the devices hang, the rest answer |
+ * | Arm | Devices | `getaddrinfo` | Asserted |
+ * | --- | --- | --- | --- |
+ * | `addresses` | 192.0.2.x | none: the baseline | nothing in flight |
+ * | `system` | `sys-*` | real, for `localhost`, from the hosts file | nothing given up or refused |
+ * | `slow` | `lane-slow-*` | `MS_DNS_SLOW_MS` a lookup, in the lanes, cold | nothing given up or refused |
+ * | `warmzone` | `lane-warm-*` | answering for a scan interval, then one zone in ten silent | the answering zone never given up, nothing refused; past the grace, every answering name refreshed within it, and the silent zone failing at once |
+ * | `hung` | `lane-hung-*` | every name silent, cold: `MS_DNS_HANG_MS` then `EAI_AGAIN` | nothing refused, and jitter as the `addresses` arm's |
+ * | `zone` | both | one zone in ten silent, cold | read only: how long the answering zone takes to be kept |
+ *
+ * **A zone is a domain**: device `n` is `lane-<kind>-n.zone-b.test` in the zone that goes silent
+ * and `….zone-a.test` in the others, as a DNS zone's names are, since the resolver gives a lane to
+ * a domain answering before one with names failing (`P-426`'s review).
  *
  * **The lanes are a model, and why.** A resolver that is slow or silent on demand needs one this
  * test controls, and `getaddrinfo` asks the one in `/etc/resolv.conf`. So the slow and silent
- * resolvers are the test's, and every worker's lookups are sent to this thread, where they are
- * answered `MS_DNS_LANES` at a time, first come first served. That is how libuv runs them:
- * `getaddrinfo` is submitted as slow I/O, and libuv lets slow I/O hold at most half its threads,
- * `(UV_THREADPOOL_SIZE + 1) / 2`, two of the default four, so the rest stay free for the file
- * system and crypto and every lookup in the process queues behind the two running. The lanes
- * default to that. They do not hold libuv's threads themselves, so the thread-pool probe below
- * reads the file system's share as unharmed in the lane arms whatever the lanes do; with real
- * lookups it reads what the system-resolver arm reads. The `lanes, answering` arm is the model's
- * control: real `getaddrinfo`, through the lanes.
+ * resolvers are the test's: the `NameResolver`'s `getaddrinfo` is a model that serves
+ * `MS_DNS_LANES` lookups at a time, first come first served, as libuv serves slow I/O on half its
+ * threads. They default to 8, `UV_THREADPOOL_SIZE` 16, which `bin/ms-probe` and the unit set; the
+ * resolver takes 6 of them. The model holds no libuv thread, so the thread-pool probe reads the
+ * file system's share as unharmed in the lane arms whatever the lanes do; the `system` arm is the
+ * real `getaddrinfo` on the real pool.
  *
- * **What is printed per arm**: checks dispatched and their results (answered, failed because the
- * lookup was given up, failed otherwise), refused and deferred; dispatch jitter (due to started,
- * `P-15`'s number); check run time; Probe Health's `lookupsInFlight` (highest and last) and
- * `lookupsGivenUp`, read through the real `ProbeHealthReporter`; the lanes' deepest queue, what
- * is still queued once the pool has drained, the p95 wait (of the lookups served and of those
- * still queued, so far) and how busy they were (a lookup still held counted so far, from the
- * wheel's start); a thread-pool probe, an `fs.stat` every 100 ms from the wheel's start, p95 and
- * worst; and how long the pool took to drain once the wheel stopped. The zone arm also says how
- * the answering zone fared.
+ * **What is printed per arm**: checks dispatched and their results (answered, failed for want of
+ * an answer, failed otherwise), refused and deferred; dispatch jitter (`P-15`'s number); check run
+ * time; Probe Health's `lookupsInFlight` (highest and last) and `lookupsGivenUp`, through the real
+ * reporter wired as the probe wires it; the `getaddrinfo` calls the resolver made and the names it
+ * keeps; the lanes' deepest queue, p95 wait and how busy they were; a thread-pool probe, an
+ * `fs.stat` every 100 ms; and how long the pool took to drain once the wheel stopped. The zone
+ * arms say how each zone fared; the warm one how long an answering name went between answers, the
+ * cold one how long the answering names took to be kept.
  *
- * **Asserted**, beside each arm having run: `lookupsGivenUp` is exactly the checks that failed at
- * the lookup's bound, so the Probe Health number is the one the checks say, and no lookup is
- * given up, and nothing refused, where every name answers from the hosts file.
+ * **Asserted for every arm**: `lookupsGivenUp` is exactly the checks that failed for want of an
+ * answer, so the Probe Health number is the one the checks say.
  *
  * Environment: `MS_DNS_SENSORS` (5,000), `MS_DNS_MINUTES` per arm (1), `MS_DNS_SLOW_MS` (100),
- * `MS_DNS_HANG_MS` (30,000), `MS_DNS_LANES` (from `UV_THREADPOOL_SIZE`, 4 unless set),
- * `MS_DNS_POOL` (the shipped ceiling), `MS_DNS_ARMS` (a comma list of arm names, all unless set).
+ * `MS_DNS_HANG_MS` (30,000), `MS_DNS_LANES` (8), `MS_DNS_POOL` (the shipped ceiling),
+ * `MS_DNS_WARM_MINUTES` (the `warmzone` arm's time after its zone goes silent, `MS_DNS_MINUTES`
+ * unless set: 7 reaches past the 5-minute grace, and only then are the answering zone's refreshes
+ * within it and the silent zone's failing asserted), `MS_DNS_COLD_MINUTES` (the `zone` arm's time,
+ * `MS_DNS_MINUTES` unless set: long enough for every answering name to be kept, or the row says
+ * how many were not), `MS_DNS_ARMS` (a comma list of arm names, all unless set).
  */
 
 const silent = pino({ level: 'silent' });
@@ -85,10 +91,12 @@ const REGISTRY = fileURLToPath(new URL('../support/lookup-registry.js', import.m
 
 const SENSORS = Number(process.env['MS_DNS_SENSORS'] ?? String(V1_TARGET_SENSORS));
 const MINUTES = Number(process.env['MS_DNS_MINUTES'] ?? '1');
+const WARM_MINUTES = Number(process.env['MS_DNS_WARM_MINUTES'] ?? String(MINUTES));
+const COLD_MINUTES = Number(process.env['MS_DNS_COLD_MINUTES'] ?? String(MINUTES));
 const SLOW_MS = Number(process.env['MS_DNS_SLOW_MS'] ?? '100');
 const HANG_MS = Number(process.env['MS_DNS_HANG_MS'] ?? '30000');
-const THREADPOOL = Number(process.env['UV_THREADPOOL_SIZE'] ?? '4');
-const LANES = Number(process.env['MS_DNS_LANES'] ?? String(Math.floor((THREADPOOL + 1) / 2)));
+const LANES = Number(process.env['MS_DNS_LANES'] ?? String(lookupLanes(16)));
+const RESOLVER_LANES = resolverLanes(LANES);
 const POOL_SIZE = Number(process.env['MS_DNS_POOL'] ?? String(defaultPoolSize()));
 const ARMS = (process.env['MS_DNS_ARMS'] ?? '')
   .split(',')
@@ -105,6 +113,13 @@ const SCAN_TIMEOUT_MS = 30_000;
 const QUEUE_MAX = 1_000;
 /** How long a pool may take to work off what the wheel left it, before the arm fails. */
 const DRAIN_BOUND_MS = 180_000;
+/** Checks that failed for want of an answer: at the lookup's bound, or told so by the resolver. */
+const GIVEN_UP = /the probe’s resolver is not answering/u;
+/**
+ * A silent name's check, once nothing is kept for it, fails at once: well inside the bound. The
+ * one that starts a hold's retry on a free lane waits for it, up to its bound.
+ */
+const AT_ONCE_MS = 1_500;
 
 function percentile(sorted: readonly number[], fraction: number): number {
   if (sorted.length === 0) return 0;
@@ -123,44 +138,62 @@ interface LaneStats {
 }
 
 /**
- * Every worker's lookups, answered from this thread `lanes` at a time, oldest first: libuv's
- * slow-I/O share of its thread pool, as the file's comment says. A `lane-<kind>-*` name says
- * how its resolver behaves.
+ * The resolver's `getaddrinfo`, served `lanes` at a time, oldest first: libuv's slow-I/O share of
+ * its thread pool, as the file's comment says. A `lane-<kind>-*` name says how its resolver
+ * behaves; a `lane-warm-*` name answers until `silence` is called for its zone.
  */
 class LookupLanes {
   readonly #lanes: number;
-  readonly #requests = new BroadcastChannel(LOOKUP_LANES_CHANNEL);
-  readonly #replies = new Map<number, BroadcastChannel>();
-  readonly #queue: { readonly request: LaneRequest; readonly at: number }[] = [];
+  readonly #queue: {
+    readonly host: string;
+    readonly at: number;
+    readonly settle: (reply: { addresses: readonly ResolvedAddress[] } | { code: string }) => void;
+  }[] = [];
   readonly #timers = new Set<NodeJS.Timeout>();
   /** How long each served lookup waited for a lane. Those still queued are added in `stats`. */
   readonly #waits: number[] = [];
-  /**
-   * When each lookup a lane holds now began: a lane is busy from then, not only once its lookup
-   * has been answered, or the lanes read idle exactly while lookups that never end hold them.
-   */
   readonly #serving = new Set<{ readonly startedAt: number }>();
-  /** What `busy` divides by starts here: `start`, or the first lookup asked if that is sooner. */
+  /** When each name was answered, from `start`, for the zone arms. */
+  readonly answeredAt = new Map<string, number[]>();
   #startedAt: number | undefined;
   #deepest = 0;
   #busyMs = 0;
   #stopped = false;
+  #silent: ((host: string) => boolean) | undefined;
 
   constructor(lanes: number) {
     this.#lanes = Math.max(1, lanes);
-    this.#requests.onmessage = (event: unknown) => {
-      const at = performance.now();
-      this.#startedAt ??= at;
-      this.#queue.push({ request: (event as { data: LaneRequest }).data, at });
-      this.#deepest = Math.max(this.#deepest, this.#queue.length);
-      this.#pump();
-    };
   }
 
-  /** Starts the clock `busy` is a share of: just before the wheel starts ticking. */
   start(): void {
     this.#startedAt ??= performance.now();
   }
+
+  /** From now, the `lane-warm-*` names this says are silent never answer. */
+  silence(silentName: (host: string) => boolean): void {
+    this.#silent = silentName;
+  }
+
+  readonly lookup = (host: string, _family: Family): Promise<readonly ResolvedAddress[]> =>
+    new Promise((resolve, reject) => {
+      const at = performance.now();
+      this.#startedAt ??= at;
+      this.#queue.push({
+        host,
+        at,
+        settle: (reply) => {
+          if ('addresses' in reply) {
+            resolve(reply.addresses);
+          } else {
+            reject(
+              Object.assign(new Error(`getaddrinfo ${reply.code} ${host}`), { code: reply.code }),
+            );
+          }
+        },
+      });
+      this.#deepest = Math.max(this.#deepest, this.#queue.length);
+      this.#pump();
+    });
 
   #pump(): void {
     while (!this.#stopped && this.#serving.size < this.#lanes) {
@@ -169,33 +202,30 @@ class LookupLanes {
       const serving = { startedAt: performance.now() };
       this.#serving.add(serving);
       this.#waits.push(serving.startedAt - next.at);
-      void this.#serve(next.request)
-        .then(
-          (answer) => answer,
-          (error: unknown): LaneReply => ({
-            code: (error as NodeJS.ErrnoException | null)?.code ?? 'EAI_FAIL',
-          }),
-        )
-        .then((answer) => {
-          this.#serving.delete(serving);
-          this.#busyMs += performance.now() - serving.startedAt;
-          if (this.#stopped) return;
-          this.#reply(next.request, answer);
-          this.#pump();
-        });
+      void this.#serve(next.host).then((reply) => {
+        this.#serving.delete(serving);
+        this.#busyMs += performance.now() - serving.startedAt;
+        if (this.#stopped) return;
+        if ('addresses' in reply) {
+          const times = this.answeredAt.get(next.host) ?? [];
+          times.push(performance.now() - (this.#startedAt ?? 0));
+          this.answeredAt.set(next.host, times);
+        }
+        next.settle(reply);
+        this.#pump();
+      });
     }
   }
 
-  async #serve(request: LaneRequest): Promise<LaneReply> {
-    const kind = /^lane-(ok|slow|hung)-/.exec(request.host)?.[1];
-    if (kind === 'ok') {
-      const answers = await lookup('localhost', { all: true, family: request.family });
-      return { addresses: answers.map(({ address, family }) => ({ address, family })) };
-    }
+  async #serve(
+    host: string,
+  ): Promise<{ addresses: readonly ResolvedAddress[] } | { code: string }> {
+    const kind = /^lane-(ok|slow|hung|warm)-/u.exec(host)?.[1];
+    const answer = { addresses: [{ address: '127.0.0.1', family: 4 }] };
+    if (kind === 'ok') return answer;
+    if (kind === 'warm' && this.#silent?.(host) !== true) return answer;
     await this.#sleep(kind === 'slow' ? SLOW_MS : HANG_MS);
-    return kind === 'slow'
-      ? { addresses: [{ address: '127.0.0.1', family: 4 }] }
-      : { code: 'EAI_AGAIN' };
+    return kind === 'slow' ? answer : { code: 'EAI_AGAIN' };
   }
 
   #sleep(ms: number): Promise<void> {
@@ -208,19 +238,6 @@ class LookupLanes {
     });
   }
 
-  #reply(request: LaneRequest, answer: LaneReply): void {
-    let channel = this.#replies.get(request.thread);
-    if (channel === undefined) {
-      channel = new BroadcastChannel(`${LOOKUP_LANES_CHANNEL}:${String(request.thread)}`);
-      this.#replies.set(request.thread, channel);
-    }
-    channel.postMessage({ id: request.id, ...answer });
-  }
-
-  /**
-   * As of now: a lookup still being served counts the time it has held its lane so far, and one
-   * still queued the time it has waited so far, so a saturated arm reads saturated.
-   */
   stats(): LaneStats {
     const now = performance.now();
     let busyMs = this.#busyMs;
@@ -235,14 +252,11 @@ class LookupLanes {
     };
   }
 
-  /** What is still waiting is never answered: the pool's workers are gone by now. */
+  /** What is still waiting is never answered: the arm's resolver is discarded with it. */
   stop(): void {
     this.#stopped = true;
     for (const timer of this.#timers) clearTimeout(timer);
     this.#timers.clear();
-    this.#requests.close();
-    for (const channel of this.#replies.values()) channel.close();
-    this.#replies.clear();
   }
 }
 
@@ -269,14 +283,20 @@ function threadPoolProbe(): { stop: () => Promise<{ p95: number; max: number }> 
   };
 }
 
-type Kind = 'address' | 'system' | 'ok' | 'slow' | 'hung';
+type Kind = 'address' | 'system' | 'ok' | 'slow' | 'hung' | 'warm';
 
 interface Arm {
   readonly name: string;
   readonly label: string;
   /** What each device is, by its index. */
   readonly kind: (device: number) => Kind;
+  /** The devices whose resolver stops answering, in a zone arm. */
+  readonly silentZone?: (device: number) => boolean;
+  /** Answering for a scan interval first, then the silent zone silent. */
+  readonly warmFirst?: boolean;
 }
+
+const oneInTen = (device: number): boolean => device % 10 === 0;
 
 const host = (device: number, kind: Kind): string => {
   switch (kind) {
@@ -285,20 +305,30 @@ const host = (device: number, kind: Kind): string => {
     case 'system':
       return `sys-${String(device)}.test`;
     default:
-      return `lane-${kind}-${String(device)}.test`;
+      return `lane-${kind}-${String(device)}.zone-${oneInTen(device) ? 'b' : 'a'}.test`;
   }
 };
+
+/** The device a `lane-*` name is. */
+const deviceNamed = (name: string): number => Number(/^lane-\w+-(\d+)\./u.exec(name)?.[1] ?? '-1');
 
 const ALL_ARMS: readonly Arm[] = [
   { name: 'addresses', label: 'addresses', kind: () => 'address' },
   { name: 'system', label: 'system resolver', kind: () => 'system' },
-  { name: 'lanes', label: 'lanes, answering', kind: () => 'ok' },
-  { name: 'slow', label: `lanes, ${String(SLOW_MS)} ms a lookup`, kind: () => 'slow' },
-  { name: 'hung', label: 'lanes, not answering', kind: () => 'hung' },
+  { name: 'slow', label: `${String(SLOW_MS)} ms a lookup, cold`, kind: () => 'slow' },
+  {
+    name: 'warmzone',
+    label: 'one zone in ten silent after a scan interval answering',
+    kind: () => 'warm',
+    silentZone: oneInTen,
+    warmFirst: true,
+  },
+  { name: 'hung', label: 'every name silent, cold', kind: () => 'hung' },
   {
     name: 'zone',
-    label: 'lanes, one zone in ten silent',
-    kind: (device) => (device % 10 === 0 ? 'hung' : 'ok'),
+    label: 'one zone in ten silent, cold',
+    kind: (device) => (oneInTen(device) ? 'hung' : 'ok'),
+    silentZone: oneInTen,
   },
 ];
 
@@ -307,16 +337,24 @@ interface Tally {
   answered: number;
   givenUp: number;
   other: number;
+  /** How long each failure took, check run time. */
+  failedMs: number[];
 }
 
-const tally = (): Tally => ({ results: 0, answered: 0, givenUp: 0, other: 0 });
+const tally = (): Tally => ({ results: 0, answered: 0, givenUp: 0, other: 0, failedMs: [] });
 
 interface Run {
+  readonly name: string;
   readonly label: string;
   readonly dispatched: number;
   readonly all: Tally;
-  /** The devices whose resolver answers, in an arm where some do not. */
+  /** The answering zone, in a zone arm. */
   readonly answering: Tally | undefined;
+  /** The silent zone, before and after its kept answers could last no longer, in a zone arm. */
+  readonly silentBefore: Tally | undefined;
+  readonly silentAfter: Tally | undefined;
+  /** Whether the arm ran past the silent zone's grace. */
+  readonly pastGrace: boolean;
   readonly refused: number;
   readonly deferred: number;
   readonly timedOut: number;
@@ -325,25 +363,63 @@ interface Run {
   readonly inFlightMax: number;
   readonly inFlightLast: number;
   readonly givenUp: number;
+  readonly asked: number;
+  readonly kept: number;
   readonly lanes: LaneStats;
+  /**
+   * The longest an answering name went between answers once its zone's neighbour went silent,
+   * from its last answer before then, to the end of the arm for its last.
+   */
+  readonly longestGapMs: number | undefined;
+  /** When the answering names were first kept, cold: p50, p95, last, and how many never were. */
+  readonly cached: { p50: number; p95: number; max: number; never: number; of: number } | undefined;
   readonly threadPool: { p95: number; max: number };
   readonly drainMs: number;
 }
 
-const GIVEN_UP = /did not resolve within \d+ ms/;
-
 async function soak(arm: Arm): Promise<Run> {
   const devices = Math.ceil(SENSORS / SENSORS_PER_DEVICE);
-  const kindOf = (sensorId: number): Kind =>
-    arm.kind(Math.floor((sensorId - 1) / SENSORS_PER_DEVICE) % devices);
-  const mixed = new Set(Array.from({ length: devices }, (_, device) => arm.kind(device))).size > 1;
+  const deviceOf = (sensorId: number): number =>
+    Math.floor((sensorId - 1) / SENSORS_PER_DEVICE) % devices;
+  const kindOf = (sensorId: number): Kind => arm.kind(deviceOf(sensorId));
+  const inSilentZone = (sensorId: number): boolean => arm.silentZone?.(deviceOf(sensorId)) === true;
 
   const all = tally();
   const answering = tally();
+  const silentBefore = tally();
+  const silentAfter = tally();
   const jitter: number[] = [];
   const run: number[] = [];
   const lateBySensor = new Map<number, number>();
   const lanes = new LookupLanes(LANES);
+  // Every `getaddrinfo` the resolver makes, whichever it is: the model's, or the system's.
+  let asked = 0;
+  const resolver = new NameResolver({
+    logger: silent,
+    lanes: RESOLVER_LANES,
+    lookup: (name, family) => {
+      asked += 1;
+      return arm.name === 'system'
+        ? systemResolve('localhost', family)
+        : lanes.lookup(name, family);
+    },
+    watch: { files: [], everyMs: 60_000 },
+  });
+  /** When the silent zone went silent, and when nothing kept for it can be served any more. */
+  let silencedAt: number | undefined;
+  const graceOver = (): boolean =>
+    silencedAt !== undefined && performance.now() >= silencedAt + ANSWER_MS + STALE_MS;
+
+  const count = (into: Tally, outcome: string, message: string, durationMs: number): void => {
+    into.results += 1;
+    if (outcome === 'ok') {
+      into.answered += 1;
+      return;
+    }
+    into.failedMs.push(durationMs);
+    if (GIVEN_UP.test(message)) into.givenUp += 1;
+    else into.other += 1;
+  };
 
   const pool = new CheckPool({
     logger: silent,
@@ -351,15 +427,21 @@ async function soak(arm: Arm): Promise<Run> {
     minSize: POOL_SIZE,
     queueMaxLength: QUEUE_MAX,
     registryModule: REGISTRY,
+    resolver,
     onResult: (result, meta) => {
-      const count = (into: Tally): void => {
-        into.results += 1;
-        if (result.outcome === 'ok') into.answered += 1;
-        else if (GIVEN_UP.test(result.message)) into.givenUp += 1;
-        else into.other += 1;
-      };
-      count(all);
-      if (mixed && kindOf(result.sensorId) !== 'hung') count(answering);
+      count(all, result.outcome, result.message, result.durationMs);
+      if (arm.silentZone !== undefined) {
+        if (!inSilentZone(result.sensorId)) {
+          count(answering, result.outcome, result.message, result.durationMs);
+        } else if (silencedAt !== undefined) {
+          count(
+            graceOver() ? silentAfter : silentBefore,
+            result.outcome,
+            result.message,
+            result.durationMs,
+          );
+        }
+      }
       run.push(result.durationMs);
       const wheelMs = lateBySensor.get(result.sensorId);
       if (wheelMs === undefined) return;
@@ -378,6 +460,8 @@ async function soak(arm: Arm): Promise<Run> {
   let wheelStats: ReturnType<TimingWheel['stats']>;
   let threadPool: { p95: number; max: number };
   let laneStats: LaneStats;
+  let wheelStartedAt = 0;
+  let stoppedAt = 0;
   try {
     await pool.start();
     // **Made once the workers have loaded**, because the wheel takes its epoch when it is made:
@@ -389,12 +473,11 @@ async function soak(arm: Arm): Promise<Run> {
         const idealNs = epochNs + BigInt(tick) * 1_000_000_000n;
         const wheelMs = Number(process.hrtime.bigint() - idealNs) / 1e6;
         for (const sensorId of due) {
-          const device = Math.floor((sensorId - 1) / SENSORS_PER_DEVICE) % devices;
           if (
             pool.submit({
               sensorId,
               sensorType: 'test.named',
-              target: { host: host(device, kindOf(sensorId)), ipVersion: 'auto' },
+              target: { host: host(deviceOf(sensorId), kindOf(sensorId)), ipVersion: 'auto' },
               params: { timeoutMs: SNMP_TIMEOUT_MS, delayMs: MODEL_CHECK_MS },
               timeoutMs: SCAN_TIMEOUT_MS,
             }) === 'accepted'
@@ -409,10 +492,12 @@ async function soak(arm: Arm): Promise<Run> {
       ticking.add({ id, intervalSeconds: INTERVAL_SECONDS });
     }
 
-    // Probe Health's own reporter over the real pool, so the numbers are the ones it would send.
+    // Probe Health's own reporter, wired as the probe wires it: the pool's workers' lookups, and
+    // beside them the resolver's running and queued.
     const health = new ProbeHealthReporter({
       scheduler: () => ticking.stats(),
       pool: () => pool.stats(),
+      lookups: lookupsBesideThePool({ lookupCounters: () => undefined }, resolver),
       memory: {
         machine: { lowest: () => null, takeLow: () => null },
         limit: { lowest: () => null, takeLow: () => null },
@@ -425,13 +510,25 @@ async function soak(arm: Arm): Promise<Run> {
     }, 1_000);
 
     // **Started with the wheel, after the workers have loaded**: the file system's share read
-    // while 64 workers import their registries is their start-up, not the lookups'. The lanes'
-    // clock starts here for the same reason.
+    // while 64 workers import their registries is their start-up, not the lookups'.
     probe = threadPoolProbe();
     lanes.start();
+    wheelStartedAt = performance.now();
     ticking.start();
-    await new Promise((resolve) => setTimeout(resolve, MINUTES * 60_000));
+    if (arm.warmFirst === true) {
+      // A scan interval answering, so that every name is kept; then the zone goes silent.
+      await new Promise((resolve) => setTimeout(resolve, INTERVAL_SECONDS * 1_000));
+      const zone = arm.silentZone ?? (() => false);
+      lanes.silence((name) => zone(deviceNamed(name)));
+      silencedAt = performance.now();
+      await new Promise((resolve) => setTimeout(resolve, WARM_MINUTES * 60_000));
+    } else {
+      if (arm.silentZone !== undefined) silencedAt = wheelStartedAt;
+      const minutes = arm.silentZone === undefined ? MINUTES : COLD_MINUTES;
+      await new Promise((resolve) => setTimeout(resolve, minutes * 60_000));
+    }
     ticking.stop();
+    stoppedAt = performance.now();
 
     // Whatever the wheel left the pool is worked off, so that every check's result, and the
     // counters each carried, are in before the numbers are read.
@@ -452,18 +549,58 @@ async function soak(arm: Arm): Promise<Run> {
     // Also when the drain failed, or the file's process would be held by the pool and the lanes.
     wheel?.stop();
     clearInterval(sampler);
-    // Never started if the pool did not: the arm is failing, and these are not read.
     threadPool = probe === undefined ? { p95: Number.NaN, max: Number.NaN } : await probe.stop();
     await pool.stop();
     lanes.stop();
   }
 
+  // The answering names, by how they were answered.
+  const answeringNames = Array.from({ length: devices }, (_, device) => device)
+    .filter((device) => arm.silentZone !== undefined && !arm.silentZone(device))
+    .map((device) => host(device, arm.kind(device)));
+  let longestGapMs: number | undefined;
+  let cached: Run['cached'];
+  if (arm.silentZone !== undefined && arm.warmFirst === true && silencedAt !== undefined) {
+    // How long each answering name went without a fresh answer once the zone went silent: from
+    // its last answer before then, which is where its kept answer's grace runs from (`P-426`'s
+    // review: from the silencing, it read up to an answer's lifetime short), and to the arm's end
+    // after its last, so that a refresh never run is counted too.
+    const from = silencedAt - wheelStartedAt;
+    const end = stoppedAt - wheelStartedAt;
+    longestGapMs = 0;
+    for (const name of answeringNames) {
+      const times = lanes.answeredAt.get(name) ?? [];
+      let previous = times.filter((at) => at < from).at(-1) ?? from;
+      for (const at of times.filter((at) => at >= from)) {
+        longestGapMs = Math.max(longestGapMs, at - previous);
+        previous = at;
+      }
+      longestGapMs = Math.max(longestGapMs, end - previous);
+    }
+  } else if (arm.silentZone !== undefined) {
+    const firsts = answeringNames
+      .map((name) => lanes.answeredAt.get(name)?.[0])
+      .filter((at): at is number => at !== undefined);
+    const ordered = sorted(firsts);
+    cached = {
+      p50: percentile(ordered, 0.5),
+      p95: percentile(ordered, 0.95),
+      max: ordered.at(-1) ?? 0,
+      never: answeringNames.length - firsts.length,
+      of: answeringNames.length,
+    };
+  }
+
   const ordered = sorted(jitter);
   return {
+    name: arm.name,
     label: arm.label,
     dispatched: wheelStats.dispatched,
     all,
-    answering: mixed ? answering : undefined,
+    answering: arm.silentZone === undefined ? undefined : answering,
+    silentBefore: arm.warmFirst === true ? silentBefore : undefined,
+    silentAfter: arm.warmFirst === true ? silentAfter : undefined,
+    pastGrace: graceOver(),
     refused: stats.refused,
     deferred: stats.deferred,
     timedOut: stats.timedOut,
@@ -476,7 +613,11 @@ async function soak(arm: Arm): Promise<Run> {
     inFlightMax: Math.max(inFlightMax, report.lookupsInFlight ?? 0),
     inFlightLast: report.lookupsInFlight ?? -1,
     givenUp: report.lookupsGivenUp ?? -1,
+    asked,
+    kept: resolver.stats().entries,
     lanes: laneStats,
+    longestGapMs,
+    cached,
     threadPool,
     drainMs,
   };
@@ -484,41 +625,73 @@ async function soak(arm: Arm): Promise<Run> {
 
 const ms = (value: number): string => `${value.toFixed(0)} ms`;
 
+const said = (label: string, t: Tally): string =>
+  `${label}: ${String(t.answered)} of ${String(t.results)} answered, ${String(t.givenUp)} given up, ` +
+  `${String(t.other)} failed otherwise; failures took p95 ${ms(percentile(sorted(t.failedMs), 0.95))}`;
+
 function row(run: Run): string {
-  const answering =
-    run.answering === undefined
-      ? ''
-      : `\n        answering zone: ${String(run.answering.answered)} of ${String(run.answering.results)} answered, ` +
-        `${String(run.answering.givenUp)} given up, ${String(run.answering.other)} failed otherwise`;
+  const zone: string[] = [];
+  if (run.answering !== undefined) zone.push(said('answering zone', run.answering));
+  if (run.silentBefore !== undefined)
+    zone.push(said('silent zone, kept answers served', run.silentBefore));
+  if (run.silentAfter !== undefined) {
+    zone.push(
+      run.pastGrace
+        ? said('silent zone, past the grace', run.silentAfter)
+        : 'silent zone, past the grace: not reached (MS_DNS_WARM_MINUTES=7 reaches it)',
+    );
+  }
+  if (run.longestGapMs !== undefined) {
+    zone.push(
+      `longest an answering name went between answers, from its last before the silence: ${ms(run.longestGapMs)}`,
+    );
+    if (!run.pastGrace) {
+      zone.push(
+        'answering zone refreshed within the grace: not asserted (MS_DNS_WARM_MINUTES=7 reaches it)',
+      );
+    }
+  }
+  if (run.cached !== undefined) {
+    zone.push(
+      run.cached.never > 0
+        ? `answering names kept, from the wheel's start: ${String(run.cached.never)} of ` +
+            `${String(run.cached.of)} not by the arm's end (MS_DNS_COLD_MINUTES=7 reaches them)`
+        : `answering names kept, from the wheel's start: all ${String(run.cached.of)}, p50 ` +
+            `${ms(run.cached.p50)}, p95 ${ms(run.cached.p95)}, last ${ms(run.cached.max)}`,
+    );
+  }
   return (
     `      ${run.label}\n` +
     `        ${String(run.dispatched)} dispatched, ${String(run.all.results)} results: ` +
-    `${String(run.all.answered)} answered, ${String(run.all.givenUp)} lookup given up, ` +
+    `${String(run.all.answered)} answered, ${String(run.all.givenUp)} given up, ` +
     `${String(run.all.other)} failed otherwise; refused ${String(run.refused)}, ` +
     `deferred ${String(run.deferred)}, timed out ${String(run.timedOut)}\n` +
     `        jitter p50 ${ms(run.jitter.p50)}, p95 ${ms(run.jitter.p95)}, max ${ms(run.jitter.max)}; ` +
     `check run p95 ${ms(run.runP95)}; drained in ${ms(run.drainMs)}\n` +
     `        Probe Health: lookupsInFlight max ${String(run.inFlightMax)}, last ${String(run.inFlightLast)}; ` +
     `lookupsGivenUp ${String(run.givenUp)}\n` +
-    `        lanes: deepest queue ${String(run.lanes.deepest)}, ${String(run.lanes.queued)} still queued; ` +
-    `wait p95 ${ms(run.lanes.waitP95)} (served and still queued); busy ${(run.lanes.busy * 100).toFixed(0)}%; ` +
-    `thread pool fs.stat p95 ${run.threadPool.p95.toFixed(2)} ms, ` +
-    `max ${run.threadPool.max.toFixed(2)} ms` +
-    answering
+    `        resolver: ${String(run.asked)} getaddrinfo, ${String(run.kept)} names kept; ` +
+    `lanes: deepest queue ${String(run.lanes.deepest)}, ${String(run.lanes.queued)} still queued, ` +
+    `wait p95 ${ms(run.lanes.waitP95)}, busy ${(run.lanes.busy * 100).toFixed(0)}%; ` +
+    `thread pool fs.stat p95 ${run.threadPool.p95.toFixed(2)} ms, max ${run.threadPool.max.toFixed(2)} ms` +
+    zone.map((line) => `\n        ${line}`).join('')
   );
 }
 
-describe('a name lookup a scan (A-66)', () => {
+describe('a name lookup a scan, through the probe’s resolver (A-66, P-426)', () => {
   const runs: Run[] = [];
 
   after(() => {
     process.stdout.write(
       `\n    measured: ${String(SENSORS)} sensors at ${String(INTERVAL_SECONDS)} s on ` +
-        `${String(Math.ceil(SENSORS / SENSORS_PER_DEVICE))} devices, ${String(MINUTES)} min an arm, ` +
+        `${String(Math.ceil(SENSORS / SENSORS_PER_DEVICE))} devices, ${String(MINUTES)} min an arm ` +
+        `(warmzone ${String(INTERVAL_SECONDS)} s answering, then ${String(WARM_MINUTES)} min; ` +
+        `zone ${String(COLD_MINUTES)} min), ` +
         `pool ${String(POOL_SIZE)}, queue ${String(QUEUE_MAX)}, ${String(availableParallelism())} cores\n` +
         `    lookup bound ${ms(SNMP_TIMEOUT_MS / 2)} (SNMP's ${ms(SNMP_TIMEOUT_MS)}), ` +
-        `check ${ms(MODEL_CHECK_MS)} after it; UV_THREADPOOL_SIZE ${String(THREADPOOL)}, ` +
-        `${String(LANES)} lookup lanes; slow ${ms(SLOW_MS)}, silent ${ms(HANG_MS)} then EAI_AGAIN\n` +
+        `check ${ms(MODEL_CHECK_MS)} after it; ${String(LANES)} lookup lanes, the resolver ` +
+        `${String(RESOLVER_LANES)}; answers kept ${ms(ANSWER_MS)}, served stale ${ms(STALE_MS)} past expiry; ` +
+        `slow ${ms(SLOW_MS)}, silent ${ms(HANG_MS)} then EAI_AGAIN\n` +
         `${runs.map(row).join('\n')}\n`,
     );
   });
@@ -533,19 +706,63 @@ describe('a name lookup a scan (A-66)', () => {
       runs.push(run);
 
       assert.ok(run.all.results > 0, 'checks ran');
-      // The Probe Health number is the checks' own: each check that failed at the lookup's bound
-      // gave exactly one lookup up, and nothing else gives one up while the pool is running.
+      // The Probe Health number is the checks' own: each check that failed for want of an answer
+      // gave exactly one lookup up, and nothing else gives one up.
       assert.equal(
         run.givenUp,
         run.all.givenUp,
-        `lookupsGivenUp read ${String(run.givenUp)}, and ${String(run.all.givenUp)} checks failed at the lookup's bound`,
+        `lookupsGivenUp read ${String(run.givenUp)}, and ${String(run.all.givenUp)} checks failed for want of an answer`,
       );
       if (arm.name === 'addresses') {
         assert.equal(run.inFlightMax, 0, 'a device given as an address is never resolved');
       }
-      if (arm.name === 'addresses' || arm.name === 'system') {
-        assert.equal(run.givenUp, 0, 'a name answered from the hosts file is never given up');
-        assert.equal(run.refused, 0, 'and a lookup a scan from it refuses no check');
+      if (arm.name === 'system' || arm.name === 'slow') {
+        assert.equal(run.givenUp, 0, 'every name answers within its bound: none given up');
+        assert.equal(run.refused, 0, 'and no check refused');
+      }
+      if (arm.name === 'warmzone') {
+        assert.equal(run.refused, 0, 'no check refused');
+        const answering = run.answering;
+        assert.ok(answering !== undefined);
+        assert.equal(answering.givenUp, 0, 'every answering name served its kept answer');
+        if (run.pastGrace) {
+          // Only past the grace can a refresh that was not run in time show: until then every
+          // answering name is served what it had (`P-426`'s review).
+          assert.equal(answering.other, 0);
+          assert.ok(
+            (run.longestGapMs ?? 0) < ANSWER_MS + STALE_MS,
+            `an answering name went ${ms(run.longestGapMs ?? 0)} between answers, against the ` +
+              `${ms(ANSWER_MS + STALE_MS)} its kept answer lasts`,
+          );
+          const after = run.silentAfter;
+          assert.ok(
+            after !== undefined && after.results > 0,
+            'the silent zone scanned past its grace',
+          );
+          assert.equal(after.answered, 0, 'nothing served past the grace');
+          assert.equal(after.givenUp, after.results, 'every one failed naming the resolver');
+          // At once, but for the one check a hold that starts a retry on a free lane: it waits for
+          // that lookup, up to its bound, as a check already waiting does (`P-426`'s review).
+          const failedMs = sorted(after.failedMs);
+          assert.ok(
+            percentile(failedMs, 0.5) < AT_ONCE_MS,
+            `at once, not at the ${ms(SNMP_TIMEOUT_MS / 2)} bound: p50 ${ms(percentile(failedMs, 0.5))}`,
+          );
+          assert.ok(
+            (failedMs.at(-1) ?? 0) < SNMP_TIMEOUT_MS / 2 + AT_ONCE_MS,
+            `none past its bound: ${ms(failedMs.at(-1) ?? 0)}`,
+          );
+        }
+      }
+      if (arm.name === 'hung') {
+        assert.equal(run.refused, 0, 'every check failed at once, and none was refused');
+        const baseline = runs.find(({ name }) => name === 'addresses');
+        if (baseline !== undefined) {
+          assert.ok(
+            run.jitter.p95 <= Math.max(2 * baseline.jitter.p95, baseline.jitter.p95 + 100),
+            `jitter p95 ${ms(run.jitter.p95)}, against the address arm's ${ms(baseline.jitter.p95)}`,
+          );
+        }
       }
     });
   }

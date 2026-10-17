@@ -710,16 +710,17 @@ const PROBE_METRICS: readonly Metric[] = [
     help: 'Device sessions opened. Read against evictions to spot a pool that never reuses one.',
     counter: true,
   },
-  // `A-66`. The probe's resolver: lookups it has not answered, and those checks gave up on.
+  // `A-66`, `P-426`. The probe's resolver: lookups it has not had answered, and the checks that
+  // failed for want of an answer. Protocol 36's two counters, as `P-426` defined them.
   {
     key: 'lookupsInFlight',
     name: 'ms_probe_name_lookups_in_flight',
-    help: 'Name lookups the probe’s resolver has not answered yet, whether or not a check still waits for them. A count that climbs and does not fall is the resolver not answering.',
+    help: 'Name lookups the probe has asked of the system resolver and not had answered: running, or queued in the probe’s resolver with its refreshes and retries, whether or not a check still waits for them. A count that climbs and does not fall is the resolver not answering.',
   },
   {
     key: 'lookupsGivenUp',
     name: 'ms_probe_name_lookups_given_up_total',
-    help: 'Name lookups a check stopped waiting for before the resolver answered: its bound passed, or it was cancelled.',
+    help: 'Checks that failed for want of an answer from the probe’s resolver, a running total: their bound passed, they were cancelled, or the resolver failed them at once (EAI_AGAIN, a name it holds, every lane stuck, or a full queue).',
     counter: true,
   },
   {

@@ -55,12 +55,16 @@ const registry = ((await import(registryModule)) as { default: CheckRegistry }).
 
 const running = new Map<string, AbortController>();
 
-port.on('message', (message: RunMessage | AbortMessage) => {
+// Only a `run` runs a check. The same port carries the probe's resolver's answers to this worker's
+// lookups (`P-426`), which its client takes, and anything else is not this listener's.
+port.on('message', (message: { readonly type?: unknown }) => {
   if (message.type === 'abort') {
-    running.get(message.jobId)?.abort(new Error('the check exceeded its timeout'));
+    running
+      .get((message as AbortMessage).jobId)
+      ?.abort(new Error('the check exceeded its timeout'));
     return;
   }
-  void run(message);
+  if (message.type === 'run') void run(message as RunMessage);
 });
 
 async function run(message: RunMessage): Promise<void> {

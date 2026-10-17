@@ -467,9 +467,16 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         ...connected,
         health: { ...connected.health, lookupsInFlight: 37, lookupsGivenUp: 1_250 },
       });
-      const metrics = parse((await varying(stuck).scrape()).body);
+      const scraped = (await varying(stuck).scrape()).body;
+      const metrics = parse(scraped);
       assert.equal(metrics.get(`ms_probe_name_lookups_in_flight${label}`), 37);
       assert.equal(metrics.get(`ms_probe_name_lookups_given_up_total${label}`), 1_250);
+      // `P-426` redefined given up in place: checks failed for want of an answer, most of them at
+      // once during an outage, not lookups waited for to their bound.
+      assert.match(
+        scraped,
+        /^# HELP ms_probe_name_lookups_given_up_total Checks that failed for want of an answer from the probe’s resolver, .*failed them at once \(EAI_AGAIN, a name it holds, every lane stuck, or a full queue\)\.$/mu,
+      );
 
       const without = parse((await varying(() => connected).scrape()).body);
       assert.equal(without.has(`ms_probe_name_lookups_in_flight${label}`), false);

@@ -1,5 +1,7 @@
 import { nameLookups, snmpPool, sshPool } from '@ms/sensors';
 import { missingTypeError, probeCatalogue } from '../catalogue.js';
+import { BUILD } from '../version.js';
+import { poolResolver, withResolverNotes } from './resolve-client.js';
 import type {
   CheckContext,
   CheckExecution,
@@ -19,8 +21,16 @@ import type {
  *
  * The catalogue is this build's profile of the built-in set (`H-12`), so a v1 probe carries no
  * flow and no Windows types, and says so by name when it is asked for one.
+ *
+ * **A name a check resolves to check it is asked of the probe's resolver** (`P-426`) when the pool
+ * that started this worker serves lookups, which the probe's own pools do: answers kept, and the
+ * lanes they run on shared by the whole probe. A fixture pool's worker resolves for itself.
  */
-const catalogue = probeCatalogue();
+const through = poolResolver();
+const catalogue = probeCatalogue(
+  BUILD.profile,
+  through === undefined ? {} : { resolve: through.resolve },
+);
 
 const registry: CheckRegistry = {
   execute(sensorType: string, context: CheckContext): Promise<CheckExecution> {
@@ -29,7 +39,8 @@ const registry: CheckRegistry = {
     if (!catalogue.has(sensorType)) return Promise.reject(missingTypeError(sensorType));
     // Through the catalogue, not the type: it is what scrubs the message of every secret the
     // check held before the result leaves this worker (`S-19`).
-    return catalogue.execute(sensorType, context);
+    // And with what the probe's resolver said about the answers it used (`P-426`).
+    return withResolverNotes(through, () => catalogue.execute(sensorType, context));
   },
 
   /**

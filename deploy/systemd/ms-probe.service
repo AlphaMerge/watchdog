@@ -56,6 +56,9 @@ Group=ms-probe
 
 Environment=NODE_ENV=production
 Environment=MS_CONFIG_FILE=/etc/ms/probe.json
+# libuv's thread pool, of which name lookups take half (P-426): 8 lanes, at most 6 for the probe's
+# resolver and 2 for everything else. bin/ms-probe sets the same unless it is set already.
+Environment=UV_THREADPOOL_SIZE=16
 ExecStart=/opt/ms/bin/ms-probe
 
 WorkingDirectory=/var/lib/ms-probe

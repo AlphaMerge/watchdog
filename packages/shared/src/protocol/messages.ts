@@ -68,12 +68,14 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * A core below 35 is sent the result without it, and keeps the prose, which still says it.
  *
  * Version 36 adds `lookupsInFlight` and `lookupsGivenUp`, under `lookupCounters` (`A-66`): the
- * name lookups on the probe's libuv thread pool that its resolver has not answered yet, whether
- * or not a check still waits for them, and a running total of those a check stopped waiting for.
- * A lookup cannot be cancelled, so a resolver that stops answering holds the pool's lookup threads
- * for every transport that resolves on the probe, and until 36 nothing counted it. Two new fields
- * in a closed schema under one capability: a core below 36 is sent neither, and a probe below 36
- * sends neither and both channels gap.
+ * name lookups the probe has asked of the system resolver and not had answered, queued in the
+ * probe's own resolver or running on libuv's thread pool, and a running total of the checks that
+ * failed for want of an answer. A lookup cannot be cancelled, so a resolver that stops answering
+ * holds lookup threads, and until 36 nothing counted it. `P-426` redefined both in place, before
+ * 36 was released: in flight takes in the probe's resolver's own queue and its refreshes, and given
+ * up the checks it fails at once for a name it holds. Two new fields in a closed schema under one
+ * capability: a core below 36 is sent neither, and a probe below 36 sends neither and both
+ * channels gap.
  *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
@@ -634,12 +636,13 @@ export interface ProbeHealthReport {
   sessionsEvicted?: number;
   sessionsOpened?: number;
   /**
-   * Name lookups on the probe's libuv thread pool (`A-66`), as the checks that resolve a name to
-   * check it count them: in the pool's workers and in the probe's main thread together.
-   * `lookupsInFlight` is how many the resolver has not answered yet, whether or not a check still
-   * waits for them, and `lookupsGivenUp` a running total of those a check stopped waiting for, at
-   * its bound or cancelled. **Absent together**, and absent on a build that does not count them.
-   * Sent only to a core at protocol 36.
+   * The probe's name lookups (`A-66`, `P-426`). `lookupsInFlight` is how many it has asked of the
+   * system resolver and not had answered, whether or not a check still waits for them: those its
+   * resolver is running or has queued for a lane, its refreshes and retries among them, and any
+   * made outside it. `lookupsGivenUp` is a running total of the checks that failed for want of an
+   * answer: at their bound, cancelled, or failed at once by the probe's resolver because it holds
+   * the name or every lane the lookup could use is stuck. **Absent together**, and absent on a
+   * build that does not count them. Sent only to a core at protocol 36.
    */
   lookupsInFlight?: number;
   lookupsGivenUp?: number;

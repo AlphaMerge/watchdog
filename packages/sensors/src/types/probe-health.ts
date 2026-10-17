@@ -222,14 +222,15 @@ const CHANNELS: readonly ChannelDef[] = [
   // diagnosis it names was one an operator could not actually make. No threshold, for the same
   // reason as its pair: a pool that opens sessions is a pool doing its job.
   { key: 'sessionsOpened', name: 'Sessions opened', unit: 'sessions', counter: { bits: 64 } },
-  // **The probe's resolver (`A-66`), and no limit on either.** A check resolves its device's name
-  // once a scan to check it (`A-57`), on libuv's thread pool, which every worker and the main
-  // thread share and where a lookup cannot be cancelled: a resolver that stops answering holds the
-  // pool's lookup threads, and every lookup after it waits behind them whichever device it is for.
-  // In flight is how many it has not answered, the given-up ones included, so a climb that does
-  // not fall is that resolver; given up is the checks that stopped waiting. Each of those checks
-  // already fails naming the resolver, Down or, for a credential pin, Unknown, so a limit here
-  // would be one more alarm for the same outage. These say it is the resolver and how deep.
+  // **The probe's resolver (`A-66`, `P-426`), and no limit on either.** A check resolves its
+  // device's name to check it (`A-57`) through the probe's one resolver, which keeps answers 30 s
+  // and runs `getaddrinfo` on libuv's thread pool at most six at a time, where a lookup cannot be
+  // cancelled. In flight is how many it has asked and not had answered, running or queued, its own
+  // refreshes and retries included, so a climb that does not fall is the system's resolver not
+  // answering; given up is the checks that failed for want of an answer, at their bound or at once
+  // for a name the probe holds. Each of those checks already fails naming the resolver, Down or,
+  // for a credential pin, Unknown, so a limit here would be one more alarm for the same outage.
+  // These say it is the resolver and how deep.
   { key: 'lookupsInFlight', name: 'Name lookups in flight', unit: 'lookups' },
   {
     key: 'lookupsGivenUp',

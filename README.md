@@ -135,7 +135,7 @@ scripts/dev.sh "node packages/core/dist/src/main.js --config dev/core.json"
 ```
 
 ```bash
-scripts/dev.sh "node packages/probe/dist/src/main.js --config dev/probe.json"
+scripts/dev.sh "UV_THREADPOOL_SIZE=16 node packages/probe/dist/src/main.js --config dev/probe.json"
 ```
 
 `scripts/dev-e2e.sh` does both, kills the core, and shows the probe reconnecting on its own.

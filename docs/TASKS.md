@@ -12118,7 +12118,7 @@ because each is a decision rather than a defect:
       bound, so a silent resolver fails the check at the bound saying so, the worker is not
       recycled, and the lookup is counted, with a test of each.
 
-- [ ] **P-426 — a probe runs two name lookups at a time** · M · A-66 · Found 2026-10-17 by
+- [x] **P-426 — a probe runs two name lookups at a time** · M · A-66 · Found 2026-10-17 by
       `A-66`. The probe sets no `UV_THREADPOOL_SIZE`, and libuv lets `getaddrinfo` hold at most
       half its four threads, so every lookup on the probe, from every worker, runs two at a
       time: at the 5,000-sensor class a lookup a scan is 83 a second, which two lanes keep up
@@ -12137,6 +12137,313 @@ because each is a decision rather than a defect:
       - **What would fix it.** A larger pool alone moves the slow threshold, not the zone
         failure. Answers kept for a TTL, or a resolver off the pool with a timeout per query,
         removes both.
+
+      **Decided 2026-10-17 by the user**, on the design (`p426-design.md`) and its review:
+      1. **Build the `getaddrinfo` slice now: this ticket and `P-425`.** The c-ares resolver is
+         decided only after the re-measure (`P-432`). No c-ares, no `probe.nameResolver`, no
+         protocol 37 and no `lookupsAnsweredStale`.
+      2. **A stale answer may be used for at most 5 minutes past its expiry.**
+
+      **P-426 outcome. One resolver in the probe, which keeps answers and decides what runs.**
+      - **What it is.** `NameResolver` (`probe/src/resolver/name-resolver.ts`), in the probe's
+        main thread. Scan workers and the query runner's worker ask it over their port to the
+        pool (`resolve` / `resolve-ack` / `resolved`, `resolver/protocol.ts`; the worker's side
+        is `runner/resolve-client.ts`); discovery's identification asks it directly. Process
+        children and fixture pools resolve for themselves.
+        - **The answers are `getaddrinfo`'s**, keyed by the lower-cased name and the family
+          asked, and asked for exactly that family: family 0 is one lookup, never two merged.
+        - **Kept**: an answer 30 s, a denial 30 s (`ENOTFOUND`, `ENODATA`, or more than 64
+          addresses, which fails naming the count), one lookup in flight a key, 10,000 names least
+          recently asked first, on a monotonic clock. Any other failure is passed to the checks
+          waiting and nothing is kept.
+        - **Stale**: an expired answer is served at once while one refresh runs, and for at most
+          5 minutes past its expiry while the refresh is not answered. A denial drops it.
+        - **Holds**: `EAI_AGAIN`, or a lookup past 1 s, holds the name 5 s, doubling to 60 s,
+          ±20%, reset by any answer. New checks fail at once, naming the resolver; one already
+          waiting for the lookup keeps its own bound. A retry runs only when a check asks.
+          Background work never moves a name in the LRU order.
+        - **Lanes**: at most 6 lookups at once: one a held name's retry, five shared by first
+          lookups and refreshes, at most four each, so one is always kept for each.
+          `UV_THREADPOOL_SIZE=16`
+          (8 lanes) is exported by `bin/ms-probe` unless set, and set by `ms-probe.service` and
+          the WinSW configuration; the probe logs it at start and warns below 16.
+        - **Fail-fast**: a check fails at once, given up, when its name is held or every lane its
+          lookup's class could take is held by one past 1 s; the lookup stays queued.
+        - **Worker side**: the client ends its own wait at its bound and 500 ms, and drops a late
+          reply by id. The main thread acknowledges a miss when it reads it; no acknowledgement
+          by the end of the bound fails as "the probe’s main thread did not take the lookup
+          within N ms (the probe is overloaded)", not given up. The resolver's handler and the
+          pool's both turn a throw into a failed lookup naming it.
+        - **Check now** asks fresh, single-flighted, ahead of every queued lookup, and uses the
+          kept answer only when the resolver does not answer in time, adding that to the
+          check's message.
+        - **`/etc/hosts` and `/etc/resolv.conf`** are compared by their contents every 5 s: a
+          hosts edit drops the names it moves, and a resolv.conf change makes every kept answer
+          due and lets holds and denials go; a lookup asked under the old configuration answers
+          its own checks, and is kept, as due, only for a name the new one has said nothing of.
+        - **A lane's next lookup**: "Check now"'s, then the name whose domain has the smallest
+          share of its names failing, the name's own failure left out, then among retries the
+          fewest failures in a row and the most recent answer, then the oldest. A failing name
+          no check has asked about for 6½ minutes stops counting against its domain.
+        - **Probe Health, no protocol change**: `lookupsInFlight` adds the resolver's running and
+          queued lookups (`lookupsBesideThePool`); `lookupsGivenUp` counts checks failed for want
+          of an answer: the bound, a cancel, a hold, fail-fast, a full queue or `EAI_AGAIN`.
+          Protocol 36's two counters are redefined in place, as it is unreleased.
+      - **Decisions beyond the review**, taken here:
+        1. **"Check now" asks a held name again**, where a scan fails at once: it is how an
+           operator sees a DNS fix take. A lookup already stuck still answers it from the kept
+           answer. (On the retry lane until the review; ahead of every queued lookup since.)
+        2. **The resolver's lanes follow the thread pool**: libuv's lanes less two, between 3
+           and 6, so a probe started without the launcher queues less inside libuv; it warns.
+        3. **The WinSW configuration sets `UV_THREADPOOL_SIZE=16` too**, as the unit does.
+        4. **A queue of at most 10,000 lookups**; a check refused by a full one is given up.
+        5. **The probe's own failures are worded as the probe's** (`probeFailed`): a main
+           thread too busy to take the lookup, a fault in the resolver, a wait the probe ended.
+           None is "no address", and none is given up.
+        6. **A `getaddrinfo` that throws is a fault**, and nothing of it is kept.
+        7. **A hold is logged at warn at most once a minute**, with how many more were held.
+        8. **A check worker runs only `run` messages**: its port now carries the resolver's.
+        9. **The perf case's lanes model is the resolver's `getaddrinfo`**, in its own thread,
+           at 8 lanes; the model's answering control arm is gone (`system` is the real one),
+           and `MS_DNS_WARM_MINUTES` sets how long the warm zone arm runs once its zone is
+           silent.
+      - **Docs.** `administration.md`: a section on how a probe resolves its devices' names,
+        what still resolves for itself (ping, jitter, scripts, PowerShell, `targetPolicy: none`,
+        a listener's sender until `P-425`, the core link), and the Probe Health row rewritten.
+        `probe-health.ts`, `messages.ts` (both places), the `lookups.ts` header and the perf case.
+      - **Tests.** `sensors/test/name-lookups.test.ts` (21, 10 new: a lookup the resolver counts not
+        counted again, which codes are not answered and which the probe's, a held name given up
+        at once, the guard and the pin in the resolver's words for a held name and in the
+        probe's for a busy one, the bound handed to the resolver, a standard catalogue's
+        resolver). `probe/test/name-resolver.test.ts` (30: the numbers decided; an answer kept
+        30 s and asked once for many; served expired while refreshed; a denial kept 30 s and
+        dropping a kept answer for good; family 0 one lookup, with a hosts override DNS has an
+        AAAA for; more than 64 addresses; an address asked nothing; the LRU with a refresh not
+        making a name recent; stale for 5 minutes and not after; a held name's kept answer
+        served, retried after the hold; 5 s doubling to 60 s with jitter, reset by an answer,
+        never retried unasked; stuck at the bound for stuck; the lanes' classes; fail-fast and
+        the lookup kept queued; a full queue; the lanes from the thread pool; "Check now"
+        fresh, its note, its failure, a held name asked again; a hosts edit and a new
+        resolv.conf; a worker's request acknowledged, forgotten at its bound with in flight
+        back to 0 when it answers, a fault in its own code and in `getaddrinfo`, the main
+        thread's callers). `resolve-client.test.ts` (7: asked by id, a failure's code, a main
+        thread that did not take it as overload and not given up, a taken one waited for, its
+        own wait ended and a late reply dropped, fresh with its note, the ack bound).
+        `pool-resolve.test.ts` (7, real workers: one lookup for every worker, a held name
+        failed at once and given up, in flight until a forgotten lookup answers, a blocked main
+        thread as overload, a handler that throws answered, "Check now" fresh with its note, a
+        worker running only `run`). `name-lookup-outage-scenario.test.ts` (1, `M-17`: a warm
+        cache, one zone in ten silent past the grace, a restart mid-outage; no state change in
+        the answering zone, the silent zone Up until 5 minutes past expiry, then Warning and
+        Down once, failing at once each scan, and no change across the restart). One case each
+        in `core/deploy-scripts` (the unit and the WinSW configuration) and
+        `core/package-provenance` (the launcher, which keeps an operator's own value). Beside
+        them, unchanged and passing: `pool-lookups` (11), `query-runner` (13),
+        `catalogue-registry` (5), `probe-health-report` (47), `check-pool` (73).
+      - **Perf.** The case measures the new path: every arm's pool serves its workers' lookups from a
+        `NameResolver` whose `getaddrinfo` is the lanes model, at 8 lanes, the resolver taking
+        6. Arms: addresses, the system resolver, 100 ms cold, one zone in ten silent after a
+        scan interval answering, everything silent cold, and one zone in ten silent cold (read
+        only). Smoked once at 200 sensors, a quarter of a minute an arm, a pool of 8 and a 5 s
+        hang, on a VM at 0.76 load a CPU with `ms-core` on the database: 6 of 6 passed. No
+        lookup for addresses; the system resolver and 100 ms cold answered all 52, none given up
+        or refused, 20 `getaddrinfo` for 20 names; the warm zone answered all 252, the silent
+        zone's 5 from kept answers; everything silent gave all 52 up at a check-run p95 of
+        1,017 ms with jitter p95 30 ms against the addresses' 6, none refused; the cold zone
+        answered all 47 of the answering zone's, which were all kept by 9 s. Not numbers: a
+        smoke. **The full-size run is owed** (T3, a quiet window):
+        `MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7` on the default size, so the warm zone arm
+        reaches past the grace and the cold zone arm keeps every answering name. **Read it for
+        the warm zone's answering names**: before the review, each silent name's first refresh
+        held a shared lane until `getaddrinfo` gave up, in arrival order, and the review's model,
+        measuring from each name's last answer, put the worst answering name about 333 s after
+        it, past the grace; the gap was measured from the silencing, which hid it. Since the
+        review an answering domain's refreshes go first.
+      - **Mutation: 44 of 44 killed.** Workers not asking over their port; family 0 merged
+        from 4 and 6; an answer kept 300 s; no denial kept; no single flight; background work
+        moving the LRU; more than 64 addresses kept; no limit on stale; a denial keeping the
+        stale answer; `EAI_AGAIN` not held; no doubling; no jitter; no reset on an answer; no
+        hold at the bound for stuck; a held name retried during its hold; a held retry on the
+        refresh lane; no lane kept for refreshes; two retries at once; no fail-fast for a check
+        asked behind stuck lanes, or for one already waiting; no ack; no error boundary in the
+        handler or the pool; the worker not ending its own wait; no bound on the ack; a busy
+        thread given up; a held name not given up; a lookup counted twice; "Check now" from the
+        cache, without its note, or without the kept answer; a hosts edit dropping nothing;
+        `lookupsInFlight` without the resolver; the guard's and the pin's words for a held name
+        and the guard's for a busy one; a worker running any message; the unit, the launcher
+        and the WinSW configuration without `UV_THREADPOOL_SIZE`; an expired answer not served;
+        the resolver taking every lane; no limit on names or on the queue. Each built and
+        failed its files, and every file was restored and rebuilt.**
+      - **Not covered by a test:** the lines in `main.ts` that build the resolver, hand it to the
+        pools and the reporter, and log the thread pool; each thing they call is tested.
+      - **Filed:** `P-432` (c-ares, after the re-measure) and `P-433` (`targetPolicy: none`
+        through the resolver).
+      - **Review.** The review confirmed three major findings and the minor ones below
+        (`p426-review-findings.md`); all are fixed here.
+        1. **A hosts or resolv.conf change was a cold start** (major): every answer, hold and
+           failure count was dropped, so a silent zone's names took the first lanes again and
+           the answering zones failed behind them, after the edit the docs called the usual
+           fix; and the files were compared by `stat`, so a rewrite with the same contents did
+           it too. Now the contents are compared (a SHA-256 a file). A hosts edit drops only
+           the names whose lines it changed (`hostsNames`). A resolv.conf change makes every
+           kept answer due now, within the same grace, lets holds and denials go, and detaches
+           lookups still running under the old configuration, whose answer is kept only when
+           nothing is (and then as due). **Failures in a row are kept** across it, decided here:
+           a name that was not answering is asked again as a retry, on the one retry lane, so a
+           zone still silent cannot take the first and shared lanes the answering zones are
+           asked on; a name the edit fixed answers its retry at once. Scenario test added: ten
+           silent names, more than the four first lanes, a hosts edit giving one of them an
+           address and then a resolv.conf rewrite, both mid-outage; zone A never changes
+           state, the fixed device never does either, and the other nine go Down once after
+           the grace.
+        2. **One first-in first-out retry lane for every held name** (major): a name of an
+           answering zone held once waited behind every silent name's retry, about 25 minutes
+           at 50 names and 30 s, and "Check now" joined the same queue. **Decided here: a lane
+           takes the name whose domain (the name less its first label) has the smallest share
+           of its names failing** (failing over kept + 1, so a lone device's one failure is
+           not a whole zone's), then among retries the fewest failures in a row, then the
+           oldest. Why the domain over the other options: a zone that stops answering is a
+           domain, so this separates it from the answering zones from its first failure,
+           including the first cycle, when every silent name has failed once just as the
+           answering name has, which ordering by failures alone cannot; a cap per name or a
+           second retry lane for one failure fills with the silent zone's first retries just
+           the same. It only reorders a queue, so it never holds a lookup back when nothing
+           else waits, and with every name in one domain it is the old order. It applies to
+           every queue, so a silent zone's first refreshes and first lookups also go behind
+           an answering zone's (the warm zone arm, and a cold restart once a silent name has
+           failed). **"Check now" is no longer a retry**: it starts its lookup on a first
+           lookup's lane, ahead of every queued one, and moves a queued lookup it joins there.
+        3. **The checks waiting on a lookup failed at the stuck mark** (major): a resolver
+           answering in 1–10 s failed checks that used to pass. The hold is for new checks
+           only now; a check already waiting keeps its own bound, and is ended early only with
+           an answer ("Check now" and a kept answer). The queued fail-fast behind lanes all
+           stuck stays, as the synthesis decided it. The outage scenario's first scan after the
+           restart now takes the bound, as its checks are each waiting for a lookup.
+        - **Minors.** "Check now" gets the kept answer, saying so, on a full queue and 250 ms
+          before its bound behind lanes busy but not stuck. Only `ENOTFOUND`/`ENODATA` (and
+          more than 64 addresses) are denials; `EMFILE`, `EAI_MEMORY` and the rest fail the
+          checks waiting and keep nothing, the kept answer included. An unread request waits
+          its whole bound, less 20 ms, before it is the probe overloaded (`ackWithinMs`). The
+          `/metrics` HELP for given up says what it counts now. The guard and the credential
+          pin say more than 64 addresses in the resolver's words, naming the count
+          (`RESOLVER_TOO_MANY`, `tooManyAddresses`; the sender's in `P-425`). The ms-server
+          supervisor, `dev-e2e.sh` and the README's command start the probe at
+          `UV_THREADPOOL_SIZE` 16; **`dev.sh` does not set it**, decided here: it runs every
+          toolchain command, builds, lint, the suites and `test:perf`, whose system arm
+          measures libuv's own pool, and the probe started through it is the README's line,
+          which sets it. Perf: the warm zone's gap is measured from each name's last answer
+          before the silence and to the arm's end; its refresh claims are asserted only past
+          the grace, and say so when not; `MS_DNS_COLD_MINUTES` gives the cold zone arm its
+          own time, and its row says how many names were not kept rather than percentiles of
+          those that were; zones are domains in its names. `resolve-client.test`'s wait for a
+          request is bounded (`pollWithin`).
+        - **Tests.** `name-resolver` 44 (14 new or rewritten: the domain; a held name of an
+          answering domain retried before a silent domain's; fewer failures first; an answering
+          domain refreshed first; a non-answer keeping nothing, twice; "Check now" waiting its
+          bound, on a full queue, before its bound, ahead of the queue and not behind retries; a
+          check already waiting answered past the stuck mark, and one ended at its bound; the
+          hosts file read, a hosts edit, a resolv.conf change, the watch timer).
+          `name-lookup-outage-scenario` 2 (the hosts-edit scenario new; the restart's first scan
+          at the bound). `resolve-client` 8 (an unread request answered after a second inside
+          its bound; the ack window; `next()` bounded). `pool-resolve` 7, `sensors/name-lookups`
+          22 (the guard and the pin on too many addresses), `core/metrics` 37 (the HELP),
+          `core/deploy-scripts` 84 (the dev start paths). Beside them, passing: `pool-lookups`
+          11, `query-runner` 13, `catalogue-registry` 5, `probe-health-report` 47, `check-pool`
+          73, `pinned-target` 41, `target-policy-transports` 70, `db-checked-target` 163,
+          `package-provenance` 29.
+        - **Mutation: 24 of 24 killed**: a hosts edit dropping every name; every look a change;
+          a resolv.conf change dropping answers, or resetting failures, or leaving an old lookup
+          standing for its name, or keeping an old answer over a new one as fresh; the retry
+          lane first in first out; no domain share; no order by failures; "Check now" on the
+          retry lane, not moving a queued retry, not first; waiting checks failed at the stuck
+          mark; a full queue refusing "Check now"; no answer before its bound; every failure a
+          denial; the ack at half the bound; the old HELP; the guard and the pin saying none;
+          the supervisor and `dev-e2e` at libuv's 4; a client that never posts (its test fails
+          in a second, not hangs); a hosts file read with its comments. Restored and rebuilt,
+          and `dist` checked for each.
+        - **Smoke**, the same settings as before, VM at 0.32 load a CPU with `ms-core` on the
+          database: 6 of 6. Addresses, the system resolver and 100 ms cold answered all 52,
+          none given up or refused; the warm zone answered all 252, the gap now read from each
+          name's last answer 41 s; everything silent gave all 52 up, check run p95 2,515 ms
+          (the first lookups' checks wait their bound now), jitter p95 25 ms, none refused; the
+          cold zone answered all 47 of the answering zone's dispatched checks, all 18 names kept
+          by 9 s (45 of 45 on the run after the rebase: how many a quarter-minute arm dispatches
+          varies). The 100 ms arm's jitter p95 read 276 ms with the thread-pool probe at 312 ms;
+          alone it read 6 ms, so the host's.
+      - **Review 2.** A second review confirmed two major findings, two minor, a test that could
+        not fail and a nit; all are fixed here.
+        1. **A warm zone gone silent filled all five shared lanes with its first refreshes**
+           (major): its names had failed nothing yet, so each was refreshed rather than retried,
+           refreshes had a lane kept and first lookups none, and every first lookup and "Check
+           now" queued behind five stuck refreshes failed at once: a sensor scanned less often
+           than 330 s, a new device, a name a hosts edit dropped. Now refreshes and first
+           lookups may hold at most four of the five each, so each keeps one, and a queued
+           lookup is failed fast only when every lane its class could take is stuck (a refresh
+           at its four no longer counts a first lookup's lane). New scenario: a warm zone of
+           ten silent names whose lookups outlast the time between scans, a pool of eight, and
+           a zone-A sensor every six minutes; it is answered at each of its three scans and no
+           zone-A sensor changes state.
+        2. **The domain share still starved a name held once** (major, in some layouts): a
+           one-name domain held once scored a half, behind a 200-name silent zone until 101 of
+           its names had failed; and names of one domain, or of one label under a search list,
+           tied and went in arrival order. Now a name's own failure is left out of its domain's
+           share (failing others over names), and among retries tied on share and failures the
+           one that answered most recently goes first, by a `lastAnsweredAt` kept when the
+           answer itself is dropped past the grace.
+        - **Minors.** A lookup asked under a replaced resolv.conf keeps its answer only for a
+          name the new configuration has said nothing of and is not asking (no answer, denial,
+          hold or lookup), and never touches its failures, hold or denial. A failing name no
+          check has asked about, and that has not failed again, for `HOLD_MAX_MS + ANSWER_MS +
+          STALE_MS` (6½ minutes) stops counting against its domain until one does, so deleting a
+          dead zone's devices leaves its domain ranked fairly and the ranking off again; its
+          failures in a row are kept. "Check now"'s early answer leads its bound by a quarter of
+          it at most (250 ms at most), so a 200 ms bound waits 150 ms, not none.
+        - **The test that could not fail.** The hosts-edit scenario ran a pool of four, as many
+          workers as first lanes, with lookups that ended between scans and every zone-A name
+          kept, so nothing of zone A ever waited for a lane. It now runs a pool of eight,
+          silent lookups of 1.5 s against 400 ms between scans, and a zone-A sensor whose answer
+          runs out between its scans; the mutant dropping every name on a hosts edit now fails
+          it.
+        - **Tests.** `name-resolver` 52 (8 new: refreshes held to four, first lookups getting
+          the fifth; a refresh failed fast behind stuck refresh lanes beside a running first
+          lookup; a one-name domain retried before a 20-name domain's three failing; one
+          domain's recently answering name before names that never answered, and again once its
+          answer is past the grace; a failing name let go of after 6½ minutes unasked and counted
+          again when asked; an old configuration's late answer under a denial, a hold, a lookup
+          under way and on a failing name; "Check now" at a 200 ms bound; two updated, the
+          refresh-order case on four lanes and the early note at 300 ms).
+          `name-lookup-outage-scenario` 3 (the warm-zone case new, the hosts-edit case made able
+          to fail). Beside them, unchanged and passing: `resolve-client` 8, `pool-resolve` 7,
+          `pool-lookups` 11, `query-runner` 13, `catalogue-registry` 5, `probe-health-report` 47,
+          `check-pool` 73, `listener-lookup` 4, `listener-restart-scenario` 9,
+          `sensors/name-lookups` 22, `pinned-target` 41, `target-policy-transports` 70 (one case
+          failed once in the run of all of them, with the S4 suite on the VM, and passed three
+          times of three alone; nothing in `sensors` changed in this round),
+          `db-checked-target` 163, `sender` 22, `syslog` 39, `snmp-trap` 31, `flow-sensor` 38,
+          `target-policy-exception` 396, `core/metrics` 37, `core/deploy-scripts` 84,
+          `package-provenance` 29.
+        - **Mutation: 17 of 17 killed**: refreshes on all five shared lanes (by the resolver's
+          tests, and by both scenario cases alone); a refresh at its cap counting a first lane as
+          its blocker; a name's own failure in its share; the first review's share; no tie by
+          the latest answer; the latest answer read from the kept one; an old configuration's
+          answer over a denial, over a hold, during the new lookup, or resetting failures; the
+          first review's guard; a hosts edit dropping every name (by the scenario alone); a
+          failing name counted for good; not counted again when asked; let go after the longest
+          hold alone; the early answer 250 ms before any bound. The denial's mutant survived the
+          first run, since a denial is served before a kept answer: the test now asks once the
+          denial runs out. Restored and rebuilt, and `dist` checked for each.
+        - **Smoke**, the same settings, VM at 0.45 load a CPU with `ms-core` on the database
+          (2 connections, none active): 6 of 6. Addresses, the system resolver and 100 ms cold
+          answered every check, none given up or refused; the warm zone answered all 252, the
+          silent zone's 5 from kept answers, longest gap 41 s; everything silent gave all 50 up,
+          check run p95 2,508 ms, jitter p95 9 ms, none refused; the cold zone answered all 45
+          of the answering zone's, all 18 names kept by 9 s.
+        - **How the full-size arms read now.** Refreshes take at most four lanes, so a silent
+          zone's first refreshes take a quarter longer to run through (50 names at 30 s: about
+          375 s rather than 300 s), and an answering name's refresh, which its domain puts
+          first, waits for one of four lanes rather than five. A silent name whose first refresh
+          is still queued when its grace ends fails at once behind the four stuck refresh lanes.
+          First lookups, and so the cold arms, are as before.
 
 - [ ] **P-427 — a superseded session's close marks its probe lost after the newer one found it**
       · S · P-416, R-05 · Found 2026-10-17 in `P-416`'s review. When a probe reconnects while its
@@ -12195,6 +12502,42 @@ because each is a decision rather than a defect:
 
       **Done when** each upper bound sits where the distance between its two outcomes puts it,
       not half a second over the expected one, and the `db.mysql` overrun is explained.
+
+- [ ] **P-432 — c-ares as a second resolver behind the probe's cache** · M · P-426, A-66 · Filed
+      2026-10-17 by `P-426`. `P-426` kept every answer `getaddrinfo`'s and bounded what it
+      costs: a lookup that cannot be cancelled still holds a libuv lane until the system
+      resolver gives up, so a zone that stops answering holds the shared lanes for that long,
+      and a probe restarted during the outage warms its answering zones only as fast as those
+      lookups end. A resolver off the thread pool with a timeout per query removes both, at the
+      price of re-implementing what glibc does with a name. **The user's decision of 2026-10-17:
+      decided only after `P-426`'s re-measure** (the full-size arms in a quiet window). If it
+      goes ahead, it is a second backend behind the same cache, `probe.nameResolver`
+      defaulting to `system`, and it needs first:
+      - a differential test against `getaddrinfo` in the smoke image, `systemd-resolved`
+        included;
+      - a search that follows `res_search`: a SERVFAIL, and a failed as-is query, move on to the
+        next candidate;
+      - family 0 as one resolution, never two merged;
+      - SERVFAIL, REFUSED and ECONNREFUSED as fast failures that reach the fallback, and
+        `.local` handled;
+      - the `hosts:` line of `nsswitch.conf` read;
+      - RFC 8305's asymmetric delay, and RFC 6724 / `gai.conf` ordering;
+      - the hostname's domain, `search .`, IDN names and `inet_aton` forms;
+      - the channel experiment run again with the fake server in a worker (a long-lived
+        channel's adaptive timeout dropped slow answers; a fresh one took them).
+
+      **Done when** those are met and the full-size arms run again on it, or the decision not to
+      build it is written down with the re-measure's numbers.
+
+- [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
+      P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
+      `checkedTarget` returns before resolving, and the transport's socket resolves the name
+      itself: a `getaddrinfo` on every connection, outside `P-426`'s cache, its lanes and its
+      holds, and outside Probe Health's counts. A probe set to `none` with a silent zone has
+      `A-66`'s collapse back for exactly the names it serves. **Done when** a device by name
+      under `none` is resolved by the probe's resolver and connected to at an address it
+      answered, as under the other policies but without the policy's check, counted on Probe
+      Health, with a test per transport family (socket `lookup`, SNMP, SSH, HTTP).
 
 - [ ] **P-434 — a channel name or unit a build takes away stays on existing sensors** · XS ·
       P-404 · Found 2026-10-17 by `P-404`. The start-up pass writes a declared name and unit only

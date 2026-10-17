@@ -869,6 +869,28 @@ describe(
         assert.match(typo.stdout, /^ {2}ignored MS_\* {4}MS_DATABSE__PASSWORD$/mu, svc);
       }
     });
+
+    it('starts the probe with libuv’s thread pool at 16 unless the operator set it (`P-426`)', () => {
+      // libuv reads UV_THREADPOOL_SIZE once, before any line of the probe runs, so the launcher is
+      // where it is set: 8 lookup lanes, 6 for the probe's resolver and 2 for everything else.
+      // `MS_NODE` is a script that says what it was started with, in place of node.
+      const { result, stage } = packageIn(packagingRepository());
+      assert.equal(result.status, 0, result.stderr);
+      const says = join(freshDir('says'), 'node');
+      write(says, '#!/bin/sh\nprintf "%s\\n" "${UV_THREADPOOL_SIZE:-unset}"\n', 0o755);
+      const started = (svc: string, env: NodeJS.ProcessEnv = {}): string => {
+        const ran = spawnSync(join(stage, 'bin', `ms-${svc}`), [], {
+          encoding: 'utf8',
+          timeout: 60_000,
+          env: { PATH: process.env['PATH'] ?? '', MS_NODE: says, ...env },
+        });
+        assert.equal(ran.status, 0, `${svc}: ${ran.stderr}`);
+        return ran.stdout.trim();
+      };
+      assert.equal(started('probe'), '16');
+      assert.equal(started('probe', { UV_THREADPOOL_SIZE: '32' }), '32', 'the operator’s own');
+      assert.equal(started('core'), 'unset', 'the core resolves nothing on its devices’ behalf');
+    });
   },
 );
 

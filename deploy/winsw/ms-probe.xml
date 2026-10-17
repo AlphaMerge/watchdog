@@ -21,6 +21,9 @@
 
   <env name="NODE_ENV" value="production" />
   <env name="MS_CONFIG_FILE" value="%ProgramData%\MonitoringSystem\probe.json" />
+  <!-- libuv's thread pool, of which name lookups take half (P-426): 8 lanes, at most 6 for the
+       probe's resolver and 2 for everything else, as ms-probe.service sets on Linux. -->
+  <env name="UV_THREADPOOL_SIZE" value="16" />
 
   <!-- Graceful shutdown. WinSW has no SIGTERM: stopparentfirst plus a generous timeout lets
        the process run its drain path before Windows terminates it. Keep stoptimeout above

@@ -1,4 +1,5 @@
 import type { CheckResult, Logger, ProbeQuery, QueryFailure } from '@ms/shared';
+import type { PoolResolver } from '../resolver/protocol.js';
 import { CheckPool, type SubmitOutcome } from '../runner/pool.js';
 import { ProcessRunner, type ProcessRunnerOptions } from '../runner/process-runner.js';
 import type { CheckRequest, LookupCounters, ResultMeta } from '../runner/types.js';
@@ -45,6 +46,12 @@ export interface QueryRunnerOptions {
   /** The registry the pool loads. The tests point it at fixtures; production takes the default. */
   registryModule?: string;
   /**
+   * The probe's resolver (`P-426`), asked **fresh**: "Check now" is how an operator sees that a
+   * DNS fix has taken, so its lookups ask the resolver rather than its cache, and use a kept answer
+   * only when the resolver does not answer, saying so in the check's message.
+   */
+  resolver?: PoolResolver;
+  /**
    * How long a check has to honour its abort before its worker is terminated: the operator's
    * `checkAbortGraceMs`, as the scheduled pool takes it (`P-242`). The pool's default otherwise.
    */
@@ -90,6 +97,7 @@ export class QueryRunner {
       queueMaxLength: options.queueMaxLength ?? 8,
       ...(options.registryModule === undefined ? {} : { registryModule: options.registryModule }),
       ...(options.abortGraceMs === undefined ? {} : { abortGraceMs: options.abortGraceMs }),
+      ...(options.resolver === undefined ? {} : { resolver: options.resolver, freshLookups: true }),
       onResult: (result, meta) => {
         this.#deliver(result, meta);
       },

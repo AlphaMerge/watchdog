@@ -75,6 +75,7 @@ export type {
   PinRequest,
   ResolvedAddress,
   ResolveHost,
+  ResolveOptions,
   WithheldPhase,
 } from './support/pinned-target.js';
 export {
@@ -90,7 +91,21 @@ export { snmpPool } from './support/snmp/pool.js';
 export type { SnmpPoolStats } from './support/snmp/pool.js';
 // And what this thread's name lookups are doing (`A-66`), for Probe Health: counted where every
 // check that resolves a name to check it waits for the answer.
-export { LookupCount, nameLookups } from './support/lookups.js';
+export {
+  countedElsewhere,
+  LookupCount,
+  nameLookups,
+  notAnswered,
+  probeFailed,
+  RESOLVER_BUSY,
+  RESOLVER_FAULT,
+  RESOLVER_FULL,
+  RESOLVER_HELD,
+  RESOLVER_LATE,
+  RESOLVER_STUCK,
+  RESOLVER_TOO_MANY,
+  tooManyAddresses,
+} from './support/lookups.js';
 export type { LookupCounters } from './support/lookups.js';
 export { sshPool } from './support/ssh/pool.js';
 export type { SshPoolStats } from './support/ssh/pool.js';
@@ -122,6 +137,7 @@ export {
 import type { BuildProfile } from '@ms/shared';
 import { SensorCatalogue } from './catalogue.js';
 import type { SensorType } from './contract.js';
+import type { ResolveHost } from './support/pinned-target.js';
 import { icmpPing } from './types/icmp-ping.js';
 import { dnsBlocklist } from './types/dns-blocklist.js';
 import { dnsRecord } from './types/dns-record.js';
@@ -280,8 +296,12 @@ export function withheldReason(profile: BuildProfile, id: string): string | unde
 
 export function standardCatalogue(
   types: readonly SensorType[] = BUILT_IN_SENSOR_TYPES,
+  /** How a check resolves a name it checks: the probe's resolver in a pool worker (`P-426`). */
+  options: { readonly resolve?: ResolveHost } = {},
 ): SensorCatalogue {
-  const catalogue = new SensorCatalogue();
+  const catalogue = new SensorCatalogue(
+    options.resolve === undefined ? {} : { resolve: options.resolve },
+  );
   for (const type of types) catalogue.register(type);
   return catalogue.seal();
 }

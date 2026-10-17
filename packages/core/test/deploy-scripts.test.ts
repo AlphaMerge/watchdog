@@ -1100,6 +1100,45 @@ describe(
   },
 );
 
+describe('libuv’s thread pool for the probe’s name lookups (`P-426`)', () => {
+  const read = (...path: string[]): string =>
+    readFileSync(join(repoRoot, 'deploy', ...path), 'utf8');
+
+  it('is 16 in the probe’s unit and its Windows service, and left alone for the core', () => {
+    assert.match(read('systemd', 'ms-probe.service'), /^Environment=UV_THREADPOOL_SIZE=16$/m);
+    assert.doesNotMatch(read('systemd', 'ms-core.service'), /UV_THREADPOOL_SIZE/);
+    assert.match(
+      read('winsw', 'ms-probe.xml'),
+      /^ {2}<env name="UV_THREADPOOL_SIZE" value="16" \/>$/m,
+    );
+  });
+
+  it('is 16 where a developer’s probe starts: the ms-server supervisor, dev-e2e and the README', () => {
+    // `P-426`'s review: ms-server is the instance kept to watch landed code, and at libuv's 4 its
+    // resolver ran 3 lanes on 2 of libuv's, reading stuck where a shipped probe would not.
+    const script = (...path: string[]): string => readFileSync(join(repoRoot, ...path), 'utf8');
+    const probeStart =
+      /^\s*UV_THREADPOOL_SIZE="\$\{UV_THREADPOOL_SIZE:-16\}" \\\n\s*node \S*packages\/probe\/dist\/src\/main\.js/mu;
+    assert.match(script('scripts', 'lib', 'ms-server-supervisor.sh'), probeStart);
+    assert.match(script('scripts', 'dev-e2e.sh'), probeStart);
+    assert.match(
+      script('README.md'),
+      /^scripts\/dev\.sh "UV_THREADPOOL_SIZE=16 node packages\/probe\/dist\/src\/main\.js/mu,
+    );
+    for (const path of [
+      ['scripts', 'lib', 'ms-server-supervisor.sh'],
+      ['scripts', 'dev-e2e.sh'],
+    ]) {
+      const text = script(...path);
+      assert.doesNotMatch(
+        text,
+        /UV_THREADPOOL_SIZE\S* \\?\n?\s*node \S*packages\/core\//u,
+        'not the core’s',
+      );
+    }
+  });
+});
+
 describe('what starts a crashed service again, and who ships it (`H-23`)', () => {
   const unit = (name: string): string =>
     readFileSync(join(repoRoot, 'deploy', 'systemd', name), 'utf8');

@@ -3,6 +3,7 @@ import {
   sensorTypesFor,
   standardCatalogue,
   withheldReason,
+  type ResolveHost,
   type SensorCatalogue,
 } from '@ms/sensors';
 import type { BuildProfile } from '@ms/shared';
@@ -15,8 +16,12 @@ import { BUILD } from './version.js';
  * executes checks and the main thread that decides which types a listener feeds — so the two
  * cannot disagree about what this build contains.
  */
-export function probeCatalogue(profile: BuildProfile = BUILD.profile): SensorCatalogue {
-  return standardCatalogue(sensorTypesFor(profile));
+export function probeCatalogue(
+  profile: BuildProfile = BUILD.profile,
+  /** How a check resolves a name it checks: a pool worker's client of the probe's resolver (`P-426`). */
+  options: { readonly resolve?: ResolveHost } = {},
+): SensorCatalogue {
+  return standardCatalogue(sensorTypesFor(profile), options);
 }
 
 /**

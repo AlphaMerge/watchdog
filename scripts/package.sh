@@ -239,12 +239,23 @@ for svc in "${services[@]}"; do
   # and a hand-run `ms-core config check` or `migrate status` did not, so it read the schema's
   # defaults: "valid" for a core.json the restart then refused, and a status taken of a database
   # that was not this installation's. `--config` still wins, as it does over the variable.
+  #
+  # **The probe's libuv thread pool at 16, unless the operator set it** (`P-426`): 8 lanes for name
+  # lookups, of which the probe's resolver takes at most 6, so a resolver that stops answering
+  # cannot hold the lanes the probe's link to the core resolves on. libuv reads it once, when the
+  # pool first starts, which is before any line of the probe could set it. The unit sets it too,
+  # for a probe started without this launcher.
+  threadpool=''
+  if [ "${svc}" = probe ]; then
+    threadpool='export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-16}"'
+  fi
   cat > "${stage}/bin/ms-${svc}" <<LAUNCHER
 #!/usr/bin/env bash
 set -euo pipefail
 here="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 export MS_BUILD_VERSION="${version}"
 export MS_CONFIG_FILE="\${MS_CONFIG_FILE:-/etc/ms/${svc}.json}"
+${threadpool}
 exec "\${MS_NODE:-node}" "\${here}/../app/${svc}/dist/src/main.js" "\$@"
 LAUNCHER
   chmod +x "${stage}/bin/ms-${svc}"
