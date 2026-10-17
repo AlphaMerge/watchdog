@@ -87,8 +87,8 @@ export interface WithheldReevaluator {
   ): Promise<number>;
   /**
    * Drops what is cached about these sensors, so the next result is decided from the stored row
-   * with the live facts as they are now (`A-41c`). Absent, `release` is only right for a caller
-   * whose cache holds nothing.
+   * (`A-41c`). Since `P-412` the state service caches no live fact, so `release` is right without
+   * it; it is kept as a re-read of the row.
    */
   forgetSensors?(sensorIds: readonly number[]): void;
 }
@@ -384,8 +384,9 @@ export class SensorVouching implements VoucherCheck {
    *
    * Re-decided here, a sensor would first return to whatever it read before it was withheld. One
    * that was Down then went Unknown, Down and Up in one batch: a transition and an alarm for an
-   * outage nobody saw at that moment. So only the live fact moves, in memory, and what is cached
-   * about the sensor is dropped so that the result is decided against the fact as it is now.
+   * outage nobody saw at that moment. So only the live fact moves, in memory, which the state
+   * service reads as it decides the result (`P-412`); what is cached about the sensor is dropped
+   * as well, so the result is decided from the stored row.
    *
    * Nothing is written, so nothing here can fail. The caller says what became of the result:
    * `undo` when it was not stored, `evaluated` when it was.

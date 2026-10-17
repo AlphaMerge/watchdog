@@ -38,8 +38,9 @@ export interface NotStartedOptions {
   readonly logger: Logger;
   /**
    * The same two a lost probe moves its sensors with, so the three are one path. Its
-   * `forgetSensors` too: a release lets a sensor go without re-deciding it, and what was cached
-   * while it was held says its probe cannot run it (`P-409`).
+   * `forgetSensors` too: a release lets a sensor go without re-deciding it, and its next result
+   * is decided from the stored row (`P-409`), though since `P-412` nothing cached says its probe
+   * cannot run it.
    */
   readonly states: ReachabilityStates;
   readonly dependencies: DependencyRecomputer;
@@ -347,7 +348,7 @@ export class NotStarted {
     // release). A started result older than the hold, decided while the sensor was held, left it
     // cached with the probe unable to run it, and the result letting it go was decided from that:
     // Unknown again, and every result after it, a real Down included, until something re-decided
-    // the sensor.
+    // the sensor. Since `P-412` nothing cached carries the hold, so this is a re-read of the row.
     this.#states.forgetSensors([...letGo.keys()]);
     return {
       released: letGo.size,

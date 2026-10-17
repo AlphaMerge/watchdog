@@ -11250,7 +11250,7 @@ because each is a decision rather than a defect:
       person's state reached by letting go of a hold says the person's words or the result's
       (the rule to be decided), never the hold's, with a test for each hold.
 
-- [ ] **P-412 — a decide that straddles a move can cache a hold's overlay after the move let it
+- [x] **P-412 — a decide that straddles a move can cache a hold's overlay after the move let it
       go** · S · P-253 · Found 2026-10-17 in `P-409`'s review. `#warm` lays the live overlay over
       a runtime it loads and only remembers it after `Promise.all`, which also waits on the
       policy read on its own connection. A move whose transaction lets a held sensor go
@@ -11261,6 +11261,45 @@ because each is a decision rather than a defect:
       is narrow. **Done when** a runtime loaded under one overlay is not remembered after the
       overlay has moved (a generation, as `#policyGeneration` is), with a test that holds the
       load open across a release.
+
+      **P-412 outcome. The state service's cache holds what the row says, and the live facts are
+      laid over it as each batch is decided.**
+      - **Decision, taken by the orchestrator** and named in the push question: **not a
+        generation.** A generation can only notice the invalidations that bump it, and the
+        overlay moves in five places, each of which has to remember to drop the entry. Instead
+        nothing in the cache carries the overlay at all: `#warm` caches a load as
+        `loadRuntimes` returns it (`probeReachable` and `vouchedFor` true, as the row restores
+        them), `decide` lays `#withLiveFacts` over the batch's cached runtimes before it folds
+        the results, and caches what it decided `asStored`, with those two facts true again.
+        So no runtime is ever remembered under an overlay, moved or not.
+      - **What else it closes.** The same overlay was cached by a read that straddled a
+        rollback (`P-253`, which drops it at the sweep that settles it) and by a result decided
+        while the sensor was held (`P-409`'s and `A-41c`'s release forgets). Those forgets stay:
+        each now costs one query and changes no answer about a hold, and their comments say so.
+        `P-253`'s owing is still what re-decides a sensor that sends no result.
+      - **What it does not close.** A load that reads a row before another transaction's
+        re-decision of it commits still caches the old row; that is the read-committed family
+        of `P-414`, not an overlay.
+      - **Cost.** One copy of the batch's cache entries into a map per decide; the overlay over it
+        returns at once while nothing is held, the normal state of an installation, and is a
+        second pass over the batch while something is.
+      - **Docs.** `state-machine.md`'s `probeReachable` and `vouchedFor` rows: not cached.
+      - **Tests.** `state-cache-overlay.test.ts`, against PostgreSQL, for each of the five holds
+        (a lost probe, a frozen clock, a check its probe could not start, a factory's unreached
+        inputs, a withholding): a load held open across a release, released only once everything
+        chained on the load has run under the hold, is decided and cached under the facts as
+        they are when it is decided; a result decided while held is cached as its row has it,
+        with the decision's cause and time, and both letting go and holding again over a warm
+        cache are read live.
+      - **Review.** Five findings over four things, fixed: the straddling test released one
+        microtask before the old code laid its overlay, so it passed on `origin/main` (a turn of
+        the event loop before the release, and the mutant below); the forget sites' comments
+        still said the cache carried the hold; the cached decision's state matched a fresh row's
+        whatever was cached (its cause and time now asserted); the cost line.
+      - **Mutants** 7/7 killed: `origin/main`'s whole service; `#warm` laying the overlay on its
+        load (all five straddling cases, on their own); `decide` reading the cache without the
+        live facts; caching what it decided with the overlay; `asStored` resetting only one of
+        the two facts, either way, or only when both are false.
 
 - [ ] **P-413 — a hold for a sensor's probe that arrives after a not-started one does not take
       its words** · S · P-410 · Found 2026-10-17 in `P-410`. `P-410` writes a check's words only

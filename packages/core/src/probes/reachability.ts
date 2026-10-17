@@ -53,8 +53,9 @@ export interface StateReevaluator {
 export interface ReachabilityStates extends StateReevaluator {
   /**
    * Drop what is cached about these sensors, so their next result is decided from the stored row
-   * and the overlay as it is then (`P-253`): what a result decided against an overlay that a
-   * rollback has since put back would otherwise carry on deciding from.
+   * (`P-253`). Since `P-412` a result decided against an overlay a rollback has since put back is
+   * cached as its row has it, and the next result reads the overlay live; what a rollback still
+   * needs is the owing (`retryGivenUp`), for a sensor that sends no result.
    */
   forgetSensors(sensorIds: readonly number[]): void;
 }
@@ -397,9 +398,9 @@ export class ProbeReachability {
 
   /**
    * Clears the owings a committed re-decision read, and only those (`P-253`), and drops what is
-   * cached about them. A read that straddled a rollback — its rows arrived before the undo and
-   * it cached them after — holds the overlay the rollback put back, and a re-decision that moves
-   * nothing does not drop it; this does, and the next result is decided from the stored row.
+   * cached about them, so the next result is decided from the stored row. A read that straddled a
+   * rollback — its rows arrived before the undo and it cached them after — held the overlay the
+   * rollback put back until `P-412`, which caches no overlay.
    */
   #settle(owing: readonly (readonly [number, number])[]): void {
     for (const [id, owingNumber] of owing) {

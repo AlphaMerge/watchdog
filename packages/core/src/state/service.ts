@@ -266,6 +266,10 @@ export class SensorStateService {
   readonly #notStartedSensors: (() => HeldWordsLookup) | undefined;
   readonly #unreachedFactories: (() => ReadonlySet<number>) | undefined;
   readonly #withheldSensors: (() => ReadonlyMap<number, HeldWords>) | undefined;
+  /**
+   * What each sensor's row says, as the last decision left it: never the live facts, which
+   * `decide` lays over it as it decides (`P-412`).
+   */
   readonly #cache = new Map<number, SensorRuntime>();
   /**
    * The effective failure policy per sensor.
@@ -342,9 +346,10 @@ export class SensorStateService {
   }
 
   /**
-   * Drops what is cached about these sensors (`A-41c`). Their next result is decided from the
-   * stored row, with the live facts as they are when it arrives: what a sensor released from a
-   * hold needs, since the cached copy still says it is withheld.
+   * Drops what is cached about these sensors (`A-41c`), so their next result is decided from the
+   * stored row. Since `P-412` nothing cached carries a hold — the live facts are laid on as each
+   * batch is decided — so a release is decided against the facts as they are without it; the
+   * callers that let a hold go keep it as a re-read of the row.
    */
   forgetSensors(sensorIds: readonly number[]): void {
     for (const sensorId of sensorIds) this.#cache.delete(sensorId);
@@ -375,12 +380,23 @@ export class SensorStateService {
     }
 
     const resolved = await this.#warm([...bySensor.keys()]);
+    // **The live facts are laid over what is cached as the batch is decided, never cached with
+    // it** (`P-412`). A load that straddled a release, a read that straddled a rollback (`P-253`)
+    // and a result decided while the sensor was held (`P-409`) each cached the overlay of their
+    // moment, and every result after it was decided from that, Unknown for a probe that was
+    // running it, until something dropped the entry.
+    const cached = new Map<number, SensorRuntime>();
+    for (const sensorId of bySensor.keys()) {
+      const one = this.#cache.get(sensorId);
+      if (one !== undefined) cached.set(sensorId, one);
+    }
+    const live = this.#withLiveFacts(cached);
 
     const transitions: StateTransition[] = [];
     const runtimes: RuntimeWrite[] = [];
 
     for (const [sensorId, batch] of bySensor) {
-      const known = this.#cache.get(sensorId);
+      const known = live.get(sensorId);
       if (known === undefined) {
         // Not a sensor any more, or never was. Counted, never silently ignored.
         this.#resultsUnknownSensor += batch.length;
@@ -474,7 +490,7 @@ export class SensorStateService {
       }
 
       if (!moved) continue;
-      this.#remember(sensorId, runtime);
+      this.#remember(sensorId, asStored(runtime));
       runtimes.push({
         sensorId,
         at: runtime.facts.lastResultAt ?? runtime.since,
@@ -806,13 +822,14 @@ export class SensorStateService {
 
   /** Loads what is not already cached. One query each for the whole batch, or none at all. */
   /**
-   * What was loaded, with the live facts laid over it: the probe (`R-05`) and the voucher
-   * (`A-29`).
+   * What was loaded or cached, with the live facts laid over it: the probe (`R-05`) and the
+   * voucher (`A-29`).
    *
    * `loadRuntimes` restores both as true because neither has a column — one is a connection and
    * the other a question about grants asked every sweep, not rows. This is the one place that
    * knows better, so every path that decides a state gets the same answer and none of them has
-   * to remember to ask.
+   * to remember to ask. Laid on as each decision is made, and never kept: the cache holds what
+   * the row says (`P-412`).
    */
   #withLiveFacts(runtimes: Map<number, SensorRuntime>): Map<number, SensorRuntime> {
     const unreachable = this.#unreachableSensors?.();
@@ -945,9 +962,7 @@ export class SensorStateService {
     const [loaded, resolved] = await Promise.all([
       runtimes.length === 0
         ? new Map<number, SensorRuntime>()
-        : this.#db
-            .tx((q: Queryable) => loadRuntimes(q, runtimes))
-            .then((loaded) => this.#withLiveFacts(loaded)),
+        : this.#db.tx((q: Queryable) => loadRuntimes(q, runtimes)),
       policies.length === 0 || this.#settings === undefined
         ? new Map<number, { value: unknown }>()
         : this.#settings.resolveForObjects(policies, SCAN_RETRY_WARNINGS.key),
@@ -987,6 +1002,15 @@ export class SensorStateService {
     );
     return this.#fallback;
   }
+}
+
+/**
+ * A runtime as its row has it (`P-412`): the facts that have no column restored as `loadRuntimes`
+ * restores them, so what is cached never carries the live facts a decision was made under.
+ */
+function asStored(runtime: SensorRuntime): SensorRuntime {
+  if (runtime.facts.probeReachable && runtime.facts.vouchedFor) return runtime;
+  return { ...runtime, facts: { ...runtime.facts, probeReachable: true, vouchedFor: true } };
 }
 
 /**
