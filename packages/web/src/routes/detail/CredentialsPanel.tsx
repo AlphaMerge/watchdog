@@ -733,6 +733,7 @@ function CredentialForm({
   const heading = useRef<HTMLHeadingElement>(null);
   const confirmation = useRef<HTMLDivElement>(null);
   const submit = useRef<HTMLButtonElement>(null);
+  const form = useRef<HTMLFormElement>(null);
   useEffect(() => {
     heading.current?.focus();
   }, []);
@@ -741,8 +742,13 @@ function CredentialForm({
   }, [pending]);
   useEffect(() => {
     if (!backToSubmit || pending !== null) return;
-    submit.current?.focus();
     setBackToSubmit(false);
+    // Only focus the page dropped, or focus still in the form: an operator who moved on while
+    // the request was out is not pulled back to it.
+    const at = document.activeElement;
+    if (at === null || at === document.body || (form.current?.contains(at) ?? false)) {
+      submit.current?.focus();
+    }
   }, [backToSubmit, pending]);
 
   const problems = useMemo(() => allProblems(fields, values, readAt, fieldsOf), [fields, values]);
@@ -808,6 +814,7 @@ function CredentialForm({
 
   return (
     <form
+      ref={form}
       aria-labelledby={headingId}
       className="space-y-4 border border-border p-4"
       onSubmit={(event) => {

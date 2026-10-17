@@ -27549,6 +27549,13 @@ because each is a decision rather than a defect:
         paragraph says it cannot be empty and the box is `aria-invalid`; typed again, it is a
         target. **Mutations** (restored byte for byte), each failing: focus owed only after a
         confirmation 2; `U-41`'s cleared entry undone 1.
+      - **Review** (2026-10-17, two-lens read-only). `refused` moved focus to *Save changes*
+        wherever focus was, so an operator who tabbed or clicked out of the form while a slow check
+        was out was pulled back, and their next Enter sent another check. Focus now moves only
+        from the body, from nowhere, or from inside the form, as `SchemaForm`, `TreeView` and
+        `HeldListFailure` already do. Test (`credentials-panel.test.tsx`, 52): focus moved to a
+        control outside the form while the check is out stays there after the refusal. Mutation:
+        the guard removed 1.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
@@ -30587,6 +30594,13 @@ because each is a decision rather than a defect:
         the clock not stopped after a 404 1; `useClock` ignoring the stop 1; the cue after two
         reads 1; the cue never quiet 1; the count not cleared by a good read 1; the minutes from
         elapsed time alone 1.
+      - **Review** (2026-10-17). The stale-cue test faked the minutes' timer and not
+        `performance.now()`, so the elapsed term was always 0 and every count it read was the
+        missed reads: the minutes from monotonic time, which the outcome states, were untested.
+        A new test moves `performance.now()` with the faked minutes, holds a read unanswered
+        eleven minutes later, and reads 14 with `aria-live="off"`. Mutation: the minutes from the
+        missed reads alone 1. The same review found the *This link does not work* page shown for a
+        first read that failed with anything but a 404; that is older than `U-80`, and is `U-85`.
       - **Not seen in a browser or a screen reader.**
 - [x] **U-81 — the template-delete focus tests fail about one run in eight** · S · U-64, U-68 ·
       Found 2026-10-09 in round 21's suite. In `templates-refused.test.tsx`, "puts it on Keep
@@ -30696,6 +30710,16 @@ because each is a decision rather than a defect:
       and if it does, the series' failure goes through `useKeptFailure` (filed by sensor and
       range; *Try again* and a range the operator picks set it aside), with a test.
       Recommended: yes — it is the same kind of read, beside the same list.
+- [ ] **U-85 — a shared map whose first read fails says the link may have been revoked** · XS ·
+      U-80 · Found 2026-10-17 by the S3 review. `SharedMapView` sets `broken` for any first read
+      that failed (a 503 while the core restarts, a 500, a refused connection), not only a 404,
+      and `broken` renders *This link does not work* with "It may have expired, or been revoked
+      … Ask them for a new one." A wall display that opens a working link during a core restart
+      tells whoever reads it to throw the link away, for the whole outage (`U-72` keeps the
+      failure through each minute's read, as decided). Older than `U-80`: the base did the same
+      for all but the moment each read was out. **Done when** only a 404 (or the gone answer)
+      earns that heading, any other first-read failure says the map could not be read and will
+      be asked for again, and a test reads both.
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.

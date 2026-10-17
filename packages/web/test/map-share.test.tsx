@@ -699,6 +699,52 @@ describe('the page a stranger opens', () => {
         observer.disconnect();
       }
     });
+
+    /**
+     * The minutes are monotonic time since the map arrived, not the reads missed: a read held
+     * unanswered (a hung core, a page put in the background) adds no miss, and the age still grows.
+     */
+    it('counts the minutes since the map arrived when they are more than the reads missed', async () => {
+      let skipped = 0;
+      const real = performance.now.bind(performance);
+      vi.spyOn(performance, 'now').mockImplementation(() => real() + skipped);
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      const region = cue();
+      for (const n of [1, 2, 3]) {
+        skipped += 60_000;
+        await minute({
+          status: 500,
+          body: {
+            error: {
+              code: 'INTERNAL',
+              message: `gone away ${String(n)}`,
+              correlationId: `req-${String(n)}`,
+            },
+          },
+        });
+        await waitFor(() => {
+          expect(region.previousElementSibling?.textContent).toContain(`req-${String(n)}`);
+        });
+      }
+      await waitFor(() => {
+        expect(region.textContent).toBe(STALE(3));
+      });
+      // Ten minutes pass with nothing heard, then the next read is asked and held.
+      skipped += 11 * 60_000;
+      const before = reads;
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => {
+        expect(reads).toBe(before + 1);
+      });
+      await waitFor(() => {
+        expect(region.textContent).toBe(STALE(14));
+      });
+      expect(region.getAttribute('aria-live')).toBe('off');
+    });
   });
 });
 

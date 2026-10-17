@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -700,6 +700,34 @@ describe('the credentials tab', () => {
         );
       },
     );
+
+    it('leaves focus where the operator moved it while the check was out (U-23)', async () => {
+      const { calls, form } = await editSnmp({ preview: REFUSED });
+      fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
+      const entry = within(form).getByLabelText('Allowed targets 2');
+      fireEvent.change(entry, { target: { value: '10.9.0.0/16' } });
+      entry.focus();
+      fireEvent.submit(form);
+      // Before the refusal arrives, the operator goes on to something outside the form.
+      const elsewhere = document.createElement('button');
+      document.body.append(elsewhere);
+      try {
+        // The field it leaves hears the blur.
+        act(() => {
+          elsewhere.focus();
+        });
+
+        await alertSaying('needs write on that probe');
+        expect(writes(calls)).toHaveLength(1);
+        // Past the effect that would have moved it.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(document.activeElement).toBe(elsewhere);
+      } finally {
+        elsewhere.remove();
+      }
+    });
 
     // `U-23`: an allowed target could not be emptied by deleting its last character; the
     // character came back under the caret. Fixed for every list of strings by `U-41`; held here
