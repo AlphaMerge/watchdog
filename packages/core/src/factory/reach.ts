@@ -1,4 +1,5 @@
 import type { StagedSet } from '../objects/vouching.js';
+import { heldIn, type HeldWordsLookup } from '../state/runtime.js';
 
 /** The Sensor Factory's type id, the one sensor type the core holds for its inputs' probe. */
 export const FACTORY_SENSOR_TYPE = 'core.factory';
@@ -7,6 +8,15 @@ export const FACTORY_SENSOR_TYPE = 'core.factory';
 export const UNREACHED_MESSAGE =
   'Not evaluated: every channel it computes reads a sensor on a probe that is lost, or whose ' +
   'clock is behind. It is evaluated again when those sensors report.';
+
+/**
+ * What a factory let go says until its next result (`R-11`, `P-413`), which the same sweep
+ * computes. It used to say `UNREACHED_MESSAGE` from the moment the hold let go of it: the words
+ * of a hold that no longer held it.
+ */
+export const REACHED_MESSAGE =
+  'What it computes is being measured again; until its next result it stands where it stood ' +
+  'before it was held.';
 
 /**
  * The Sensor Factories held Unknown, cause `probe`, because every channel they compute gapped on
@@ -35,10 +45,21 @@ export const UNREACHED_MESSAGE =
 export class FactoryReach {
   #unreached: ReadonlySet<number> = new Set();
   #inputs: ReadonlyMap<number, readonly number[]> = new Map();
+  /** `#unreached` as it is when asked, each with `UNREACHED_MESSAGE` (`P-413`). */
+  readonly #words = heldIn(() => this.#unreached, { message: UNREACHED_MESSAGE, failure: null });
 
   /** The factories held Unknown for their inputs' probe right now. */
   unreached(): ReadonlySet<number> {
     return this.#unreached;
+  }
+
+  /**
+   * The held factories, each with what it says while held (`P-413`): what the state service lays
+   * over the facts, and says, unless a lost link, a silence or a frozen clock holds it too. A
+   * view, so a set a sweep replaces is followed.
+   */
+  heldWords(): HeldWordsLookup {
+    return this.#words;
   }
 
   /**
@@ -65,7 +86,8 @@ export class FactoryReach {
       left,
       holds: (sensorId) => this.#unreached.has(sensorId),
       cause: 'probe',
-      message: UNREACHED_MESSAGE,
+      // A factory it holds says `heldWords`' (`P-413`); these are what one it lets go says.
+      message: REACHED_MESSAGE,
       undo: () => {
         // Put back, so the next sweep sees the same crossings and makes the same write (`A-45`).
         this.#unreached = before;

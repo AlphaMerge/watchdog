@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { CheckResult } from '@ms/shared';
-import { FactoryReach, UNREACHED_MESSAGE } from '../src/factory/reach.js';
+import { FactoryReach, REACHED_MESSAGE } from '../src/factory/reach.js';
 import { FactoryService } from '../src/factory/service.js';
 import { FactorySweep } from '../src/factory/sweep.js';
 import type { Database } from '../src/db/pool.js';
@@ -686,7 +686,8 @@ describe('the sets a factory sweep settles together (`M-26`, `M-28`)', () => {
       db: { tx: (fn: (q: never) => Promise<unknown>) => fn({} as never) } as never,
       states: {
         reevaluate: (_q, sensors, _at, cause) => {
-          const words = cause.message === UNREACHED_MESSAGE ? 'probe words' : 'no words';
+          // The words the probe set lets a factory go in; what it holds says its own (`P-413`).
+          const words = cause.message === REACHED_MESSAGE ? 'probe words' : 'no words';
           calls.push(`reevaluate ${ids(sensors)} ${cause.sources?.join(',') ?? ''} ${words}`);
           return fails
             ? Promise.reject(new Error('could not serialize'))

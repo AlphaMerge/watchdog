@@ -114,17 +114,22 @@ export async function buildHarness(
      * (`P-407`); `SensorVouching.heldWords`.
      */
     withheldSensors?: () => ReadonlyMap<number, HeldWords>;
-    /** A lost probe's sensors (`R-05`); `ProbeReachability.unreachableSensors`. */
-    unreachableSensors?: () => ReadonlySet<number>;
-    /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.frozenSensors`. */
-    clockFrozenSensors?: () => ReadonlySet<number>;
+    /**
+     * The five holds of a sensor for its probe, each with its words (`P-413`). A lost link's
+     * sensors (`R-05`); `ProbeReachability.heldWords('link')`.
+     */
+    lostSensors?: () => HeldWordsLookup;
+    /** A silent probe's sensors (`P-74`); `ProbeReachability.heldWords('silence')`. */
+    silentSensors?: () => HeldWordsLookup;
+    /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.heldWords`. */
+    clockFrozenSensors?: () => HeldWordsLookup;
+    /** The factories held for their inputs' probe (`M-26`); `FactoryReach.heldWords`. */
+    unreachedFactories?: () => HeldWordsLookup;
     /**
      * The sensors whose checks their probe could not start (`P-265`), with their probe's words
      * (`P-410`); `NotStarted.heldWords`.
      */
     notStartedSensors?: () => HeldWordsLookup;
-    /** The factories held for their inputs' probe (`M-26`); `FactoryReach.unreached`. */
-    unreachedFactories?: () => ReadonlySet<number>;
     /** How long a change waits for the tree lock (`P-229`); 30 s unless a test is about it. */
     treeLockWaitMs?: number;
     /** The object service's logger, for a test about what it says (`P-311`); silent otherwise. */
@@ -155,9 +160,8 @@ export async function buildHarness(
           ...(options.withheldSensors === undefined
             ? {}
             : { withheldSensors: options.withheldSensors }),
-          ...(options.unreachableSensors === undefined
-            ? {}
-            : { unreachableSensors: options.unreachableSensors }),
+          ...(options.lostSensors === undefined ? {} : { lostSensors: options.lostSensors }),
+          ...(options.silentSensors === undefined ? {} : { silentSensors: options.silentSensors }),
           ...(options.clockFrozenSensors === undefined
             ? {}
             : { clockFrozenSensors: options.clockFrozenSensors }),

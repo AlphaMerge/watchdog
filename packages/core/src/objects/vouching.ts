@@ -70,7 +70,10 @@ export interface StagedSet {
   readonly left: readonly number[];
   /** Whether it holds this sensor now. */
   holds(sensorId: number): boolean;
-  /** The cause it decides, and the words for a sensor it decides. */
+  /**
+   * The cause it decides, and the words for a sensor it lets go. A sensor it holds says the words
+   * the state service reads from the hold itself, whoever re-decides it (`P-413`).
+   */
   readonly cause: SensorStateCause;
   readonly message: string;
   /** Puts the set back, for a write that did not land. */
@@ -529,7 +532,8 @@ export class SensorVouching implements VoucherCheck {
         // each dependent on the outage the master can no longer speak for.
         await this.#dependencies?.holdWithheld(q, entered);
         // `access` is the cause this can speak for, and the words come from the set. The set
-        // alongside speaks for its own.
+        // alongside speaks for its own cause, in the words of what it lets go: what it holds says
+        // the hold's own (`P-413`).
         const count = await this.#states?.reevaluate(q, changed, at, {
           message: alongside?.message ?? '',
           sources: alongside === undefined ? ['access'] : ['access', alongside.cause],

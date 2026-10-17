@@ -11448,7 +11448,7 @@ because each is a decision rather than a defect:
         live facts; caching what it decided with the overlay; `asStored` resetting only one of
         the two facts, either way, or only when both are false.
 
-- [ ] **P-413 — a hold for a sensor's probe that arrives after a not-started one does not take
+- [x] **P-413 — a hold for a sensor's probe that arrives after a not-started one does not take
       its words** · S · P-410 · Found 2026-10-17 in `P-410`. `P-410` writes a check's words only
       while no lost probe, frozen clock or held factory also holds the sensor, so those stand
       over them; but each of those writes its words once, on the re-decision that holds the
@@ -11458,6 +11458,83 @@ because each is a decision rather than a defect:
       first-come among themselves. **Done when** each hold publishes its words per sensor and
       `#heldWords` for `probe` resolves them in the episode index's order (lost link, silence,
       frozen, factory, not started), with a test per pair in both orders.
+
+      **P-413 outcome. Each hold for a sensor's probe says its own words, and the sensor says the
+      first in the episode index's order that holds it.**
+      - **Decisions, taken here** and named for the push question:
+        1. **Five holds, each with its words, resolved in one place.** `ProbeReachability`
+           (`heldWords('link')`, `heldWords('silence')`), `ClockFreeze`, `FactoryReach` and
+           `NotStarted` each publish a `HeldWordsLookup`, and the state service takes them as
+           five options (`lostSensors`, `silentSensors`, `clockFrozenSensors`,
+           `unreachedFactories`, `notStartedSensors`) and keeps their order in one list,
+           `#probeHolds`. That list both lays `probeReachable: false` (`#heldFacts`) and gives
+           the words (`#heldWords`, the first that holds the sensor). Not a walk in each owner and
+           not a flag on `reevaluate`'s cause. The three holds whose words never change publish a
+           view over their live set (`heldIn` in `state/runtime.ts`). `unreachableSensors` is gone
+           as an option, so `main.ts` and every test that wired it did not compile until rewired.
+        2. **A lost link and a silence are two holds**, though one owner's. One probe is held for
+           one reason, first-come (`P-74`), so they meet on a sensor only when two probes hold it
+           across a move; kept apart so the order is the state service's. A silent probe whose
+           link then drops keeps its silence and its words until it reconnects (`P-430`).
+        3. **The hold's words, never its caller's.** Every re-decision of a held sensor says the
+           words of the hold that stands; a caller's message is said only by a sensor it lets go.
+           So a sensor moved under a lost probe says the probe stopped answering, where it said
+           "the probe carrying this sensor changed", and a factory the probe set lets go says
+           `REACHED_MESSAGE`, words of its own, where it said the hold's `UNREACHED_MESSAGE` until
+           its result later in the same sweep. `StagedSet.message` is now a release's words.
+      - **What it covers.** A sensor Unknown/probe for a check not started that a lost link or a
+        silence then holds (the same-state branch rewords it, and their end gives the check's
+        words back); a sensor `NotStarted.resync` frees onto a lost probe, in `main.ts`'s sink
+        order; a sensor a move takes between a probe whose link is lost and one that is silent,
+        either way (`ProbeReachability.resync` re-decides it, though it stays held); a result
+        decided while a hold's owner has not yet re-decided the sensor, alone or over another. A
+        hold arriving over another, or letting go while another stands, rewords the sensor with
+        no transition, the same `since`, and no alarm moved; the last to let go leaves none of
+        their words.
+      - **Cost.** Nothing while nothing is held. While something is, a held sensor's re-decision
+        asks up to five lookups for its words; a hold that arrives over another, or lets go while
+        another stands, rewrites the sensor's words, one `UPDATE` with no history row.
+      - **Not changed.** The sink order: were `NotStarted`'s resync to run before
+        `ReachabilitySync`'s, the sensor would read its last reading in between, two transitions;
+        `main.ts` runs reachability first and the test keeps that order.
+      - **Docs.** `state-machine.md`, the bullet on whose words a held sensor says, rewritten.
+      - **Tests.**
+        - `hold-words.test.ts`, against PostgreSQL, table-driven: every pair of the five in both
+          orders, 20 cases. Each lays the first and then the second as its owner lays it, in a
+          caller's words that are not the hold's, and asserts the hold's own words on arrival, the
+          higher one's after the second arrives, the lower one's with no transition and the same
+          `since` once the higher lets go, and the release's words, none of a hold's, once the
+          last does. And what `decide` resolves itself: each hold laid with no re-decision over
+          an Up sensor (5), and each pair with the second laid that way over the first (20), the
+          higher one's words on the row and, for the single holds, on the transition. The single
+          holds and the 10 pairs whose lower hold comes first decide a result while the row says
+          other words; the 10 whose higher comes first pin the order. Through the owners: a check not started that a
+          lost link, then a silence, holds and lets go (2); a move that frees a not-started
+          sensor onto a lost probe, through `ReachabilitySync` and `ClockFreezeSync`, and that
+          probe's return; a move between a lost probe and a silent one, each way, reworded with
+          no transition and the same `since` (2); a factory staged and let go through
+          `SensorVouching`.
+        - `overtaken-results.test.ts`'s row a hold decided unchanged: the second hold is now the
+          check's next round in the same words, since a lost probe's would reword the row.
+          `state-cache-overlay.test.ts` gains a silence. The rest is wiring.
+        - Run with `P-411` and their neighbours, rebased on `origin/main` at `5936e43c`: 33
+          files, 1,091 tests, all passing, none skipped. This commit alone, `hold-words.test.ts`
+          and five neighbours: 6 files, 134 tests, all passing.
+      - **Review.** Two findings, fixed, the second found twice. `ProbeReachability.resync`
+        re-decided only the sensors that crossed its held set's boundary, so one moved between a
+        probe whose link is lost and one that is silent kept the old reason's words until the probe
+        came back: it now re-decides a sensor whose lost-link membership changed, and the same-state
+        branch rewords it. And the pair test's result could not tell `decide`'s lookup from the
+        stored words, which the arrival had already written: the 5 single cases and the 10 pairs
+        whose lower hold comes first now decide a result while the row says another hold's words,
+        and the 10 whose higher comes first pin the order (a third finding, on the review of the
+        fixes, corrected this line, which had claimed all 25).
+      - **Mutants** 11/11 killed: `#heldWords` as `P-410` left it (the not-started words only,
+        none under another hold); the order reversed; a silence before a lost link; a factory
+        before a frozen clock; no reword in the same-state branch; a caller's words on arrival;
+        every reason held as a link; a factory let go in the hold's words; a frozen sensor
+        published with the thaw's words (`clock-freeze.test.ts`); `resync` blind to a change of
+        reason; `decide` keeping the stored words under a hold.
 
 - [x] **P-414 — a rewrite decided from an unlocked read can overwrite a pause committed
       meanwhile** · S · P-147 · Found 2026-10-17 in `P-410`'s design. `reevaluate` reads its
@@ -11852,6 +11929,17 @@ because each is a decision rather than a defect:
       three times out of three when rerun alone. **Done when** each side is the median of
       several logins, so that one stall cannot decide it, and the claim (the decoy verification
       happens at all) stands.
+
+- [ ] **P-430 — a silent probe whose link drops stays silent until it reconnects** · XS · P-74,
+      P-413 · Found 2026-10-17 in `P-413`. `ProbeReachability.lost` returns at once for a probe
+      already held for some reason, so a probe held for its silence (`P-74`) whose connection
+      then closes keeps the silence: its sensors say it "is connected but has stopped sending
+      results", Core Health counts it among the silent probes rather than the ones not
+      connected (`P-80`), and its episode reads silent. The delivery sweep skips a probe that is
+      not connected and already held, so nothing corrects it until `found()` on reconnect.
+      **Done when** a link lost while a probe is held for its silence takes the hold over as a
+      lost link, in a lost link's words, with no transition, and a test that closes a silent
+      probe's link.
 
 - [ ] **P-431 — two sensor tests time a bound with no room for a loaded machine** · XS · A-62,
       P-07 · Found 2026-10-17 in the full suite for `P-408`, `P-406` and `P-397` together, on a VM

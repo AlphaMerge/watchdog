@@ -7,6 +7,7 @@ import type { Database, Queryable } from '../src/db/pool.js';
 import { Ingestor, type IngestTarget } from '../src/ingestion/ingestor.js';
 import { PROBE_SOURCE } from '../src/probes/reachability.js';
 import {
+  heldIn,
   readSensorState,
   writeRuntimes,
   writeStateHistory,
@@ -77,7 +78,7 @@ describe(
       db = scratch.db;
       h = await buildHarness(db, {
         states: true,
-        unreachableSensors: () => lost,
+        lostSensors: () => heldIn(() => lost, { message: LOST, failure: null }),
         notStartedSensors: () => unstarted,
       });
       assert.ok(h.states !== undefined);
@@ -367,14 +368,16 @@ describe(
       await hold(ROUND);
       assert.deepEqual([(await row()).state, (await row()).message], ['unknown', ROUND]);
       // Its started result lets it go, without a re-decision (`NotStarted.release`), and is
-      // decided Up; then its probe is lost, whose re-decision finds the row as it holds it.
+      // decided Up; then its probe's next round cannot start it either, and that hold's
+      // re-decision finds the row as it holds it, in its own words. A lost probe's would reword
+      // it (`P-413`), which is a write.
       unstarted.delete(sensorId);
       states.forgetSensors([sensorId]);
       const measured = ahead(5);
       const decided = await states.decide([ok(measured)]);
       assert.equal(decided.runtimes[0]?.state, 'up');
-      lost.add(sensorId);
-      await hold(LOST);
+      unstarted.set(sensorId, { message: ROUND, failure: null });
+      await hold(ROUND);
       assert.equal(
         states.peek(sensorId)?.state,
         'up',

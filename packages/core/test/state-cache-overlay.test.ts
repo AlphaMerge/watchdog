@@ -40,12 +40,17 @@ const HOLDS: readonly Hold[] = [
   {
     name: 'a lost probe',
     decided: { state: 'unknown', cause: 'probe' },
-    option: (held) => ({ unreachableSensors: () => held }),
+    option: (held) => ({ lostSensors: () => asWords(held) }),
+  },
+  {
+    name: 'a silence',
+    decided: { state: 'unknown', cause: 'probe' },
+    option: (held) => ({ silentSensors: () => asWords(held) }),
   },
   {
     name: 'a frozen clock',
     decided: { state: 'unknown', cause: 'probe' },
-    option: (held) => ({ clockFrozenSensors: () => held }),
+    option: (held) => ({ clockFrozenSensors: () => asWords(held) }),
   },
   {
     name: 'a check its probe could not start',
@@ -55,7 +60,7 @@ const HOLDS: readonly Hold[] = [
   {
     name: 'a factory’s unreached inputs',
     decided: { state: 'unknown', cause: 'probe' },
-    option: (held) => ({ unreachedFactories: () => held }),
+    option: (held) => ({ unreachedFactories: () => asWords(held) }),
   },
   {
     name: 'a withholding',

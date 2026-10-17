@@ -1,6 +1,7 @@
 import { describeError, type CheckFailure, type Logger } from '@ms/shared';
 import { savepoint, type Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
+import { heldIn, type HeldWords, type HeldWordsLookup } from '../state/runtime.js';
 
 /**
  * Which probes are reachable, and what that means for their sensors (`R-05`).
@@ -62,6 +63,19 @@ export interface ReachabilityStates extends StateReevaluator {
 
 /** What the probe paths speak for when they re-decide a sensor (`R-11`). */
 export const PROBE_SOURCE: readonly 'probe'[] = ['probe'];
+
+/** What a sensor whose probe's link has gone says while it is held (`R-05`). */
+export const LOST_MESSAGE = 'the probe carrying this sensor stopped answering';
+
+/** What a sensor whose probe is connected and sends nothing says while it is held (`P-74`). */
+export const SILENT_MESSAGE =
+  'the probe carrying this sensor is connected but has stopped sending results';
+
+/** Each reason's words, which name no place a check stopped: no check ran (`P-413`). */
+const HELD_WORDS: Readonly<Record<OfflineReason, HeldWords>> = {
+  link: { message: LOST_MESSAGE, failure: null },
+  silence: { message: SILENT_MESSAGE, failure: null },
+};
 
 export interface ProbeReachabilityOptions {
   db: Db;
@@ -170,6 +184,19 @@ export class ProbeReachability {
   readonly #byProbe = new Map<number, HeldBy>();
   /** Which probe holds each sensor in `#unreachable`, for the alarm engine's hold (`M-22`). */
   readonly #carrier = new Map<number, number>();
+  /**
+   * `#unreachable` by the reason that holds each sensor, kept with it (`P-413`), and each one's
+   * words read from it: the state service resolves a lost link's before a silence's, as it does
+   * every hold's, so neither reason's words go first-come.
+   */
+  readonly #byReason: Readonly<Record<OfflineReason, Set<number>>> = {
+    link: new Set(),
+    silence: new Set(),
+  };
+  readonly #words: Readonly<Record<OfflineReason, HeldWordsLookup>> = {
+    link: heldIn(() => this.#byReason.link, HELD_WORDS.link),
+    silence: heldIn(() => this.#byReason.silence, HELD_WORDS.silence),
+  };
   /**
    * Sensors whose re-decision a resync gave up (`P-249`), owed one by the next resync or delivery
    * sweep. At most `MAX_GIVEN_UP`; past that the rest are logged as dropped.
@@ -292,6 +319,9 @@ export class ProbeReachability {
     if (this.#byProbe.size === 0) return 0;
 
     const before = new Set(this.#unreachable);
+    // And which of them a lost link held, since a move between a probe whose link is lost and one
+    // that is silent keeps the sensor held but changes whose words it says (`P-413`).
+    const beforeLink = new Set(this.#byReason.link);
     // The probes whose held set this changes, to or from empty included (`M-24`), and the entry
     // each had, which a rollback puts back.
     const replaced = new Map<number, { was: HeldBy; now: HeldBy }>();
@@ -324,10 +354,15 @@ export class ProbeReachability {
 
     // Both directions: sensors that left an offline probe go back to what their last reading
     // says, and sensors that arrived under one become Unknown. Only the ones that actually
-    // moved across the boundary — the rest have nothing to re-decide.
+    // moved across the boundary — the rest have nothing to re-decide. **And those that moved
+    // between a lost link and a silence** (`P-413`): still held, so no transition, but each says
+    // its hold's words, and a lost link's are not a silent probe's. A sensor held for both says
+    // the link's, so the link's set alone says whether its words changed.
     const changed = [
       ...[...before].filter((id) => !this.#unreachable.has(id)),
-      ...[...this.#unreachable].filter((id) => !before.has(id)),
+      ...[...this.#unreachable].filter(
+        (id) => !before.has(id) || beforeLink.has(id) !== this.#byReason.link.has(id),
+      ),
     ];
     // And whatever an earlier resync gave up re-deciding, which nothing else will.
     const owing = [...this.#givenUp];
@@ -489,15 +524,14 @@ export class ProbeReachability {
     );
   }
 
-  /** `#unreachable` and `#carrier`, from `#byProbe`. */
+  /** `#unreachable`, `#carrier` and `#byReason`, from `#byProbe`. */
   #rebuild(): void {
     this.#unreachable.clear();
     this.#carrier.clear();
+    this.#byReason.link.clear();
+    this.#byReason.silence.clear();
     for (const [probeObjectId, held] of this.#byProbe) {
-      for (const id of held.sensorIds) {
-        this.#unreachable.add(id);
-        this.#carrier.set(id, probeObjectId);
-      }
+      this.#hold(probeObjectId, held.reason, held.sensorIds);
     }
   }
 
@@ -519,9 +553,17 @@ export class ProbeReachability {
     return !this.#unreachable.has(sensorId);
   }
 
-  /** The live set, for the state service to overlay onto what it loads. */
+  /** The live set: every sensor held, for either reason. */
   unreachableSensors(): ReadonlySet<number> {
     return this.#unreachable;
+  }
+
+  /**
+   * The sensors held for one reason, each with what it says while held (`P-413`): what the state
+   * service lays over the facts, and says, after any hold above it. A view over the live set.
+   */
+  heldWords(reason: OfflineReason): HeldWordsLookup {
+    return this.#words[reason];
   }
 
   /** What this probe's absence holds, and since when, while it does (`M-22`). */
@@ -568,7 +610,7 @@ export class ProbeReachability {
     }
 
     this.#byProbe.set(probeObjectId, { sensorIds, reason, since: this.#now() });
-    this.#hold(probeObjectId, sensorIds);
+    this.#hold(probeObjectId, reason, sensorIds);
     this.#outages += 1;
     // Nothing held, so no episode begins and there is no alarm to re-decide. Sensors that arrive
     // later begin one, and `resync` re-decides the probe's alarm with them (`M-24`).
@@ -591,13 +633,9 @@ export class ProbeReachability {
           q,
           [...sensorIds, ...this.#probeAlarms(probeObjectId)],
           this.#now(),
-          {
-            message:
-              reason === 'link'
-                ? 'the probe carrying this sensor stopped answering'
-                : 'the probe carrying this sensor is connected but has stopped sending results',
-            sources: PROBE_SOURCE,
-          },
+          // The words the sensors say come from `heldWords`, whoever re-decides them (`P-413`);
+          // these are the same, for a caller that reads no hold.
+          { message: HELD_WORDS[reason].message, sources: PROBE_SOURCE },
         );
         // **The dependents of a master under this probe** (`P-135`). The master is Unknown now,
         // not Down, so nothing is holding them — and nothing else was ever going to notice: the
@@ -689,7 +727,7 @@ export class ProbeReachability {
       });
     } catch (error) {
       this.#byProbe.set(probeObjectId, entry);
-      this.#hold(probeObjectId, sensorIds);
+      this.#hold(probeObjectId, entry.reason, sensorIds);
       this.#logger.error(
         { probeObjectId, sensors: sensorIds.length, err: describeError(error) },
         'could not clear a returning probe’s sensors; leaving them marked so the next pass retries',
@@ -720,10 +758,12 @@ export class ProbeReachability {
     }
   }
 
-  #hold(probeObjectId: number, sensorIds: readonly number[]): void {
+  #hold(probeObjectId: number, reason: OfflineReason, sensorIds: readonly number[]): void {
+    const byReason = this.#byReason[reason];
     for (const id of sensorIds) {
       this.#unreachable.add(id);
       this.#carrier.set(id, probeObjectId);
+      byReason.add(id);
     }
   }
 
@@ -731,6 +771,8 @@ export class ProbeReachability {
     for (const id of sensorIds) {
       this.#unreachable.delete(id);
       this.#carrier.delete(id);
+      this.#byReason.link.delete(id);
+      this.#byReason.silence.delete(id);
     }
   }
 

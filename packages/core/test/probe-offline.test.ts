@@ -62,7 +62,8 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       logger: silentLogger,
       settings: harness.resolver,
       pauses: new PauseRepository(),
-      unreachableSensors: () => reachability.unreachableSensors(),
+      lostSensors: () => reachability.heldWords('link'),
+      silentSensors: () => reachability.heldWords('silence'),
     });
     reachability = new ProbeReachability({
       db,
@@ -262,7 +263,7 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       logger: silentLogger,
       settings: harness.resolver,
       pauses: new PauseRepository(),
-      unreachableSensors: () => new Set<number>(),
+      lostSensors: () => new Map(),
     });
     await db.tx((q) =>
       unaware.reevaluate(q, [sensorId], new Date(), {

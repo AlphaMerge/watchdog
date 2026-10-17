@@ -3,6 +3,7 @@ import { after, before, describe, it } from 'node:test';
 import { PROTOCOL_VERSION } from '@ms/shared';
 import type { Database } from '../../src/db/pool.js';
 import { ClockFreeze, FROZEN_UNDER_SQL } from '../../src/probes/clock-freeze.js';
+import type { HeldWordsLookup } from '../../src/state/runtime.js';
 import type { ProbeLink } from '../../src/transport/probe-endpoint.js';
 import {
   createScratchDatabase,
@@ -73,14 +74,14 @@ describe(
       assert.ok(made !== undefined);
       return made;
     };
-    const none: ReadonlySet<number> = new Set();
+    const none: HeldWordsLookup = new Map();
 
     before(async () => {
       scratch = await createScratchDatabase('clockperf');
       db = scratch.db;
       h = await buildHarness(db, {
         states: true,
-        clockFrozenSensors: () => made?.frozenSensors() ?? none,
+        clockFrozenSensors: () => made?.heldWords() ?? none,
       });
 
       // Through the service, one group at a time: the walk's cost is the real tree's shape.

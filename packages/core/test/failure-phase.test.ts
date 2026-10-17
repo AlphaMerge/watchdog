@@ -46,10 +46,10 @@ const CHECK: CheckFailure = { phase: 'check', target: 'app.dc.test' };
 /** The holds the state service reads live, set by each test (`P-407`). */
 const unstarted = new Map<number, HeldWords>();
 const withheld = new Map<number, HeldWords>();
-/** The other holds of a sensor for its probe, which write their words once (`P-410`). */
-const unreachable = new Set<number>();
-const frozen = new Set<number>();
-const unreached = new Set<number>();
+/** The other holds of a sensor for its probe, each with its words (`P-410`, `P-413`). */
+const unreachable = new Map<number, HeldWords>();
+const frozen = new Map<number, HeldWords>();
+const unreached = new Map<number, HeldWords>();
 const POOL = 'the worker pool has given up and cannot run checks';
 const POOL_DISABLED: CheckFailure = { phase: 'pool-disabled' };
 
@@ -96,7 +96,7 @@ describe(
         states: true,
         notStartedSensors: () => unstarted,
         withheldSensors: () => withheld,
-        unreachableSensors: () => unreachable,
+        lostSensors: () => unreachable,
         clockFrozenSensors: () => frozen,
         unreachedFactories: () => unreached,
       });
@@ -453,7 +453,7 @@ describe(
     ] as const) {
       it(`leaves ${other}’s words standing, and says the check’s when that lets go first (P-410)`, async () => {
         await report([ok(0)]);
-        set.add(sensorId);
+        set.set(sensorId, { message: words, failure: null });
         await rehold(1, { message: words, sources: PROBE_SOURCE });
         assert.deepEqual(await said(), { state: 'unknown', message: words, failure: null });
         const held = await transitions();

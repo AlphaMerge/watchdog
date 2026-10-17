@@ -186,6 +186,21 @@ export interface HeldWords {
  */
 export type HeldWordsLookup = Pick<ReadonlyMap<number, HeldWords>, 'has' | 'get' | 'size'>;
 
+/**
+ * A hold whose every sensor says the same words (`P-413`): a lost link, a silence, a frozen clock
+ * and a factory's unreached inputs. A view over the hold's live set, read as it is when asked, so
+ * a set the hold replaces is followed.
+ */
+export function heldIn(sensors: () => ReadonlySet<number>, words: HeldWords): HeldWordsLookup {
+  return {
+    get size(): number {
+      return sensors().size;
+    },
+    has: (sensorId) => sensors().has(sensorId),
+    get: (sensorId) => (sensors().has(sensorId) ? words : undefined),
+  };
+}
+
 /** Whether two holds say the same words and name the same place it stopped, or are both none. */
 export function sameHeldWords(a: HeldWords | undefined, b: HeldWords | undefined): boolean {
   if (a === undefined || b === undefined) return a === b;

@@ -4,6 +4,7 @@ import { Reach, Visibility } from '../src/auth/access.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { PROBE_SOURCE } from '../src/probes/reachability.js';
 import {
+  heldIn,
   readSensorState,
   writeRuntimes,
   writeStateHistory,
@@ -66,7 +67,7 @@ describe(
       db = scratch.db;
       h = await buildHarness(db, {
         states: true,
-        unreachableSensors: () => lost,
+        lostSensors: () => heldIn(() => lost, { message: LOST, failure: null }),
         notStartedSensors: () => unstarted,
       });
     });

@@ -78,7 +78,8 @@ describe(
         logger: silentLogger,
         settings: harness.resolver,
         pauses: new PauseRepository(),
-        unreachableSensors: () => reachability.unreachableSensors(),
+        lostSensors: () => reachability.heldWords('link'),
+        silentSensors: () => reachability.heldWords('silence'),
       });
       const real = states;
       const watched = new Proxy(db, {

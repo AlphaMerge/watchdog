@@ -54,7 +54,6 @@ const available = await databaseAvailable();
 const NEVER_ISSUED = 9_000_000;
 const NONE_WITHHELD: ReadonlyMap<number, string> = new Map();
 const NO_HELD_WORDS: ReadonlyMap<number, HeldWords> = new Map();
-const NONE_HELD: ReadonlySet<number> = new Set();
 
 /** The formula a factory over these sensors' `rtt` would have. */
 const sumOf = (...ids: number[]): Record<string, unknown> => ({
@@ -265,7 +264,7 @@ describe(
         states: true,
         alarms: engine,
         withheldSensors: () => vouching?.heldWords() ?? NO_HELD_WORDS,
-        unreachedFactories: () => reach?.unreached() ?? NONE_HELD,
+        unreachedFactories: () => reach?.heldWords() ?? NO_HELD_WORDS,
       });
       const sync = new TriggerSync({ engine, logger: silent });
       h.audit.also = sync;

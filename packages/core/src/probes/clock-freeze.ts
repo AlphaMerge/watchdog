@@ -1,6 +1,7 @@
 import { describeError, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
+import { heldIn, type HeldWordsLookup } from '../state/runtime.js';
 import type { ProbeLink } from '../transport/probe-endpoint.js';
 import { PROBE_SOURCE, type DependencyRecomputer, type StateReevaluator } from './reachability.js';
 
@@ -142,6 +143,8 @@ export class ClockFreeze {
   readonly #since = new Map<number, Date>();
   /** Which probe froze each sensor; the one that froze it last, when two sets hold it. */
   readonly #carrier = new Map<number, number>();
+  /** `#frozen`, each with `FROZEN_MESSAGE` (`P-413`). */
+  readonly #words = heldIn(() => this.#frozen, { message: FROZEN_MESSAGE, failure: null });
   #sweeps = 0;
 
   constructor(options: ClockFreezeOptions) {
@@ -157,6 +160,14 @@ export class ClockFreeze {
 
   frozenSensors(): ReadonlySet<number> {
     return this.#frozen;
+  }
+
+  /**
+   * The frozen sensors, each with what it says while frozen (`P-413`): what the state service lays
+   * over the facts, and says, unless its probe's link is gone or it is silent. A view.
+   */
+  heldWords(): HeldWordsLookup {
+    return this.#words;
   }
 
   /** How many of one probe's sensors are frozen, for its Probe Health. */

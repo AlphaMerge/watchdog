@@ -10,7 +10,7 @@ export type Resyncable = Pick<ProbeReachability, 'holdsAny' | 'resync'>;
 export interface ReachabilitySyncOptions {
   /**
    * Read through a closure, because `ProbeReachability` is built long after the audit sink that
-   * needs it — the same forward reference `SensorStateService.unreachableSensors` uses, and for
+   * needs it — the same forward reference `SensorStateService.lostSensors` uses, and for
    * the same reason. Undefined means nothing is watching probes yet, which is a core still
    * starting up and has no overlay to keep in step.
    */

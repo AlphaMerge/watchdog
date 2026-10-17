@@ -165,7 +165,6 @@ describe(
       heldBy: (probe) => now().index.heldBy(probe),
       inputsOf: (id) => now().index.inputsOf(id),
     };
-    const none: ReadonlySet<number> = new Set();
     const nothingHeld: ReadonlyMap<number, HeldWords> = new Map();
 
     let batch = 0;
@@ -577,10 +576,11 @@ describe(
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
-        unreachableSensors: () => core?.reachability.unreachableSensors() ?? none,
-        clockFrozenSensors: () => core?.freeze.frozenSensors() ?? none,
+        lostSensors: () => core?.reachability.heldWords('link') ?? nothingHeld,
+        silentSensors: () => core?.reachability.heldWords('silence') ?? nothingHeld,
+        clockFrozenSensors: () => core?.freeze.heldWords() ?? nothingHeld,
+        unreachedFactories: () => core?.reach.heldWords() ?? nothingHeld,
         notStartedSensors: () => core?.unstarted.heldWords() ?? nothingHeld,
-        unreachedFactories: () => core?.reach.unreached() ?? none,
       });
       triggerSync = new TriggerSync({ engine, logger: silent });
       h.audit.also = triggerSync;

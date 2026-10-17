@@ -503,7 +503,8 @@ async function serve(): Promise<void> {
   // until a state is decided, which is long after both exist.
   // eslint-disable-next-line prefer-const -- assigned below, once reachability exists.
   let reachabilityRef: ProbeReachability | undefined;
-  const noProbesDown: ReadonlySet<number> = new Set();
+  // What a hold not built yet holds: nothing, with nothing to say (`P-413`).
+  const noneHeld: HeldWordsLookup = new Map();
   // The same shape, for the sensors the core has stopped evaluating because of who vouched for
   // them (`A-29`). The check needs the state service to move them, so it is built after it.
   // eslint-disable-next-line prefer-const -- assigned below, once the check exists.
@@ -512,12 +513,10 @@ async function serve(): Promise<void> {
   // And for the sensors a probe's clock has frozen (`P-232`), which needs the endpoint.
   // eslint-disable-next-line prefer-const -- assigned below, once the endpoint exists.
   let clockFreezeRef: ClockFreeze | undefined;
-  const noneFrozen: ReadonlySet<number> = new Set();
   // And for the sensors whose checks their probe could not start (`P-265`), which needs the
   // dependency recompute built below.
   // eslint-disable-next-line prefer-const -- assigned below, once the recompute exists.
   let notStartedRef: NotStarted | undefined;
-  const noneUnstarted: HeldWordsLookup = new Map();
   const states = new SensorStateService({
     db,
     logger,
@@ -528,10 +527,13 @@ async function serve(): Promise<void> {
     pauses: new PauseRepository(),
     alarms,
     onStatesCommitted: publishStates,
-    unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
-    clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
-    notStartedSensors: () => notStartedRef?.heldWords() ?? noneUnstarted,
-    unreachedFactories: () => factoryReach.unreached(),
+    // The five holds of a sensor for its probe, each with its words (`P-413`); the state service
+    // keeps the order their words stand in.
+    lostSensors: () => reachabilityRef?.heldWords('link') ?? noneHeld,
+    silentSensors: () => reachabilityRef?.heldWords('silence') ?? noneHeld,
+    clockFrozenSensors: () => clockFreezeRef?.heldWords() ?? noneHeld,
+    unreachedFactories: () => factoryReach.heldWords(),
+    notStartedSensors: () => notStartedRef?.heldWords() ?? noneHeld,
     withheldSensors: () => vouchingRef?.heldWords() ?? nothingWithheld,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the

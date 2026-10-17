@@ -19,7 +19,7 @@ import {
 } from '../src/probes/clock-freeze.js';
 import { ClockFreezeSync } from '../src/probes/clock-freeze-sync.js';
 import { ProbeReachability } from '../src/probes/reachability.js';
-import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
+import { writeRuntimes, writeStateHistory, type HeldWordsLookup } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
 import { TriggerService } from '../src/triggers/service.js';
@@ -89,7 +89,7 @@ describe(
     /** Replaced per test; the state service reads whichever is current. */
     let freeze: ClockFreeze | undefined;
     let reachability: ProbeReachability | undefined;
-    const none: ReadonlySet<number> = new Set();
+    const none: HeldWordsLookup = new Map();
 
     /** Each connected probe's offset; absent is a probe with no session. */
     const offsets = new Map<number, number | null>();
@@ -194,8 +194,9 @@ describe(
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
-        unreachableSensors: () => reachability?.unreachableSensors() ?? none,
-        clockFrozenSensors: () => freeze?.frozenSensors() ?? none,
+        lostSensors: () => reachability?.heldWords('link') ?? none,
+        silentSensors: () => reachability?.heldWords('silence') ?? none,
+        clockFrozenSensors: () => freeze?.heldWords() ?? none,
       });
       const sync = new TriggerSync({ engine, logger: silent });
       h.audit.also = sync;
