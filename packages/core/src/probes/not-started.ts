@@ -1,7 +1,11 @@
 import { describeError, type CheckFailure, type CheckResult, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
-import { PROBE_SOURCE, type DependencyRecomputer, type StateReevaluator } from './reachability.js';
+import {
+  PROBE_SOURCE,
+  type DependencyRecomputer,
+  type ReachabilityStates,
+} from './reachability.js';
 
 /** What a sensor let go by a tree change says until its next result. */
 export const MOVED_OFF_MESSAGE =
@@ -31,8 +35,12 @@ interface Db extends Queryable {
 export interface NotStartedOptions {
   readonly db: Db;
   readonly logger: Logger;
-  /** The same two a lost probe moves its sensors with, so the three are one path. */
-  readonly states: StateReevaluator;
+  /**
+   * The same two a lost probe moves its sensors with, so the three are one path. Its
+   * `forgetSensors` too: a release lets a sensor go without re-deciding it, and what was cached
+   * while it was held says its probe cannot run it (`P-409`).
+   */
+  readonly states: ReachabilityStates;
   readonly dependencies: DependencyRecomputer;
   /** The sensors that are a probe's own alarm, re-evaluated with the ones it holds (`M-22`). */
   readonly probeAlarms?: (probeObjectId: number) => readonly number[];
@@ -93,7 +101,7 @@ const NOTHING_RELEASED: ReleasedBatch = { released: 0, stored: () => undefined }
 export class NotStarted {
   readonly #db: Db;
   readonly #logger: Logger;
-  readonly #states: StateReevaluator;
+  readonly #states: ReachabilityStates;
   readonly #dependencies: DependencyRecomputer;
   readonly #probeAlarms: (probeObjectId: number) => readonly number[];
   readonly #now: () => Date;
@@ -291,6 +299,12 @@ export class NotStarted {
       carriers.set(id, this.#carrier.get(id));
       this.#forget(id, probeObjectId);
     }
+    // **Decided from the row, not from what was cached while held** (`P-409`, as `A-41c`'s
+    // release). A started result older than the hold, decided while the sensor was held, left it
+    // cached with the probe unable to run it, and the result letting it go was decided from that:
+    // Unknown again, and every result after it, a real Down included, until something re-decided
+    // the sensor.
+    this.#states.forgetSensors([...letGo.keys()]);
     return {
       released: letGo.size,
       stored: (landed) => {
@@ -306,6 +320,9 @@ export class NotStarted {
           this.#carrier.set(id, carrier ?? probeObjectId);
         }
         this.#place(probeObjectId, back, this.#since.get(probeObjectId) ?? since);
+        // Held again: what was cached for a result nobody stored must not go on saying it is let
+        // go.
+        this.#states.forgetSensors([...letGo.keys()]);
       },
     };
   }

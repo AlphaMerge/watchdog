@@ -11130,7 +11130,7 @@ because each is a decision rather than a defect:
       **Done when** a check process whose start-up bound fired is settled as not started
       whatever it answers, with a test that holds the ready line back across the bound.
 
-- [ ] **P-409 — a not-started release keeps the cache that says the probe is unreachable** · XS
+- [x] **P-409 — a not-started release keeps the cache that says the probe is unreachable** · XS
       · P-265 · Found 2026-10-17 in `P-407`'s review. `NotStarted.release` lets a sensor go
       without re-deciding it, as `SensorVouching.release` does, but unlike it never calls
       `forgetSensors`. A started result older than the hold and newer than `last_result_at`
@@ -11143,6 +11143,25 @@ because each is a decision rather than a defect:
       the cache for every sensor it moves, `failure-phase.test.ts` loses its hand-made
       `forgetSensors`, and a test against PostgreSQL holds a sensor, decides an older started
       result while it is held, and has the next result decide it in one transition.
+
+      **P-409 outcome. A release forgets what was cached while the sensor was held.**
+      - `NotStarted.release` calls `forgetSensors` for every sensor it lets go, as
+        `SensorVouching.release` does, and `stored(false)` calls it again for the ones it puts
+        back, so a result nobody stored leaves nothing cached that says it was let go.
+        `NotStartedOptions.states` is now `ReachabilityStates`, the type a lost probe moves its
+        sensors with, which has it: the compiler holds every wiring to it.
+      - **Tests.** `not-started.test.ts`: the sensors let go, and only those, are forgotten, and
+        again when put back; nothing when nothing is let go. `probe-episode-scenario.test.ts`,
+        against PostgreSQL: `[ran, could not start]` holds the ping and decides the older result
+        while it is held, and the next result lets it go Up in one step, `unknown>up` after
+        `up>unknown`. Before the fix it stayed Unknown.
+      - **This departs from the done-when for one line.** `failure-phase.test.ts` keeps its
+        hand-made `forgetSensors`: it lays the hold over the facts with a bare set and has no
+        `NotStarted` to release, so the forget stands in for what `release` now does, and its
+        comment says so. The release itself is held by `not-started.test.ts` and the scenario
+        against PostgreSQL. The review also found `P-412`.
+      - **Mutants 2/2**: the release's forget (the scenario fails too, so the defect was real),
+        and the put-back's.
 
 - [ ] **P-410 — a not-started sensor held again in new words keeps the first hold's words** · S ·
       P-265 · Found 2026-10-17 in `P-407`. `reevaluate` rewords a sensor whose state and cause
@@ -11164,6 +11183,18 @@ because each is a decision rather than a defect:
       the check…" with `startup` beside it, of a probe that is running it again. **Done when** a
       person's state reached by letting go of a hold says the person's words or the result's
       (the rule to be decided), never the hold's, with a test for each hold.
+
+- [ ] **P-412 — a decide that straddles a move can cache a hold's overlay after the move let it
+      go** · S · P-253 · Found 2026-10-17 in `P-409`'s review. `#warm` lays the live overlay over
+      a runtime it loads and only remembers it after `Promise.all`, which also waits on the
+      policy read on its own connection. A move whose transaction lets a held sensor go
+      (`NotStarted.resync`, as `ClockFreeze.resync` and `ProbeReachability.resync`'s commit
+      path) deletes a cache entry that does not exist yet, and the late `#remember` then caches
+      the held copy; the sensor's new probe never goes through a release, so its results are
+      decided from it. The runtime cache has no generation check, unlike `#policies`. The window
+      is narrow. **Done when** a runtime loaded under one overlay is not remembered after the
+      overlay has moved (a generation, as `#policyGeneration` is), with a test that holds the
+      load open across a release.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as

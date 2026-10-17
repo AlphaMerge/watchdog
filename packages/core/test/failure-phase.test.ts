@@ -340,8 +340,8 @@ describe(
       assert.deepEqual(await said(), { state: 'unknown', message: GAVE_UP, failure: STARTUP });
 
       // Let go, the next result decides it, and a success names nowhere it failed. The cache is
-      // forgotten here by hand because `NotStarted.release` does not yet do it (`P-409`): the
-      // result decided while held is cached with the probe unreachable.
+      // forgotten as `NotStarted.release` forgets it (`P-409`): the result decided while held is
+      // cached with the probe unable to run it.
       unstarted.delete(sensorId);
       h.states?.forgetSensors([sensorId]);
       await report([ok(5)]);

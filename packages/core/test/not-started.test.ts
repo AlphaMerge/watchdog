@@ -67,12 +67,21 @@ interface World {
     failure?: CheckFailure | null;
   }[];
   recomputes: number;
+  /** Each call to drop what the state service cached, with its sensors (`P-409`). */
+  readonly forgotten: number[][];
   /** Refuses every write while true. */
   failing: boolean;
 }
 
 function world(): World {
-  return { last: new Map(), under: new Map(), reevaluated: [], recomputes: 0, failing: false };
+  return {
+    last: new Map(),
+    under: new Map(),
+    reevaluated: [],
+    recomputes: 0,
+    forgotten: [],
+    failing: false,
+  };
 }
 
 function holder(w: World, alarms: readonly number[] = []): NotStarted {
@@ -109,6 +118,9 @@ function holder(w: World, alarms: readonly number[] = []): NotStarted {
           ...(cause.failure === undefined ? {} : { failure: cause.failure }),
         });
         return Promise.resolve(ids.length);
+      },
+      forgetSensors: (ids) => {
+        w.forgotten.push([...ids]);
       },
     },
     dependencies: {
@@ -259,6 +271,22 @@ describe('what lets a held sensor go (`P-265`)', () => {
     assert.equal(held.carrierOf(1), 9);
     assert.equal(held.heldOn(9), 1);
     assert.ok(held.heldBy(9) !== undefined, 'and the episode is still there (`M-22`)');
+  });
+
+  it('drops what was cached about each sensor it lets go, and again when it puts one back (P-409)', async () => {
+    const w = world();
+    const held = holder(w);
+    await held.hold(9, [unstarted(1, 0), unstarted(2, 0), unstarted(3, 0)]);
+    assert.deepEqual(w.forgotten, [], 'a hold re-decides what it holds, which drops it there');
+    const released = held.release(9, [ran(1, 5), ran(3, 5), ran(2, 0)]);
+    assert.deepEqual(w.forgotten, [[1, 3]], 'only the ones it lets go');
+    released.stored(false);
+    assert.deepEqual(w.forgotten, [
+      [1, 3],
+      [1, 3],
+    ]);
+    held.release(9, [ran(2, 0)]).stored(false);
+    assert.equal(w.forgotten.length, 2, 'nothing let go, nothing dropped');
   });
 
   it('ends the probe’s episode with its last sensor', async () => {

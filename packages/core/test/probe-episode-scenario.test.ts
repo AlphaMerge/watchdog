@@ -997,6 +997,69 @@ describe(
       );
     });
 
+    it('decides a sensor its own result lets go from the row, not from what was cached while it was held (P-409)', async () => {
+      const made = await probeWith('recached', { health: false });
+      await settle(made);
+      const sensor = made.pings[1] ?? assert.fail('no ping');
+      assert.equal((await readSensorState(db, sensor))?.state, 'up');
+      const base = Date.now();
+      const t = (seconds: number): string => new Date(base + seconds * 1000).toISOString();
+
+      // A check that ran, then one that could not start: held, and the one that ran is decided
+      // while it is held, against the probe that cannot run it.
+      await ingestProbe(made.probe, [
+        {
+          sensorId: sensor,
+          at: t(-40),
+          outcome: 'ok',
+          message: 'reply',
+          durationMs: 12,
+          channels: [],
+        },
+        {
+          sensorId: sensor,
+          at: t(-30),
+          outcome: 'error',
+          message: 'the probe took 10012 ms to start the check and gave up',
+          durationMs: 10_012,
+          channels: [],
+          notStarted: true,
+          failure: { phase: 'startup' },
+        },
+      ]);
+      assert.equal(now().unstarted.heldOn(made.probe), 1);
+      assert.equal((await readSensorState(db, sensor))?.state, 'unknown');
+
+      // The check runs again, and its result lets the sensor go and decides it in one step.
+      await ingestProbe(made.probe, [
+        {
+          sensorId: sensor,
+          at: t(-10),
+          outcome: 'ok',
+          message: 'reply',
+          durationMs: 12,
+          channels: [],
+        },
+      ]);
+      assert.equal(now().unstarted.heldOn(made.probe), 0);
+      const runtime = await readSensorState(db, sensor);
+      assert.deepEqual(
+        { state: runtime?.state, cause: runtime?.cause, message: runtime?.message },
+        { state: 'up', cause: 'scan', message: 'reply' },
+      );
+      const rows = await db.query<{ state: string; previous_state: string }>(
+        `SELECT state::text AS state, previous_state::text AS previous_state
+         FROM sensor_state WHERE sensor_id = $1 AND time >= $2 ORDER BY time`,
+        [sensor, new Date(base - MINUTE)],
+      );
+      // As a set: the hold is stamped by the core's clock, the result by the probe's.
+      assert.deepEqual(
+        rows.map((row) => `${row.previous_state}>${row.state}`).sort(),
+        ['unknown>up', 'up>unknown'],
+        'held once and let go in one step',
+      );
+    });
+
     it('shows the view to the Unknown trigger and to nothing else', async () => {
       // Guard 1. Two probes, one with a trigger on Unknown over its Probe Health and one with no
       // trigger at all, taken through the same loss together. Their Probe Health state history
