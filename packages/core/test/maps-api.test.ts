@@ -721,14 +721,21 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       assert.equal(made.statusCode, 201, made.body);
       const token = made.json<{ token: string }>().token;
 
+      const before = Date.now();
       const response = await open(token);
+      const after = Date.now();
       assert.equal(response.statusCode, 200, response.body);
       const body = response.json<{
         name: string;
         widgets: { state: string; data?: { name: string } }[];
         hasBackground: boolean;
+        readAt: string;
       }>();
       assert.equal(body.name, 'shared-publicly');
+      // When the core read it, by its own clock (`U-80`): the page dates the map by this.
+      assert.match(body.readAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+      const readAt = Date.parse(body.readAt);
+      assert.ok(readAt >= before && readAt <= after, `${body.readAt} is not within the request`);
       const drawn = body.widgets[0];
       assert.ok(drawn);
       assert.equal(drawn.state, 'ok');

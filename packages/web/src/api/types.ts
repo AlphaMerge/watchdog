@@ -1120,6 +1120,8 @@ export interface SharedMap {
   tiles: TileSource | null;
   problems: { id: string; problem: string }[];
   hasBackground: boolean;
+  /** When the core read it, by the core's clock (`U-80`). */
+  readAt: string;
 }
 
 /* ------------------------------------------------------------------------- reports */

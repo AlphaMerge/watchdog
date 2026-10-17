@@ -45,26 +45,35 @@ import { sharedBackgroundUrl, sharedMapPath } from '../maps/shareUrl';
  * **A link that has 404'd is not asked for again** (`U-74`). The answer cannot change — a revoked
  * or expired link stays that way, and one that never existed will not start — and every minute's
  * read would be spent from the core's per-address budget, which an unauthenticated caller shares
- * with everything else it asks from that address. The path is null for that token from the 404 on; another token is
- * asked for as any link is.
+ * with everything else it asks from that address. The path is null for that token from the 404
+ * on; another token is asked for as any link is. **Nor is the page redrawn** (`U-80`): the minute's
+ * clock stops for a gone link, since there is nothing left to ask for or to show.
  *
- * **When the map was read is said beside its name** (`U-74`): *Last read 14:05*, from this
- * browser's clock at the moment the good answer arrived. The answer carries no time of its own,
- * and the moment that matters to whoever is looking at a wall display is when this page last got
- * a picture, against the clock in the room — which is the device's. A clock time and not
- * *3 minutes ago*: it changes only when a read succeeds, so nothing on the page has to step every
- * minute to keep it true, and a display that has been failing for an hour shows an hour-old time
+ * **When the map was read is said beside its name** (`U-74`): *Last read 14:05*, by the core's
+ * clock, which the answer carries (`readAt`, `U-80`) — not this device's, which on a wall display
+ * nobody sets may be minutes or hours out. A clock time and not *3 minutes ago*: it changes only
+ * when a read succeeds, so a display that has been failing for an hour shows an hour-old time
  * without the page doing anything. It is plain text, in no live region: while reads succeed it
  * changes once a minute, and a screen reader saying so each time would be chatter. A failure is
  * said, once, by the region under it; the time is there to be read.
+ *
+ * **Three reads missed, and the page says how old the map is** (`U-80`): *Not updated for 3
+ * minutes: the last read failed*, under the failure, in a polite region there and empty from the
+ * map's first appearance. Its minutes are this device's monotonic time since the map was read
+ * (never fewer than the reads missed), so a wrong wall clock cannot make them wrong either. **Said
+ * once**: the region is polite when it is filled, and `aria-live="off"` once its count has moved,
+ * so the minute's step is shown and not said. A map read empties it, and a later run is said
+ * again.
  */
 
 /** The same minute the signed-in board uses. A wall display does not need faster. */
 const REFRESH_MS = 60_000;
 
+/** Reads missed in a row before the page says how old the map is (`U-80`). */
+const STALE_AFTER = 3;
+
 export function SharedMapView(): React.JSX.Element {
   const { token } = useParams();
-  const tick = useClock(REFRESH_MS);
 
   // **A 404 sticks for the link** (`U-66` review). Read from the answer in hand alone, it lasted a
   // minute: the next minute's path is `loading` (`U-62`), so the revoked map was drawn again, and
@@ -74,20 +83,32 @@ export function SharedMapView(): React.JSX.Element {
   // keeps the 404 it last answered.
   const [gone, setGone] = useState<{ token: string; error: ApiError } | null>(null);
   const asking = token !== undefined && gone?.token !== token;
+  const tick = useClock(REFRESH_MS, asking);
 
   // The tick is in the path so the poll is a refetch of a new URL rather than a cache decision;
   // `useApi` aborts the one in flight when it changes.
   const view = useApi<SharedMap>(asking ? `${sharedMapPath(token)}?t=${String(tick)}` : null);
 
-  // The last map read for this link, and when (`U-74`). Set during render from the answer in
-  // hand, so the time is never a render behind the map it dates.
-  const [held, setHeld] = useState<{ token: string; map: SharedMap; at: number } | null>(null);
+  // The last map read for this link, when the core read it (`U-74`, `U-80`), and when it arrived
+  // by this device's monotonic clock, which the stale cue counts from. Set during render from the
+  // answer in hand, so the time is never a render behind the map it dates.
+  const [held, setHeld] = useState<{
+    token: string;
+    map: SharedMap;
+    at: number;
+    since: number;
+  } | null>(null);
   if (
     view.status === 'ready' &&
     token !== undefined &&
     (held === null || held.token !== token || held.map !== view.data)
   ) {
-    setHeld({ token, map: view.data, at: Date.now() });
+    setHeld({
+      token,
+      map: view.data,
+      at: Date.parse(view.data.readAt),
+      since: performance.now(),
+    });
   }
   const last = held !== null && held.token === token ? held : null;
 
@@ -112,6 +133,27 @@ export function SharedMapView(): React.JSX.Element {
   const [problem, setProblem] = useState<ApiError | null>(null);
   if (view.status === 'ready' && problem !== null) setProblem(null);
   if (failed !== null && (problem === null || !sameWords(problem, failed))) setProblem(failed);
+
+  // The reads missed in a row since the map on screen was read (`U-80`): each failed refresh,
+  // counted once, since each minute's is a new error. Filed with the token; a map read clears it.
+  const [misses, setMisses] = useState<{ token: string; count: number; last: ApiError } | null>(
+    null,
+  );
+  if (view.status === 'ready' && misses !== null) setMisses(null);
+  if (failed !== null && token !== undefined && (misses === null || misses.last !== failed)) {
+    setMisses({ token, count: (misses?.token === token ? misses.count : 0) + 1, last: failed });
+  }
+  const missed = misses !== null && misses.token === token ? misses.count : 0;
+  const stale =
+    missed >= STALE_AFTER && last !== null
+      ? Math.max(missed, Math.floor((performance.now() - last.since) / 60_000))
+      : null;
+  // The count the cue was first said with: once it has moved, the region is no longer live, so
+  // the cue is said once and its minutes step quietly.
+  const [cueFrom, setCueFrom] = useState<number | null>(null);
+  if (stale === null && cueFrom !== null) setCueFrom(null);
+  if (stale !== null && cueFrom === null) setCueFrom(stale);
+  const cueSaid = stale !== null && cueFrom !== null && stale !== cueFrom;
 
   useEffect(() => {
     if (view.status === 'ready') document.title = `${view.data.name} — MonitoringSystem`;
@@ -150,7 +192,7 @@ export function SharedMapView(): React.JSX.Element {
                   <p className="text-sm text-text-muted">{map.description}</p>
                 )}
                 {/* Plain text, in no live region: it changes with every good read. */}
-                {last !== null && (
+                {last !== null && Number.isFinite(last.at) && (
                   <p className="text-sm text-text-muted">
                     Last read{' '}
                     <time dateTime={new Date(last.at).toISOString()}>{readAt(last.at)}</time>
@@ -170,6 +212,14 @@ export function SharedMapView(): React.JSX.Element {
                     <CorrelationId id={problem.correlationId} />
                   </>
                 )}
+              </p>
+              <p
+                role="status"
+                aria-live={cueSaid ? 'off' : 'polite'}
+                aria-atomic="true"
+                className="mt-1 text-sm text-warning-fg empty:mt-0"
+              >
+                {stale !== null && <>Not updated for {stale} minutes: the last read failed.</>}
               </p>
             </div>
             <MapCanvas

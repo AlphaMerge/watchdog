@@ -2063,13 +2063,14 @@ The map a share token opens, with every widget resolved. Expired, revoked and ne
 | --- | --- | --- | --- |
 | `token` | path | string | **required** |
 
-**200** { name, description, widgets, connectors, problems, hasBackground, geo, tiles }
+**200** { name, readAt, description, widgets, connectors, problems, hasBackground, geo, tiles }
 
 **200 response**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `name` | string | **required** |  |
+| `readAt` | string (date-time) | **required** | When the core read this answer, by its own clock. |
 | `description` | string |  |  |
 | `widgets` | object[] | **required** |  |
 | `connectors` | object[] | **required** |  |

@@ -10,15 +10,18 @@ import { useEffect, useState } from 'react';
  * Its own module because two components need it — the signed-in board and `G-06`'s shared page —
  * and a file that exports both a component and a hook loses fast refresh.
  */
-export function useClock(everyMs: number): number {
+export function useClock(everyMs: number, running = true): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {
+    // Stopped, it holds its count and nothing re-renders for it: a shared link that has 404'd
+    // has nothing left to ask or to redraw (`U-80`). Started again, it counts on from there.
+    if (!running) return;
     const handle = setInterval(() => {
       setTick((was) => was + 1);
     }, everyMs);
     return () => {
       clearInterval(handle);
     };
-  }, [everyMs]);
+  }, [everyMs, running]);
   return tick;
 }

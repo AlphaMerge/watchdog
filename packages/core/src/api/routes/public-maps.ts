@@ -83,9 +83,16 @@ export function publicMapRoutes(app: FastifyInstance, options: PublicMapRouteOpt
           200: {
             type: 'object',
             additionalProperties: false,
-            required: ['name', 'widgets', 'connectors', 'problems', 'hasBackground'],
+            required: ['name', 'widgets', 'connectors', 'problems', 'hasBackground', 'readAt'],
             properties: {
               name: { type: 'string' },
+              // `U-80`: what the page dates the map by, so a wall display whose own clock is
+              // wrong still shows the right time.
+              readAt: {
+                type: 'string',
+                format: 'date-time',
+                description: 'When the core read this answer, by its own clock.',
+              },
               description: { type: 'string' },
               // Loose for the same reason the authenticated view route's is: a resolved widget is
               // a union whose arms differ by kind.
@@ -162,6 +169,8 @@ export function publicMapRoutes(app: FastifyInstance, options: PublicMapRouteOpt
       const shared = resolved.geo?.publicTiles === true && tiles.urlTemplate !== '' ? tiles : null;
       return {
         name: opened.map.name,
+        // Once everything above has been read, so it is never earlier than what it dates.
+        readAt: new Date().toISOString(),
         description: opened.map.description,
         widgets: resolved.widgets,
         connectors: resolved.connectors,

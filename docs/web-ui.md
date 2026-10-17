@@ -245,11 +245,15 @@ not read is absent from the list rather than refused.
   account is disabled or deleted. It reads the map again each minute with the last one still on
   screen; a read that fails is said under the map's name and the map stays, until the link itself
   stops working. A link whose first read fails says so, and the same failure a minute later is
-  not said again; one in other words is (`U-72`). Once the core has answered that a link does not work, the page stops asking for
-  it. Beside the map's name, *Last read 14:05* says when the map on screen was read, by the
-  display's own clock (with the day, once that is not today); it moves only when a read
-  succeeds, so a display that has been failing for an hour shows an hour-old time, and it is
-  plain text that a screen reader does not announce each minute.
+  not said again; one in other words is (`U-72`). Once the core has answered that a link does not
+  work, the page stops asking for it, and stops redrawing itself each minute (`U-80`). Beside the
+  map's name, *Last read 14:05* says when the core read the map on screen, by the core's clock
+  rather than the display's, which nobody may have set (with the day, once that is not today); it
+  moves only when a read succeeds, so a display that has been failing for an hour shows an
+  hour-old time, and it is plain text that a screen reader does not announce each minute. After
+  three reads in a row have failed, a line under the failure says *Not updated for 3 minutes: the
+  last read failed*, counting on each minute; it is announced once, politely, when it appears, and
+  its count steps without being said. A good read takes it away (`U-80`).
 - **Five-star maps surface in the Home menu.** Priority is set on the map itself.
 - **A name is unique among the maps you can read, not across the installation.** Two groups can
   each have a "Core Network" without either learning the other's exists, and a list that holds two

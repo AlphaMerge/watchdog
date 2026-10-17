@@ -151,6 +151,7 @@ describe('the page a stranger opens', () => {
     tiles: null,
     problems: [],
     hasBackground: false,
+    readAt: '2026-10-09T12:05:00.000Z',
   };
 
   /** Moves the page to another link without remounting it, as following one in the tab would. */
@@ -455,6 +456,9 @@ describe('the page a stranger opens', () => {
       expect(screen.queryByText('Router')).toBeNull();
       const alert = await statusSaying('this link is not valid');
       const records = watch();
+      // Nothing is left to ask for or to show, so the minute's clock has stopped (`U-80`): no
+      // interval is scheduled, and nothing re-renders the page.
+      expect(vi.getTimerCount()).toBe(0);
 
       // Later minutes (`U-66` review, `U-74`): the link is not asked for again, the map does not
       // come back, nothing is loading, and the alert is the same node, never touched.
@@ -492,20 +496,23 @@ describe('the page a stranger opens', () => {
         steer?.('/shared/def');
       });
       await screen.findByRole('heading', { name: 'Floor 2' });
-      expect(asked.slice(2)).toEqual(['/api/v1/public/maps/def?t=6']);
+      // The clock counts on from where it stopped: five minutes passed with it stopped.
+      expect(asked.slice(2)).toEqual(['/api/v1/public/maps/def?t=1']);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
       act(() => {
         vi.advanceTimersByTime(60_000);
       });
       await waitFor(() => {
         expect(reads).toBe(4);
       });
-      expect(asked[3]).toBe('/api/v1/public/maps/def?t=7');
+      expect(asked[3]).toBe('/api/v1/public/maps/def?t=2');
 
       // And the one that 404'd is still not asked for when the page goes back to it.
       act(() => {
         steer?.('/shared/abc');
       });
       await screen.findByRole('heading', { name: 'This link does not work' });
+      expect(vi.getTimerCount()).toBe(0);
       act(() => {
         vi.advanceTimersByTime(120_000);
       });
@@ -535,10 +542,16 @@ describe('the page a stranger opens', () => {
       return null;
     };
 
-    it('says when the map was last read, beside it and not aloud, until a read succeeds', async () => {
-      let now = todayAt(14, 5);
-      vi.spyOn(Date, 'now').mockImplementation(() => now);
-      replies = [{ body: shared }];
+    /** The map, as the core answers it when its clock reads `at`. */
+    const readBy = (at: number): { body: unknown } => ({
+      body: { ...shared, readAt: new Date(at).toISOString() },
+    });
+
+    it('says when the core last read the map, beside it and not aloud, until a read succeeds', async () => {
+      // This device's clock is hours out, as a wall display nobody sets may be (`U-80`): the
+      // time shown is the core's, from the answer.
+      vi.spyOn(Date, 'now').mockImplementation(() => todayAt(9, 0));
+      replies = [readBy(todayAt(14, 5))];
       openAt('abc');
       await screen.findByRole('heading', { name: 'Floor 1' });
       const line = screen.getByText(/^Last read/u);
@@ -554,20 +567,17 @@ describe('the page a stranger opens', () => {
       expect(said.contains(line)).toBe(false);
 
       // A good read moves it.
-      now = todayAt(14, 6);
-      await minute({ body: shared });
+      await minute(readBy(todayAt(14, 6)));
       await waitFor(() => {
         readAt(todayAt(14, 6));
       });
       expect(said.textContent).toBe('');
 
       // Failed ones leave it where it was, with the failure said under it.
-      now = todayAt(14, 7);
       await minute(failure('req-1'));
       await waitFor(() => {
         expect(said.textContent).toContain('could not be read again');
       });
-      now = todayAt(14, 8);
       await minute(failure('req-2'));
       await settle();
       expect(reads).toBe(4);
@@ -577,8 +587,7 @@ describe('the page a stranger opens', () => {
       expect(liveAncestor(line)).toBeNull();
 
       // The next good read moves it again and empties the region.
-      now = todayAt(14, 9);
-      await minute({ body: shared });
+      await minute(readBy(todayAt(14, 9)));
       await waitFor(() => {
         readAt(todayAt(14, 9));
       });
@@ -588,8 +597,7 @@ describe('the page a stranger opens', () => {
 
     it('gives the day of a read that was not today', async () => {
       const yesterday = todayAt(23, 58) - 86_400_000;
-      vi.spyOn(Date, 'now').mockImplementation(() => yesterday);
-      replies = [{ body: shared }];
+      replies = [readBy(yesterday)];
       openAt('abc');
       await screen.findByRole('heading', { name: 'Floor 1' });
       const day = new Date(yesterday).toLocaleDateString(undefined, {
@@ -599,6 +607,97 @@ describe('the page a stranger opens', () => {
       expect(screen.getByText(/^Last read/u).textContent).toBe(
         `Last read ${day}, ${asTime(yesterday)}`,
       );
+    });
+
+    /** The polite region under the failure, which says how old the map is (`U-80`). */
+    const cue = (): HTMLElement => {
+      const found = screen.getAllByRole('status').at(-1);
+      if (found === undefined) throw new Error('no region for the age');
+      return found;
+    };
+    const STALE = (minutes: number): string =>
+      `Not updated for ${String(minutes)} minutes: the last read failed.`;
+
+    it('says how old the map is after three missed reads, once, politely', async () => {
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      const region = cue();
+      expectQuiet(region, ['mt-1', 'empty:mt-0'], 'polite');
+      const seen: { text: string; live: string | null }[] = [];
+      const observer = new MutationObserver(() => {
+        seen.push({ text: region.textContent, live: region.getAttribute('aria-live') });
+      });
+      observer.observe(region, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+      /**
+       * A minute whose read fails, landed: each in words of its own, so the failure region shows
+       * when it has (in the same words it would change nothing, by `U-72`'s rule).
+       */
+      const miss = async (n: number): Promise<void> => {
+        await minute({
+          status: 500,
+          body: {
+            error: {
+              code: 'INTERNAL',
+              message: `gone away ${String(n)}`,
+              correlationId: `req-${String(n)}`,
+            },
+          },
+        });
+        await waitFor(() => {
+          expect(region.previousElementSibling?.textContent).toContain(`req-${String(n)}`);
+        });
+      };
+      try {
+        // Two missed reads say the failure, and nothing about the age.
+        await miss(1);
+        await miss(2);
+        expect(region.textContent).toBe('');
+        // The third: said, in the node that was there, while it is polite.
+        await miss(3);
+        await waitFor(() => {
+          expect(region.textContent).toBe(STALE(3));
+        });
+        expect(region.getAttribute('aria-live')).toBe('polite');
+        expect(cue()).toBe(region);
+        expect(screen.queryByRole('alert')).toBeNull();
+        // The next minute's count is shown and not said: the region stopped being live with
+        // the same change that moved it.
+        await miss(4);
+        await waitFor(() => {
+          expect(region.textContent).toBe(STALE(4));
+        });
+        expect(region.getAttribute('aria-live')).toBe('off');
+        await miss(5);
+        await waitFor(() => {
+          expect(region.textContent).toBe(STALE(5));
+        });
+        // A map read empties it, and makes it live again for the next run.
+        await minute({ body: shared });
+        await waitFor(() => {
+          expect(region.textContent).toBe('');
+        });
+        expect(region.getAttribute('aria-live')).toBe('polite');
+        // Every change with text in it was either the first, said politely, or a quiet step.
+        const said = seen.filter((one) => one.text !== '' && one.live !== 'off');
+        expect([...new Set(said.map((one) => one.text))]).toEqual([STALE(3)]);
+        // A later run is said again.
+        await miss(6);
+        await miss(7);
+        expect(region.textContent).toBe('');
+        await miss(8);
+        await waitFor(() => {
+          expect(region.textContent).toBe(STALE(3));
+        });
+        expect(region.getAttribute('aria-live')).toBe('polite');
+      } finally {
+        observer.disconnect();
+      }
     });
   });
 });

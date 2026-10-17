@@ -30519,7 +30519,7 @@ because each is a decision rather than a defect:
         navigator read as not saying 6, the two router canaries among them. Full web suite
         1,123 passed.
 
-- [ ] **U-80 — the shared map's age, and its clock** · XS · U-74 · Found 2026-10-09 in `U-74`.
+- [x] **U-80 — the shared map's age, and its clock** · XS · U-74 · Found 2026-10-09 in `U-74`.
       The map says when it was last read but gives no cue when that is old. The time is the
       display's own clock, so a wrong clock shows a wrong time; the core could put a time in the
       public payload. After a 404 the minute clock still re-renders for nothing. **Decision
@@ -30529,6 +30529,43 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** a stale cue after three missed reads ("Not updated
       for N minutes: the last read failed"), announced once, politely. The time comes from
       the core's clock in the public payload, and the re-render after a 404 stops.
+
+      **U-80 outcome. The answer carries the core's time, the page says how old the map is after
+      three missed reads, and a gone link's clock stops.** Core and web; no migration, no
+      protocol change.
+      - **Core.** `GET /public/maps/{token}` answers `readAt`, required, a `date-time` taken once
+        everything else is read. `api-reference.md` regenerated.
+      - ***Last read*** is the core's `readAt`, not the browser's clock: a wall display nobody set
+        still shows the right time. The day once it is not today, as before.
+      - **The cue.** Reads missed in a row are counted per link, each failed refresh once (each
+        minute's is a new error), and a map read clears the count. From the third, a line under
+        the failure says *Not updated for 3 minutes: the last read failed.*, in warning ink. Its
+        minutes are this device's monotonic time since the map arrived, never fewer than the reads
+        missed, so a wrong wall clock cannot skew them either.
+      - **Said once.** The line is a `role="status"` there and empty from the map's first
+        appearance, polite when it fills; once its count has moved it is `aria-live="off"`, set in
+        the same commit as the step, so the minutes count on without being said. Emptied by a
+        good read, and polite again, so a later run is said again. An explicit `aria-live` on a
+        status is the attribute browsers honour over the role's own; not checked in a screen
+        reader.
+      - **After a 404** `useClock` is given `running: false`: no interval, so nothing re-renders.
+        Another link starts it again, counting on from where it stopped.
+      - **Docs.** `web-ui.md`'s Maps section.
+      - **Tests.** `maps-api.test.ts` (core): `readAt` is an ISO instant between the request's
+        start and end. `map-share.test.tsx` (web): with this device's clock at 09:00, *Last read*
+        says the core's 14:05, then 14:06 after a good read, stays there through two failures,
+        moves to 14:09; a read from yesterday gives the day. Missed reads 1 and 2 leave the line
+        empty (it is quiet, polite, `mt-1 empty:mt-0` before); the third fills it, polite; the
+        fourth and fifth step it with `aria-live="off"`; every change with text in it while live
+        is the first; a good read empties it and makes it polite; a new run is said again at 3.
+        After the 404 no timer is scheduled; the next link is asked at `?t=1`, then `?t=2`.
+        Core: `maps-api`, `build-hygiene`, `api-strict-schemas`, `object-visibility` 185 pass.
+      - **Mutations** (restored byte for byte; core rebuilt and checked against `dist`), each
+        failing: `readAt` not the core's now (core) 1; *Last read* from the browser's clock 2;
+        the clock not stopped after a 404 1; `useClock` ignoring the stop 1; the cue after two
+        reads 1; the cue never quiet 1; the count not cleared by a good read 1; the minutes from
+        elapsed time alone 1.
+      - **Not seen in a browser or a screen reader.**
 - [x] **U-81 — the template-delete focus tests fail about one run in eight** · S · U-64, U-68 ·
       Found 2026-10-09 in round 21's suite. In `templates-refused.test.tsx`, "puts it on Keep
       it when the question is asked" and "never leaves it on the page while a delete is out"
