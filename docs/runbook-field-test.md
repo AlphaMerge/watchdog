@@ -497,6 +497,7 @@ build does not construct them (`H-12`).
 | `/api/v1/schedules` | GET · POST | 401 |
 | `/api/v1/schedules/{id}` | GET · PUT · DELETE | 401 |
 | `/api/v1/sensor-types` | GET | 401 |
+| `/api/v1/sensor-types/{id}/channels` | POST | 401 |
 | `/api/v1/sensor-types/{id}/preview` | POST | 401 |
 | `/api/v1/sensors/{id}/check` | POST | 401 |
 | `/api/v1/sensors/{id}/history` | GET | 401 |
