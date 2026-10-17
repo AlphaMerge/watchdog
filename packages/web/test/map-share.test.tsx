@@ -388,6 +388,59 @@ describe('the page a stranger opens', () => {
       expect(loadingShown(records)).toBe(false);
     });
 
+    it('says a first read that failed once, while later minutes fail in the same words (U-72)', async () => {
+      replies = [failure('req-1')];
+      openAt('abc');
+      const said = await statusSaying('the database went away');
+      expect(said.textContent).toContain('req-1');
+      const seen: string[] = [];
+      const observer = new MutationObserver(() => {
+        seen.push(said.textContent);
+      });
+      observer.observe(said, { childList: true, subtree: true, characterData: true });
+      /** The next minute, its read answered with `reply`: the failure stays while it is out. */
+      const later = async (reply: { body: unknown; status?: number }): Promise<void> => {
+        const before = reads;
+        act(() => {
+          vi.advanceTimersByTime(60_000);
+        });
+        await waitFor(() => {
+          expect(reads).toBe(before + 1);
+          expect(waiting).toHaveLength(1);
+        });
+        expect(screen.queryByText('Loading the map…')).toBeNull();
+        act(() => {
+          waiting.shift()?.(reply);
+        });
+        await settle();
+      };
+      try {
+        // The same failure a minute later, with an id of its own: not news, so nothing changes.
+        await later(failure('req-2'));
+        expect(said.textContent).toContain('req-1');
+        expect(said.textContent).not.toContain('req-2');
+        expect(seen).toEqual([]);
+        // Other words are said, in the same node.
+        await later({
+          status: 503,
+          body: { error: { code: 'UNAVAILABLE', message: 'restarting', correlationId: 'req-3' } },
+        });
+        await waitFor(() => {
+          expect(said.textContent).toContain('restarting');
+        });
+        expect(said.textContent).toContain('req-3');
+        expect(seen.every((text) => text.includes('restarting'))).toBe(true);
+        expect(said.isConnected).toBe(true);
+        expect(screen.queryByRole('alert')).toBeNull();
+      } finally {
+        observer.disconnect();
+      }
+      // A map read takes its place.
+      await later({ body: shared });
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      expect(reads).toBe(4);
+    });
+
     it('drops the map when the link stops working, for good', async () => {
       const notFound = {
         status: 404,

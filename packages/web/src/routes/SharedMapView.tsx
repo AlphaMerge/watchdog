@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { type ApiError, sameWords, useApi } from '../api/client';
 import type { SharedMap } from '../api/types';
+import { useKeptFailure } from '../api/kept-failure';
 import { CorrelationId } from '../components/Panels';
 import { ReadRegion } from '../components/ReadRegion';
 import { MapCanvas } from '../maps/MapBoard';
@@ -96,8 +97,14 @@ export function SharedMapView(): React.JSX.Element {
   }
   const goneError = gone !== null && gone.token === token ? gone.error : goneNow;
   const map = goneError !== null ? null : view.status === 'ready' ? view.data : (last?.map ?? null);
+  // A first read that failed other than with a 404, **kept through the minute's reads and their
+  // repeats in the same words** (`U-72`): each minute's read used to put the loading line back
+  // and the next failure in after it, so a core that stayed down was said once a minute to a
+  // wall nobody was asking. One in other words is said; a map read clears it. Filed with the
+  // token, since the path moves with every minute.
+  const firstRead = useKeptFailure(view, token ?? null, last === null && goneError === null);
   /** What the page says instead of a map: the link's 404, or a first read that failed. */
-  const broken = goneError ?? (map === null && view.status === 'error' ? view.error : null);
+  const broken = goneError ?? (map === null ? firstRead.failure : null);
   const failed = view.status === 'error' && map !== null ? view.error : null;
 
   // The refresh failure on screen: the first of a run in the same words, until a read succeeds.

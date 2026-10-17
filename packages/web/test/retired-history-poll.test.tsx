@@ -86,19 +86,8 @@ const json = (body: unknown, status = 200): Response =>
     status,
     headers: { 'content-type': 'application/json' },
   });
-const unavailable = (): Response =>
-  json(
-    {
-      error: {
-        code: 'UNAVAILABLE',
-        message: 'restarting',
-        correlationId: 'req-67',
-        context: {},
-        details: {},
-      },
-    },
-    503,
-  );
+const unavailable = (message = 'restarting', correlationId = 'req-67'): Response =>
+  json({ error: { code: 'UNAVAILABLE', message, correlationId, context: {}, details: {} } }, 503);
 
 /** What the core holds: Column b retired or not, and whether an edit has added Column d. */
 let listSaysRetired = true;
@@ -106,6 +95,8 @@ let valuesSayRetired = true;
 let added = false;
 /** How the nth read of the list is answered: at once, refused, or held until `release`. */
 let listReply: (read: number) => 'answer' | 'fail' | 'hold' = () => 'answer';
+/** The words and id the nth read of the list is refused with, when it is. */
+let listRefusal: (read: number) => readonly [string, string] = () => ['restarting', 'req-67'];
 let release: (answer: 'list' | 'fail') => void = () => undefined;
 /** How the nth read of the series is answered. */
 let historyReply: (read: number) => 'answer' | 'fail' = () => 'answer';
@@ -208,6 +199,7 @@ beforeEach(() => {
   valuesSayRetired = true;
   added = false;
   listReply = () => 'answer';
+  listRefusal = () => ['restarting', 'req-67'];
   historyReply = () => 'answer';
   release = () => undefined;
   listReads = 0;
@@ -226,7 +218,7 @@ beforeEach(() => {
     if (path === '/api/v1/objects/9/channels') {
       listReads += 1;
       const reply = listReply(listReads);
-      if (reply === 'fail') return Promise.resolve(unavailable());
+      if (reply === 'fail') return Promise.resolve(unavailable(...listRefusal(listReads)));
       if (reply === 'hold') {
         return new Promise<Response>((resolve) => {
           release = (answer) => {
@@ -502,6 +494,63 @@ describe('a failed re-read of the channel list (U-67)', () => {
     });
     expect(region.matches(':empty')).toBe(true);
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+describe('a re-read of the channel list the page makes itself, refused again (U-72)', () => {
+  it('is not said again in the same words, and is in other words', async () => {
+    // The list keeps saying Column b is retired and every poll says it is live, so the page reads
+    // the list again once a minute, on its own; every read but the first and the last is refused.
+    valuesSayRetired = false;
+    listReply = (read) => (read === 1 || read === 6 ? 'answer' : 'fail');
+    listRefusal = (read) =>
+      read === 4 ? ['disk full', 'req-4'] : ['restarting', `req-${String(read)}`];
+    mount('/objects/9');
+    expect(await screen.findByText('Column c')).toBeDefined();
+    const region = failureRegion(channelsCard());
+    const said = (words: string, id: string): string =>
+      'The channel list could not be read again, so this is the one read before and may be out ' +
+      `of date: ${words} ${id}`;
+    await waitFor(() => {
+      expect(region.textContent).toBe(said('restarting', 'req-2'));
+    });
+
+    const seen: string[] = [];
+    const observer = new MutationObserver(() => {
+      seen.push(region.textContent);
+    });
+    observer.observe(region, { childList: true, subtree: true, characterData: true });
+    /** A minute of polls, the last of which reads the list again. */
+    const minute = async (reads: number): Promise<void> => {
+      for (let index = 0; index < RELIST_MIN_MS / POLL_MS; index += 1) await onePoll();
+      await waitFor(() => {
+        expect(listReads).toBe(reads);
+      });
+    };
+    try {
+      // Refused in the same words, with an id of its own, and then in other words: only the
+      // second is said, and the region was never emptied between, not while either read was out.
+      await minute(3);
+      await minute(4);
+      await waitFor(() => {
+        expect(region.textContent).toBe(said('disk full', 'req-4'));
+      });
+      expect(seen).toEqual([said('disk full', 'req-4')]);
+      // Back to the first words: other than the last, so said.
+      await minute(5);
+      await waitFor(() => {
+        expect(region.textContent).toBe(said('restarting', 'req-5'));
+      });
+      // A read that answers empties it.
+      await minute(6);
+      await waitFor(() => {
+        expect(region.textContent).toBe('');
+      });
+      expect(seen).toEqual([said('disk full', 'req-4'), said('restarting', 'req-5'), '']);
+      expect(speaking()).toEqual([]);
+    } finally {
+      observer.disconnect();
+    }
   });
 });
 

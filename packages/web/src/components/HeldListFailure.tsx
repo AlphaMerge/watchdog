@@ -20,8 +20,12 @@ export const PLACED_MS = 100;
  *   (`role="status"`, said whole): nothing the operator asked for was refused, and the list they
  *   were reading is still there to read (`U-60`'s first read is polite for the same reason). The
  *   caller passes the failure only while a list is held; with none held the page has its own
- *   error panel. Emptied as each read starts — the caller's `error` is null while one is out — so
- *   the same failure twice is said twice; the next good read leaves it empty. **Empty as it
+ *   error panel. **The channel list, the templates and the readings pass `useKeptFailure`'s**
+ *   (`U-72`): the first failure of a run in the same words, kept through the reads the page makes
+ *   on its own, so a repeat nobody asked for changes nothing here and is not said again, while
+ *   one in other words is; *Try again* clears it as its read starts (`error` null), so the same
+ *   failure after it is said again; the next good read leaves it empty. The History tab passes
+ *   its hook's own failure, emptied as each read starts, so each is said (`U-83`). **Empty as it
  *   mounts, too** (`U-78`): a failure already held when the region comes onto the page — the
  *   sensor page's readings, failed while the History tab was open, on coming back to Overview —
  *   is put in a moment after it, rather than arriving with it and going unsaid.
@@ -52,7 +56,7 @@ export function HeldListFailure({
   what: string;
   /** What is shown meanwhile, as it ends that sentence after "so". */
   held?: string;
-  /** The last read's failure, only while a list is held; null while a read is out. */
+  /** The failure to say, only while a list is held (`useKeptFailure`); null while *Try again*'s read is out. */
   error: ApiError | null;
   /** A read of the list is out. */
   reading: boolean;

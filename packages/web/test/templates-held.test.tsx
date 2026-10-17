@@ -52,6 +52,8 @@ const METHOD: NotificationMethod = {
 
 /** How the nth read of the list is answered: at once, refused, or held until `release`. */
 let listReply: (read: number) => 'answer' | 'fail' | 'hold' = () => 'answer';
+/** The words and id the nth read of the list is refused with, when it is. */
+let listRefusal: (read: number) => readonly [string, string] = () => ['restarting', 'req-67'];
 let release: (answer: 'list' | 'fail') => void = () => undefined;
 let listReads = 0;
 
@@ -62,18 +64,14 @@ const reply = (status: number, data: unknown): Promise<Response> =>
       headers: { 'content-type': 'application/json' },
     }),
   );
-const LIST_REFUSED = {
-  error: {
-    code: 'UNAVAILABLE',
-    message: 'restarting',
-    correlationId: 'req-67',
-    context: {},
-    details: {},
-  },
-};
+const refused = (message: string, correlationId: string): unknown => ({
+  error: { code: 'UNAVAILABLE', message, correlationId, context: {}, details: {} },
+});
+const LIST_REFUSED = refused('restarting', 'req-67');
 
 beforeEach(() => {
   listReply = () => 'answer';
+  listRefusal = () => ['restarting', 'req-67'];
   release = () => undefined;
   listReads = 0;
   vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
@@ -98,7 +96,7 @@ beforeEach(() => {
     if (path === '/templates') {
       listReads += 1;
       const next = listReply(listReads);
-      if (next === 'fail') return reply(503, LIST_REFUSED);
+      if (next === 'fail') return reply(503, refused(...listRefusal(listReads)));
       if (next === 'hold') {
         return new Promise<Response>((resolve) => {
           release = (answer) => {
@@ -310,5 +308,64 @@ describe('a failed re-read of the template list (U-67)', () => {
       expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     });
     expect(document.activeElement).toBe(other);
+  });
+});
+
+describe('a re-read of the template list after a save, refused again (U-72)', () => {
+  it('is not said again in the same words, and is in other words', async () => {
+    // Every read after a save is refused but the last: in the same words with ids of their own,
+    // then in other words, then the first again.
+    listReply = (read) => (read === 1 || read === 6 ? 'answer' : 'fail');
+    listRefusal = (read) =>
+      read === 4 ? ['disk full', 'req-4'] : ['restarting', `req-${String(read)}`];
+    await open('/templates?id=9', 'Editing Alert hook');
+    const region = listRegion();
+    const said = (words: string, id: string): string =>
+      'The template list could not be read again, so this is the one read before and may be ' +
+      `out of date: ${words} ${id}`;
+    /** Opens the template and saves it: the list is read again, which nobody asked for. */
+    const save = async (reads: number): Promise<void> => {
+      if (screen.queryByRole('heading', { name: 'Editing Alert hook' }) === null) {
+        fireEvent.click(button('Alert hook'));
+        await screen.findByRole('heading', { name: 'Editing Alert hook' });
+      }
+      press('Save template');
+      await waitFor(() => {
+        expect(listReads).toBe(reads);
+      });
+    };
+
+    await save(2);
+    await waitFor(() => {
+      expect(region.textContent).toBe(said('restarting', 'req-2'));
+    });
+    const seen: string[] = [];
+    const observer = new MutationObserver(() => {
+      seen.push(region.textContent);
+    });
+    observer.observe(region, { childList: true, subtree: true, characterData: true });
+    try {
+      // The same words, then other words: only the second is said, and the region was never
+      // emptied between, not while either read was out.
+      await save(3);
+      await save(4);
+      await waitFor(() => {
+        expect(region.textContent).toBe(said('disk full', 'req-4'));
+      });
+      expect(seen).toEqual([said('disk full', 'req-4')]);
+      await save(5);
+      await waitFor(() => {
+        expect(region.textContent).toBe(said('restarting', 'req-5'));
+      });
+      await save(6);
+      await waitFor(() => {
+        expect(region.textContent).toBe('');
+      });
+      expect(seen).toEqual([said('disk full', 'req-4'), said('restarting', 'req-5'), '']);
+      expect(listRegion()).toBe(region);
+      expect(speaking()).toEqual([]);
+    } finally {
+      observer.disconnect();
+    }
   });
 });

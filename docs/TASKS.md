@@ -30195,7 +30195,7 @@ because each is a decision rather than a defect:
         poll reads; the set-aside failure filed again on the press's render; the press's render
         not counted as reading (the button went, with its focus).
 
-- [ ] **U-72 — repeats of an automatic failure are announced every minute** · S · U-67, U-66 ·
+- [x] **U-72 — repeats of an automatic failure are announced every minute** · S · U-67, U-66 ·
       Found 2026-10-09. A held list's automatic re-read empties and refills its region, so a
       failure that persists is said again each minute. The shared map's first read failing
       other than with a 404 makes a new alert every minute. **Decision first**: should a repeat
@@ -30207,6 +30207,39 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** a repeat of the same failure from a read nobody
       asked for stays silent, and a new or different failure is announced. For the channel
       list, the templates list and the shared map, with tests.
+
+      **U-72 outcome. One hook, `useKeptFailure` (`api/kept-failure.ts`), holds the failure a
+      page says for its own reads: the first of a run in the same words, id and all, until a read
+      answers.** Web only; no route, no migration.
+      - **The rule** is the readings poll's since `U-71`'s review, moved out of
+        `ObjectDetailView` so the three lists share it: kept through each read the page makes and
+        each repeat in the same words (`sameWords`, code and message); a failure in other words
+        replaces it and is said; a good read clears it; filed with the path (for the shared map,
+        the token, since its path carries the minute). *Try again*, the operator's, clears it as
+        its read starts and sets the failure in hand aside, so the same failure after it is said
+        again: they asked. It also says when that read is starting (`reading`), so
+        `HeldListFailure` keeps *Try again* and its focus on the press's render.
+      - **The channel list** (its once-a-minute re-read while the list and the poll disagree),
+        **the templates** (the re-read after each save or delete) and **the readings** pass it to
+        `HeldListFailure`. **The shared map's first read**, failing other than with a 404, is kept
+        through the minute's reads, so the page no longer goes back to *Loading the map…* and
+        says the failure again each minute; a 404 or a map read takes its place.
+      - **Docs.** `web-ui.md`: the templates, the channel list and the shared link.
+      - **Tests.** `retired-history-poll.test.tsx`: the minute's re-reads refused in the same
+        words (`req-3`) then other words (`req-4`), the first words again (`req-5`), then
+        answered: the region's recorded states are exactly the three changes, never emptied
+        between. `templates-held.test.tsx`: the same through five saves. `map-share.test.tsx`: a
+        first read refused (`req-1`), the next minute in the same words (`req-2`) changes
+        nothing and never shows the loading line, other words are said in the same node, then a
+        map. `readings-held.test.tsx` and the `U-67` tests unchanged and passing.
+      - **Mutations** (restored byte for byte), each failing: every new error replacing the one
+        kept 4; other words kept 5; the failure dropped while a read is out 4; the channel list,
+        the templates, the shared map each given the hook's own error again 1 each; *Try again*
+        not clearing it 4; *Try again*'s starting read not counted as reading 3; the set-aside
+        failure filed again 3.
+      - **Not done.** The History tab's series, re-read with the channel list, still says each
+        failure (`U-83`). The shared map's refresh failure keeps its own copy of the rule, which
+        it had already.
 - [x] **U-73 — *Save template* is `disabled` while it saves** · XS · U-69 · Found 2026-10-09 in
       `U-69`. A refused save can lose focus before the refusal is said. `U-64` used
       `aria-disabled` on *Yes, delete* for this. **Done when** *Save* and *Create* do the same,
@@ -30593,6 +30626,17 @@ because each is a decision rather than a defect:
           again after a set.
       - **Not seen in a browser.** Reaching the page means signing in, a credential this session
         does not enter.
+- [ ] **U-83 — the History tab says its series' same failure again with each re-read** · XS ·
+      U-72 · Found 2026-10-17 in `U-72`. The History tab reads its series again whenever the page
+      reads the channel list again (`U-61`) — at most once a minute, while the list and the poll
+      disagree — and hands `HeldListFailure` the hook's own failure, which is null while each
+      read is out: a core that stays down is said again each time, in the same words, to nobody
+      who asked. `U-72`'s decision (a repeat of the same failure from a read nobody asked for
+      stays silent; a new or different one is said) was given for the channel list, the
+      templates and the shared map only. **Done when** decided whether it covers the series too,
+      and if it does, the series' failure goes through `useKeptFailure` (filed by sensor and
+      range; *Try again* and a range the operator picks set it aside), with a test.
+      Recommended: yes — it is the same kind of read, beside the same list.
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.

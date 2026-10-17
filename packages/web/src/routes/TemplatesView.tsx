@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
+import { useKeptFailure } from '../api/kept-failure';
 import type {
   NotificationMethod,
   ObjectPage,
@@ -83,6 +84,9 @@ export function TemplatesView(): React.JSX.Element {
     if (templates.status === 'ready') heldTemplates.current = templates.data.items;
   }, [templates]);
   const items = templates.status === 'ready' ? templates.data.items : heldTemplates.current;
+  // Its re-read's failure, said beside it: the first of a run in the same words, kept through the
+  // re-read after each save or delete, which nobody asked for (`U-72`).
+  const listKept = useKeptFailure(templates, '/templates', items !== null);
 
   // One region from the first read to its failure (`U-58`). A list held through a re-read is not
   // waited on: its failure is said beside it (`U-67`).
@@ -138,9 +142,9 @@ export function TemplatesView(): React.JSX.Element {
       <Card>
         <HeldListFailure
           what="The template list"
-          error={templates.status === 'error' ? templates.error : null}
-          reading={templates.status === 'loading'}
-          onRetry={templates.reload}
+          error={listKept.failure}
+          reading={listKept.reading}
+          onRetry={listKept.readAgain}
           focusAfter={focusNew}
         />
         {items.length === 0 ? (

@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { sameWords, useApi, type ApiError } from '../api/client';
+import { useApi, type ApiError } from '../api/client';
+import { useKeptFailure } from '../api/kept-failure';
 import { useStateStream, type LiveState } from '../api/stream';
 import type {
   AncestorsView,
@@ -116,6 +117,10 @@ export function ObjectDetailView(): React.JSX.Element {
         : heldChannels.current?.path === channelsPath
           ? heldChannels.current.items
           : null;
+  // A re-read of the held list that failed, said beside it (`U-67`): **the first of a run in the
+  // same words, kept through the re-reads the page makes on its own** (`U-72`), so a core that
+  // stays down is said once, not once a minute while the list and the poll disagree.
+  const listKept = useKeptFailure(channels, channelsPath, channelList !== null);
   // Re-read when the values poll says the list is stale (`U-55`, `U-61`), at most once a minute:
   // a channel flapping, or a list and a poll that keep disagreeing, cannot turn every poll into a
   // second request. Monotonic, as anything measuring an interval is. Per sensor: the last re-read
@@ -182,40 +187,14 @@ export function ObjectDetailView(): React.JSX.Element {
   // until a read succeeds** (`U-71` review; `U-59`'s rule for `RunPanel`'s polls, and the shared
   // map's). Each poll fails with a new error and a new id, and handing `HeldListFailure` the
   // hook's own error would empty its region as every poll starts and fill it as it fails: the
-  // same failure said four times a minute, to nobody who asked. So it is kept through the poll's
-  // read and through a repeat in the same words, first id and all; a failure in other words
-  // replaces it, and is said; a good read empties it. Filed with the path, so it is never another
-  // sensor's. Set during render from the answer in hand, so never a render behind it. *Try
-  // again*, pressed by the operator, sets it aside as its read starts, so the same failure after
-  // it is said again: they asked.
-  const [pollFailure, setPollFailure] = useState<{ path: string; error: ApiError } | null>(null);
-  // The failure *Try again* set aside: the hook still holds it on the render the press makes,
-  // before its read starts, and filed again then it would never leave the region.
-  const [setAside, setSetAside] = useState<ApiError | null>(null);
-  const failedNow =
-    values.status === 'error' &&
-    readings !== null &&
-    valuesPath !== null &&
-    values.error !== setAside
-      ? values.error
-      : null;
-  if (values.status === 'ready' && pollFailure !== null) setPollFailure(null);
-  if (
-    failedNow !== null &&
-    valuesPath !== null &&
-    (pollFailure === null ||
-      pollFailure.path !== valuesPath ||
-      !sameWords(pollFailure.error, failedNow))
-  ) {
-    setPollFailure({ path: valuesPath, error: failedNow });
-  }
-  const heldFailure =
-    pollFailure !== null && pollFailure.path === valuesPath ? pollFailure.error : null;
-  const readAgain = (): void => {
-    setPollFailure(null);
-    if (values.status === 'error') setSetAside(values.error);
-    values.reload();
-  };
+  // same failure said four times a minute, to nobody who asked. *Try again*, pressed by the
+  // operator, sets it aside as its read starts, so the same failure after it is said again: they
+  // asked. The rule is `useKeptFailure`'s, the channel list's and the templates' too (`U-72`).
+  const {
+    failure: heldFailure,
+    reading: readingValues,
+    readAgain,
+  } = useKeptFailure(values, valuesPath, readings !== null);
   // *Try again* on the values' error panel (no readings held), pressed for the error it shows:
   // out until that read answers, as `ErrorPanel` counts busy, since every failed read parses a
   // new error.
@@ -332,17 +311,18 @@ export function ObjectDetailView(): React.JSX.Element {
     setParam('retired', hide ? 'hide' : null);
   };
 
-  // A re-read of the held list that failed (`U-67`), said beside it on either tab that shows it.
-  // The retry is the hook's own `reload`, not `relist`, whose minute would hold it back (`U-60`).
+  // A re-read of the held list that failed (`U-67`), said beside it on either tab that shows it,
+  // kept through the page's own re-reads (`U-72`). The retry is the hook's own `reload`, with what
+  // is shown set aside, not `relist`, whose minute would hold it back (`U-60`).
   // When a good read takes *Try again* away, focus goes to the tab's panel, which is focusable,
   // named by its tab, and holds the list.
   const listFailure =
     channelList !== null ? (
       <HeldListFailure
         what="The channel list"
-        error={channels.status === 'error' ? channels.error : null}
-        reading={channels.status === 'loading'}
-        onRetry={channels.reload}
+        error={listKept.failure}
+        reading={listKept.reading}
+        onRetry={listKept.readAgain}
         focusAfter={() => {
           document.getElementById(`panel-${active}`)?.focus();
         }}
@@ -375,11 +355,7 @@ export function ObjectDetailView(): React.JSX.Element {
                   onRetryList={channels.reload}
                   readings={readings}
                   readingsError={values.status === 'error' ? values.error : null}
-                  reading={
-                    values.status === 'loading' ||
-                    // Pressed, and the hook not yet `loading`: its read is starting.
-                    (values.status === 'error' && values.error === setAside)
-                  }
+                  reading={readingValues}
                   onRetryReadings={retryValues}
                   heldFailure={heldFailure}
                   onReadAgain={readAgain}

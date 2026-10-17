@@ -183,7 +183,8 @@ Notification templates — what a message says, who receives it, and when it is 
   method's settings with them, so Enter in a settings box saves without taking focus from that
   box; **Cancel** does nothing until the answer is in (`U-78`). The list is then read
   again; if that read fails, the list in hand stays and a line above it says it may be out of
-  date, with **Try again** (`U-67`).
+  date, with **Try again** (`U-67`). The same failure after the next save is not said again; one
+  in other words is, and so is the same one after **Try again**, since you asked (`U-72`).
 - **A recipient is an address, a user or a group.** Users and groups are picked by typing a name,
   and the template keeps the one picked even if it is renamed later. The list warns about an
   account that is disabled or has no address, and about a group with no members, because a
@@ -243,7 +244,8 @@ not read is absent from the list rather than refused.
   its maker loses a grant, and stops opening at all, as a revoked link does, when the maker's
   account is disabled or deleted. It reads the map again each minute with the last one still on
   screen; a read that fails is said under the map's name and the map stays, until the link itself
-  stops working. Once the core has answered that a link does not work, the page stops asking for
+  stops working. A link whose first read fails says so, and the same failure a minute later is
+  not said again; one in other words is (`U-72`). Once the core has answered that a link does not work, the page stops asking for
   it. Beside the map's name, *Last read 14:05* says when the map on screen was read, by the
   display's own clock (with the day, once that is not today); it moves only when a read
   succeeds, so a display that has been failing for an hour shows an hour-old time, and it is
@@ -335,7 +337,9 @@ one an edit added since the page opened (`U-61`). The page polls on the Overview
 tab alike, and each re-read of the list reads the History tab's series again, up to now, so the
 chart shows the new line too. An ordinary poll does not ask for the list. If a re-read fails, the
 list in hand stays and a line beside it says it could not be read again, with **Try again**
-(`U-67`). Put the column back
+(`U-67`). While the page keeps reading it again by itself, the same failure is said once, not
+once a minute; one in other words is said, and so is the same one after **Try again** (`U-72`).
+Put the column back
 and it is read again, with its history. Its kind of reading cannot change on the way back — a
 counter stores rates and a gauge values, and one line cannot mean both — so the **Parameters**
 form asks the core which channel the column lands on and holds it to what that channel stores: its
