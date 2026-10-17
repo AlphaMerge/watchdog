@@ -3,7 +3,9 @@
 # package (`H-34`). Not a script of its own: `scripts/package-deb.sh` puts this text into the
 # .deb's postrm, under `purge`, and `scripts/package-rpm.sh` into the .rpm's postun scriptlet,
 # under an erase ($1 = 0) — the package's files, ms-setup among them, are gone by the time either
-# runs, so this has to travel inside them. POSIX sh, because dpkg runs a postrm with /bin/sh,
+# runs, so this has to travel inside them. A tarball installation's `ms-uninstall` reads it from
+# beside itself before it removes the release, and runs it after (`H-39`), in the same place in
+# the order. POSIX sh, because dpkg runs a postrm with /bin/sh,
 # dash on Debian, and under `set -e`: **nothing here may change the scriptlet's exit status**, so
 # every command that can fail is a condition. A postrm that failed would leave the package
 # half-purged, in `rc`, over a file. No percent sign anywhere: rpm would read one as a macro

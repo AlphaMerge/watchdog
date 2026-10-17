@@ -91,6 +91,11 @@ install -d -m 0755 "${incoming}/etc" "${incoming}/deploy/systemd" "${incoming}/l
 cp "${FROM}"/etc/*.json "${incoming}/etc/"
 cp "${FROM}"/deploy/systemd/*.service "${incoming}/deploy/systemd/"
 install -m 0755 "${FROM}/deploy/setup.sh" "${incoming}/libexec/ms-setup"
+# How a tarball installation is removed (`H-39`), which a package leaves to its package manager,
+# with the fragment a package's purge runs for the probe's ping drop-in beside it, where the
+# uninstaller reads it.
+install -m 0755 "${FROM}/deploy/uninstall.sh" "${incoming}/libexec/ms-uninstall"
+install -m 0644 "${FROM}/deploy/remove-ping-conf.sh" "${incoming}/libexec/remove-ping-conf.sh"
 printf '%s\n' "${version}" > "${incoming}/VERSION"
 
 # --- 2. ask the new build ------------------------------------------------------------------

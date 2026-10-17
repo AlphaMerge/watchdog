@@ -13,6 +13,8 @@
 #   deploy/winsw/*.xml            Windows service definitions
 #   deploy/setup.sh               the post-install every installer runs (H-05)
 #   deploy/place-release.sh       copy, check, stop, swap — the tarball installers' upgrade (H-21)
+#   deploy/uninstall.sh           the tarball's removal, installed as libexec/ms-uninstall (H-39)
+#   deploy/remove-ping-conf.sh    the probe's ping drop-in, taken away by a removal (H-34)
 #   docs/                         this release's documentation, which the units point at
 #   etc/{core,probe}.json         example configuration
 #   install.sh                    Linux installer
@@ -277,7 +279,11 @@ cp "${repo_root}/deploy/setup.sh" "${stage}/deploy/setup.sh"
 # How both tarball installers put a release in place without touching the running one until the
 # new build has accepted the configuration (`H-21`).
 cp "${repo_root}/deploy/place-release.sh" "${stage}/deploy/place-release.sh"
-chmod +x "${stage}/deploy/setup.sh" "${stage}/deploy/place-release.sh"
+# What removes a tarball installation (`H-39`), and the fragment for the probe's ping drop-in it
+# runs, the one the packages' purge and erase carry. `place-release.sh` puts both in libexec.
+cp "${repo_root}/deploy/uninstall.sh" "${stage}/deploy/uninstall.sh"
+cp "${repo_root}/deploy/remove-ping-conf.sh" "${stage}/deploy/remove-ping-conf.sh"
+chmod +x "${stage}/deploy/setup.sh" "${stage}/deploy/place-release.sh" "${stage}/deploy/uninstall.sh"
 # The release's own documentation, staged here so that the tarball, the .deb and the .rpm all
 # install the same copy — the packages used to take the repository's and the tarball none, and
 # install.sh then copied whatever `docs` sat beside the directory it was unpacked in.

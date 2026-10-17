@@ -1154,6 +1154,58 @@ for svc in ms-core ms-probe; do
   { [ "${result}" = "success" ] && [ "${code}" = "0" ]; } || failed=1
 done
 
+# --- the tarball's removal (H-39) ---------------------------------------------------------------
+#
+# Last, because nothing is installed after it, and not when the box is to be kept: that is for a
+# measurement that needs the installation (`MS_SMOKE_KEEP`). The services are started again first,
+# so that the removal has running services to stop, as an operator's would.
+if [ "${MS_SMOKE_KEEP:-0}" = "1" ]; then
+  echo "==> not removing the installation: MS_SMOKE_KEEP=1 keeps it, so ms-uninstall is not asserted"
+else
+  echo "==> asserting ms-uninstall removes the installation and the ping drop-in, and keeps the data (H-39)"
+  docker exec "${container}" systemctl start ms-core ms-probe || true
+  if docker exec "${container}" /opt/ms/libexec/ms-uninstall >"${logs}/uninstall.log" 2>&1; then
+    left=''
+    for path in /opt/ms /usr/lib/systemd/system/ms-core.service \
+      /usr/lib/systemd/system/ms-probe.service /usr/lib/systemd/system/ms-recover@.service \
+      /etc/sysctl.d/60-ms-probe-ping.conf \
+      /etc/systemd/system/multi-user.target.wants/ms-core.service \
+      /etc/systemd/system/multi-user.target.wants/ms-probe.service; do
+      if docker exec "${container}" test -e "${path}" -o -L "${path}"; then left="${left} ${path}"; fi
+    done
+    lost=''
+    for path in /etc/ms/core.json /etc/ms/probe.json /etc/ms/tls/ca.crt /var/lib/ms-core \
+      /var/lib/ms-probe; do
+      docker exec "${container}" test -e "${path}" || lost="${lost} ${path}"
+    done
+    running=''
+    for svc in ms-core ms-probe; do
+      state="$(docker exec "${container}" systemctl is-active "${svc}" 2>/dev/null || true)"
+      [ "${state}" != active ] || running="${running} ${svc}"
+    done
+    if [ -n "${left}${lost}${running}" ]; then
+      echo "    FAILED — left:${left:- nothing}; lost:${lost:- nothing}; running:${running:- nothing}" >&2
+      sed 's/^/      /' "${logs}/uninstall.log" >&2
+      failed=1
+    elif ! grep -qF 'removed /etc/sysctl.d/60-ms-probe-ping.conf, which ms-setup wrote' \
+      "${logs}/uninstall.log"; then
+      echo "    FAILED — ms-uninstall did not say it removed the ping drop-in:" >&2
+      sed 's/^/      /' "${logs}/uninstall.log" >&2
+      failed=1
+    elif ! docker exec "${container}" id ms-probe >/dev/null 2>&1; then
+      echo "    FAILED — ms-uninstall removed the ms-probe service user" >&2
+      failed=1
+    else
+      echo "    /opt/ms, the units, their enable links and the ping drop-in: gone, and said so"
+      echo "    /etc/ms, /var/lib/ms-*, the service users: kept; ms-core and ms-probe: stopped"
+    fi
+  else
+    echo "    FAILED — ms-uninstall exited non-zero:" >&2
+    sed 's/^/      /' "${logs}/uninstall.log" >&2
+    failed=1
+  fi
+fi
+
 if [ "${failed}" -ne 0 ]; then
   echo "==> SMOKE TEST FAILED" >&2
   exit 1

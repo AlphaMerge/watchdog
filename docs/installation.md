@@ -546,10 +546,15 @@ sudo dpkg -P ms          # or: sudo rpm -e ms
 From a tarball install:
 
 ```bash
-sudo systemctl disable --now ms-core ms-probe
-sudo rm -rf /opt/ms /usr/lib/systemd/system/ms-{core,probe}.service /usr/lib/systemd/system/ms-recover@.service
-sudo systemctl daemon-reload
+sudo /opt/ms/libexec/ms-uninstall
 ```
+
+It stops and disables both services, removes the release from `/opt/ms` with the one it kept at
+`/opt/ms/previous` (anything you put there yourself stays, and is named), removes the units from
+`/usr/lib/systemd/system`, and takes the probe's ping setting away as a purge does (below). It
+refuses an installation that a package owns. An installation from a release before `H-39` has no
+`ms-uninstall`; run `sudo ./deploy/uninstall.sh` from this release's unpacked tarball instead,
+which does the same.
 
 `/etc/ms`, `/var/lib/ms-*`, the database and your drop-ins under
 `/etc/systemd/system/ms-*.service.d` are left alone deliberately — they hold the
@@ -567,8 +572,8 @@ Reinstalling before that boot is safe: the setup finds the range at the `ms-prob
 which only it sets, and writes the file again. The file is kept, and named, while `/opt/ms` is
 still installed — after switching from `ms` to `ms-probe` or back, purging the old package leaves
 it to the new one's probe. If it cannot be removed (`chattr +i`, a read-only `/etc`), the purge
-says so and still completes; remove it yourself. After a tarball install, remove the file
-yourself if the setup wrote one.
+says so and still completes; remove it yourself. `ms-uninstall` does the same for a tarball
+installation, with the same text (`H-39`).
 
 ---
 

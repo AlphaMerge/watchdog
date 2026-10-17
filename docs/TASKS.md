@@ -37131,12 +37131,51 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       over its pipe — with a test on a Windows runner, and the documentation's Windows paragraph
       is removed.
 
-- [ ] **H-39 — the tarball's uninstall leaves the probe's ping drop-in** · S · H-34 · Found
+- [x] **H-39 — the tarball's uninstall leaves the probe's ping drop-in** · S · H-34 · Found
       2026-10-07 in `H-34`. The `.deb` purge and the `.rpm` erase remove
       `/etc/sysctl.d/60-ms-probe-ping.conf` while it is still ms-setup's
       (`deploy/remove-ping-conf.sh`), but a tarball install has no uninstall step that does, and
       `installation.md`'s tarball removal does not mention it. **Done when** the tarball's
       uninstall path runs the same fragment (or the guide names the file), with a smoke step.
+
+      **H-39 outcome. A tarball installation has an uninstaller, `ms-uninstall`, and it runs the
+      packages' fragment.**
+      - **Why a script, not a line in the guide.** The tarball's removal was three commands to
+        copy; a fourth that removes a file only while it reads as the setup wrote it is not one
+        to copy by hand, and the fragment already says that in one place. So the tarball gets
+        what the packages have: a removal that runs it.
+      - **`deploy/uninstall.sh`**, which `place-release.sh` installs as
+        `<prefix>/libexec/ms-uninstall` beside `ms-setup`, with `remove-ping-conf.sh` beside it;
+        `package.sh` ships both in the tarball's `deploy/`, so an installation from before this
+        removes with `sudo ./deploy/uninstall.sh` from a newer unpacked tarball. It stops each
+        service with any retry `ms-recover` scheduled, disables it, removes what a release puts
+        in the prefix (`app bin web docs etc deploy libexec VERSION previous .incoming`) and the
+        prefix too when nothing else is left in it (otherwise it says it kept it), the three
+        units, reloads systemd, and then runs the fragment, which it read before the release
+        went: run after, as in a `postrm`, it finds `/opt/ms/libexec/ms-setup` gone and removes
+        the drop-in while it is still the setup's, keeps an edited one and says so. `/etc/ms`,
+        `/var/lib/ms-*`, the database, drop-ins and the service users stay, as with a package.
+      - **It refuses** an installation dpkg or rpm owns (asked of `libexec/ms-setup`, by exit
+        status), naming `dpkg -P <name>` or `rpm -e <name>`; and a prefix that is `/`, relative,
+        or has no `VERSION`, as the installer does.
+      - **Docs.** `installation.md`'s tarball removal is `sudo /opt/ms/libexec/ms-uninstall`, with
+        what it does and keeps, and the ping paragraph says it runs the same text.
+      - **Tests.** `deploy-scripts.test.ts`, seven, against a tarball installation as
+        `place-release.sh` and `ms-setup` leave one, with the fragment looking at this prefix as
+        it looks at /opt/ms: release, previous, units and drop-in gone, the operator's file, the
+        configuration and a drop-in kept, each service's retry stopped before it, stopped before
+        disabled, the reload after; the empty prefix removed; an edited drop-in kept; a `.deb`'s
+        and an `.rpm`'s installation refused with nothing touched; the three bad prefixes; run
+        from an unpacked release's `deploy/`; `package.sh` stages both. `place-release.sh`'s swap
+        test asserts both files in `libexec`, `ms-uninstall` at 0755. The file is 94 of 94.
+        **Mutations 13/13**: the fragment run before the release went, or never; no disable; the
+        retry left; `previous` left; the prefix removed with the operator's file in it; the units
+        left; a `.deb`'s or an `.rpm`'s installation removed; an empty prefix taken for one;
+        `place-release.sh` not installing either file; `package.sh` not staging the uninstaller.
+      - **Smoke.** `smoke-install.sh` (Debian 12, arm64, a tarball built at the commit) ends with
+        it, unless `MS_SMOKE_KEEP=1`: services started, `ms-uninstall` run, *smoke test passed*,
+        with */opt/ms, the units, their enable links and the ping drop-in: gone, and said so* and
+        */etc/ms, /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
 
 - [ ] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
       Found 2026-10-07 in `H-34`. `ms`'s rpm `%preun` with `$1=0` (and the `.deb`'s `prerm` on

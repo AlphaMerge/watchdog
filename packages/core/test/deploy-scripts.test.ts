@@ -580,6 +580,10 @@ function release(box: Sandbox, version: string): string {
     writeFileSync(join(from, 'deploy', 'systemd', `ms-${svc}.service`), '[Service]\n');
   }
   writeFileSync(join(from, 'deploy', 'setup.sh'), '#!/usr/bin/env bash\n');
+  // What `package.sh` stages beside it for the tarball's removal (`H-39`), as this tree has them.
+  for (const name of ['uninstall.sh', 'remove-ping-conf.sh']) {
+    writeFileSync(join(from, 'deploy', name), readFileSync(script(name)));
+  }
   return from;
 }
 
@@ -649,6 +653,13 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
     assert.equal(readFileSync(join(prefix, 'previous', 'VERSION'), 'utf8'), '1.0.0\n');
     assert.equal(readFileSync(join(prefix, 'previous', 'app', 'marker'), 'utf8'), '1.0.0');
     assert.ok(existsSync(join(prefix, 'libexec', 'ms-setup')));
+    // The tarball's removal, and the fragment it runs beside it (`H-39`).
+    assert.equal(mode(join(prefix, 'libexec', 'ms-uninstall')), 0o755);
+    assert.equal(sha256(join(prefix, 'libexec', 'ms-uninstall')), sha256(script('uninstall.sh')));
+    assert.equal(
+      sha256(join(prefix, 'libexec', 'remove-ping-conf.sh')),
+      sha256(script('remove-ping-conf.sh')),
+    );
     assert.equal(readFileSync(join(prefix, 'operators-own-notes.txt'), 'utf8'), 'mine');
     assert.ok(!existsSync(join(prefix, '.incoming')));
 
@@ -2069,6 +2080,226 @@ describe(
         assert.equal(count(source, embed), 1, packager);
         assert.ok(source.includes(`${branch}${embed}\n`), `${packager}: not inside ${branch}`);
       }
+    });
+  },
+);
+
+describe(
+  'ms-uninstall, the removal of a tarball installation (`H-39`)',
+  {
+    skip: linux ? false : 'Linux only',
+  },
+  () => {
+    /** The ping drop-in exactly as setup.sh writes it for `gid`, from setup.sh's own heredoc. */
+    const pingConf = (gid: number): string => {
+      const found = /<<SYSCTL\n([\s\S]*?\n)SYSCTL\n/u.exec(
+        readFileSync(script('setup.sh'), 'utf8'),
+      );
+      assert.ok(found?.[1] !== undefined, 'setup.sh writes no drop-in this test can find');
+      return found[1].replaceAll('$' + '{probe_gid}', String(gid));
+    };
+    const RELEASE_ENTRIES = ['app', 'bin', 'web', 'docs', 'etc', 'deploy', 'libexec', 'VERSION'];
+
+    /**
+     * A tarball installation as `place-release.sh` and `ms-setup` leave one: a release with the
+     * uninstaller and the fragment in `libexec`, the release it replaced, the units, the ping
+     * drop-in as setup writes it, and around them what is not the release's — the configuration,
+     * an operator's drop-in, a unit of somebody else's and a file of the operator's in the prefix.
+     */
+    function tarballInstallation(box: Sandbox): {
+      prefix: string;
+      units: string;
+      conf: string;
+      ping: string;
+      env: NodeJS.ProcessEnv;
+    } {
+      const prefix = join(box.dir, 'opt-ms');
+      for (const dir of ['app', 'bin', 'web', 'docs', 'etc', 'deploy/systemd', 'libexec']) {
+        mkdirSync(join(prefix, dir), { recursive: true });
+      }
+      mkdirSync(join(prefix, 'previous', 'app'), { recursive: true });
+      writeFileSync(join(prefix, 'VERSION'), '2.0.0\n');
+      writeFileSync(join(prefix, 'app', 'marker'), '2.0.0');
+      writeFileSync(join(prefix, 'operators-own-notes.txt'), 'mine');
+      writeFileSync(join(prefix, 'libexec', 'ms-setup'), '#!/bin/sh\n', { mode: 0o755 });
+      writeFileSync(join(prefix, 'libexec', 'ms-uninstall'), readFileSync(script('uninstall.sh')), {
+        mode: 0o755,
+      });
+      // With this prefix where the fragment looks for an installed ms or ms-probe, as /opt/ms is
+      // for an installation in the default place: what decides it is whether this one has gone.
+      const fragment = readFileSync(script('remove-ping-conf.sh'), 'utf8');
+      assert.equal(count(fragment, PING_SETUP_LINE), 1);
+      writeFileSync(
+        join(prefix, 'libexec', 'remove-ping-conf.sh'),
+        fragment.replace(PING_SETUP_LINE, `ms_ping_setup=${join(prefix, 'libexec', 'ms-setup')}\n`),
+      );
+      const units = join(box.dir, 'usr-lib-units');
+      mkdirSync(units);
+      for (const unit of ['ms-core.service', 'ms-probe.service', 'ms-recover@.service']) {
+        writeFileSync(join(units, unit), '[Service]\n');
+      }
+      writeFileSync(join(units, 'somebody-elses.service'), '[Service]\n');
+      const conf = join(box.dir, 'etc-ms');
+      mkdirSync(join(conf, 'tls'), { recursive: true });
+      writeFileSync(join(conf, 'core.json'), '{"database":{"password":"kept"}}');
+      const dropIn = join(box.dir, 'etc-units', 'ms-core.service.d');
+      mkdirSync(dropIn, { recursive: true });
+      writeFileSync(join(dropIn, 'override.conf'), '[Service]\nMemoryMax=8G\n');
+      const sysctl = join(box.dir, 'sysctl.d');
+      mkdirSync(sysctl);
+      const ping = join(sysctl, '60-ms-probe-ping.conf');
+      writeFileSync(ping, pingConf(998));
+      return {
+        prefix,
+        units,
+        conf,
+        ping,
+        env: { MS_SETUP_UNIT_DIR: units, MS_SETUP_SYSCTL_DIR: sysctl },
+      };
+    }
+
+    const uninstall = (
+      box: Sandbox,
+      at: { prefix: string; env: NodeJS.ProcessEnv },
+      from = join(at.prefix, 'libexec', 'ms-uninstall'),
+    ): SpawnSyncReturns<string> => box.run([from, '--prefix', at.prefix], at.env);
+
+    it('removes the release, its units and the ping drop-in setup wrote, and nothing else', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      const result = uninstall(box, at);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+      for (const entry of [...RELEASE_ENTRIES, 'previous']) {
+        assert.ok(!existsSync(join(at.prefix, entry)), `${entry} was left in the prefix`);
+      }
+      assert.equal(readFileSync(join(at.prefix, 'operators-own-notes.txt'), 'utf8'), 'mine');
+      assert.match(result.stdout, /opt-ms is kept: no release put what is left in it there/);
+      assert.deepEqual(readdirSync(at.units), ['somebody-elses.service']);
+      assert.ok(!existsSync(at.ping), 'the ping drop-in setup wrote was left');
+      assert.match(result.stderr, /removed .*60-ms-probe-ping\.conf, which ms-setup wrote/);
+      // What a package's removal leaves, this leaves.
+      assert.equal(
+        readFileSync(join(at.conf, 'core.json'), 'utf8'),
+        '{"database":{"password":"kept"}}',
+      );
+      assert.ok(existsSync(join(box.dir, 'etc-units', 'ms-core.service.d', 'override.conf')));
+      assert.match(result.stdout, /MonitoringSystem 2\.0\.0 was removed from .*opt-ms\./);
+      assert.match(result.stdout, /Left in place.*\n.*\/etc\/ms, \/var\/lib\/ms-core/);
+
+      // Each service stopped and disabled with any retry ms-recover scheduled, before the units
+      // went, and systemd told of the units after.
+      const log = box.logged();
+      const ranAt = (line: string): number => {
+        const index = log.indexOf(line);
+        assert.ok(index >= 0, `${line} was never run:\n${log}`);
+        return index;
+      };
+      for (const svc of ['ms-core', 'ms-probe']) {
+        assert.ok(
+          ranAt(`systemctl stop ms-recover-${svc}-retry.timer`) <
+            ranAt(`systemctl stop ${svc}.service`),
+        );
+        assert.ok(
+          ranAt(`systemctl stop ${svc}.service`) < ranAt(`systemctl disable ${svc}.service`),
+        );
+        assert.ok(ranAt(`systemctl disable ${svc}.service`) < ranAt('systemctl daemon-reload'));
+      }
+    });
+
+    it('removes the prefix itself when nothing of the operator’s is in it', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      rmSync(join(at.prefix, 'operators-own-notes.txt'));
+      const result = uninstall(box, at);
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(!existsSync(at.prefix));
+      assert.doesNotMatch(result.stdout, /is kept/);
+    });
+
+    it('keeps a ping drop-in that was edited, and says so', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      const edited = `${pingConf(998)}# and for the backup host's checks\n`;
+      writeFileSync(at.ping, edited);
+      const result = uninstall(box, at);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(at.ping, 'utf8'), edited);
+      assert.match(
+        result.stderr,
+        /60-ms-probe-ping\.conf is not as ms-setup wrote it, so it was left/,
+      );
+    });
+
+    it('refuses an installation a package owns, and touches nothing', () => {
+      for (const [tool, said, remover] of [
+        ['dpkg-query', 'echo "ms: $2"', 'dpkg -P ms'],
+        ['rpm', 'echo ms-probe', 'rpm -e ms-probe'],
+      ] as const) {
+        const box = sandbox();
+        const at = tarballInstallation(box);
+        writeFileSync(join(box.bin, tool), `#!/usr/bin/env bash\n${said}\n`, { mode: 0o755 });
+        const result = uninstall(box, at);
+        assert.equal(result.status, 1, `${tool}: ${result.stdout}`);
+        assert.match(
+          result.stderr,
+          new RegExp(`is the .* package's; remove it with: ${remover}$`, 'mu'),
+        );
+        for (const entry of RELEASE_ENTRIES) assert.ok(existsSync(join(at.prefix, entry)), entry);
+        assert.equal(readdirSync(at.units).length, 4);
+        assert.ok(existsSync(at.ping));
+        assert.ok(!box.logged().includes('systemctl'), box.logged());
+      }
+    });
+
+    it('refuses a prefix with no installation in it, and one that is not absolute', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      const empty = join(box.dir, 'nothing-here');
+      mkdirSync(empty);
+      for (const [prefix, said] of [
+        [empty, /there is no installation at .*nothing-here/u],
+        ['opt/ms', /--prefix must be an absolute path/u],
+        ['/', /refusing to remove '\/'/u],
+      ] as const) {
+        const result = uninstall(
+          box,
+          { prefix, env: at.env },
+          join(at.prefix, 'libexec', 'ms-uninstall'),
+        );
+        assert.equal(result.status, 1, `${prefix}: ${result.stdout}`);
+        assert.match(result.stderr, said);
+      }
+      assert.ok(!box.logged().includes('systemctl'), box.logged());
+      assert.ok(existsSync(at.ping));
+    });
+
+    it('runs from an unpacked release too, for an installation from before it had one', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      rmSync(join(at.prefix, 'libexec', 'ms-uninstall'));
+      rmSync(join(at.prefix, 'libexec', 'remove-ping-conf.sh'));
+      const unpacked = release(box, '3.0.0');
+      const result = uninstall(box, at, join(unpacked, 'deploy', 'uninstall.sh'));
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.ok(!existsSync(join(at.prefix, 'app')));
+      assert.ok(!existsSync(at.ping));
+      assert.ok(
+        existsSync(join(unpacked, 'deploy', 'uninstall.sh')),
+        'it removed the release it came in',
+      );
+    });
+
+    it('is in every tarball, and every tarball installation', () => {
+      const packager = readFileSync(join(repoRoot, 'scripts', 'package.sh'), 'utf8');
+      for (const name of ['uninstall.sh', 'remove-ping-conf.sh']) {
+        assert.ok(
+          packager.includes(`cp "$` + `{repo_root}/deploy/${name}" "$` + `{stage}/deploy/${name}"`),
+          `package.sh does not stage deploy/${name}`,
+        );
+      }
+      // Both tarball installers place a release with place-release.sh (asserted with `H-27`'s),
+      // which puts these in libexec: see 'stops the services before the swap'.
     });
   },
 );
