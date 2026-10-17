@@ -27,6 +27,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${repo_root}/scripts/lib/build-tree.sh"
 # shellcheck source=scripts/lib/mac-metadata.sh
 . "${repo_root}/scripts/lib/mac-metadata.sh"
+# shellcheck source=scripts/lib/doc-block.sh
+. "${repo_root}/scripts/lib/doc-block.sh"
 
 # **Ubuntu is named in the exit criterion, so it is a target here** (`PLAN.md` Phase 10: "a clean
 # install on Ubuntu and on Windows Server"). Proving Debian and *assuming* Ubuntu would be
@@ -781,12 +783,17 @@ docker exec "${container}" mkdir -p /etc/systemd/system/ms-recover@.service.d
 docker exec "${container}" bash -c "printf '[Service]\nEnvironment=MS_RECOVER_BASE_SEC=${cooldown}\n' \
   > /etc/systemd/system/ms-recover@.service.d/smoke.conf"
 docker exec "${container}" systemctl daemon-reload
+# **Among what the unit names, not all of it** (`H-25`): an operator's drop-in adds to the list,
+# as the runbook's `OnFailure=` below does, and that is not a fault in the release's unit.
 for svc in ms-core ms-probe; do
   named="$(docker exec "${container}" systemctl show "${svc}" -p OnFailure --value)"
-  [ "${named}" = "ms-recover@${svc}.service" ] || {
-    echo "    FAILED — ${svc} names '${named}' in OnFailure=, not ms-recover@${svc}.service" >&2
-    failed=1
-  }
+  case " ${named} " in
+    *" ms-recover@${svc}.service "*) ;;
+    *)
+      echo "    FAILED — ${svc} names '${named}' in OnFailure=, without ms-recover@${svc}.service" >&2
+      failed=1
+      ;;
+  esac
 done
 is_active() { [ "$(docker exec "${container}" systemctl is-active ms-probe 2>/dev/null || true)" = active ]; }
 wait_active() {
@@ -856,6 +863,230 @@ docker exec "${container}" systemctl daemon-reload
 docker exec "${container}" systemctl reset-failed ms-probe
 docker exec "${container}" systemctl start ms-probe
 wait_active 30 || { echo "    FAILED — ms-probe did not start again on its own configuration" >&2; failed=1; }
+
+# --- watching the core from outside (H-25) ----------------------------------------------------
+#
+# `administration.md`, "Watching the core from outside", set up the way an operator would. The
+# blocks it says to paste are taken out of the document (`ms_doc_block`) and installed as they
+# are written, so an edit to the runbook that breaks one breaks this. Two things differ from a
+# real setup, and neither is in what is being tested: `mail` is a stub that writes down what it
+# was given, because the box has no mail to send; and the check "from another machine" runs on
+# this box against 127.0.0.1, which is the same request from somewhere less useful.
+runbook="${repo_root}/docs/administration.md"
+box_mail=/var/log/smoke-mail.log
+core_up() { [ "$(docker exec "${container}" systemctl is-active ms-core 2>/dev/null || true)" = active ]; }
+wait_core() {
+  for _ in $(seq 1 "$1"); do core_up && return 0; sleep 1; done
+  return 1
+}
+# The runbook's one block with LINE in it, into the box at DEST with MODE, through any sed
+# expressions that follow.
+runbook_to_box() {
+  local line="$1" dest="$2" mode="$3"
+  shift 3
+  if ! ms_doc_block "${runbook}" "${line}" >"${logs}/block"; then
+    echo "    FAILED — administration.md has no single block with '${line}'" >&2
+    failed=1
+    return 1
+  fi
+  [ "$#" -eq 0 ] || sed "$@" "${logs}/block" >"${logs}/block.edited"
+  [ "$#" -eq 0 ] || mv "${logs}/block.edited" "${logs}/block"
+  docker cp "${logs}/block" "${container}:${dest}"
+  docker exec "${container}" chmod "${mode}" "${dest}"
+}
+# How many mails so far have TEXT in their command line or their message.
+mails() {
+  docker exec "${container}" sh -c 'cat "$1" 2>/dev/null | grep -c -F -- "$2" || true' _ \
+    "${box_mail}" "$1"
+}
+docker cp "${repo_root}/scripts/smoke/mail-stub.sh" "${container}:/usr/local/bin/mail"
+docker exec "${container}" chmod 755 /usr/local/bin/mail
+
+echo "==> asserting the runbook's OnFailure= drop-in adds to the unit's, and runs when ms-core fails (H-25)"
+docker exec "${container}" mkdir -p /etc/systemd/system/ms-core.service.d
+if runbook_to_box '# /etc/systemd/system/ms-core-failed.service' \
+     /etc/systemd/system/ms-core-failed.service 644 \
+   && runbook_to_box 'OnFailure=ms-core-failed.service' \
+     /etc/systemd/system/ms-core.service.d/h25-failed.conf 644; then
+  docker exec "${container}" systemctl daemon-reload
+  # Each name on its own: systemd lists them in its own order, not the order they were added in.
+  named="$(docker exec "${container}" systemctl show ms-core -p OnFailure --value)"
+  case " ${named} " in
+    *" ms-recover@ms-core.service "*) ;;
+    *) named="${named} (without ms-recover@ms-core.service)" ;;
+  esac
+  case " ${named} " in
+    *" ms-core-failed.service "*) ;;
+    *) named="${named} (without ms-core-failed.service)" ;;
+  esac
+  case "${named}" in
+    *without*)
+      echo "    FAILED — with the runbook's drop-in, ms-core names '${named}' in OnFailure=" >&2
+      failed=1 ;;
+    *) echo "    OnFailure=${named}" ;;
+  esac
+  # A configuration the core refuses ends the unit `failed` at once (exit 78, never restarted):
+  # the quickest honest way there. The start limit gets there too, and is proved above.
+  docker exec "${container}" cp -p /etc/ms/core.json /tmp/core.json.h25
+  docker exec "${container}" bash -c 'echo "{\"api\": {\"port\": \"eighty-eighty\"}}" > /etc/ms/core.json'
+  docker exec "${container}" systemctl restart ms-core 2>/dev/null || true
+  box_host="$(docker exec "${container}" hostname)"
+  for _ in $(seq 1 30); do
+    [ "$(mails "ms-core has failed on ${box_host}")" -ge 1 ] && break
+    sleep 1
+  done
+  if [ "$(mails "-s ms-core has failed on ${box_host} ops@example.com")" = 1 ] \
+     && [ "$(mails 'Active: failed')" -ge 1 ]; then
+    echo "    ms-core failed (exit 78): ms-core-failed.service mailed 'ms-core has failed on ${box_host}', with its status"
+  else
+    echo "    FAILED — ms-core-failed.service did not mail once with the failed unit's status:" >&2
+    docker exec "${container}" cat "${box_mail}" >&2 2>/dev/null || true
+    docker exec "${container}" journalctl -u ms-core-failed --no-pager -n 20 >&2 || true
+    failed=1
+  fi
+  docker exec "${container}" cp -p /tmp/core.json.h25 /etc/ms/core.json
+fi
+docker exec "${container}" rm -rf /etc/systemd/system/ms-core.service.d \
+  /etc/systemd/system/ms-core-failed.service
+docker exec "${container}" systemctl daemon-reload
+docker exec "${container}" systemctl reset-failed ms-core
+docker exec "${container}" systemctl start ms-core || true
+wait_core 60 || { echo "    FAILED — ms-core did not start again on its own configuration" >&2; failed=1; }
+
+echo "==> asserting a core with heartbeat.url sends one after its first pass, and counts one that fails (H-25)"
+# A receiver on the box, the core pointed at it with both intervals at their floor of ten seconds,
+# and then the receiver taken away. The path stands in for the receiver's token, which the log
+# must never carry.
+hb_log=/var/log/smoke-heartbeats.log
+hb_path=/ping/smoke-h25-receiver-token
+docker cp "${repo_root}/scripts/smoke/heartbeat-receiver.mjs" "${container}:/tmp/heartbeat-receiver.mjs"
+docker exec "${container}" systemd-run --quiet --unit=ms-smoke-heartbeat \
+  "$(docker exec "${container}" bash -c 'command -v node')" /tmp/heartbeat-receiver.mjs 9109 "${hb_log}"
+docker exec "${container}" cp -p /etc/ms/core.json /tmp/core.json.h25
+docker exec "${container}" node -e '
+  const fs = require("node:fs");
+  const file = "/etc/ms/core.json";
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+  cfg.heartbeat = { url: process.argv[1], intervalSeconds: 10 };
+  cfg.housekeeping = { ...(cfg.housekeeping ?? {}), intervalSeconds: 10 };
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+' "http://127.0.0.1:9109${hb_path}"
+docker exec "${container}" systemctl restart ms-core || true
+hb_first=''
+for _ in $(seq 1 120); do
+  hb_first="$(docker exec "${container}" head -1 "${hb_log}" 2>/dev/null || true)"
+  [ -n "${hb_first}" ] && break
+  sleep 1
+done
+hb_expected="GET ${hb_path} ms-core/$(docker exec "${container}" cat /opt/ms/VERSION)"
+if [ "${hb_first}" = "${hb_expected}" ]; then
+  echo "    the receiver was sent: ${hb_first}"
+else
+  echo "    FAILED — the receiver was sent '${hb_first:-nothing in 120 s}', not '${hb_expected}'" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 >&2 || true
+  failed=1
+fi
+# Each read of the route is what failed since the read before it, so the counts are added up.
+hb_failures() {
+  ms_docker_curl "${container}" -sf "${api}/core-health" 2>/dev/null \
+    | json '.channels.heartbeatFailures' 2>/dev/null || true
+}
+hb_read=''
+for _ in $(seq 1 30); do
+  hb_read="$(hb_failures)"
+  case "${hb_read}" in [0-9]*) break ;; esac
+  sleep 1
+done
+if [ "${hb_read}" = 0 ]; then
+  echo "    GET /core-health: heartbeatFailures 0 while the receiver answers"
+else
+  echo "    FAILED — GET /core-health says heartbeatFailures '${hb_read}' while the receiver answers" >&2
+  failed=1
+fi
+docker exec "${container}" systemctl stop ms-smoke-heartbeat
+hb_counted=0
+for _ in $(seq 1 20); do
+  sleep 3
+  hb_read="$(hb_failures)"
+  case "${hb_read}" in [0-9]*) hb_counted=$((hb_counted + hb_read)) ;; esac
+  [ "${hb_counted}" -ge 1 ] && break
+done
+if [ "${hb_counted}" -lt 1 ]; then
+  echo "    FAILED — with the receiver gone, Core Health counted no heartbeat failure in 60 s" >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 >&2 || true
+  failed=1
+elif ! matches 'heartbeat did not reach its receiver' docker exec "${container}" journalctl -u ms-core --no-pager; then
+  echo "    FAILED — a heartbeat failure was counted with no warn line for it" >&2
+  failed=1
+elif matches "${hb_path}" docker exec "${container}" journalctl -u ms-core --no-pager; then
+  echo "    FAILED — the core's journal carries the heartbeat URL's path, the receiver's token" >&2
+  failed=1
+else
+  echo "    receiver stopped: heartbeatFailures ${hb_counted}, and a warn line that names no path"
+fi
+docker exec "${container}" cp -p /tmp/core.json.h25 /etc/ms/core.json
+docker exec "${container}" systemctl restart ms-core || true
+wait_core 60 || { echo "    FAILED — ms-core did not start again without the heartbeat" >&2; failed=1; }
+
+echo "==> asserting the runbook's checks from another machine, against this core (H-25)"
+# Steps 1-3 of the runbook: a token that can only read, in a header file only root can read, and
+# the check — each of the two — with the URL made this core's.
+check_url="http://127.0.0.1:8080/api/v1/core-health"
+down_said='MonitoringSystem core is down'
+back_said='MonitoringSystem core is back'
+check_exit() {
+  docker exec "${container}" "/usr/local/bin/$1" >/dev/null 2>&1 && echo 0 || echo "$?"
+}
+read_token="$(docker exec -e MS_TOKEN_NAME=core-check -e MS_TOKEN_SCOPE=read "${container}" \
+  bash /tmp/api-token.sh 2>"${logs}/read-token.err" || true)"
+if [ -z "${read_token}" ]; then
+  echo "    FAILED — no read-scoped token for the check: $(cat "${logs}/read-token.err")" >&2
+  failed=1
+elif runbook_to_box '# Exits 0 only if the core answered 200 inside ten seconds.' \
+       /usr/local/bin/ms-core-check 755 -e "s|^URL=.*|URL=${check_url}|" \
+     && runbook_to_box '# Mails once when the core stops answering 200, and once when it answers again.' \
+       /usr/local/bin/ms-core-check-once 755 -e "s|^URL=.*|URL=${check_url}|"; then
+  docker exec "${container}" install -d -m 700 /etc/ms-core-check /var/lib/ms-core-check
+  header() {
+    docker exec "${container}" sh -c \
+      'umask 077; printf "Authorization: Bearer %s\n" "$1" >/etc/ms-core-check/header' _ "$1"
+  }
+  header "${read_token}"
+  check_said=''
+  # Up: both pass, and nobody is told anything.
+  check_said="${check_said}up $(check_exit ms-core-check) $(check_exit ms-core-check-once) $(mails "${down_said}");"
+  # Down: the first tells you each time it runs, the second once.
+  docker exec "${container}" systemctl stop ms-core
+  check_said="${check_said} down $(check_exit ms-core-check) $(check_exit ms-core-check)"
+  check_said="${check_said} $(mails "${down_said}") $(mails '(HTTP 000; 000 is no answer at all)')"
+  check_said="${check_said} $(check_exit ms-core-check-once) $(check_exit ms-core-check-once)"
+  check_said="${check_said} $(mails "${down_said}");"
+  # Back: the second says so, once. Waited for with a request of its own, not with a check that
+  # would mail every time it found the core still starting.
+  docker exec "${container}" systemctl start ms-core || true
+  for _ in $(seq 1 60); do
+    [ "$(docker exec "${container}" curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      --header @/etc/ms-core-check/header "${check_url}" 2>/dev/null || true)" = 200 ] && break
+    sleep 1
+  done
+  check_said="${check_said} back $(check_exit ms-core-check-once) $(mails "${back_said}")"
+  check_said="${check_said} $(mails '(down since ') $(check_exit ms-core-check-once)"
+  check_said="${check_said} $(mails "${back_said}") $(mails "${down_said}");"
+  # A token the core does not know, as after a revocation: a 401, and said so.
+  header 'mst_not-a-token-this-core-issued'
+  check_said="${check_said} refused $(check_exit ms-core-check) $(mails '(HTTP 401; 000 is no answer at all)')"
+  header "${read_token}"
+  case "${check_said}" in
+    "up 0 0 0; down 1 1 2 2 1 1 3; back 0 1 1 0 1 3; refused 1 1")
+      echo "    up: both 0, no mail; down: ms-core-check mailed each run (2), the variant once;"
+      echo "    back: the variant mailed once that it was back; a token it does not know: 401, mailed" ;;
+    *)
+      echo "    FAILED — the checks did not behave as the runbook says: ${check_said}" >&2
+      docker exec "${container}" cat "${box_mail}" >&2 2>/dev/null || true
+      failed=1 ;;
+  esac
+fi
+wait_core 60 || { echo "    FAILED — ms-core did not start again after the checks" >&2; failed=1; }
 
 echo "==> asserting a re-run starts a core whose password comes from MS_DATABASE__PASSWORD__FROM_FILE (H-30)"
 # core.json's password empty on purpose, the real one in a file named by a drop-in, which only the

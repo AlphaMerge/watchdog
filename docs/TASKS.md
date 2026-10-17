@@ -36335,7 +36335,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
 ---
 
-- [ ] **H-25 — the two ways of watching the core from outside have not been run** · S · H-18 ·
+- [x] **H-25 — the two ways of watching the core from outside have not been run** · S · H-18 ·
       Found 2026-10-02 by `H-18`. The `OnFailure=` drop-in was written from systemd's rules and
       never installed; the outside check's script was never run against a core; no core has been
       started with `heartbeat.url`. The smoke install compares `OnFailure` to exactly
@@ -36344,6 +36344,56 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       notify unit run on `failed`; a started core sends a heartbeat after its first pass and
       shows `heartbeatFailures`; and the outside check has a variant that alerts once per
       outage, not every minute.
+
+      **H-25 outcome. All three run against a packaged core on a booted systemd, from the
+      runbook's own text, and the outside check has a variant that tells you once.**
+      - **The runbook is what runs.** `scripts/lib/doc-block.sh`'s `ms_doc_block FILE LINE` takes
+        out the one fenced block of a document that has LINE among its lines, unindented (a block
+        in a list item is indented); no such block exits 1 and two exit 2, so a second copy cannot
+        pass on the first. `smoke-install.sh` installs `ms-core-failed.service`, the `OnFailure=`
+        drop-in and both checks that way, so an edit to `administration.md` that breaks one breaks
+        the smoke. The drop-in is a block of its own now (`[Unit]`, `OnFailure=…`) beside the
+        `systemctl edit` line, which used to share it. `mail` is the one thing replaced, by
+        `scripts/smoke/mail-stub.sh`, which writes down what it was given.
+      - **`OnFailure=`.** The smoke's own check asks for `ms-recover@<svc>.service` among the
+        names, not for exactly that. With the runbook's drop-in systemd lists both, in its own
+        order — `ms-core-failed.service ms-recover@ms-core.service`, which the runbook's example
+        output now shows (it had them the other way round) — and a core that refused its file
+        (exit 78, `failed`) had `ms-core-failed.service` mail once, *ms-core has failed on
+        <host>*, with the failed unit's `systemctl status`.
+      - **The heartbeat.** A receiver on loopback (`scripts/smoke/heartbeat-receiver.mjs`, under
+        `systemd-run`), `heartbeat.url` at it and both intervals at their floor of ten seconds. The
+        first request after the restart was `GET /ping/smoke-h25-receiver-token ms-core/1.0.0-rc.2`;
+        `GET /core-health` read `heartbeatFailures` 0 while it answered and 1 once it was stopped,
+        with the warn line in the journal and the URL's path nowhere in it.
+      - **Once an outage.** A second script in the runbook: the same request, a file under
+        `/var/lib/ms-core-check` that remembers an outage already told, one mail when the core
+        stops answering 200 and one when it answers again, and exit 1 on every failed run still.
+        The file is written only once the down mail has gone and removed only once the back mail
+        has, so a mail that could not be sent is tried again at the next run. The every-minute
+        script stays, and the runbook says which is which.
+      - **Against the core**, with a read-scoped token (`api-token.sh` takes `MS_TOKEN_SCOPE`):
+        up, both exit 0 and nothing is mailed; core stopped, the every-minute check mailed at each
+        of two runs (HTTP 000) and the variant once over two; core back, the variant mailed once
+        that it was back, and nothing at the run after; a token the core never issued, 401, mailed.
+      - **Tests.** `deploy-scripts.test.ts`, five, the scripts taken from the runbook by the same
+        extractor and run by dash, as cron would, against stub `curl` and `mail`: the extractor
+        (one block, unindented; none, 1; two, 2); each block the smoke installs is there once,
+        the drop-in exactly; the first check mails at every failed run (000, 503, 401); the
+        variant over an outage, its end and a second one; a mail that failed tried again, down
+        and back. **Mutations 11/11**: a failed run in an outage mailing again, the state written
+        though the mail failed, removed though the back mail failed, a back mail with no outage,
+        anything but 000 taken for up (each script), no time limit, the extractor not
+        unindenting, passing on the last of two blocks and missing an indented line, and the
+        runbook's drop-in gaining an empty `OnFailure=` (which would reset the list).
+      - **Not done:** the checks ran on the core's own box against 127.0.0.1, not from another
+        machine; the request is the same one. The mail is a stub, as everywhere in the smokes.
+      - **Smoke runs 2026-10-17**, `scripts/smoke-install.sh` (Debian 12, arm64, v1), on the
+        tarball packaged at this ticket's first commit (`9e840333`; what followed changed the smoke
+        script and the runbook, not the package). The first failed on the smoke's own new check
+        of `OnFailure=`, which wanted the two names in the order they were added, every other
+        assertion passing; the second, with the check reading each name on its own: *smoke test
+        passed*.
 
 - [x] **H-26 — an upgrade does not show a passing config check's warnings** · S · B-08 ·
       Found 2026-10-02 by `B-08`. `deploy/place-release.sh` runs `config check` and keeps the

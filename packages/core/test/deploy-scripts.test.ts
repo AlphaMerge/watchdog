@@ -2188,6 +2188,227 @@ describe('install.sh’s closing summary (`H-35`)', { skip: linux ? false : 'Lin
   });
 });
 
+/**
+ * `ms_doc_block` from `scripts/lib/doc-block.sh`, the way `smoke-install.sh` takes the runbook's
+ * blocks out of the document (`H-25`).
+ */
+function docBlock(file: string, line: string): SpawnSyncReturns<string> {
+  return spawnSync(
+    'bash',
+    [
+      '-c',
+      '. "$1" && ms_doc_block "$2" "$3"',
+      'doc-block',
+      join(repoRoot, 'scripts', 'lib', 'doc-block.sh'),
+      file,
+      line,
+    ],
+    { encoding: 'utf8', timeout: 10_000 },
+  );
+}
+
+describe('watching the core from outside, as the runbook says to (`H-25`)', () => {
+  const RUNBOOK = join(repoRoot, 'docs', 'administration.md');
+  const EVERY_RUN = '# Exits 0 only if the core answered 200 inside ten seconds.';
+  const ONCE = '# Mails once when the core stops answering 200, and once when it answers again.';
+  const DOWN = '-s MonitoringSystem core is down ops@example.com';
+  const BACK = '-s MonitoringSystem core is back ops@example.com';
+
+  /** The runbook's block with `line` in it, as `smoke-install.sh` installs it. */
+  function block(line: string): string {
+    const found = docBlock(RUNBOOK, line);
+    assert.equal(found.status, 0, `no single block in the runbook has '${line}': ${found.stderr}`);
+    return found.stdout;
+  }
+
+  /**
+   * A machine of the operator's, with `curl` answering what `STUB_DIR/code` says and `mail`
+   * sending what `STUB_DIR/mail-status` lets it, each writing down what it was asked.
+   */
+  interface Watcher {
+    readonly box: Sandbox;
+    /** Runs the check once against a core that answers `code`. */
+    run(code: string, mailStatus?: number): SpawnSyncReturns<string>;
+    /** Every mail sent so far, one `mail <arguments>` line and its message each. */
+    mails(): string[];
+    readonly state: string;
+  }
+
+  function watcher(line: string): Watcher {
+    const box = sandbox();
+    const state = join(box.dir, 'var-lib-ms-core-check');
+    mkdirSync(state, { mode: 0o700 });
+    const text = block(line);
+    assert.ok(text.startsWith('#!/bin/sh\n'), `not a script as it would be installed:\n${text}`);
+    const script = join(box.dir, 'ms-core-check');
+    // The state directory is the one thing on the operator's machine moved into the sandbox.
+    writeFileSync(script, text.replaceAll('/var/lib/ms-core-check/', `${state}/`), {
+      mode: 0o755,
+    });
+    writeFileSync(
+      join(box.bin, 'curl'),
+      '#!/usr/bin/env bash\necho "curl $*" >> "$STUB_LOG"\ncode="$(cat "$STUB_DIR/code")"\n' +
+        'printf %s "$code"\n[ "$code" != 000 ] || exit 28\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(box.bin, 'mail'),
+      '#!/usr/bin/env bash\n{ echo "mail $*"; cat; } >> "$STUB_DIR/mail.log"\n' +
+        'exit "$(cat "$STUB_DIR/mail-status")"\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(join(box.dir, 'mail.log'), '');
+    return {
+      box,
+      state,
+      run: (code, mailStatus = 0) => {
+        writeFileSync(join(box.dir, 'code'), code);
+        writeFileSync(join(box.dir, 'mail-status'), String(mailStatus));
+        // As cron runs it: by its own `#!/bin/sh`, which is dash on Debian.
+        return spawnSync(script, [], { cwd: box.dir, env: box.env, encoding: 'utf8' });
+      },
+      mails: () =>
+        readFileSync(join(box.dir, 'mail.log'), 'utf8')
+          .split(/^(?=mail )/mu)
+          .filter((mail) => mail !== ''),
+    };
+  }
+
+  it('takes one block whole out of the document, unindented, and refuses none or two', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ms-doc-block-'));
+    const doc = join(dir, 'doc.md');
+    writeFileSync(
+      doc,
+      [
+        'Text with the line in it: # wanted',
+        '',
+        '1. A step.',
+        '',
+        '   ```sh',
+        '   #!/bin/sh',
+        '   # wanted',
+        '',
+        '     indented further',
+        '   ```',
+        '',
+        '```',
+        '# another',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    const one = docBlock(doc, '# wanted');
+    assert.equal(one.status, 0, one.stderr);
+    assert.equal(one.stdout, '#!/bin/sh\n# wanted\n\n  indented further\n');
+    const none = docBlock(doc, '# nowhere');
+    assert.equal(none.status, 1);
+    assert.equal(none.stdout, '');
+    writeFileSync(doc, `${readFileSync(doc, 'utf8')}\n\`\`\`\n# another\n\`\`\`\n`);
+    const two = docBlock(doc, '# another');
+    assert.equal(two.status, 2, 'a second copy in the document passed on the first');
+    assert.equal(two.stdout, '');
+  });
+
+  it('has each block the smoke test installs, once, the drop-in exactly as it adds', () => {
+    assert.equal(
+      block('OnFailure=ms-core-failed.service'),
+      '[Unit]\nOnFailure=ms-core-failed.service\n',
+    );
+    const unit = block('# /etc/systemd/system/ms-core-failed.service');
+    assert.match(
+      unit,
+      /^\[Service\]\nType=oneshot\nExecStart=.*\| mail -s "ms-core has failed on %H"/mu,
+    );
+    for (const line of [EVERY_RUN, ONCE]) {
+      assert.equal(
+        count(block(line), '\nURL='),
+        1,
+        `${line}: no single URL= line to point at a core`,
+      );
+    }
+  });
+
+  it('mails at every run while the core is down, the check as it is written first', () => {
+    const check = watcher(EVERY_RUN);
+    const up = check.run('200');
+    assert.equal(up.status, 0, up.stderr);
+    assert.deepEqual(check.mails(), []);
+    // The request: ten seconds, the token from its file, the URL as configured.
+    const asked = check.box.logged();
+    assert.match(asked, /--max-time 10 /u);
+    assert.match(asked, /--header @\/etc\/ms-core-check\/header /u);
+    assert.match(asked, / https:\/\/monitoring\.example\.com\/api\/v1\/core-health$/mu);
+
+    for (const code of ['000', '503', '401']) assert.equal(check.run(code).status, 1, code);
+    const sent = check.mails();
+    assert.equal(sent.length, 3, sent.join(''));
+    for (const [i, code] of ['000', '503', '401'].entries()) {
+      assert.ok(sent[i]?.startsWith(`mail ${DOWN}\n`), sent[i]);
+      assert.match(
+        sent[i] ?? '',
+        new RegExp(`is down \\(HTTP ${code}; 000 is no answer at all\\)`, 'u'),
+      );
+    }
+  });
+
+  it('mails once when the core goes down and once when it is back, the variant', () => {
+    const check = watcher(ONCE);
+    const down = join(check.state, 'down');
+    const said = (): string =>
+      check
+        .mails()
+        .map((mail) => mail.split('\n')[0])
+        .join(' / ');
+
+    assert.equal(check.run('200').status, 0);
+    assert.equal(said(), '', 'mailed that a core that was never down is back');
+    // Down, and down again in every way it can be: one mail, and a failure each run.
+    for (const code of ['000', '000', '503', '401']) assert.equal(check.run(code).status, 1, code);
+    assert.equal(said(), `mail ${DOWN}`);
+    assert.match(check.mails()[0] ?? '', /is down \(HTTP 000; 000 is no answer at all\)/u);
+    assert.ok(existsSync(down));
+    const since = readFileSync(down, 'utf8').trim();
+    // Back: one mail, saying since when, and the outage forgotten.
+    assert.equal(check.run('200').status, 0);
+    assert.equal(check.run('200').status, 0);
+    assert.equal(said(), `mail ${DOWN} / mail ${BACK}`);
+    assert.ok(
+      check.mails()[1]?.includes(`is answering again (down since ${since})`),
+      check.mails()[1],
+    );
+    assert.ok(!existsSync(down));
+    // A second outage is a second mail.
+    assert.equal(check.run('503').status, 1);
+    assert.equal(said(), `mail ${DOWN} / mail ${BACK} / mail ${DOWN}`);
+  });
+
+  it('tries a mail that could not be sent again at the next run, down and back', () => {
+    const check = watcher(ONCE);
+    const down = join(check.state, 'down');
+    assert.equal(check.run('000', 1).status, 1);
+    assert.ok(!existsSync(down), 'an outage nobody was told of was marked as told');
+    assert.equal(check.run('000', 1).status, 1);
+    assert.equal(check.run('000').status, 1);
+    assert.equal(check.run('000').status, 1);
+    assert.equal(check.mails().length, 3, 'two failed tries and one that went, then quiet');
+    assert.ok(existsSync(down));
+
+    assert.equal(check.run('200', 1).status, 0);
+    assert.ok(existsSync(down), 'an end nobody was told of was forgotten');
+    assert.equal(check.run('200').status, 0);
+    assert.ok(!existsSync(down));
+    assert.equal(check.run('200').status, 0);
+    const sent = check.mails().map((mail) => mail.split('\n')[0]);
+    assert.deepEqual(sent, [
+      `mail ${DOWN}`,
+      `mail ${DOWN}`,
+      `mail ${DOWN}`,
+      `mail ${BACK}`,
+      `mail ${BACK}`,
+    ]);
+  });
+});
+
 describe('the MS_* variables the product sets itself, and who reports them (`H-32`)', () => {
   const sections = new Set(
     [coreConfigSchema, probeConfigSchema].flatMap((schema) =>

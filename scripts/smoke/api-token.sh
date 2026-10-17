@@ -12,10 +12,13 @@
 #
 # A token's name is unique per account, so a second caller on the same box — a measurement run
 # after the smoke test, say — names its own with `MS_TOKEN_NAME`, or is refused `TOKEN_EXISTS`.
+# `MS_TOKEN_SCOPE=read` issues one that can change nothing, which is what the runbook's check from
+# another machine is given (`H-25`); the default is `full`.
 set -euo pipefail
 
 API="${MS_API:-http://127.0.0.1:8080/api/v1}"
 token_name="${MS_TOKEN_NAME:-smoke}"
+token_scope="${MS_TOKEN_SCOPE:-full}"
 password_file="${MS_PASSWORD_FILE:-/var/lib/ms-core/first-admin-password}"
 
 [ -r "${password_file}" ] || {
@@ -43,8 +46,8 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -c "${jar}" \
 }
 
 request="$(node -e '
-  process.stdout.write(JSON.stringify({ name: process.argv[1], scope: "full" }));
-' "${token_name}")"
+  process.stdout.write(JSON.stringify({ name: process.argv[1], scope: process.argv[2] }));
+' "${token_name}" "${token_scope}")"
 issued="$(curl -s -b "${jar}" -H 'content-type: application/json' \
   -d "${request}" "${API}/auth/tokens")"
 secret="$(printf '%s' "${issued}" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p')"

@@ -2121,8 +2121,8 @@ What each answer means:
 Three things to know before relying on it:
 
 - **It tells you every minute for as long as the core is down.** That is the right default for a
-  script this short. Send it to something that groups repeats, or have the script keep a state
-  file, if a mail a minute is too many.
+  script this short, and the wrong one for a night-long outage. The variant below tells you once
+  when the core goes down and once when it is back.
 - **A restart is a `503` or a refused connection for a few seconds.** If upgrades are routine and
   the mail is not wanted, alert on the second failure in a row.
 - **With `api.requireAuthentication` off the route answers anybody, and without a database**: its
@@ -2130,6 +2130,40 @@ Three things to know before relying on it:
   and the port and no longer the database. Keep authentication on.
 
 The check uses one request a minute of the token's account's [rate limit](#the-rate-limit-and-provisioning-scripts).
+
+**Once an outage, and once when it is back.** The same request, with a file that remembers an
+outage it has already told you about. Install it in place of the one above, under the same name
+and the same crontab line, and give it a directory of its own:
+
+```
+sudo install -d -m 700 /var/lib/ms-core-check
+```
+
+```sh
+#!/bin/sh
+# Mails once when the core stops answering 200, and once when it answers again.
+URL=https://monitoring.example.com/api/v1/core-health
+DOWN=/var/lib/ms-core-check/down
+code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+  --header @/etc/ms-core-check/header "$URL")
+if [ "$code" = 200 ]; then
+  [ -e "$DOWN" ] || exit 0
+  echo "MonitoringSystem core at $URL is answering again (down since $(cat "$DOWN"))" |
+    mail -s 'MonitoringSystem core is back' ops@example.com && rm -f "$DOWN"
+  exit 0
+fi
+[ -e "$DOWN" ] && exit 1
+echo "MonitoringSystem core at $URL is down (HTTP $code; 000 is no answer at all)" |
+  mail -s 'MonitoringSystem core is down' ops@example.com && date -u >"$DOWN"
+exit 1
+```
+
+- **The file is written only once the mail has gone**, and removed only once the second one has.
+  A mail that could not be sent is tried again at the next run, rather than the outage, or its
+  end, going unreported.
+- **Each failed run in an outage is silent, whatever it saw**: a `000` that turns into a `503`
+  as the core comes back up is the same outage.
+- **It still exits 1 for every failed run**, so whatever runs it can count them.
 
 #### The core's outbound heartbeat
 
@@ -2204,7 +2238,11 @@ ExecStart=/bin/sh -c 'systemctl status ms-core --no-pager | mail -s "ms-core has
 
 ```
 sudo systemctl edit ms-core
-# and in the drop-in it opens:
+```
+
+and, in the drop-in it opens:
+
+```ini
 [Unit]
 OnFailure=ms-core-failed.service
 ```
@@ -2215,8 +2253,11 @@ dependency listed in a drop-in is added to the list. Check that both are there:
 
 ```
 systemctl show ms-core -p OnFailure --value
-# ms-recover@ms-core.service ms-core-failed.service
+# ms-core-failed.service ms-recover@ms-core.service
 ```
+
+(`smoke-install.sh` installs these two blocks as they are written here, makes the core fail, and
+waits for the mail.)
 
 Expect one message for each time the unit fails, which for a core that keeps crashing is one a
 retry: 10 minutes, then 20, 40, 80, 160, and every 4 hours.
