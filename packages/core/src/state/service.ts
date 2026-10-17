@@ -25,6 +25,7 @@ import {
   isStaleResult,
   operatorDecided,
   readingMessage,
+  leftToHold,
   DEFAULT_FAILURE_POLICY,
   type Decision,
   type FailurePolicy,
@@ -34,6 +35,7 @@ import type { ChannelOutcome } from './limits.js';
 import { canAcknowledge, type ResolvedAcknowledgement } from './acknowledgement.js';
 import {
   loadRuntimes,
+  lockRuntimeStates,
   lockRuntimes,
   writeAcknowledgements,
   writeSimulatedErrors,
@@ -366,6 +368,58 @@ export class SensorStateService {
    */
   forgetSensors(sensorIds: readonly number[]): void {
     for (const sensorId of sensorIds) this.#cache.delete(sensorId);
+  }
+
+  /**
+   * The sensors among these result writes whose rows a probe's hold has reached since they were
+   * decided (`P-415`), and what is cached of them dropped.
+   *
+   * Asked inside the write's transaction, before its history. Only a write a probe's hold holds
+   * now can be named, so only its row is read, and locked (`lockRuntimeStates`): a hold whose
+   * re-decision has committed is on the row, and one that has not waits for the write and decides
+   * from what it leaves (`P-414`). Nothing held, the normal state of an installation, locks and
+   * names nothing, so the write takes its rows as it always has. What this names keeps the row's
+   * state and words; the cache holds the batch's state, which the row will not, so its entry
+   * goes.
+   *
+   * `changing` is the sensors the write's transitions move, whose rows its history takes anyway.
+   * Those no hold holds are taken first: a release has let go of a master before it locks it,
+   * and its dependency recompute then writes the dependents, so a held dependent's row taken
+   * ahead of the master waited on the release while the release waited on it. The held rows
+   * asked about go after them, together and in id order, as the hold's own re-decision takes
+   * them (`lockRuntimes`): a moved one taken ahead of a steady one the hold holds crossed the
+   * hold.
+   */
+  async overtaken(
+    q: Queryable,
+    writes: readonly RuntimeWrite[],
+    changing: readonly number[],
+  ): Promise<ReadonlySet<number>> {
+    const heldOf = this.#heldFacts();
+    if (heldOf === undefined) return NOTHING_OVERTAKEN;
+    // Held now, and decided otherwise: what `leftToHold` can name, whatever the row says.
+    const asked = writes.filter(
+      (write) =>
+        !heldOf(write.sensorId).probeReachable &&
+        !(write.state === 'unknown' && write.cause === 'probe'),
+    );
+    if (asked.length === 0) return NOTHING_OVERTAKEN;
+    const held = (sensorId: number): boolean => !heldOf(sensorId).probeReachable;
+    await lockRuntimeStates(
+      q,
+      changing.filter((sensorId) => !held(sensorId)),
+    );
+    const rows = await lockRuntimeStates(
+      q,
+      asked.map((write) => write.sensorId),
+    );
+    const behind = new Set<number>();
+    for (const write of asked) {
+      const row = rows.get(write.sensorId);
+      if (row !== undefined && leftToHold(write, row)) behind.add(write.sensorId);
+    }
+    for (const sensorId of behind) this.#cache.delete(sensorId);
+    return behind;
   }
 
   /** The current state of a sensor as far as this process knows. Undefined if never seen. */
@@ -867,6 +921,30 @@ export class SensorStateService {
    * the row says (`P-412`).
    */
   #withLiveFacts(runtimes: Map<number, SensorRuntime>): Map<number, SensorRuntime> {
+    const heldOf = this.#heldFacts();
+    if (heldOf === undefined) return runtimes;
+    for (const [sensorId, runtime] of runtimes) {
+      const held = heldOf(sensorId);
+      if (held.probeReachable && held.vouchedFor) continue;
+      runtimes.set(sensorId, {
+        ...runtime,
+        facts: {
+          ...runtime.facts,
+          ...(held.probeReachable ? {} : { probeReachable: false }),
+          ...(held.vouchedFor ? {} : { vouchedFor: false }),
+        },
+      });
+    }
+    return runtimes;
+  }
+
+  /**
+   * What the holds lay over each sensor now — a lost probe, a frozen clock, a check its probe
+   * could not start and a factory's unreached inputs make its probe unreachable, a withholding
+   * takes its voucher — or nothing at all while nothing is held, the normal state of an
+   * installation.
+   */
+  #heldFacts(): ((sensorId: number) => HeldFacts) | undefined {
     const unreachable = this.#unreachableSensors?.();
     const frozen = this.#clockFrozenSensors?.();
     const unstarted = this.#notStartedSensors?.();
@@ -878,26 +956,17 @@ export class SensorStateService {
     const anyUnreached = unreached !== undefined && unreached.size > 0;
     const anyWithheld = withheld !== undefined && withheld.size > 0;
     if (!anyUnreachable && !anyFrozen && !anyUnstarted && !anyUnreached && !anyWithheld) {
-      return runtimes;
+      return undefined;
     }
-    for (const [sensorId, runtime] of runtimes) {
-      const lost =
+    return (sensorId) => ({
+      probeReachable: !(
         (anyUnreachable && unreachable.has(sensorId)) ||
         (anyFrozen && frozen.has(sensorId)) ||
         (anyUnstarted && unstarted.has(sensorId)) ||
-        (anyUnreached && unreached.has(sensorId));
-      const refused = anyWithheld && withheld.has(sensorId);
-      if (!lost && !refused) continue;
-      runtimes.set(sensorId, {
-        ...runtime,
-        facts: {
-          ...runtime.facts,
-          ...(lost ? { probeReachable: false } : {}),
-          ...(refused ? { vouchedFor: false } : {}),
-        },
-      });
-    }
-    return runtimes;
+        (anyUnreached && unreached.has(sensorId))
+      ),
+      vouchedFor: !(anyWithheld && withheld.has(sensorId)),
+    });
   }
 
   /**
@@ -1038,6 +1107,15 @@ export class SensorStateService {
     return this.#fallback;
   }
 }
+
+/** What the holds lay over a sensor, live and never stored (`R-05`, `A-29`). */
+interface HeldFacts {
+  readonly probeReachable: boolean;
+  readonly vouchedFor: boolean;
+}
+
+/** What `overtaken` names while nothing is held. */
+const NOTHING_OVERTAKEN: ReadonlySet<number> = new Set();
 
 /**
  * A runtime as its row has it (`P-412`): the facts that have no column restored as `loadRuntimes`

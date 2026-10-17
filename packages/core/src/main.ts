@@ -1476,6 +1476,8 @@ async function serve(): Promise<void> {
     // dependencies settled is the alarm the dependency exists to suppress (M-17, N-02).
     alarms,
     onStatesCommitted: publishStates,
+    // A result written after a probe's hold reached its row leaves its state to the hold (P-415).
+    holds: states,
     // And afterwards, the probes: a check result is not a configuration change, so this is the
     // one write path the audit sink does not cover.
     onDependencyChange: () => {

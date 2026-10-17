@@ -11365,7 +11365,7 @@ because each is a decision rather than a defect:
         transitions only, which leaves a reword out; the lock without its id order; the read
         without its lock.
 
-- [ ] **P-415 — a result decided before a hold and stored after the hold's re-decision overwrites
+- [x] **P-415 — a result decided before a hold and stored after the hold's re-decision overwrites
       it** · S · P-147 · Found 2026-10-17 in `P-414`'s review. Ingestion decides a batch, with
       the live facts laid on as it decides (`P-412`), and the `Ingestor` writes it up to
       `batchMaxDelayMs` later. A probe lost in between — `#handleClose` calls
@@ -11383,6 +11383,101 @@ because each is a decision rather than a defect:
       rows are locked by then), with a test that decides a batch, commits a lost probe's
       re-decision and then flushes the batch.
 
+      **P-415 outcome. A result written after a probe's hold reached its row leaves the state
+      to the hold.**
+      - **Decisions, taken by the orchestrator** and named in the push question:
+        1. **Asked of the row, locked, not of the decision.** Inside the write's transaction and
+           before its history, `SensorStateService.overtaken` takes the writes a probe's hold
+           holds now (a lost probe, a frozen clock, a check its probe could not start, a
+           factory's unreached inputs) that say other than Unknown/probe, reads their rows
+           locked in id order (`lockRuntimeStates`), and names those whose row already says
+           Unknown/probe (`leftToHold`). A hold whose re-decision has committed is on the row;
+           one laid but not committed waits on the lock and decides from what the write leaves
+           (`P-414`). The first version answered from the decision alone (`standsUnder`); its
+           review confirmed 17 findings, among them that it was neither safe (an
+           acknowledgement's lapse) nor complete (a release committed first).
+        2. **Only those rows locked, and after the rows the write moves.** Locking every row a
+           write touches before its history closed a cycle with a release (`found()` locks a
+           master, then its dependency recompute pauses dependents whose steady results ride in
+           the same write), and so did locking a held dependent ahead of a master a release has
+           let go of, whose transition the write carries. Taking every moved row first instead
+           crossed the hold itself, which locks its rows in id order, when a moved row of its
+           probe came ahead of a steady one. So the unheld rows the transitions move are taken
+           first, in id order, as the history took them before anything was asked, and then
+           the held rows asked about, together in id order. A held steady dependent
+           ahead of a steady master still can cross (`P-422`). With nothing held, the normal
+           state, the write takes its rows as it did before.
+        3. **Kept, not re-decided.** `writeRuntimes` keeps those rows' state, cause, words,
+           place and `since`, beside `P-147`'s pause guard, and writes the scan facts, the
+           failure count and the verdict. The row already says what the hold decides, so
+           nothing is decided in the ingest transaction: no hold's words to find (`P-413`), no
+           alarm reaction outside the ingestor's per-source gating (`P-146`).
+        4. **The history and the stream follow the row; the reactions follow what was
+           measured.** An overtaken sensor's transitions measured before its newest stored row
+           stay as history (`P-145`). Any at or after it (a probe's clock ahead, a hold that
+           decided the row unchanged and wrote nothing) are left out (`beforeTheNewest`), and
+           none is announced, since the stream shows the last frame it got (`U-02`). Every one
+           is reacted to as measured, whatever the probe's clock stamped it, as it would have
+           been had the write gone first: a master's recovery starts its dependents' delay, and
+           a Down ends one (`M-11`). Leaving a recovery stamped after the hold's row out of the
+           reaction left the dependents the hold let go to page.
+        5. **Probe holds only, and the hold's direction only.** A second design, which also
+           compared the row with what each result was decided from and re-decided every row
+           that had moved, had 16 defects confirmed against it before it was written: holds'
+           words, holds that roll back, acknowledgements, stale sources and the alarm gating.
+           Withholdings stay as they were (`P-420`): a master's Down kept behind one loses
+           `M-23`'s hold, and each dependent pages. A result decided under a hold let go since,
+           and a row a hold re-decided whose release has begun, are `P-418`.
+      - **Cost.** None while nothing is held. While a probe's hold holds sensors, a write that
+        carries one of them takes up to two statements locking rows its history and its `UPDATE`
+        took anyway, earlier (a held row whose result the floors refuse is locked when the
+        `UPDATE` would have passed it), and one reading the newest history rows when a write is
+        overtaken.
+      - **Not changed, and filed.** A hold laid after the write asked, or whose unlocked read
+        decides the row unchanged, does not wait for it (`P-417`). A hold whose transaction
+        fails owes no re-decision, and this change adds a case: a write kept for a hold laid
+        but not committed is left Unknown if that hold then rolls back (`P-419`). A result
+        written behind a pause committed since (`P-147`) is still announced (`P-421`). The
+        dependency reaction still takes dependents' rows after the write's, as before, and a
+        write and a release can still lock rows crosswise: a held steady dependent's row ahead
+        of a steady master's here, and the `UPDATE`'s scan order on `main` (`P-422`).
+      - **Logged** at info, with the sensors, when a write is overtaken.
+      - **Code.** The five holds' facts are read in one place, `#heldFacts`, which
+        `#withLiveFacts` and `overtaken` share; `leftToHold` is in `machine.ts`.
+      - **Docs.** `state-machine.md`, a note after `P-414`'s.
+      - **Tests.**
+        - `state-machine.test.ts`: `leftToHold`, ten rows. It is asked only of a sensor a
+          probe's hold holds now, which `overtaken` decides before it reads the row.
+        - `overtaken-results.test.ts`, against PostgreSQL through the `Ingestor`: a lost
+          probe's last batch stored after the loss keeps Unknown, its words, its place and its
+          `since`, writes its two failures and its time, keeps its measured transitions before
+          the hold's, announces nothing, and the probe's return decides Down from it; a batch
+          the hold has not reached is written as decided and the hold decides from it; a hold
+          re-deciding while the write holds a row it asked about waits for it (a row with no
+          transition, which only that lock holds); a row a hold decided unchanged keeps it and
+          drops the batch's cached state, which nothing else drops; a probe clock ahead leaves
+          its transitions out; a batch decided under the hold is written as decided and stays
+          cached; a not-started sensor its own result let go, at Unknown/probe while another
+          probe's hold is in force, is written as decided; a master's recovery the hold overtook
+          starts its dependents' delay, and its Down ends one, each also when stamped after the
+          hold's row; a write moving a master while a release holds it, and asking about a held
+          dependent the release then writes, lets both commit, and so does one moving a held row
+          while the hold holds a steady one below it and then takes the moved one; one write
+          with an overtaken sensor and one written as decided; and `main.ts` wires it.
+      - **Review.** Four rounds. The first version's review confirmed 17 findings and the second
+        design's 16, and both were set aside. The third's confirmed 12, each fixed or filed
+        (`P-417` to `P-421`). The fourth confirmed 6 more: the lock order above (whose first
+        fix, every moved row first, crossed the hold and was found before it landed), recoveries
+        stamped after the hold's row left out of the reaction, a `leftToHold` argument nothing
+        passed, a gap in the tests, and two stale sentences. It refuted 1, a merged write
+        decided across a hold, which no source can produce.
+      - **Mutants.** 23 of 23 killed: each half of `leftToHold`; the question asked of another
+        hold, and of no hold at all; the first lock dropped, taken of every moved row, or of
+        the held ones instead; the moved rows not passed; the kept flag for none and for all;
+        the `since`, words and place `CASE`s; the announcement filter both ways; the history
+        filter both ways and at its bound; the cache drop; and the reactions without the kept
+        sensors, or with only the transitions that landed.
+
 - [ ] **P-416 — a probe lost while its `found()` is still writing leaves its sensors at their last
       reading** · S · P-414 · Found 2026-10-17 in `P-414`'s review. `#online` clears the overlay
       before its transaction, which re-decides each sensor from Unknown/probe to what it last
@@ -11395,6 +11490,96 @@ because each is a decision rather than a defect:
       interleave their re-decisions (one at a time per probe, or `found()` re-deciding, or
       owing, what was lost again since it began), with a test that holds `found()`'s
       transaction open across a `lost()`.
+
+- [ ] **P-417 — a hold that a result write in flight does not wait for** · S · P-415, P-416 ·
+      Found 2026-10-17 in `P-415`'s reviews. A write locks only the rows a probe's hold holds
+      when it asks (`P-415`), so a hold laid after the question, whose re-decision commits
+      before the write's `UPDATE` reaches the row, is written over. And `reevaluate` locks only
+      the rows it will rewrite (`P-414`): a row at Unknown/probe that nothing holds (a
+      not-started sensor let go by the batch's own started result, which `NotStarted.release`
+      does not re-decide, or a hold forgotten by a core restart) is decided unchanged by a probe
+      lost while the batch's write is open, so nothing waits for the write, which then commits
+      the batch's Up for a probe that is gone, and `found()` later decides it unchanged:
+      `P-416`'s mechanism, from an ingest write. **Done when** neither can leave a write over a
+      hold: a hold's re-decision also locks, and decides again, the rows it decides unchanged on
+      a hold fact (cause probe or access), and one laid after the write asked is re-checked
+      before its `UPDATE` or waits for it, with a test for each that holds an ingest write open
+      across a `lost()`.
+
+- [ ] **P-418 — a result decided from a row re-decided since is written as decided** · M · P-415
+      · Found 2026-10-17 in `P-415`'s design review. The write compares nothing it was decided
+      from. A batch decided under a hold let go since writes Unknown/probe over the release's
+      state (a silence hold's last batch over `resumed()`), and the release decided without it.
+      A hold and its release both committed between decide and write (a link flap) leave the row
+      as the batch found it, so the batch's Down goes in while the history ends on `found()`'s Up;
+      a release that has cleared its overlay but not committed when the write asks waits on the
+      write or reads after it and decides the row unchanged, so the batch's Down goes in while
+      the history ends on the hold's Unknown.
+      An acknowledgement extended between the two is wiped by the lapse the write carries.
+      **Done when** a write decided from a row that has moved since (state, cause, `since`,
+      acknowledgement) leaves it and is re-decided in the ingest transaction from what it
+      stores, in the result's own words for a state its readings decide, with a test for each.
+      The design review found what that has to get right: `P-413`'s words first; no alarm
+      reaction of its own, outside the ingestor's per-source gating (`P-146`, `P-169`); a write
+      the floors refuse not re-decided; an acknowledgement its result expired cleared; a stale
+      source's batch not re-decided on the core's clock ahead of the replay behind it.
+
+- [ ] **P-419 — a hold or a release whose transaction fails owes no re-decision** · S · P-249 ·
+      Found 2026-10-17 in `P-415`'s design review. `ProbeReachability.lost`'s catch releases the
+      overlay and returns 0, and `ClockFreeze`'s `restore()` and `SensorVouching`'s put-back do
+      the same. A batch decided under the overlay before it rolled back is written as decided,
+      Unknown/probe for a probe that is connected, and if the probe reconnects before the
+      delivery sweep retries, `found()` finds no entry and nothing re-decides the sensor until
+      its next result. `P-415` adds a case: a write it kept on a row already at Unknown/probe
+      (a not-started sensor let go by its own result) for a hold laid but not committed is left
+      Unknown if that hold rolls back, with nothing holding it. **Done when** each such failure
+      drops the cache and owes its sensors a re-decision, as `#undoOnRollback` and
+      `retryGivenUp` do, with a test per holder and one for the kept write.
+
+- [ ] **P-420 — a result decided before a withholding and stored after it writes over it** · S ·
+      P-415, M-23 · Found 2026-10-17 in `P-415`'s reviews. `P-415` leaves withholdings out.
+      Keeping a write behind a committed withholding the way it keeps one behind a probe's hold
+      would page each dependent: the kept Down still reaches the dependency reaction, but
+      `applyPauses` holds dependents from the master's row, which the keep leaves at
+      Unknown/access; `M-23`'s until-evaluated mark was decided on the Warning the withholding
+      saw; and the reaction's Down clears any `dependency_clear_at`, that mark included
+      (`markRecoveries`). Today the Down is written over Unknown/access, which holds the
+      dependents and leaves the row Down while withheld. And `holdUntilEvaluated`
+      reads its `state IN (...)` against the committed row, so a withholding that runs while the
+      Down is being written sets no mark either. **Done when** a write behind a withholding keeps
+      Unknown/access and a master's measured Down still holds its dependents until it is
+      evaluated, with an `M-17` scenario test of a master and its dependents in both orders.
+
+- [ ] **P-421 — a result written behind a pause committed since is still announced** · S ·
+      P-147, P-415 · Found 2026-10-17 in `P-415`'s review. `writeRuntimes` keeps a paused row's
+      state when a pause committed between a batch's decision and its write (`P-147`), but the
+      batch's transitions are written and announced as decided: an operator pauses a sensor as
+      its Down is in flight, the pause's frame goes out, then the Down's, and every open tree
+      shows Down while the row says Paused. A paused sensor is not scanned, so nothing corrects
+      it until a resubscribe. `P-415` keeps a probe hold's rows out of the announcement and ends
+      their history on the hold's row; a pause's are not. **Done when** a write the pause guard
+      holds announces nothing of the state it did not write, and its history does not end
+      after the pause's row, with a test through the `Ingestor`.
+
+- [ ] **P-422 — a result write and a release's dependency recompute can lock rows crosswise** ·
+      S · P-415, P-394 · Found 2026-10-17 in `P-415`'s fourth review. A release (`found()`,
+      `resumed()`, a thaw, a not-started resync) locks a master's runtime row, re-decides it,
+      and its dependency recompute then writes the dependents' rows (`applyPauses`). A result
+      write takes rows in id order and then in its `UPDATE`'s scan order, neither of which
+      follows master before dependent. `P-415` takes the unheld rows its transitions move
+      first and then the held rows it asks about, but a write that asks about a held dependent
+      with a steady result and carries its master's steady result still holds the dependent
+      while its `UPDATE` waits on the master; a hold whose recompute lets go of a dependent the
+      same write moves finds the write holding the dependent and waiting on the held master;
+      and on `main` already, the `UPDATE` can reach a dependent before its master. PostgreSQL then
+      aborts one of the two. A write aborted is nacked and offered again, which costs a retry;
+      a release aborted puts its hold back (`#online`'s catch) with nothing to retry it while
+      the probe stays connected, so a connected probe's sensors stay Unknown until it next
+      reconnects. **Done when** a deadlock between the two costs a retry and never a held
+      probe: the release paths retry on `deadlock_detected` (`40P01`), as
+      `credential-vouching.ts` counts a write that gave way, with a scenario test of a master
+      on one probe and a held dependent on another, a write holding the dependent open across
+      the release.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as

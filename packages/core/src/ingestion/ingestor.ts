@@ -3,7 +3,7 @@ import type { Queryable } from '../db/pool.js';
 import type { WrittenReadings } from '../timeseries/store.js';
 import { CounterStore } from './counter-store.js';
 import type { CounterSample } from './counters.js';
-import { writeRuntimes, writeStateHistory } from '../state/runtime.js';
+import { beforeTheNewest, writeRuntimes, writeStateHistory } from '../state/runtime.js';
 import type {
   CommittedStates,
   RuntimeWrite,
@@ -143,6 +143,22 @@ export interface AlarmReactor {
   reconcilesReadings(q: Queryable): Promise<boolean>;
 }
 
+/**
+ * Which result writes a probe's hold has reached since they were decided, asked in the write's
+ * transaction, which it locks their rows in, after the unheld rows its transitions move; drops
+ * what is cached of them (`P-415`). `SensorStateService.overtaken`.
+ */
+export interface HoldsSince {
+  overtaken(
+    q: Queryable,
+    writes: readonly RuntimeWrite[],
+    changing: readonly number[],
+  ): Promise<ReadonlySet<number>>;
+}
+
+/** What `HoldsSince.overtaken` would name while nothing is asked. */
+const NOTHING_OVERTAKEN: ReadonlySet<number> = new Set();
+
 export interface IngestorOptions {
   /** Narrower than the pool, so a test can hand it a stub that fails. */
   db: IngestTarget;
@@ -186,6 +202,13 @@ export interface IngestorOptions {
    * decides, but wasted work during exactly the outage that made the network slow.
    */
   onDependencyChange?: () => void;
+  /**
+   * Asked inside the write, before its history, which results a probe's hold has reached since
+   * they were decided (`P-415`): a batch is written up to `batchMaxDelayMs` after it was decided,
+   * and a probe lost in between has held its sensors first. Absent, every result's state is
+   * written as decided.
+   */
+  holds?: HoldsSince;
 }
 
 export interface IngestionStats {
@@ -282,6 +305,7 @@ export class Ingestor {
   readonly #alarms: AlarmReactor | undefined;
   readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #onDependencyChange: (() => void) | undefined;
+  readonly #holds: HoldsSince | undefined;
   #dependencyPauses = 0;
   #staleReactions = 0;
   readonly #catchUpGraceMs: number;
@@ -342,6 +366,7 @@ export class Ingestor {
     this.#alarms = options.alarms;
     this.#onStatesCommitted = options.onStatesCommitted;
     this.#onDependencyChange = options.onDependencyChange;
+    this.#holds = options.holds;
   }
 
   /**
@@ -643,18 +668,53 @@ export class Ingestor {
                 channelIds: written.map((row) => row.channel_id),
                 times: written.map((row) => row.time),
               });
+        const writes = [...runtimes.values()];
+        // **Asked before the history, of the rows a probe's hold holds** (`P-415`). A batch is
+        // written up to `batchMaxDelayMs` after it was decided, and a probe lost in between has
+        // held its sensors first: the write put the batch's Up or Down back over the hold's
+        // Unknown, with nothing to re-decide it while the probe was away, and announced it. The
+        // rows asked about are locked, after the unheld rows the transitions move, so a hold
+        // whose re-decision has not committed waits for this write and decides from it
+        // (`P-414`); one laid after the question, or whose read decides the row unchanged, does
+        // not (`P-417`).
+        const overtaken =
+          this.#holds === undefined || writes.length === 0
+            ? NOTHING_OVERTAKEN
+            : await this.#holds.overtaken(
+                q,
+                writes,
+                transitions.map((transition) => transition.sensorId),
+              );
+        if (overtaken.size > 0) {
+          this.#logger.info(
+            { sensors: overtaken.size, sensorIds: [...overtaken].slice(0, 20) },
+            'results stored after a probe’s hold reached their rows; their state is left to it',
+          );
+        }
+        // **An overtaken sensor's history ends where its row does.** Its transitions measured
+        // before the hold's row stay (`P-145`). Any at or after it, which would end the history
+        // on a state the row does not have, are left out, and none is announced, since the
+        // stream shows the last frame it got and the hold's own has said what the sensor is
+        // (`U-02`). The reactions below still take every transition as measured, as they would
+        // had the write gone first, whatever the probe's clock stamped them: a master's recovery
+        // starts its dependents' delay and a Down ends one (`M-11`), and the alarm reconcile
+        // reads the row.
+        const landing =
+          overtaken.size === 0 ? transitions : await beforeTheNewest(q, transitions, overtaken);
+        const announce: CommittedStates | undefined =
+          overtaken.size === 0 || this.#onStatesCommitted === undefined
+            ? this.#onStatesCommitted
+            : (committed) =>
+                this.#onStatesCommitted?.(
+                  committed.filter((transition) => !overtaken.has(transition.sensorId)),
+                );
         // Same transaction, same reason: the readings and the state they decided commit
         // together or not at all (M-02).
         // **At the instants the probe measured them** (`P-145`). A spool replay is an hour of
         // genuine history arriving late; stamping it after the newest stored row rewrote the
         // whole outage into consecutive milliseconds, in the table uptime is computed from.
-        const appended = await writeStateHistory(
-          q,
-          transitions,
-          this.#onStatesCommitted,
-          'as-measured',
-        );
-        const advanced = await writeRuntimes(q, [...runtimes.values()]);
+        const appended = await writeStateHistory(q, landing, announce, 'as-measured');
+        const advanced = await writeRuntimes(q, writes, overtaken);
         // Same transaction, same reason again (`P-107`): a baseline that advanced for readings
         // that were never stored makes the next scan of that counter unmeasurable.
         if (counters.size > 0) await this.#counters.save(q, counters);

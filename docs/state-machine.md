@@ -880,9 +880,30 @@ Two further notes for whoever picks those up:
   pause flags said paused, a lost probe's re-decision wrote Unknown into the row and into the
   history, stamped after the pause and following the state before it, and a not-started round's
   new words wrote Unknown into the row with the history still saying paused. The rows it decides
-  nothing for stay unlocked, so it locks no more than it did. A result is guarded against a
-  pause only (`writeRuntimes`, `P-147`): one decided before a hold and stored after the hold's
-  re-decision is `P-415`.
+  nothing for stay unlocked, so it locks no more than it did.
+
+- **A result a probe's hold reached first leaves its state to the hold** (`P-415`). A batch is
+  decided as it arrives and written up to `batchMaxDelayMs` later; a probe lost in between held
+  its sensors Unknown first, and the batch wrote its Up or Down over that, and announced it,
+  leaving a lost probe's sensor Up with nothing to re-decide it while the probe was away. Inside
+  the write, before its history, the state service reads, locked in id order, the rows of the
+  writes a probe's hold holds now, and names those whose row already says Unknown/probe while the
+  write says otherwise (`leftToHold`). The unheld rows the write's transitions move are taken
+  first, as the history takes them, since a release locks a master it has let go of before its
+  dependents; the held rows asked about then together in id order, as the hold takes them.
+  `writeRuntimes`
+  keeps those rows' state, cause, words and `since`, beside the pause guard (`P-147`), and
+  writes what the result says of the check. Their transitions measured before the hold's row
+  stay as history; any at or after it (a probe clock ahead, a hold that decided the row
+  unchanged and wrote nothing) are left out, and none is announced. Every one is still reacted
+  to as measured, as it would have been had the write gone first: a master's recovery starts its
+  dependents' delay and a Down ends one, whatever the probe's clock stamped them. A write the
+  hold has not reached yet is written as decided: the hold's
+  re-decision waits on the row's lock and decides from what the write leaves (`P-414`) —
+  unless it was laid after the write asked, or its unlocked read decides the row unchanged
+  (`P-417`). Withholdings are not asked about (`P-420`), nor a result decided under a hold let
+  go since, nor a row a hold re-decided whose release has begun (`P-418`). A held steady row
+  taken ahead of a steady master's can still cross a release's recompute (`P-422`).
 
 - **The unreachable overlay is derived from the tree, not snapshotted against it** (`P-103`).
   `lost` records which sensors a probe was carrying; a move, a create or a delete changes that

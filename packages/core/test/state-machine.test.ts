@@ -6,6 +6,7 @@ import {
   evaluate,
   isPaused,
   isStaleResult,
+  leftToHold,
   pauseCause,
   queryState,
   CHANNELS_CLEAR,
@@ -30,6 +31,7 @@ import {
   V2_STATES,
   type PauseSource,
   type SensorState,
+  type SensorStateCause,
 } from '../src/state/tables.js';
 
 const BASE: StateFacts = {
@@ -595,4 +597,27 @@ describe('invariants', () => {
       }
     }
   });
+});
+
+describe('whether a result written now leaves its row to a probe’s hold (P-415)', () => {
+  const at = (state: SensorState, cause: SensorStateCause): Decision => ({ state, cause });
+  const HELD = at('unknown', 'probe');
+  const cases: [string, Decision, Decision, boolean][] = [
+    ['a Down over the hold’s Unknown', at('down', 'scan'), HELD, true],
+    ['an Up over the hold’s Unknown', at('up', 'scan'), HELD, true],
+    ['a limit’s Warning over it', at('warning', 'limit'), HELD, true],
+    ['a withholding’s Unknown over it', at('unknown', 'access'), HELD, true],
+    // Neither can stand on a row at Unknown/probe, which no pause or force decided.
+    ['a pause decided from a row that has moved', at('paused', 'user'), HELD, true],
+    ['a force decided from a row that has moved', at('down', 'simulated'), HELD, true],
+    ['the hold’s own decision', HELD, HELD, false],
+    ['a row the hold has not reached', at('down', 'scan'), at('up', 'scan'), false],
+    ['a row a withholding holds', at('down', 'scan'), at('unknown', 'access'), false],
+    ['a row awaiting its first scan', at('down', 'scan'), at('unknown', 'scan'), false],
+  ];
+  for (const [name, write, row, left] of cases) {
+    it(`${left ? 'leaves' : 'writes'} ${name}`, () => {
+      assert.equal(leftToHold(write, row), left);
+    });
+  }
 });

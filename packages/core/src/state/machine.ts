@@ -408,6 +408,29 @@ export function clearedByRecovery(facts: SensorFacts, decision: Decision): Senso
 }
 
 /**
+ * Whether a result written now leaves its row to a probe's hold (`P-415`): a row that already
+ * says what that hold decides, and a write that says otherwise. Asked only of a sensor a probe's
+ * hold holds now, which `SensorStateService.overtaken` decides before it reads the row: a row at
+ * Unknown/probe that nothing holds, such as a not-started sensor its own result let go
+ * (`NotStarted.release`), is written as decided.
+ *
+ * A batch is decided as it arrives and written up to `batchMaxDelayMs` later, so a probe lost in
+ * between has held its sensors first, and the write put the batch's Up or Down back over the
+ * hold's Unknown with nothing to re-decide it while the probe was away. The row is the test, not
+ * the decision alone: a hold whose re-decision has not committed has not reached the row, and
+ * decides from what the write leaves there (`P-414`).
+ *
+ * Layer 3 only. A row at Unknown/probe has no pause or forced error in force, which would have
+ * decided it otherwise, so a write that says paused or simulated was decided from a row that has
+ * moved since. A withholding (layer 3a) is not asked about: a master's Down written behind one is
+ * what `M-23` holds its dependents on (`P-420`).
+ */
+export function leftToHold(write: Decision, row: Decision): boolean {
+  const held = (one: Decision): boolean => one.state === 'unknown' && one.cause === 'probe';
+  return held(row) && !held(write);
+}
+
+/**
  * Re-evaluates without a new result. What a pause, a resume, an acknowledgement or a probe
  * going away calls — the tasks that add those (`M-08`…`M-14`, `R-05`) change a flag and ask.
  */

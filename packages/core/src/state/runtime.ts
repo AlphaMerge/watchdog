@@ -302,6 +302,34 @@ export async function lockRuntimes(
   return new Map(rows.map((row) => [Number(row.object_id), toRuntime(row)]));
 }
 
+/**
+ * The state and cause on each of these sensors' runtime rows, locked in id order (`P-415`).
+ *
+ * What a result write reads of the rows a probe's hold holds, before its history, so that what
+ * it reads is what it will write over: a hold's re-decision that has committed is on the row,
+ * and one that has not waits for the write and decides from what it leaves (`P-414`). Id order,
+ * as `writeStateHistory`'s own lock and `lockRuntimes` take them (`P-394`). Only those rows, and
+ * after the unheld rows the write's transitions move: every row a write touches, or a held
+ * dependent ahead of a master a release has let go of, taken this early, closed a cycle with
+ * the release, whose dependency recompute locks the master and then the dependents. A held
+ * steady dependent taken ahead of a steady master still can (`P-422`).
+ */
+export async function lockRuntimeStates(
+  q: Queryable,
+  sensorIds: readonly number[],
+): Promise<Map<number, { state: SensorState; cause: SensorStateCause }>> {
+  if (sensorIds.length === 0) return new Map();
+  const rows = await q.query<{ sensor_id: string; state: SensorState; cause: SensorStateCause }>(
+    `SELECT object_id::text AS sensor_id, state, cause FROM sensor_runtime
+     WHERE object_id = ANY($1::bigint[])
+     ORDER BY object_id FOR NO KEY UPDATE`,
+    [[...new Set(sensorIds)]],
+  );
+  return new Map(
+    rows.map((row) => [Number(row.sensor_id), { state: row.state, cause: row.cause }]),
+  );
+}
+
 /** Told what actually landed, after the transaction that wrote it commits (`U-02`). */
 export type CommittedStates = (committed: readonly StateTransition[]) => void | Promise<void>;
 
@@ -550,6 +578,32 @@ async function orderedAfterLast(
 }
 
 /**
+ * The transitions that sort before their sensor's newest stored row, for the sensors in `held`;
+ * the rest unchanged (`P-415`).
+ *
+ * A row a probe's hold kept does not take its result's state, and the history must not end on
+ * that state either: a probe whose clock runs ahead (up to the 15 minutes `P-99` accepts) stamps
+ * its result after the hold's row, and a hold that decided a row unchanged wrote no row at all.
+ * Measured history before the newest row stays; anything at or after it is left out. A kept
+ * sensor with no history yet takes none of its result's.
+ */
+export async function beforeTheNewest(
+  q: Queryable,
+  changes: readonly StateTransition[],
+  held: ReadonlySet<number>,
+): Promise<StateTransition[]> {
+  const asked = [...new Set(changes.map((change) => change.sensorId))].filter((id) => held.has(id));
+  if (asked.length === 0) return [...changes];
+  const rows = await q.query<{ sensor_id: string; time: Date }>(NEWEST_STATES, [asked]);
+  const newest = new Map(rows.map((row) => [Number(row.sensor_id), row.time.getTime()]));
+  return changes.filter((change) => {
+    if (!held.has(change.sensorId)) return true;
+    const last = newest.get(change.sensorId);
+    return last !== undefined && change.at.getTime() < last;
+  });
+}
+
+/**
  * Moves each sensor's current row forward.
  *
  * The `last_result_at` predicate is the idempotence guard: a duplicated or out-of-order result
@@ -560,10 +614,14 @@ async function orderedAfterLast(
  *
  * Returns how many rows moved. Fewer than were offered means a sensor was deleted, or a result
  * was stale; the caller counts the difference rather than assuming.
+ *
+ * `overtaken` names the writes whose rows a probe's hold has reached since they were decided
+ * (`SensorStateService.overtaken`, `P-415`): their state is left to the hold, as a pause's is.
  */
 export async function writeRuntimes(
   q: Queryable,
   writes: readonly RuntimeWrite[],
+  overtaken: ReadonlySet<number> = new Set(),
 ): Promise<number> {
   if (writes.length === 0) return 0;
   const rows = await q.query<{ object_id: string }>(
@@ -580,14 +638,21 @@ export async function writeRuntimes(
      -- readings' channel verdict -- because they are facts about the check, which did happen.
      -- Only the state, and the words that describe it, are left to the pause. That is what
      -- decide() would have produced had the pause been visible to it.
-     SET state = CASE WHEN w.held THEN r.state ELSE w.state END,
-         cause = CASE WHEN w.held THEN r.cause ELSE w.cause END,
-         message = CASE WHEN w.held THEN r.message ELSE w.message END,
+     --
+     -- **And to a probe's hold that has reached the row since the result was decided**
+     -- (P-415): a lost probe, a frozen clock, a check its probe could not start, a factory's
+     -- unreached inputs. Those live in memory, not on the row, so the caller says which writes
+     -- they overtook, from the rows it has locked.
+     SET state = CASE WHEN w.held OR w.overtaken THEN r.state ELSE w.state END,
+         cause = CASE WHEN w.held OR w.overtaken THEN r.cause ELSE w.cause END,
+         message = CASE WHEN w.held OR w.overtaken THEN r.message ELSE w.message END,
          -- Where the check failed goes with the words (P-285): a pause's words stay, and so
          -- does what they were written beside.
-         failure_phase = CASE WHEN w.held THEN r.failure_phase ELSE w.failure_phase END,
-         failure_target = CASE WHEN w.held THEN r.failure_target ELSE w.failure_target END,
-         since = CASE WHEN w.held THEN r.since ELSE w.since END,
+         failure_phase =
+           CASE WHEN w.held OR w.overtaken THEN r.failure_phase ELSE w.failure_phase END,
+         failure_target =
+           CASE WHEN w.held OR w.overtaken THEN r.failure_target ELSE w.failure_target END,
+         since = CASE WHEN w.held OR w.overtaken THEN r.since ELSE w.since END,
          consecutive_failures = w.consecutive_failures,
          last_result_at = w.at,
          -- Only ever cleared here. §2.4 clears an acknowledgement on a recovery a reading
@@ -619,9 +684,10 @@ export async function writeRuntimes(
        FROM unnest(
          $1::bigint[], $2::timestamptz[], $3::sensor_state_kind[], $4::sensor_state_cause[],
          $5::text[], $6::timestamptz[], $7::int[], $8::boolean[],
-         $9::sensor_state_kind[], $10::sensor_state_cause[], $11::text[], $12::text[]
+         $9::sensor_state_kind[], $10::sensor_state_cause[], $11::text[], $12::text[],
+         $13::boolean[]
        ) AS t(sensor_id, at, state, cause, message, since, consecutive_failures, acknowledged,
-              channel_state, channel_cause, failure_phase, failure_target)
+              channel_state, channel_cause, failure_phase, failure_target, overtaken)
      ) AS w
      WHERE r.object_id = w.sensor_id
        -- Both floors (P-97). GREATEST ignores nulls, so a sensor that has never reported and
@@ -642,6 +708,7 @@ export async function writeRuntimes(
       writes.map((write) => write.channel?.cause ?? null),
       writes.map((write) => write.failure?.phase ?? null),
       writes.map((write) => write.failure?.target ?? null),
+      writes.map((write) => overtaken.has(write.sensorId)),
     ],
   );
   return rows.length;
