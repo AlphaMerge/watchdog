@@ -724,7 +724,7 @@ function CredentialForm({
   const [pending, setPending] = useState<CredentialWrite | null>(null);
   const [failure, setFailure] = useState<ApiError | null>(null);
   const [serverProblems, setServerProblems] = useState<readonly FieldProblem[]>([]);
-  /** The confirmation was dismissed or refused, and focus is owed to the button it replaced. */
+  /** The confirmation was dismissed, or a save refused, and focus is owed to the save button. */
   const [backToSubmit, setBackToSubmit] = useState(false);
 
   // Under its set's own heading when it edits one, and under the card's when it writes a new
@@ -762,9 +762,12 @@ function CredentialForm({
     const failed = asApiError(error, fallback);
     setFailure(failed);
     setServerProblems(refusedFields(failed));
-    // A save refused after it was confirmed takes the confirmation, and the button that had focus,
-    // away: focus goes to the save button the confirmation stood in for.
-    if (pending !== null) setBackToSubmit(true);
+    // Focus goes to the save button, however the save was refused (`U-23`). Confirmed, the
+    // confirmation and the button that had focus are taken away; checked, or written straight
+    // after a check with nothing to ask, the fields and the button were disabled while it was out,
+    // and a browser drops the focus a disabled control held to the page. The refusal is said by
+    // the region above the button either way.
+    setBackToSubmit(true);
     setPending(null);
     setBusy(null);
   };

@@ -669,6 +669,68 @@ describe('the credentials tab', () => {
       });
     });
 
+    // `U-23`: the check and a write with nothing to confirm hold every field and the button while
+    // they are out, and a browser drops the focus a disabled control held to the page; nothing
+    // put it back when either was refused.
+    it.each([
+      ['the check', { preview: REFUSED }, 1],
+      ['a save with nothing to confirm', { preview: written(), write: REFUSED }, 2],
+    ] as const)(
+      'returns focus to the save button when %s is refused (U-23)',
+      async (_what, stub, sent) => {
+        const { calls, form } = await editSnmp(stub);
+        fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
+        const entry = within(form).getByLabelText('Allowed targets 2');
+        fireEvent.change(entry, { target: { value: '10.9.0.0/16' } });
+        // Enter in the box submits the form, with focus in the box.
+        entry.focus();
+        fireEvent.submit(form);
+
+        await alertSaying('needs write on that probe');
+        expect(writes(calls)).toHaveLength(sent);
+        // Waited for: the alert is in the document a moment before the effect that moves focus.
+        await waitFor(() => {
+          expect(document.activeElement).toBe(
+            within(form).getByRole('button', { name: 'Save changes' }),
+          );
+        });
+        // Still open, with what was typed.
+        expect(within(form).getByLabelText<HTMLInputElement>('Allowed targets 2').value).toBe(
+          '10.9.0.0/16',
+        );
+      },
+    );
+
+    // `U-23`: an allowed target could not be emptied by deleting its last character; the
+    // character came back under the caret. Fixed for every list of strings by `U-41`; held here
+    // on this tab.
+    it('empties an allowed target to its last character, keeps the entry, and says it cannot be saved empty (U-23)', async () => {
+      const { calls, form } = await editSnmp();
+      const box = within(form).getByLabelText<HTMLInputElement>('Allowed targets 1');
+      expect(box.value).toBe('10.0.0.0/24');
+      fireEvent.change(box, { target: { value: '1' } });
+      fireEvent.change(box, { target: { value: '' } });
+      expect(box.value).toBe('');
+      expect(within(form).getByLabelText<HTMLInputElement>('Allowed targets 1')).toBe(box);
+      expect(within(form).getByRole('button', { name: 'Remove Allowed targets 1' })).toBeDefined();
+      // `minLength: 1`: an empty target cannot be saved, and the form says so at the entry.
+      expect(within(form).getByText('1 field needs attention')).toBeDefined();
+      expect(within(form).getByRole('button', { name: 'Save changes' })).toHaveProperty(
+        'disabled',
+        true,
+      );
+      fireEvent.blur(box);
+      expect(box.getAttribute('aria-invalid')).toBe('true');
+      expect(document.getElementById(`${box.id}-problem`)?.textContent).toMatch(
+        /cannot be empty: type a value, or remove the entry/u,
+      );
+      // Typed again, it is a target again.
+      fireEvent.change(box, { target: { value: '10.1.0.0/24' } });
+      expect(box.value).toBe('10.1.0.0/24');
+      expect(within(form).queryByText('1 field needs attention')).toBeNull();
+      expect(writes(calls)).toEqual([]);
+    });
+
     it('returns focus to the control that opened a form when the form is cancelled', async () => {
       const { form } = await editSnmp();
       fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }));

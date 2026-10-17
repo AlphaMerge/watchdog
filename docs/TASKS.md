@@ -27528,6 +27528,28 @@ because each is a decision rather than a defect:
       move focus. **Done when** the tab is walked through in a browser with a keyboard and a
       screen reader, light and dark, and both edges are fixed with tests.
 
+      **The two edges, 2026-10-17. Left unticked: the walk-through in a browser, with a keyboard
+      and a screen reader, light and dark, is still owed** — this session runs no browser. Web
+      only.
+      - **Emptying an allowed target** already worked: `U-41` made a cleared entry of any list of
+        strings hold `''` (`SchemaForm`'s `set`), which is where the character came back, rather
+        than `removeAt`. Nothing changed; now held on this tab by a test.
+      - **A refused preview now moves focus to the save button**, and so does a save refused
+        straight after a check with nothing to confirm, as a confirmed save refused already did
+        (`U-21`'s rule, and `ParamsForm`'s). Both hold every field and the button `disabled`
+        while out, and a browser drops the focus a disabled control held to the page; nothing put
+        it back. `refused` now owes focus to the button whichever request was refused; the
+        region above it says the refusal, as before.
+      - **Tests** (`credentials-panel.test.tsx`, 51): with focus in a new target's box and the
+        form submitted (Enter), the check refused and, separately, the write after a check with
+        nothing to ask refused: the alert says it, one and two requests were sent, focus is on
+        *Save changes*, and what was typed stays. An allowed target typed down to its last
+        character and then deleted: the box is empty and the same node, the entry and its Remove
+        stay, *1 field needs attention* and Save disabled, and on leaving it the problem
+        paragraph says it cannot be empty and the box is `aria-invalid`; typed again, it is a
+        target. **Mutations** (restored byte for byte), each failing: focus owed only after a
+        confirmation 2; `U-41`'s cleared entry undone 1.
+
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
       sensor the reader can see — exactly a probe getting its first sensor — sends no frame, so
