@@ -11137,7 +11137,7 @@ because each is a decision rather than a defect:
         words or passing none; 082's comment unchanged. `probe-episode-scenario.test.ts`: every starved ping held with `startup` on its
           row and its Unknown transition, and let go with its own result's place.
 
-- [ ] **P-408 — a check process ready as its start-up bound fires is settled at its timeout** ·
+- [x] **P-408 — a check process ready as its start-up bound fires is settled at its timeout** ·
       XS · P-260 · Found 2026-10-17 in `P-285`'s review. If the start-up timer
       (`process-runner.ts`, `giveUp`) runs after the child has written its ready line but before
       the parent has read it, it aborts `deadline` and `onStdout` then ignores the ready line.
@@ -11147,6 +11147,30 @@ because each is a decision rather than a defect:
       `startup` and `notStarted`. The window is one event-loop turn at the 30 s start-up bound.
       **Done when** a check process whose start-up bound fired is settled as not started
       whatever it answers, with a test that holds the ready line back across the bound.
+
+      **P-408 outcome. A check process given up at its start-up bound never started, whatever it
+      answers.**
+      - `#run` settles a run whose start-up bound fired as `startup` before it reads the answer,
+        where it did so only when nothing readable came back. An `aborted` answer was counted in
+        `timedOut` and read "Stopped at its timeout"; an `ok` one was a reading from a check the
+        runner had given up before it saw it begin. Now each is counted in `startupFailed` and
+        `failed` and in nothing else, the run times included, with the given-up message it had.
+      - **Decided: whatever it answers, `ok` and a malformed line included**, as the done-when
+        says. Reading the ready line replaces the bound, so the bound fires only while the runner
+        has not seen the check begin, and the stop it sends goes out in that turn: a reading
+        after it is from a check the runner has said it gave up. The run's outcome is no longer
+        checked, since a bound that fired is what ended the run.
+      - **Tests.** `process-runner.test.ts`: two check processes held at their load by
+        `support/gated-registry.ts` until the test says go, after which the test holds its own
+        event loop past a 10 s bound from a `setImmediate`. Each ready line is written, and each
+        check begun under the child's `SIGTERM` handler, before the bound fires, and read after
+        it. One answers its stop `aborted`, one `ok`; both are `startup`, `notStarted`, failed in
+        `startup`, with no channels. The test fails rather than passes if a child began loading
+        too near the bound, a check did not begin while the loop was held, or a child did not
+        answer. 50/50 in the file.
+      - **Mutant 1/1**: the runner as it was settles the `aborted` answer as `aborted`. The
+        fixture's first draft let its child's event loop empty, so the child exited unheard and
+        the old runner passed too; the `answered` mark is what now fails it.
 
 - [x] **P-409 — a not-started release keeps the cache that says the probe is unreachable** · XS
       · P-265 · Found 2026-10-17 in `P-407`'s review. `NotStarted.release` lets a sensor go

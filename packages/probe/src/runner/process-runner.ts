@@ -67,9 +67,9 @@ export interface ProcessRunnerStats {
   crashed: number;
   /**
    * Checks that never ran because their process did not get as far as running them (`P-260`):
-   * it was still loading the probe's sensor types at the start-up bound and was ended, the load
-   * failed, or the process exited or was killed before it said it was ready. Counted in `failed`
-   * as well, and in neither `timedOut` nor `crashed`.
+   * it was still loading the probe's sensor types at the start-up bound and was ended (whatever it
+   * answered after, `P-408`), the load failed, or the process exited or was killed before it said
+   * it was ready. Counted in `failed` as well, and in neither `timedOut` nor `crashed`.
    */
   startupFailed: number;
   /**
@@ -468,6 +468,27 @@ export class ProcessRunner {
 
     // Abandoned by `stop` while it ran, and answered there.
     if (job.settled) return;
+    // **Given up at the start-up bound, whatever it answers** (`P-408`). Reading the ready line
+    // replaces the bound, so the bound fires only before the line is read, but it can fire after
+    // the line was written. The child that wrote it then hears the `SIGTERM` with its handler
+    // installed and answers `aborted`, or even `ok`, and the line, read a moment later, is
+    // ignored. Taken as it came, that answer was a check stopped at its timeout. The runner had
+    // given the check up before it saw it begin, so it is a check that never started: neither a
+    // timeout nor a crash nor a reading, and its message says whose time it was.
+    if (gaveUpAfterMs !== undefined) {
+      this.#startupFailed += 1;
+      this.#failed += 1;
+      this.#emit(job, waitMs, 'startup', {
+        outcome: 'error',
+        durationMs: run.durationMs,
+        message:
+          `the probe took ${String(Math.round(gaveUpAfterMs))} ms to start the check and gave ` +
+          `up: its process had not loaded the probe's sensor types within the ` +
+          `${String(this.#startupTimeoutMs)} ms it is allowed, so the check never ran` +
+          tail(run.stderr),
+      });
+      return;
+    }
     // **A claim, read as one** (`P-277`). The check process runs as `processUid`, and so does the
     // script it runs, which may `ptrace` it or take its stdout with `pidfd_getfd` and write any
     // line there. What such a line can reach is this sensor's own result, which its script decides
@@ -548,22 +569,6 @@ export class ProcessRunner {
     // Nothing parseable came back. Which of the three reasons decides the phase, and they are not
     // interchangeable: a crash is a fault of the check, a timeout is ours, and a spawn failure
     // means the probe is misinstalled and no amount of retrying will help.
-    if (run.outcome === 'timeout' && gaveUpAfterMs !== undefined) {
-      // Ended while it was still loading: the check never ran, so it neither timed out nor
-      // crashed, and its message says whose time it was.
-      this.#startupFailed += 1;
-      this.#failed += 1;
-      this.#emit(job, waitMs, 'startup', {
-        outcome: 'error',
-        durationMs: run.durationMs,
-        message:
-          `the probe took ${String(Math.round(gaveUpAfterMs))} ms to start the check and gave ` +
-          `up: its process had not loaded the probe's sensor types within the ` +
-          `${String(this.#startupTimeoutMs)} ms it is allowed, so the check never ran` +
-          tail(run.stderr),
-      });
-      return;
-    }
     record(this.#runs, run.durationMs);
     if (run.outcome === 'timeout') {
       this.#timedOut += 1;

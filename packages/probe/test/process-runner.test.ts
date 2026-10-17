@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -40,6 +40,8 @@ const silent = pino({ level: 'silent' });
 const FIXTURES = join(import.meta.dirname, 'support', 'check-fixtures.js');
 /** The same checks, behind an import that is slow, hangs or fails as `childEnv` says (`P-260`). */
 const STALLED = join(import.meta.dirname, 'support', 'stalled-registry.js');
+/** A registry whose load waits for the test's word, to hold a ready line across the bound (`P-408`). */
+const GATED = join(import.meta.dirname, 'support', 'gated-registry.js');
 /** The probe's own registry, as a probe loads it: the real `exe.script`, not a fixture (`P-262`). */
 const CATALOGUE = join(import.meta.dirname, '..', 'src', 'runner', 'catalogue-registry.js');
 
@@ -82,6 +84,22 @@ function runnerOf(
 
 function until(predicate: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
   return pollWithin(timeoutMs, what, predicate, 10);
+}
+
+/**
+ * Holds this thread, and with it the event loop, until `untilMs` has passed and `met` answers
+ * true, or until `capMs`; says whether both came (`P-408`). Nothing sent to this process is read
+ * meanwhile. Held from a `setImmediate`, the loop's next turn runs the timers that fell due before
+ * it reads anything.
+ */
+function holdLoop(untilMs: number, met: () => boolean, capMs: number): boolean {
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const now = performance.now();
+    if (now >= untilMs && met()) return true;
+    if (now >= capMs) return false;
+    Atomics.wait(pause, 0, 0, 5);
+  }
 }
 
 const request = (sensorId: number, sensorType: string, extra: Record<string, unknown> = {}) => ({
@@ -371,6 +389,80 @@ describe('process runner', () => {
         );
       } finally {
         await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('settles a check whose ready line came as the bound fired as never started, whatever it answers (P-408)', async () => {
+      // **A ready line written before the bound and read after it.** Each child loads the gated
+      // registry, which waits at its load for the test's word. The test gives it and at once
+      // holds its own event loop past the bound, in a `setImmediate`, so that the loop's next
+      // turn runs its due timers, the bound among them, before it reads a pipe. Meanwhile each
+      // child writes its ready line, installs its `SIGTERM` handler and begins its check. Then
+      // the bound fires, the runner stops the child, the line is read and ignored, and the child
+      // answers its stop: `aborted`, which was settled as a check stopped at its timeout, or `ok`,
+      // which was settled as a reading.
+      //
+      // Ten seconds, as above, so that a loaded machine has the children loading inside it.
+      const boundMs = 10_000;
+      const answers = ['aborted', 'ok'] as const;
+      const dirs = await Promise.all(answers.map(() => mkdtemp(join(tmpdir(), 'ms-p408-'))));
+      try {
+        const runs = answers.map((answer, at) => {
+          const run = runnerOf({
+            registryModule: GATED,
+            startupTimeoutMs: boundMs,
+            childEnv: { MS_TEST_GATE_DIR: dirs[at] ?? '' },
+          });
+          run.runner.submit(request(117 + at, 'test.gated', { answer, timeoutMs: 60_000 }));
+          return run;
+        });
+        // After the spawns, so each bound has run at least as long as this says.
+        const submittedAt = performance.now();
+        await until(
+          () => dirs.every((dir) => existsSync(join(dir, 'loading'))),
+          'both children to begin loading',
+          boundMs,
+        );
+        const loadingAfterMs = performance.now() - submittedAt;
+        assert.ok(
+          loadingAfterMs < boundMs - 1_000,
+          `the children began loading after ${String(Math.round(loadingAfterMs))} ms, too near ` +
+            `the ${String(boundMs)} ms bound to hold their ready lines across it`,
+        );
+        const started = (): boolean => dirs.every((dir) => existsSync(join(dir, 'started')));
+        const held = await new Promise<boolean>((resolve) => {
+          setImmediate(() => {
+            for (const dir of dirs) writeFileSync(join(dir, 'go'), '');
+            resolve(holdLoop(submittedAt + boundMs + 250, started, submittedAt + boundMs + 30_000));
+          });
+        });
+        // A failure, not a pass, if not: a check that never began wrote no ready line to hold.
+        assert.ok(held, 'both checks began while the loop was held, so both lines were written');
+
+        await until(() => runs.every(({ seen }) => seen.length === 1), 'both answers', 30_000);
+        runs.forEach(({ runner, seen }, at) => {
+          const { result, meta } = seen[0] ?? {};
+          const said = `answering ${String(answers[at])}: ${result?.message ?? ''}`;
+          // And a failure, not a pass, if it did not answer: the bound settled a silent process
+          // as never started before this change too.
+          assert.ok(existsSync(join(dirs[at] ?? '', 'answered')), `${said}: the child answered`);
+          assert.equal(meta?.phase, 'startup', said);
+          assert.equal(result?.outcome, 'error', said);
+          assert.equal(result.notStarted, true, said);
+          assert.deepEqual(result.failure, { phase: 'startup' }, said);
+          assert.deepEqual(result.channels, [], said);
+          assert.match(result.message, /^the probe took \d+ ms to start the check and gave up/);
+          const stats = runner.stats();
+          assert.equal(stats.startupFailed, 1, said);
+          assert.equal(stats.failed, 1, said);
+          assert.equal(stats.timedOut, 0, `${said}: no check ran on the runner’s clock`);
+          assert.equal(stats.completed, 0, said);
+          assert.equal(stats.crashed, 0, said);
+          assert.ok((stats.startupMs?.max ?? 0) >= boundMs, said);
+          assert.equal(stats.runMs.max, 0, `${said}: a start given up is not a run`);
+        });
+      } finally {
+        await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
       }
     });
 
