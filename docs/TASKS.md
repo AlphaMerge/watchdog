@@ -37230,12 +37230,52 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         note from `ms`'s `%postun`, and *rpm -e ms-probe: ms-probe inactive, and no enable link
         left*; each box's earlier assertions as before.
 
-- [ ] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
+- [x] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
       · Found 2026-10-07 in `P-276`. Since `P-276` a root probe with scripts and no
       `processUid`/`processGid` refuses to start, but the installer's `config check` runs as root
       for a unit that normally runs as `ms-probe`, so it cannot tell. A host with a `User=root`
       drop-in finds out when the upgraded probe exits 78. **Done when** `setup.sh` reads the unit's
       user (`systemctl show -p User ms-probe`) and says so before restarting, with a smoke step.
+
+      **H-41 outcome. `ms-setup` reads the unit's account and, where it is root, says the probe will
+      refuse before it restarts it.**
+      - **What it reads.** After the reload that applied every drop-in, and only for a
+        `probe.json` the check passed with its `P-276` note (*started as root, this probe would
+        refuse to start: …*), `systemctl show ms-probe.service -p User --value`: `root`, `0` or
+        nothing at all is root. A unit systemd has not loaded (`LoadState` not `loaded`) is not
+        a finding. Then, on stderr and before *==> starting ms-probe*: *==> ms-probe.service runs
+        the probe as root (User=root), so it will refuse /etc/ms/probe.json when it is started
+        below, and exit 78 — unless the unit's own environment sets probe.processUid and
+        probe.processGid, which this check cannot see. The probe says:* and the probe's reason,
+        with the note's framing cut off.
+      - **Said, not refused.** The restart goes ahead and fails as it did before, and this run
+        exits 1 on it; the difference is that the reason comes first rather than only in the
+        journal. The probe is the one that knows — a drop-in can also set
+        `MS_PROBE__PROCESS_UID`, which the check run here never sees — and refusing here would
+        hold the core back as well, for a probe that is stopped either way.
+      - **Docs.** `installation.md` (*From a release before `P-276`*) and `administration.md`
+        (Script sensors) say the installer now says so before the restart.
+      - **Tests.** `deploy-scripts.test.ts`, two, against the stub launcher, which now gives the
+        note for a file that says `scripts-as-root`: `User=root`, `User=0` and no `User=` each
+        get the heading, three lines under it ending in the reason, once, no `note:` and no
+        framing, with `show -p User` asked after the reload and before the restart and the run
+        exiting 0 (the stub's restart succeeds); the packaged account, a file with nothing to
+        refuse, a unit systemd has not loaded, a core-only host and `--no-start` say nothing.
+        `root-scripts.test.ts`, one: `setup.sh`'s own two `sed` expressions, run as it runs them
+        on both notes the probe gives, return exactly the probe's reason — so a reworded note
+        fails there rather than in the field. The files are 102 of 102 and 28 of 28.
+        **Mutations 8/8**: nothing said; `User=0` or no `User=` not taken for root; a unit not
+        loaded taken for root; the note's ending kept; refused rather than said; said for the
+        packaged account; the probe's note reworded.
+      - **Smoke.** `smoke-packages.sh`, on each box after the `H-40` swap, with `ms-probe`
+        installed and running: a `User=root` drop-in, `probe.scriptDir` set, and
+        `/opt/ms/libexec/ms-setup --components probe` run as an operator would. *package smoke
+        test passed* (Debian 12 and Rocky 9, arm64): on both, *ms-setup: exit 1, the probe exited
+        78, and before the restart it said:* the heading above, line for line before *==>
+        starting ms-probe*, ending in *probe.processUid: is not set, and this probe runs as root
+        with a script directory (probe.scriptDir: /var/lib/ms-probe/h41-scripts) …*; then the
+        drop-in and file put back and the probe started again. This run also passed every
+        `H-28` and `H-40` assertion again.
 
 - [x] **H-42 — the release notes must say what migration 073 does and does not repair** · XS ·
       P-302 · Found 2026-10-08 in `P-302`. Clones made before `P-302` stored counters as totals

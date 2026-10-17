@@ -397,9 +397,12 @@ Migrations run on startup and are reversible. A build started against a database
 `probe.processUid` no longer starts: every script it ran was running as root. The packaged
 `ms-probe.service` runs the probe as `ms-probe`, so a package or tarball installation is not
 affected; a probe under a drop-in that sets `User=root`, or started by hand as root, is. The
-installer's configuration check passes it, because the check cannot see which account the unit
-runs as, and the restart then fails with *probe.processUid: is not set, and this probe runs as
-root …*. The same goes for a root probe that sets `probe.processUid` and leaves
+installer's configuration check passes it — the check runs as root for a unit that normally runs
+as `ms-probe`, so it cannot tell — but `ms-setup` then asks systemd which account
+`ms-probe.service` runs as, and where that is root (`User=root`, or no `User=` at all) it says
+before the restart, under *==> ms-probe.service runs the probe as root …*, that the probe will
+refuse `probe.json`, and why (`H-41`). The restart still happens, and fails with
+*probe.processUid: is not set, and this probe runs as root …*. The same goes for a root probe that sets `probe.processUid` and leaves
 `probe.processGid` at 0, which ran its scripts in root's group. Before upgrading, run it as an
 unprivileged account, or set both `probe.processUid` and `probe.processGid`, or — if root is
 what you mean — `"allowScriptsAsRoot": true` under `probe` (`administration.md` → Script

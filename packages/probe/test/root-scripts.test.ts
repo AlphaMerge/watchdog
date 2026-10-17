@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +29,8 @@ import { pollWithin, within } from './support/within.js';
 
 /** At runtime this file is `dist/test/root-scripts.test.js`. */
 const MAIN = join(import.meta.dirname, '..', 'src', 'main.js');
+/** The repository, from `packages/probe/dist/test`. */
+const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 
 type Settings = Pick<
   ProbeConfig['probe'],
@@ -217,6 +219,33 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
         notes[0] ?? '',
         /^started as root, this probe would refuse to start: probe\.processGid: is not set/,
       );
+    });
+
+    it('is what ms-setup cuts the reason out of, for a unit that runs the probe as root (`H-41`)', () => {
+      // `deploy/setup.sh` shows the reason, without the note's framing, before it restarts a
+      // probe whose unit runs as root. Its two sed expressions, run as it runs them, on each note.
+      const setup = readFileSync(join(REPO_ROOT, 'deploy', 'setup.sh'), 'utf8');
+      const framing = /sed -n '(s\/\^note: [^']*)'/u.exec(setup)?.[1] ?? '';
+      const after = /sed '(s\/\\\. The packaged [^']*)'/u.exec(setup)?.[1] ?? '';
+      assert.notEqual(framing, '', 'setup.sh does not take the note’s opening off');
+      assert.notEqual(after, '', 'setup.sh does not take the note’s ending off');
+      for (const probe of [settings(), settings({ processUid: 998 })]) {
+        const note = rootScriptsNote(probe, 'linux') ?? '';
+        assert.notEqual(note, '');
+        const cut: SpawnSyncReturns<string> = spawnSync(
+          'sh',
+          ['-c', 'sed -n "$1" | sed "$2"', 'sh', framing, after],
+          {
+            input: `configuration is valid for ms-probe\nnote: ${note}\n  file /etc/ms/probe.json\n`,
+            encoding: 'utf8',
+            timeout: 10_000,
+          },
+        );
+        assert.equal(cut.status, 0, cut.stderr);
+        const verdict = rootScripts(probe, 0);
+        assert.ok(verdict.kind === 'refused', verdict.kind);
+        assert.equal(cut.stdout, `${verdict.message}\n`);
+      }
     });
 
     describe('through the verb', () => {

@@ -689,7 +689,9 @@ arguments and the variables — so treat both as untrusted input in every script
   starts it with a warning. A root probe with no script directory starts, and logs a warning that
   it runs as root. `ms-probe config check` cannot know which account the service will run as — the
   installer runs it as root, for a unit that runs as `ms-probe` — so it passes such a file and
-  prints a `note:` line saying a root start would refuse it; the installer does not show notes.
+  prints a `note:` line saying a root start would refuse it. The installer shows no notes but
+  this one, and only where it applies: when systemd says `ms-probe.service` runs as root,
+  `ms-setup` says before it restarts the probe that the probe will refuse, and why (`H-41`).
   On Windows (release 1.1) none of this applies: `processUid` is ignored there.
 - **A check's timeout is the check's own** (`P-260`). Each check runs in a process of its own,
   which first loads the probe's sensor types: about 21 ms on a quiet machine, and measured at up

@@ -524,6 +524,38 @@ fi
 #
 # `--no-start` skips it: that mode exists for a machine that is being staged, and the
 # configuration it will run with is not necessarily the one on disk yet.
+#
+# **And a probe the unit runs as root is said to refuse before it is restarted** (`H-41`). Since
+# `P-276` a probe that starts as root with a script directory and no `processUid` refuses to (exit
+# 78). The check cannot tell — it runs here as root, for a unit that normally runs the probe as
+# `ms-probe` — so it passes such a file with a `note: ` saying what would happen as root, and on a
+# host whose drop-in sets `User=root` the restart below was the first anybody heard of it. The
+# account is the unit's, read from systemd after the reload above has applied every drop-in; an
+# empty `User=` is root as well, and a unit systemd has not loaded is not a finding. **Said, not
+# refused**: the restart still goes ahead, the probe refuses, and this run fails on it as it did
+# before, with the reason above it rather than only in the journal. The probe is the one that
+# knows — a drop-in can also set `MS_PROBE__PROCESS_UID`, which this check never sees — and
+# refusing here would hold the core back as well, for a probe that is stopped either way.
+said_as_root() {
+  local user as reason
+  [ "$(systemctl show ms-probe.service -p LoadState --value 2>/dev/null || true)" = loaded ] || return 0
+  user="$(systemctl show ms-probe.service -p User --value 2>/dev/null || true)"
+  case "${user}" in
+    root | 0) as="User=${user}" ;;
+    '') as='no User=, which is root' ;;
+    *) return 0 ;;
+  esac
+  reason="$(printf '%s\n' "$1" \
+    | sed -n 's/^note: started as root, this probe would refuse to start: //p' \
+    | sed 's/\. The packaged ms-probe\.service runs it as ms-probe, which this does not apply to$//')"
+  [ -n "${reason}" ] || return 0
+  cat >&2 <<ROOT
+==> ms-probe.service runs the probe as root (${as}), so it will refuse ${CONFDIR}/probe.json
+    when it is started below, and exit 78 — unless the unit's own environment sets
+    probe.processUid and probe.processGid, which this check cannot see. The probe says:
+    ${reason}
+ROOT
+}
 if [ "${start_services}" -eq 1 ]; then
   config_bad=0
   for svc in "${components[@]}"; do
@@ -534,6 +566,7 @@ if [ "${start_services}" -eq 1 ]; then
         echo "==> ${CONFDIR}/${svc}.json is valid for ${version}. The check says:" >&2
         printf '%s\n' "${warnings}" | sed 's/^/    /' >&2
       fi
+      [ "${svc}" != probe ] || said_as_root "${out}"
     else
       echo "==> ${CONFDIR}/${svc}.json is not valid for ${version}:" >&2
       echo "${out}" | sed 's/^/    /' >&2

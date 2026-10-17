@@ -543,7 +543,9 @@ describe('ms-enrol', { skip: linux ? false : 'Linux only' }, () => {
  * A file that says `no-effect-setting` is warned about the way `runConfigCheck` warns (`B-08`):
  * two lines marked `warning: ` on stderr, before anything else and whether or not the check then
  * passes. A pass says what a real one says, on stdout, and one of its lines has the marker in
- * the middle of it — which is not a warning. Every call is written to `STUB_LOG`.
+ * the middle of it — which is not a warning. One that says `scripts-as-root` passes with the note
+ * a probe's check gives a file root would refuse (`P-276`), on stdout. Every call is written to
+ * `STUB_LOG`.
  */
 function launcher(svc: string, version: string): string {
   return (
@@ -553,6 +555,9 @@ function launcher(svc: string, version: string): string {
     `  echo "warning: a second thing ms-${svc} starts with" >&2\nfi\n` +
     `grep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\n` +
     `echo "configuration is valid for ms-${svc} ${version}"\n` +
+    `grep -q scripts-as-root "$4" && echo "note: started as root, this probe would refuse to ` +
+    `start: ${AS_ROOT_REASON}. The packaged ms-probe.service runs it as ms-probe, which this ` +
+    `does not apply to"\n` +
     `echo "  file            $4"\n` +
     `echo "  ignored MS_*    MS_NOT_A_warning: line"\nexit 0\n`
   );
@@ -561,6 +566,17 @@ function launcher(svc: string, version: string): string {
 /** What the stub launcher warns of first, as the check writes it. */
 const FIRST_WARNING =
   'warning: flowListener.enabled: is true, and this build carries no flow sensor type';
+
+/**
+ * What the stub launcher's check notes, on stdout with its pass, for a file that says
+ * `scripts-as-root` (`P-276`): the probe's own reason, inside the note's framing.
+ */
+const AS_ROOT_REASON =
+  'probe.processUid: is not set, and this probe runs as root with a script directory ' +
+  '(probe.scriptDir: /srv/scripts), so every script in it would run as root. Either set ' +
+  'probe.processUid and probe.processGid to an unprivileged account, or run the probe as one, ' +
+  'as the packaged ms-probe.service does; or set probe.allowScriptsAsRoot: true to run them as ' +
+  'root anyway';
 
 /** How many times `needle` is in `text`. */
 const count = (text: string, needle: string): number => text.split(needle).length - 1;
@@ -1500,6 +1516,112 @@ describe(
         assert.ok(!box.logged().includes('config check'), box.logged());
         assert.doesNotMatch(result.stdout + result.stderr, /warning: |is valid for/);
         assert.ok(!box.logged().includes('restart'), box.logged());
+      }
+    });
+
+    /** The lines under the first line `heading` matches, up to the next that is not indented. */
+    function linesUnder(stderr: string, heading: RegExp): string[] {
+      const said = stderr.split('\n');
+      const at = said.findIndex((line) => heading.test(line));
+      assert.ok(at >= 0, `nothing matches ${String(heading)}:\n${stderr}`);
+      const under: string[] = [];
+      for (const line of said.slice(at + 1)) {
+        if (!line.startsWith('    ')) break;
+        under.push(line);
+      }
+      return under;
+    }
+
+    it('says before the restart that a probe the unit runs as root will refuse (`H-41`)', () => {
+      for (const [user, as] of [
+        ['root', 'User=root'],
+        ['0', 'User=0'],
+        ['', 'no User=, which is root'],
+      ] as const) {
+        const box = sandbox();
+        const { prefix, conf } = installation(box, CONFIGURED);
+        writeFileSync(join(conf, 'probe.json'), '{"probe":{"scriptDir":"scripts-as-root"}}');
+        const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
+          STATE_ms_core: 'active',
+          STATE_ms_probe: 'active',
+          SHOW_ms_probe_LoadState: 'loaded',
+          SHOW_ms_probe_User: user,
+        });
+        // Said, not refused: the restart goes ahead, and the stub's succeeds.
+        assert.equal(result.status, 0, `${user}: ${result.stdout}${result.stderr}`);
+        // `as` has nothing a regular expression would read as syntax.
+        const heading = new RegExp(
+          `^==> ms-probe\\.service runs the probe as root \\(${as}\\), ` +
+            'so it will refuse .*/etc-ms/probe\\.json$',
+          'u',
+        );
+        const said = linesUnder(result.stderr, heading);
+        assert.equal(said.length, 3, said.join('\n'));
+        assert.match(said[0] ?? '', /when it is started below, and exit 78/);
+        assert.equal(said[2], `    ${AS_ROOT_REASON}`, `${user}: ${result.stderr}`);
+        assert.equal(count(result.stderr, 'runs the probe as root'), 1);
+        // The reason only: the note's own framing is for a person running the check by hand.
+        assert.doesNotMatch(result.stderr + result.stdout, /The packaged ms-probe\.service runs/);
+        assert.doesNotMatch(result.stderr + result.stdout, /^note: /mu);
+        // Asked of systemd after the reload that applied the drop-ins, and said before the restart.
+        const log = box.logged();
+        const at = (line: string): number => {
+          const index = log.indexOf(line);
+          assert.ok(index >= 0, `${line} was never run:\n${log}`);
+          return index;
+        };
+        assert.ok(at('systemctl daemon-reload') < at('systemctl show ms-probe.service -p User'));
+        assert.ok(
+          at('systemctl show ms-probe.service -p User') < at('systemctl restart ms-probe.service'),
+        );
+      }
+    });
+
+    it('says nothing of root for the packaged account, no scripts, no unit, no probe, no start', () => {
+      const asRoot = '{"probe":{"scriptDir":"scripts-as-root"}}';
+      const loaded = { SHOW_ms_probe_LoadState: 'loaded' };
+      for (const [why, args, file, show] of [
+        [
+          'the packaged unit',
+          ['--components', 'core,probe'],
+          asRoot,
+          { ...loaded, SHOW_ms_probe_User: 'ms-probe' },
+        ],
+        [
+          'root, and nothing to refuse',
+          ['--components', 'core,probe'],
+          '{}',
+          { ...loaded, SHOW_ms_probe_User: 'root' },
+        ],
+        [
+          'a unit systemd has not loaded',
+          ['--components', 'core,probe'],
+          asRoot,
+          { SHOW_ms_probe_LoadState: 'not-found' },
+        ],
+        [
+          'a core-only host',
+          ['--components', 'core'],
+          asRoot,
+          { ...loaded, SHOW_ms_probe_User: 'root' },
+        ],
+        [
+          '--no-start',
+          ['--components', 'core,probe', '--no-start'],
+          asRoot,
+          { ...loaded, SHOW_ms_probe_User: 'root' },
+        ],
+      ] as const) {
+        const box = sandbox();
+        const { prefix, conf } = installation(box, CONFIGURED);
+        writeFileSync(join(conf, 'probe.json'), file);
+        const result = setup(box, prefix, conf, args, {
+          STATE_ms_core: 'active',
+          STATE_ms_probe: 'active',
+          ...show,
+        });
+        assert.equal(result.status, 0, `${why}: ${result.stdout}${result.stderr}`);
+        assert.doesNotMatch(result.stderr, /runs the probe as root/, why);
       }
     });
 

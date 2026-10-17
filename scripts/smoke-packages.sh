@@ -622,6 +622,46 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   echo "    ${probe_swap_cmd/PKG/${probe_name}}: ms gone, ms-probe active and enabled"
   grep -F 'ms-probe.service was left as it is' "${probe_log}" | sed 's/^/      /' || true
 
+  # --- a probe the unit runs as root, said before the restart (H-41) ---------------------------
+  #
+  # **The host that finds out from exit 78**: a `User=root` drop-in, and a `probe.scriptDir`, which
+  # since `P-276` a root probe with no `processUid` refuses. The check passes the file — it runs as
+  # root for a unit that runs as ms-probe, and only notes it — so `ms-setup` asks systemd which
+  # account the unit runs as and says so before it restarts the probe. The restart goes ahead and
+  # fails, as it did before; what is asserted is that the reason came first.
+  echo "==> asserting ms-setup says a root probe will refuse before it restarts it (H-41)"
+  local root_dropin=/etc/systemd/system/ms-probe.service.d/h41-root.conf root_scripts=/var/lib/ms-probe/h41-scripts
+  local root_status=0 said_at starting_at main_status
+  ${in} mkdir -p "$(dirname "${root_dropin}")" "${root_scripts}"
+  ${in} bash -c "printf '[Service]\nUser=root\nGroup=root\n' > ${root_dropin}"
+  ${in} cp -p /etc/ms/probe.json /root/probe.json.h41
+  ${in} node -e '
+    const fs = require("node:fs");
+    const file = "/etc/ms/probe.json";
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    config.probe = { ...(config.probe ?? {}), scriptDir: process.argv[1] };
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+  ' "${root_scripts}"
+  ${fresh} /opt/ms/libexec/ms-setup --components probe >"${probe_log}" 2>&1 || root_status=$?
+  said_at="$(grep -n -F -x '==> ms-probe.service runs the probe as root (User=root), so it will refuse /etc/ms/probe.json' \
+    "${probe_log}" | head -1 | cut -d: -f1)"
+  starting_at="$(grep -n -F -x '==> starting ms-probe' "${probe_log}" | head -1 | cut -d: -f1)"
+  main_status="$(${in} systemctl show ms-probe.service -p ExecMainStatus --value 2>/dev/null || true)"
+  if [ "${root_status}" -ne 1 ] || [ -z "${said_at}" ] || [ -z "${starting_at}" ] \
+    || [ "${said_at}" -ge "${starting_at}" ] || [ "${main_status}" != 78 ] \
+    || ! grep -qF -- "    probe.processUid: is not set, and this probe runs as root with a script directory (probe.scriptDir: ${root_scripts})" \
+      "${probe_log}"; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "ms-setup under User=root: exit ${root_status}, said at line ${said_at:-none}, started at line ${starting_at:-none}, the probe exited ${main_status:-unknown}"
+  fi
+  echo "    ms-setup: exit 1, the probe exited 78, and before the restart it said:"
+  sed -n "${said_at},$((said_at + 3))p" "${probe_log}" | cut -c1-110 | sed 's/^/      /'
+  ${in} rm -f "${root_dropin}"
+  ${in} mv /root/probe.json.h41 /etc/ms/probe.json
+  ${in} systemctl daemon-reload
+  ${in} systemctl reset-failed ms-probe.service >/dev/null 2>&1 || true
+  ${in} systemctl restart ms-probe.service || fail "ms-probe did not start again once the drop-in was gone"
+
   echo "==> erasing ms-probe with its probe running (H-40)"
   ${in} bash -c "${probe_remove_cmd}" >"${probe_log}" 2>&1 \
     || { cat "${probe_log}" >&2; fail "could not remove ms-probe after the swap"; }
