@@ -1,11 +1,12 @@
 import { useCallback, useMemo, useState } from 'react';
 import { ApiError, problemPath, send } from '../../api/client';
-import type { ObjectDetail, SensorTypeSummary } from '../../api/types';
+import type { ChannelRecord, ObjectDetail, SensorTypeSummary } from '../../api/types';
 import { CorrelationId } from '../../components/Panels';
 import { MappingPreview } from '../../forms/MappingPreview';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt, type JsonSchema } from '../../forms/schema';
 import { allProblems, type FieldProblem } from '../../forms/validate';
+import { useKeptChannels } from './kept-channels';
 import { modeChangesOf, type ModeChange } from './model';
 
 /**
@@ -23,11 +24,18 @@ import { modeChangesOf, type ModeChange } from './model';
 export function ParamsForm({
   detail,
   type,
+  channels,
   onSaved,
 }: {
   detail: ObjectDetail;
   /** Absent when the catalogue does not know this sensor's type. */
   type: SensorTypeSummary | undefined;
+  /**
+   * The sensor's channel rows, where the page has them (`U-40`): what holds a column put back
+   * after an earlier edit took it out to what its kept channel stores. Without them nothing is
+   * asked, and such a column is the core's 409 to refuse.
+   */
+  channels?: readonly ChannelRecord[] | null;
   onSaved: () => void;
 }): React.JSX.Element {
   const stored = useMemo(() => detail.params ?? {}, [detail.params]);
@@ -73,6 +81,7 @@ export function ParamsForm({
   const schema = useMemo(() => (type?.paramsSchema ?? {}) as JsonSchema, [type]);
   const fields = useMemo(() => fieldsOf(schema), [schema]);
   const problems = useMemo(() => allProblems(fields, values, readAt, fieldsOf), [fields, values]);
+  const keptFor = useKeptChannels(type?.id, schema, stored, values, channels);
   const dirty = JSON.stringify(values) !== JSON.stringify(stored) || replacing.size > 0;
 
   const onReplace = useCallback((path: string, on: boolean) => {
@@ -161,6 +170,7 @@ export function ParamsForm({
         disabled={saving}
         serverProblems={serverProblems}
         existing={stored}
+        keptFor={keptFor}
       />
 
       {type.hasPreview && <MappingPreview typeId={type.id} params={values} />}

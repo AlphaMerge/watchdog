@@ -367,6 +367,7 @@ export const channelRecordSchema = {
     'showInGraph',
     'showInTable',
     'lookupId',
+    'counterBits',
     'declaredLookup',
     'retired',
   ],
@@ -387,6 +388,14 @@ export const channelRecordSchema = {
     showInGraph: { type: 'boolean' },
     showInTable: { type: 'boolean' },
     lookupId: { type: ['string', 'null'] },
+    counterBits: {
+      enum: [32, 64, null],
+      description:
+        'The counter width the channel was declared with, or `null` for a gauge: whether its ' +
+        'samples are rates or values as read. Fixed for the channel’s life — an edit that would ' +
+        'turn a counter into a gauge or back is refused with `409 OBJECT_CHANNEL_MODE_FIXED` — ' +
+        'so a column an edit took out and another puts back is held to it (U-40).',
+    },
     declaredLookup: {
       type: ['string', 'null'],
       description:

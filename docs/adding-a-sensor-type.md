@@ -257,7 +257,11 @@ channel the sensor is judged by.
   change the core refuses. Inside an array, also name on the entry's schema the required property
   that says which entry it is — `'x-entryKey': 'column'` on `snmp.table`'s columns — so an entry
   is matched to what the sensor has by what it is, not where it sits, and one an edit adds stays
-  open. The annotation is the warning; the refusal is still the core's, judged from the channels.
+  open — unless it lands on a channel the sensor kept from an earlier edit that took the entry out:
+  the form asks the core which channels the entry declares (`POST /sensor-types/{id}/channels`,
+  your `channels()` answering) and holds it to what that channel's row stores (`U-40`), so
+  nothing about your keys is copied into the web. The annotation is the warning; the refusal is
+  still the core's, judged from the channels.
   Which channel is `isPrimary` moves with the edit too (`P-309`), once that channel has a row: a
   key the edit adds and makes primary becomes it on its first reading (`P-314`). And at every
   start, a sensor whose stored parameters declare a primary that has a row but is not primary

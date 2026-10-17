@@ -1000,6 +1000,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           return [{ id: 'swept.template', name: 'Swept' }];
         case 'POST /api/v1/sensor-types/:id/preview':
           return [{ document: '{}', params: {} }];
+        case 'POST /api/v1/sensor-types/:id/channels':
+          // Parameters only, as the preview's are: nothing in the tree is named or read (`U-40`).
+          return [{ params: {} }];
         case 'POST /api/v1/templates/preview':
           return [pingId, regrantedId, carvedSensorId, otherSensorId].map((sensorId) => ({
             template: {

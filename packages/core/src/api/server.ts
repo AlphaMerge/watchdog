@@ -809,7 +809,10 @@ export class ApiServer {
         await scope.register(stateLogRoutes, { log: this.#stateLog });
         alarmRoutes(scope, { alarms: this.#alarms });
         await scope.register(auditRoutes, { db: this.#db, audit: this.#audit });
-        await scope.register(sensorTypeRoutes, { catalogue: this.#catalogue });
+        await scope.register(sensorTypeRoutes, {
+          catalogue: this.#catalogue,
+          logger: this.#logger,
+        });
         await scope.register(lookupRoutes, { lookups: this.#lookups });
         if (this.#maps !== undefined) {
           mapRoutes(scope, {

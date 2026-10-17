@@ -577,15 +577,47 @@ export function fixedChangedReason(stored: unknown): string {
   );
 }
 
+/** What a channel stores (`T-02`): a counter's rate, or a gauge's value as read. */
+export type ChannelMode = 'counter' | 'gauge';
+
+/**
+ * A channel the sensor still has for an entry its stored parameters do not name (`U-40`).
+ *
+ * An edit that takes a table column out keeps the column's channel, its row and its history
+ * (`P-310`). An entry that puts the column back is new to the stored parameters, so `existingEntry`
+ * finds nothing for it, but the core re-declares the kept row, and refuses the edit if that would
+ * turn a counter into a gauge or back (`P-303`). Which channel an entry lands on is the type's to
+ * say, so the core is asked (`POST /sensor-types/{id}/channels`) rather than the key derived here.
+ */
+export interface KeptChannel {
+  /** The channel key the entry declares, as the core answered it. */
+  readonly key: string;
+  /** What the sensor's row for it stores. */
+  readonly stores: ChannelMode;
+  /** What the entry, as the form holds it, would make it. */
+  readonly declares: ChannelMode;
+}
+
+/**
+ * What the form knows of the channels an entry with no stored counterpart lands on (`U-40`):
+ * the kept ones among them, `[]` for none (a column the sensor never had), or `undefined` while
+ * nothing has been said — not asked yet, not answered yet, or refused (an entry not yet valid).
+ */
+export type Kept = readonly KeptChannel[] | undefined;
+
 /**
  * Whether a fixed field can be changed here.
  *
  * - `open`: not fixed, or nothing exists here yet. The ordinary control.
- * - `locked`: it exists and holds what is stored. Read-only, with the reason.
+ * - `locked`: it exists and holds what is stored. Read-only, with the reason. `kept` when what
+ *   exists is a channel kept from an earlier edit rather than a stored entry (`U-40`).
  * - `changed`: it exists, and what the form holds is not what is stored. Only reachable inside an
  *   array — an entry's key edited to name a column the sensor has with the other mode — and left
  *   editable, saying what is stored, so the operator can put it back. Locking it would freeze a
  *   value the core refuses, with no control to undo it but retyping the key.
+ * - `refused`: the same for an entry that lands on a kept channel (`U-40`) and would change what it
+ *   stores. There is no stored value to name, only the channel and what it stores, so that is what
+ *   is said.
  *
  * Absent is the schema's default on both sides, as the core stores it. So `locked` carries the
  * value it compared, which is what the read-only box shows: a field the form holds as absent (an
@@ -594,15 +626,72 @@ export function fixedChangedReason(stored: unknown): string {
  */
 export type FixedState =
   | { readonly kind: 'open' }
-  | { readonly kind: 'locked'; readonly value: unknown }
-  | { readonly kind: 'changed'; readonly stored: unknown };
+  | { readonly kind: 'locked'; readonly value: unknown; readonly kept?: readonly KeptChannel[] }
+  | { readonly kind: 'changed'; readonly stored: unknown }
+  | { readonly kind: 'refused'; readonly channels: readonly KeptChannel[] };
 
-export function fixedState(field: FieldModel, existing: Existing, value: unknown): FixedState {
-  if (!field.createOnly || existing === undefined) return { kind: 'open' };
+export function fixedState(
+  field: FieldModel,
+  existing: Existing,
+  value: unknown,
+  kept?: Kept,
+): FixedState {
+  if (!field.createOnly) return { kind: 'open' };
   const fallback = defaultFor(field);
-  const stored = existing[field.name] ?? fallback;
   const held = value ?? fallback;
+  if (existing === undefined) {
+    // Nothing stored here; a kept channel is the one thing that still fixes it (`U-40`).
+    if (kept === undefined || kept.length === 0) return { kind: 'open' };
+    const refused = kept.filter((channel) => channel.stores !== channel.declares);
+    return refused.length === 0
+      ? { kind: 'locked', value: held, kept }
+      : { kind: 'refused', channels: refused };
+  }
+  const stored = existing[field.name] ?? fallback;
   return JSON.stringify(held) === JSON.stringify(stored)
     ? { kind: 'locked', value: held }
     : { kind: 'changed', stored };
+}
+
+/** “col6” (a counter), and “col7” (a gauge): the channels a sentence below names. */
+function namedChannels(channels: readonly KeptChannel[]): string {
+  const named = channels.map((channel) => `“${channel.key}” (a ${channel.stores})`);
+  const last = named.pop() ?? '';
+  return named.length === 0 ? last : `${named.join(', ')} and ${last}`;
+}
+
+/**
+ * What a fixed field says beside it, or `null` for an open one (`U-34`, `U-40`). One sentence per
+ * state, each in words the operator can act on: what is fixed, and the way to the other value.
+ */
+export function fixedReason(state: FixedState): string | null {
+  switch (state.kind) {
+    case 'open':
+      return null;
+    case 'locked':
+      return state.kept === undefined
+        ? FIXED_REASON
+        : `Fixed once the sensor exists: it still has ${channelWord(state.kept)} ` +
+            `${namedChannels(state.kept)} from an earlier edit; add a new sensor to change it.`;
+    case 'changed':
+      return fixedChangedReason(state.stored);
+    case 'refused': {
+      const [only, ...more] = state.channels;
+      const turned =
+        only !== undefined && more.length === 0
+          ? `would make it a ${only.declares}, which is refused. Choose the value that keeps it a ` +
+            only.stores
+          : 'would change what they store, which is refused. Choose the values that keep them as ' +
+            'they are';
+      return (
+        `Fixed once the sensor exists: it still has ${channelWord(state.channels)} ` +
+        `${namedChannels(state.channels)} from an earlier edit, and this value ${turned}, or add ` +
+        'a new sensor to change it.'
+      );
+    }
+  }
+}
+
+function channelWord(channels: readonly KeptChannel[]): string {
+  return channels.length === 1 ? 'channel' : 'channels';
 }

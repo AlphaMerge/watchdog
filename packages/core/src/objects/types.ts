@@ -325,6 +325,13 @@ export interface ChannelRecord {
    */
   readonly lookupId: string | null;
   /**
+   * The counter width the row was declared with, 32 or 64, or `null` for a gauge (`T-02`): whether
+   * the channel stores a rate or the value as read. Fixed for the channel's life, since an edit
+   * that would change it is refused (`P-303`), so it is what the parameters form holds a column to
+   * when the sensor kept the column's channel from an edit that took the column out (`U-40`).
+   */
+  readonly counterBits: number | null;
+  /**
    * The lookup this channel's sensor type declares for it, for the sensor's stored parameters
    * (`U-82`), or `null`: none declared, or a type that cannot answer for them or is not
    * registered in this build. What the channel table offers first when an operator sets a

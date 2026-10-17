@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-169 routes.
+170 routes.
 
 ## Conventions
 
@@ -471,7 +471,7 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 - `limits`: at least 1 field must be given
 - `processing`: at least 1 field must be given
 
-**200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId, declaredLookup, retired }
+**200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId, counterBits, declaredLookup, retired }
 
 **200** is [ms:channelRecord](#schema-ms-channelrecord)
 
@@ -3417,6 +3417,37 @@ For types whose parameters contain paths into a document — `rest.custom`’s `
 | `expectations[].ok` | boolean | **required** |  |
 | `problems` | string[] | **required** |  |
 
+### `POST /api/v1/sensor-types/{id}/channels`
+
+The channels these parameters would declare
+
+Which channels a sensor of this type would have with these parameters: each key, name, unit, lookup, whether it is primary, and whether it is a counter (`counterBits`, `null` for a gauge). The parameters are validated and given their defaults as a create would, and the **type’s own declaration** answers for them, so this is what a create would write and what an edit is compared against. For a client that has to know a channel’s key before there is a sensor or a reading — the parameters form asks it which channel a table column it is putting back lands on, to hold the column to the channel the sensor kept when an earlier edit took the column out (U-40). Limits are not in the answer: only a type whose channels never depend on its parameters declares them, and no edit changes one. **Nothing is read and nothing is stored.** Parameters a create would refuse are refused here with the same 400 and the same problems; a type that is not registered is a 404.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | string, at most 100 characters | **required** |
+
+**Body**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `params` | object | **required** | The parameters to declare channels for, as a create would take them: validated against the type’s schema and given its defaults first, so the answer is what a sensor created or edited with them would declare. |
+
+**200** { sensorType, channels }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorType` | string | **required** |  |
+| `channels` | object[] | **required** |  |
+| `channels[].key` | string | **required** |  |
+| `channels[].name` | string | **required** |  |
+| `channels[].unit` | string | **required** |  |
+| `channels[].isPrimary` | boolean | **required** |  |
+| `channels[].lookupId` | string | **required** nullable |  |
+| `channels[].counterBits` | `32` · `64` | **required** nullable | A counter’s declared width, or `null` for a gauge. |
+
 ## sensors
 
 ### `GET /api/v1/sensors/{id}/values`
@@ -4118,6 +4149,7 @@ one of 4 shapes, by `kind`
 | `showInGraph` | boolean | **required** |  |
 | `showInTable` | boolean | **required** |  |
 | `lookupId` | string | **required** nullable |  |
+| `counterBits` | `32` · `64` | **required** nullable | The counter width the channel was declared with, or `null` for a gauge: whether its samples are rates or values as read. Fixed for the channel’s life — an edit that would turn a counter into a gauge or back is refused with `409 OBJECT_CHANNEL_MODE_FIXED` — so a column an edit took out and another puts back is held to it (U-40). |
 | `declaredLookup` | string | **required** nullable | The lookup the sensor’s type declares for this channel, for its stored parameters, or `null`: none declared, or a type that cannot answer for them or is not registered. A channel created before its type declared one has `lookupId` null beside it; set it with `PATCH /objects/{id}/channels/{key}`. Worked out from the type on every read. |
 | `retired` | boolean | **required** | Nothing will read this channel again: the sensor’s type declares every channel it reports, and the sensor’s parameters no longer declare this one (an edit took it out), and it has no reading newer than the last change to the sensor’s parameters, which a probe running a newer build than the core could still send. A reading is timed by the probe’s clock, so after each change such a channel can read `true` for one scan interval plus however far that probe’s clock runs behind the core’s database. Its history is kept, and putting it back makes it live again. Worked out from the type on every read. `false` also where the type cannot say: one whose readings can name channels it does not declare, such as a script’s. |
 

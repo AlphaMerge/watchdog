@@ -410,6 +410,7 @@ export function ObjectDetailView(): React.JSX.Element {
                   <ParamsForm
                     detail={detail}
                     type={types.data.items.find((type) => type.id === detail.sensorType)}
+                    channels={channelList}
                     onSaved={object.reload}
                   />
                 )}

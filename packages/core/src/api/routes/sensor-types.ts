@@ -1,10 +1,14 @@
 import { SensorTypeError, type SensorCatalogue } from '@ms/sensors';
+import type { Logger } from '@ms/shared';
 import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
+import { catalogueSensorTypeGate } from '../../objects/sensor-type-gate.js';
 import { COMPUTES, READS } from '../authorization.js';
 
 export interface SensorTypeRouteOptions {
   catalogue: SensorCatalogue;
+  /** Hears about a type that cannot answer for parameters its schema accepted (`P-296`). */
+  logger?: Logger;
 }
 
 const sensorTypeListSchema = {
@@ -120,6 +124,50 @@ const previewResultSchema = {
   },
 } as const;
 
+const declaredBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['params'],
+  properties: {
+    params: {
+      type: 'object',
+      additionalProperties: true,
+      description:
+        'The parameters to declare channels for, as a create would take them: validated against ' +
+        'the type’s schema and given its defaults first, so the answer is what a sensor created ' +
+        'or edited with them would declare.',
+    },
+  },
+} as const;
+
+const declaredChannelsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['sensorType', 'channels'],
+  properties: {
+    sensorType: { type: 'string' },
+    channels: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['key', 'name', 'unit', 'isPrimary', 'lookupId', 'counterBits'],
+        properties: {
+          key: { type: 'string' },
+          name: { type: 'string' },
+          unit: { type: 'string' },
+          isPrimary: { type: 'boolean' },
+          lookupId: { type: ['string', 'null'] },
+          counterBits: {
+            enum: [32, 64, null],
+            description: 'A counter’s declared width, or `null` for a gauge.',
+          },
+        },
+      },
+    },
+  },
+} as const;
+
 /**
  * What the add-sensor form is built from (ADR-001 Decision 7: `paramsSchema` generates the UI).
  *
@@ -127,10 +175,18 @@ const previewResultSchema = {
  * keep that annotation in the schema on purpose — it is how a form knows to render a password
  * field, and it is a statement about the *shape*, never about a stored value.
  *
- * The one POST does no writing either: it runs a type's own mapping language over a document the
- * caller pasted and hands back what each path selected (`U-13`).
+ * The two POSTs do no writing either: one runs a type's own mapping language over a document the
+ * caller pasted and hands back what each path selected (`U-13`); the other answers which channels
+ * a set of parameters would declare (`U-40`).
  */
 export function sensorTypeRoutes(app: FastifyInstance, options: SensorTypeRouteOptions): void {
+  // The gate the object service writes through, so the answer is the one a create would act on:
+  // the same validation, the same defaults, the same fitting of a label to its row (`P-405`).
+  const gate = catalogueSensorTypeGate(
+    options.catalogue,
+    options.logger === undefined ? {} : { logger: options.logger },
+  );
+
   app.get(
     '/sensor-types',
     {
@@ -212,6 +268,62 @@ export function sensorTypeRoutes(app: FastifyInstance, options: SensorTypeRouteO
         );
       }
       return result;
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { params: Record<string, unknown> } }>(
+    '/sensor-types/:id/channels',
+    {
+      // Nothing is read from the tree and nothing is stored: the parameters are in the request.
+      config: COMPUTES,
+      schema: {
+        tags: ['sensor-types'],
+        summary: 'The channels these parameters would declare',
+        description:
+          'Which channels a sensor of this type would have with these parameters: each key, ' +
+          'name, unit, lookup, whether it is primary, and whether it is a counter (`counterBits`, ' +
+          '`null` for a gauge). The parameters are validated and given their defaults as a ' +
+          'create would, and the **type’s own declaration** answers for them, so this is what a ' +
+          'create would write and what an edit is compared against.\n\n' +
+          'For a client that has to know a channel’s key before there is a sensor or a reading ' +
+          '— the parameters form asks it which channel a table column it is putting back lands ' +
+          'on, to hold the column to the channel the sensor kept when an earlier edit took the ' +
+          'column out (U-40). Limits are not in the answer: only a type whose channels never ' +
+          'depend on its parameters declares them, and no edit changes one.\n\n' +
+          '**Nothing is read and nothing is stored.** Parameters a create would refuse are ' +
+          'refused here with the same 400 and the same problems; a type that is not registered ' +
+          'is a 404.',
+        params: {
+          type: 'object',
+          required: ['id'],
+          additionalProperties: false,
+          properties: { id: { type: 'string', maxLength: 100 } },
+        },
+        body: declaredBodySchema,
+        response: { 200: declaredChannelsSchema },
+      },
+    },
+    (request) => {
+      const typeId = request.params.id;
+      if (!options.catalogue.has(typeId)) {
+        throw new ObjectError('OBJECT_NOT_FOUND', `sensor type "${typeId}" is not registered`, {
+          context: { phase: 'declared-channels' },
+          details: { sensorType: typeId },
+        });
+      }
+      const params = gate.normalise(typeId, request.body.params);
+      return {
+        sensorType: typeId,
+        // As `createChannels` writes a draft: no unit is '', no lookup or counter is null.
+        channels: gate.channelsFor(typeId, params).map((draft) => ({
+          key: draft.key,
+          name: draft.name,
+          unit: draft.unit ?? '',
+          isPrimary: draft.isPrimary === true,
+          lookupId: draft.lookup ?? null,
+          counterBits: draft.counterBits ?? null,
+        })),
+      };
     },
   );
 }

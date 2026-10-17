@@ -49,6 +49,7 @@ function channel(id: number, key: string, retired = false): ChannelRecord {
     spikeMin: null,
     spikeMax: null,
     lookupId: null,
+    counterBits: null,
     declaredLookup: null,
     retired,
   };

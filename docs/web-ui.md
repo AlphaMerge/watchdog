@@ -336,7 +336,11 @@ tab alike, and each re-read of the list reads the History tab's series again, up
 chart shows the new line too. An ordinary poll does not ask for the list. If a re-read fails, the
 list in hand stays and a line beside it says it could not be read again, with **Try again**
 (`U-67`). Put the column back
-and it is read again, with its history. Only a type that promises its readings name no channel it does not declare is
+and it is read again, with its history. Its kind of reading cannot change on the way back — a
+counter stores rates and a gauge values, and one line cannot mean both — so the **Parameters**
+form asks the core which channel the column lands on and holds it to what that channel stores: its
+**Reading type** is read-only when it matches, and otherwise says which channel it is, what it
+stores and that the other value is refused (`U-40`). Only a type that promises its readings name no channel it does not declare is
 marked this way (`P-310`): every shipped type but three (`P-320`). An advanced script's extra
 channels, and Windows CPU's per-processor and Windows Volume's per-drive channels, come from what
 was read, so no channel of those three types is ever called retired. Nor is a channel

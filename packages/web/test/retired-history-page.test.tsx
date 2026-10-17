@@ -51,6 +51,7 @@ const channel = (id: number, key: string, retired: boolean): ChannelRecord => ({
   spikeMin: null,
   spikeMax: null,
   lookupId: null,
+  counterBits: null,
   declaredLookup: null,
   retired,
 });

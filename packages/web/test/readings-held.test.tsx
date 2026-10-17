@@ -56,6 +56,7 @@ const channel = (id: number, name: string): ChannelRecord => ({
   spikeMin: null,
   spikeMax: null,
   lookupId: null,
+  counterBits: null,
   declaredLookup: null,
   retired: false,
 });

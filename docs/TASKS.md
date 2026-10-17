@@ -28742,7 +28742,7 @@ because each is a decision rather than a defect:
         without being removed, which `removeAt` now refuses on purpose. What it should hold
         instead is the form's decision, not the path helper's.
 
-- [ ] **U-40 — the edit form cannot see a channel kept from a column an earlier edit removed** ·
+- [x] **U-40 — the edit form cannot see a channel kept from a column an earlier edit removed** ·
       S · U-34 · Found 2026-10-08 in `U-34`. Putting that column back in the other mode is
       offered and then refused with a 409. **Done when** the form reads the sensor's channel rows
       and locks the mode for such a column too, with a test.
@@ -28750,6 +28750,67 @@ because each is a decision rather than a defect:
       **Decided 2026-10-11 by the user:** the form learns a column's channel key from a new
       core dry-run route (which channels these parameters would declare, for any type), not
       from a hook on the sensor type.
+
+      **U-40 outcome. The core says which channels parameters would declare, the channel list
+      says what each channel stores, and the form holds a column put back to its kept channel.**
+      No migration and no protocol number.
+      - **`POST /sensor-types/{id}/channels`** (`COMPUTES`, as the preview is): `{ params }` in,
+        `{ sensorType, channels: [{ key, name, unit, isPrimary, lookupId, counterBits }] }` out.
+        Through the object service's own gate (`catalogueSensorTypeGate`): validated and given
+        defaults as a create is, the type's `channels()` answering, each label fitted to its row
+        (`P-405`), so the answer is what a create writes and what an edit compares against. A
+        create's 400 with its problems for parameters a create refuses, a 404 for a type not
+        registered; nothing read from the tree, nothing stored, nothing audited. **Limits are
+        left out**: only a `fixedChannels` type declares them and no edit changes one (`P-293`).
+        The computes sweep (`object-visibility`) calls it.
+      - **`counterBits` on `ms:channelRecord`** (`32`, `64` or `null` for a gauge), read from the
+        row in the one query the list, the detail and a set's answer share. Stored, not derived,
+        so the detail's tag needed nothing new. `api-reference.md` regenerated.
+      - **The form** (`ParamsForm`, given the page's channel list). For each entry of an array
+        whose entry schema names its key and holds a fixed field, whose key the stored
+        parameters do not have, it asks the route with the **stored** parameters and the array
+        holding that entry alone (`kept-channels.ts`): so the answer is that entry's channels,
+        a half-typed field elsewhere does not stop it, and no secret being typed is sent for a
+        question about a column. Answers are filed by the entry's key and fixed values, nothing
+        else: a name typed afterwards asks nothing, and a locked entry keeps its answer. Asked
+        300 ms after the entry settles; a refused question (an entry not yet valid) is asked
+        again only when it changes; nothing is asked without channel rows, or with none. A
+        declared channel with a row is kept: matching what the row stores, the field is
+        `locked` (read-only) and says *it still has channel “col6” (a counter) from an earlier
+        edit*; otherwise `refused`, still a select, saying the value would make it a gauge and
+        to choose the value that keeps it a counter. Not by deriving `col6` in the web: the key
+        is the type's (`snmp.table` builds it from the OID), and `adding-a-sensor-type.md` says
+        so.
+      - **Focus and the region.** The lock comes a round trip after the change that earns it, so
+        `U-34`'s refocus intent now lasts until the field locks, while focus is still on it or
+        fell to the page with the select; it goes once focus is anywhere else, so a lock that
+        arrives after the operator moved on does not pull them back. A fixed field's sentence is
+        now always rendered, empty while open, as a polite region outside the control's stack
+        (`mt-1 empty:mt-0`, as `ProblemRegion`), so a sentence that arrives with an answer comes
+        into a region that was there. `web-ui.md` says it beside *put the column back*.
+      - **Tests.** Core `declared-channels.test.ts` (3, against the shipped `snmp.table`): the
+        answer field for field equal to the rows a create of the same parameters writes,
+        defaults and a counter's `/s` included; a create's 400, a missing body, an unregistered
+        type's 404, nothing stored or audited; `counterBits` on the list, a column taken out
+        keeping its row as a retired counter, and the dry run of it put back as a gauge (`col6`,
+        `null`) matching the 409 the edit then gets for exactly that channel, while as a counter
+        it matches and is accepted. Web `kept-channel.test.tsx` (13): the states and sentences
+        table-driven; the questions (stored entries not asked, duplicates and an absent mode at
+        its default one question, unkeyed arrays none); a put-back column refused then locked,
+        with focus moved to the read-only box and the region the same node throughout, the
+        request's body, a name typed after asking nothing, the PATCH; a column with no row open;
+        the debounce and a refused question under fake timers; focus left where the operator
+        moved it; nothing asked without rows. The web fixtures gained `counterBits: null`.
+        **Mutations**, each killed, restored byte for byte: `kept` ignored 6; what the row stores
+        taken from the answer 3; the intent cleared after one render 1; the region only with a
+        sentence 1; the form's values as the base 1; no debounce 1; answers filed by key alone 2;
+        focus pulled back wherever it went 1; the row's `counter_bits` not read 2; the route not
+        validating 1; the answer's `counterBits` null 2.
+      - **Not done.** A type whose required parameter is a secret would be refused the question
+        (the stored parameters carry no secrets) and leave such an entry to the 409; no shipped
+        type with a keyed array has one. An array inside an entry is not asked about, as its
+        path holds the entry's position. A save pressed inside the 300 ms and the round trip
+        still meets the 409, which says it as before.
 - [x] **U-41 — clearing an entry in an array of plain strings is ignored** · XS · U-39 · Found
       2026-10-08 in `U-39`. Deleting the last character of a tag puts the text back: the entry's
       control reports "absent", and an entry cannot be absent without being removed. **Done when**

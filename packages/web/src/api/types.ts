@@ -205,6 +205,12 @@ export interface ChannelRecord {
    */
   lookupId: string | null;
   /**
+   * The counter width the channel was declared with, or `null` for a gauge (`T-02`). Fixed for the
+   * channel's life (`P-303`): the parameters form holds a column put back after an earlier edit
+   * took it out to what its kept channel stores (`U-40`).
+   */
+  counterBits: number | null;
+  /**
    * The lookup the sensor's type declares for this channel (`U-82`), or `null`. The channel table
    * offers it first when a lookup is set: a channel created before its type declared one, or one
    * somebody cleared, has none.
@@ -216,6 +222,20 @@ export interface ChannelRecord {
    * where the core cannot say, so never read it as "being read".
    */
   retired: boolean;
+}
+
+/**
+ * One channel `POST /sensor-types/{id}/channels` says a set of parameters would declare (`U-40`):
+ * what a create of them would write, before there is a sensor or a reading.
+ */
+export interface DeclaredChannel {
+  key: string;
+  name: string;
+  unit: string;
+  isPrimary: boolean;
+  lookupId: string | null;
+  /** A counter's declared width, or `null` for a gauge. */
+  counterBits: number | null;
 }
 
 /** One entry in `GET /lookups`. */

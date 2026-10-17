@@ -1104,7 +1104,7 @@ export class ObjectRepository {
     return q.query<ChannelRow>(
       `SELECT c.id, c.sensor_id, c.key, c.name, c.unit, c.is_primary, c.scale_mul, c.scale_div,
               c.decimals, c.limits, c.spike_min, c.spike_max, c.show_in_graph, c.show_in_table,
-              c.lookup_id,
+              c.lookup_id, c.counter_bits,
               CASE
                 WHEN $2::text[] IS NULL OR c.key = ANY($2::text[]) THEN false
                 ELSE NOT EXISTS (
@@ -2293,6 +2293,7 @@ interface ChannelRow {
   show_in_graph: boolean;
   show_in_table: boolean;
   lookup_id: string | null;
+  counter_bits: number | null;
   /** `false` whenever the read was not asked about retirement (`reportable` null). */
   retired: boolean;
 }
@@ -2314,5 +2315,6 @@ function storedChannelOf(row: ChannelRow): StoredChannelRecord {
     showInGraph: row.show_in_graph,
     showInTable: row.show_in_table,
     lookupId: row.lookup_id,
+    counterBits: row.counter_bits,
   };
 }

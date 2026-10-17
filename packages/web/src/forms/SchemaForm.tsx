@@ -2,9 +2,8 @@ import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from '
 import {
   existingEntry,
   existingWithin,
-  FIXED_REASON,
   fieldsOf,
-  fixedChangedReason,
+  fixedReason,
   fixedState,
   isMultiline,
   movedPaths,
@@ -16,6 +15,7 @@ import {
   type Existing,
   type FieldModel,
   type JsonSchema,
+  type Kept,
 } from './schema';
 import { ProblemRegion, SchemaControl } from './Control';
 import { movedProblems, problemsFor, type FieldProblem } from './validate';
@@ -48,6 +48,12 @@ export interface SchemaFormProps {
    * the screen, and only what is stored says which entries the sensor already has.
    */
   readonly existing?: Record<string, unknown>;
+  /**
+   * The channels an array entry the stored parameters do not name lands on, where the sensor kept
+   * them from an earlier edit (`U-40`); asked of the entry at `array` as the form holds it. Absent,
+   * as when adding a sensor, nothing is kept. `ParamsForm` says how it knows.
+   */
+  readonly keptFor?: (array: string, entry: unknown) => Kept;
 }
 
 /** The default, one array for every render: a fresh `[]` would start the problems again. */
@@ -76,6 +82,7 @@ export function SchemaForm({
   disabled = false,
   serverProblems = NO_PROBLEMS,
   existing,
+  keptFor,
 }: SchemaFormProps): React.JSX.Element {
   const fields = useMemo(() => fieldsOf(schema), [schema]);
   const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
@@ -127,6 +134,8 @@ export function SchemaForm({
           moveTouched={moveTouched}
           serverProblems={problems}
           existing={existing}
+          keptFor={keptFor}
+          kept={undefined}
         />
       ))}
     </div>
@@ -152,6 +161,10 @@ interface FieldProps {
   serverProblems: readonly FieldProblem[];
   /** What the sensor already has around this field (`U-34`); `existingWithin` says how. */
   existing: Existing;
+  /** `SchemaForm`'s, for the entries of every array below (`U-40`). */
+  keptFor: ((array: string, entry: unknown) => Kept) | undefined;
+  /** The kept channels the entry this field is in lands on (`U-40`); `undefined` outside one. */
+  kept: Kept;
 }
 
 function Field(props: FieldProps): React.JSX.Element {
@@ -194,12 +207,14 @@ function Control({
   markTouched,
   serverProblems,
   existing,
+  kept,
 }: FieldProps): React.JSX.Element {
   const id = useId();
   const value = readAt(values, field.path);
   const isSet = redacted.includes(field.path);
   const beingReplaced = replacing.has(field.path);
-  const fixed = fixedState(field, existing, value);
+  const fixed = fixedState(field, existing, value, kept);
+  const reason = fixedReason(fixed);
 
   const problems = [
     ...serverProblems.filter((problem) => problem.path === field.path),
@@ -230,14 +245,26 @@ function Control({
   // hears that the field is now fixed. Only when the change came from this control while it had
   // focus — a column key retyped elsewhere in the entry can lock this field too, and must not
   // pull focus away from the key being typed.
+  //
+  // **Held until the lock comes, not one render** (`U-40`). A field held to a kept channel locks
+  // when the core answers for the value it was set to, a round trip after the change, by which
+  // time the render the change made is long gone. So the intent stays while focus is still here,
+  // or fell to the page with the select the lock took away, and goes once focus is anywhere else:
+  // a lock that comes after the operator moved on must not pull them back.
   const wrapper = useRef<HTMLDivElement>(null);
   const refocus = useRef(false);
   useLayoutEffect(() => {
     if (!refocus.current) return;
-    refocus.current = false;
+    const at = document.activeElement;
+    const fell = at === null || at === document.body;
+    if (!fell && !(wrapper.current?.contains(at) ?? false)) {
+      refocus.current = false;
+      return;
+    }
     if (fixed.kind !== 'locked') return;
+    refocus.current = false;
     const control = document.getElementById(id);
-    if (control !== null && document.activeElement !== control) control.focus();
+    if (control !== null && at !== control) control.focus();
   });
 
   return (
@@ -300,16 +327,23 @@ function Control({
             }}
           />
         )}
-
-        {fixed.kind !== 'open' && (
-          // Polite live region as well as a description: going from `changed` to `locked` keeps this
-          // element and changes its sentence, which is announced even where moving focus onto the
-          // read-only box does not read its description again.
-          <p id={`${id}-fixed`} className="text-xs text-text-muted" aria-live="polite">
-            {fixed.kind === 'locked' ? FIXED_REASON : fixedChangedReason(fixed.stored)}
-          </p>
-        )}
       </div>
+
+      {field.createOnly && (
+        // **Always there for a fixed field, a polite live region** (`U-34`, `U-40`), as the problem
+        // below is (`U-41`). Going from `changed` to `locked` changes its sentence in place, which
+        // is announced even where moving focus onto the read-only box does not read its
+        // description again; and a field held to a kept channel is open while the core is asked,
+        // so its sentence comes into a region that was there, empty, before it. Outside the stack
+        // above and taking no space while empty, for `ProblemRegion`'s reasons (`U-45`).
+        <p
+          id={`${id}-fixed`}
+          className="mt-1 text-xs text-text-muted empty:mt-0"
+          aria-live="polite"
+        >
+          {reason}
+        </p>
+      )}
 
       {/* **Always there, and a polite live region** (`U-41`, WCAG 4.1.3). A problem appears when
           the field is left, by which time focus is on the next control and the description tied
@@ -503,23 +537,27 @@ function Entry({
   // own path. Nothing in it is fixed (`U-34`), so nothing is existing either.
   if (children.length === 0) {
     return (
-      <Field {...props} existing={undefined} field={scalarEntryOf(items, props.field, index)} />
+      <Field
+        {...props}
+        existing={undefined}
+        kept={undefined}
+        field={scalarEntryOf(items, props.field, index)}
+      />
     );
   }
 
   // The stored entry this one *is*, by its key and not its position (`U-34`): an entry the
   // operator added, or one whose key they changed to something the sensor does not have, is new.
-  const existing = existingEntry(
-    items,
-    readAt(props.values, path),
-    props.existing?.[props.field.name],
-  );
+  const entry = readAt(props.values, path);
+  const existing = existingEntry(items, entry, props.existing?.[props.field.name]);
+  // Unless the sensor kept the channel it lands on from an earlier edit (`U-40`).
+  const kept = existing === undefined ? props.keptFor?.(props.field.path, entry) : undefined;
 
   return (
     <div className="space-y-4">
       {children.map((child) => (
         // By name, not path, which carries this entry's position (`U-47` review).
-        <Field key={child.name} {...props} field={child} existing={existing} />
+        <Field key={child.name} {...props} field={child} existing={existing} kept={kept} />
       ))}
     </div>
   );
