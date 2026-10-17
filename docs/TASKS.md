@@ -12600,6 +12600,35 @@ because each is a decision rather than a defect:
       back without touching a reading's words; or the type guide says a build cannot take a name
       or a unit away from existing sensors, and why.
 
+- [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
+      P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
+      branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
+      answer is not stored (the name already has an answer, denial, hold or lookup under the new
+      configuration). A name the change broke then looks recently answered for one cycle and
+      wins retry ties against names that really did answer. **Done when** `lastAnsweredAt` is
+      set in that branch only when the answer is stored, with a test and a mutant.
+- [ ] **P-437 — a probe's pool fills free memory to the reserve and then churns at it** · S ·
+      P-426, P-271 · Found 2026-10-17 on `ms-server`. The dev probe grows its pool whenever a check
+      is queued, until the machine's available memory reaches `reserveMb`, and then the memory
+      gate holds and releases it every second or two with no hysteresis.
+      - **On `a2852ea3`**, after 54 minutes: probe RSS 2.27 GB, 42–46 workers, 1,183 "growing the
+        check pool" in an hour, and the gate's warning about once a second.
+      - **On `5b6bbd2a`**, after a Docker restart left more memory free: 61–63 workers (about
+        50 MB each), RSS 3.3 GB after 10 minutes. In those 10 minutes: 244 grows, 256 shrinks,
+        311 holds and 311 releases, with `availableMb` 1,992 against `reserveMb` 1,984.
+      - **The cost.** Each grow is a worker start, so the churn costs CPU and floods the log.
+        Holding the machine at its reserve squeezes everything else on it: here, two test suites
+        and the VM, which went down at a host load near 270. This was not proven to be the cause.
+      - **Not `P-426`'s.** It does not size the pool, but measure per-worker memory before and
+        after it.
+
+      **Done when:**
+      - the gate has hysteresis (hold below the reserve, release only some way above it), and
+        its warning is said once a hold, not once a toggle;
+      - growth is bounded by demand that lasts, not by one queued check;
+      - a test drives available memory around the reserve and asserts at most one hold and one
+        release, and a bounded number of grows;
+      - `pool-memory-cap.test.ts`'s line count is extended to the toggle case.
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
       `#retire` and `#startTimedOut` do, so a memory reading during a slow terminate treats that
