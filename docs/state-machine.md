@@ -891,19 +891,34 @@ Two further notes for whoever picks those up:
   write says otherwise (`leftToHold`). The unheld rows the write's transitions move are taken
   first, as the history takes them, since a release locks a master it has let go of before its
   dependents; the held rows asked about then together in id order, as the hold takes them.
-  `writeRuntimes`
-  keeps those rows' state, cause, words and `since`, beside the pause guard (`P-147`), and
-  writes what the result says of the check. Their transitions measured before the hold's row
-  stay as history; any at or after it (a probe clock ahead, a hold that decided the row
-  unchanged and wrote nothing) are left out, and none is announced. Every one is still reacted
-  to as measured, as it would have been had the write gone first: a master's recovery starts its
-  dependents' delay and a Down ends one, whatever the probe's clock stamped them. A write the
-  hold has not reached yet is written as decided: the hold's
-  re-decision waits on the row's lock and decides from what the write leaves (`P-414`) —
-  unless it was laid after the write asked, or its unlocked read decides the row unchanged
-  (`P-417`). Withholdings are not asked about (`P-420`), nor a result decided under a hold let
-  go since, nor a row a hold re-decided whose release has begun (`P-418`). A held steady row
-  taken ahead of a steady master's can still cross a release's recompute (`P-422`).
+  `writeRuntimes` keeps those rows' state, cause, words and `since`, beside the pause guard
+  (`P-147`), and writes what the result says of the check. Their transitions measured before the
+  hold's row stay as history; any at or after it (a probe clock ahead, a hold that decided the row
+  unchanged and wrote nothing) are left out, and none is announced. Every one is still reacted to
+  as measured, as it would have been had the write gone first: a master's recovery starts its
+  dependents' delay and a Down ends one, whatever the probe's clock stamped them. A write the hold
+  has not reached yet is written as decided: the hold's re-decision waits on the row's lock and
+  decides from what the write leaves (`P-414`) — unless it was laid after the write asked, or its
+  unlocked read decides the row unchanged (`P-417`). Withholdings are not asked about (`P-420`),
+  nor a result decided under a hold let go since, nor a row a hold re-decided whose release has
+  begun (`P-418`). A held steady row taken ahead of a steady master's can still cross a release's
+  recompute (`P-422`).
+
+- **A probe's loss and its return run one at a time** (`P-416`). `lost`, `found` and `resumed`
+  used to change the overlay as they were called and then re-decide the probe's sensors, each in a
+  transaction of its own and from an unlocked read (`P-414`). A `lost` that arrived while
+  `found`'s transaction was still writing read the hold's Unknown it had not yet replaced, decided
+  nothing, and `found` then committed the last reading, for a probe that was gone, with nothing to
+  re-decide it while it stayed away. A `found` during `lost`'s write left a connected probe's
+  sensors Unknown, and one during `lost`'s read of the tree found no hold to let go of. Now each
+  probe's calls run whole, one at a time and in the order they were made: the overlay change and
+  the re-decision that follows it. Letting only the transactions wait is not enough, because a
+  call's overlay change would then reach a re-decision still in flight, which decides under it in
+  the other call's words. So a newer call's overlay change waits for the one before it, a few
+  milliseconds at most, and a result decided meanwhile sees the overlay as it was (`P-418`). A
+  loss whose write fails lets go of the sensors as a resync has left them. A resync and the
+  delivery sweep's retry do not take turns: they re-decide what a tree change moved across the
+  overlay, or what a failure owed. A superseded session's close is `P-427`.
 
 - **The unreachable overlay is derived from the tree, not snapshotted against it** (`P-103`).
   `lost` records which sensors a probe was carrying; a move, a create or a delete changes that

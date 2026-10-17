@@ -181,6 +181,22 @@ export class ProbeReachability {
   readonly #givenUp = new Map<number, number>();
   #owings = 0;
   #outages = 0;
+  /**
+   * Each probe's `lost`, `found` and `resumed`, one at a time and in the order they were called
+   * (`P-416`), each whole: what it changes in the overlay, and the re-decision that follows.
+   *
+   * They used to change the overlay as they were called and then re-decide the probe's sensors
+   * in a transaction of their own, from an unlocked read (`P-414`). A `lost` that arrived while
+   * `found`'s transaction was still writing read the hold's Unknown it had not yet replaced,
+   * decided nothing, and `found` then committed the last reading for a probe that was gone, with
+   * nothing to re-decide it while it stayed away; a `found` during `lost`'s write left a connected
+   * probe's sensors Unknown; and a `found` during `lost`'s tree read found no hold to let go of.
+   * Only the transactions waiting is not enough: a call's overlay change would then reach a
+   * re-decision still in flight, which decides under it in the other call's words. So a call's
+   * overlay change waits for the turn before it as well, a few milliseconds at most, and a result
+   * decided meanwhile sees the overlay as it was (`P-418`).
+   */
+  readonly #turns = new Map<number, Promise<void>>();
 
   constructor(options: ProbeReachabilityOptions) {
     this.#db = options.db;
@@ -529,6 +545,10 @@ export class ProbeReachability {
    * never been scanned, so it is already Unknown for want of a reading.
    */
   async lost(probeObjectId: number, reason: OfflineReason = 'link'): Promise<number> {
+    return this.#inTurn(probeObjectId, () => this.#lose(probeObjectId, reason));
+  }
+
+  async #lose(probeObjectId: number, reason: OfflineReason): Promise<number> {
     // Already offline for some reason. Whichever came first is the one an operator is reading,
     // and re-marking would re-walk the tree and re-evaluate for no change.
     if (this.#byProbe.has(probeObjectId)) return 0;
@@ -587,8 +607,10 @@ export class ProbeReachability {
         return count;
       });
     } catch (error) {
+      // As a resync has left it, which may have re-read the probe's sensors meanwhile; nothing
+      // else changes this probe's entry while its turn runs (`P-416`).
+      this.#release(this.#byProbe.get(probeObjectId)?.sensorIds ?? sensorIds);
       this.#byProbe.delete(probeObjectId);
-      this.#release(sensorIds);
       this.#outages -= 1;
       // Returned rather than rethrown, for the reason the `#sensorsUnder` failure above gives:
       // one probe the database would not answer for must not abort the sweep over the others.
@@ -614,7 +636,7 @@ export class ProbeReachability {
    * add a second transition per sensor for no information, and turn one outage into two.
    */
   async found(probeObjectId: number): Promise<number> {
-    return this.#online(probeObjectId, undefined);
+    return this.#inTurn(probeObjectId, () => this.#online(probeObjectId, undefined));
   }
 
   /**
@@ -626,7 +648,7 @@ export class ProbeReachability {
    * answer about a probe nobody is talking to.
    */
   async resumed(probeObjectId: number): Promise<number> {
-    return this.#online(probeObjectId, 'silence');
+    return this.#inTurn(probeObjectId, () => this.#online(probeObjectId, 'silence'));
   }
 
   async #online(probeObjectId: number, only: OfflineReason | undefined): Promise<number> {
@@ -679,6 +701,23 @@ export class ProbeReachability {
       'a probe came back; its sensors returned to their last reading',
     );
     return moved;
+  }
+
+  /** `work`, once every call for this probe made before it has settled (`P-416`). */
+  async #inTurn<T>(probeObjectId: number, work: () => Promise<T>): Promise<T> {
+    const before = this.#turns.get(probeObjectId);
+    let done = (): void => undefined;
+    const mine = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    this.#turns.set(probeObjectId, mine);
+    try {
+      if (before !== undefined) await before;
+      return await work();
+    } finally {
+      done();
+      if (this.#turns.get(probeObjectId) === mine) this.#turns.delete(probeObjectId);
+    }
   }
 
   #hold(probeObjectId: number, sensorIds: readonly number[]): void {

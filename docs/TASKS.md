@@ -11500,7 +11500,7 @@ because each is a decision rather than a defect:
         filter both ways and at its bound; the cache drop; and the reactions without the kept
         sensors, or with only the transitions that landed.
 
-- [ ] **P-416 — a probe lost while its `found()` is still writing leaves its sensors at their last
+- [x] **P-416 — a probe lost while its `found()` is still writing leaves its sensors at their last
       reading** · S · P-414 · Found 2026-10-17 in `P-414`'s review. `#online` clears the overlay
       before its transaction, which re-decides each sensor from Unknown/probe to what it last
       read. A `lost()` that arrives before that commits sets the overlay again; its unlocked
@@ -11512,6 +11512,52 @@ because each is a decision rather than a defect:
       interleave their re-decisions (one at a time per probe, or `found()` re-deciding, or
       owing, what was lost again since it began), with a test that holds `found()`'s
       transaction open across a `lost()`.
+
+      **P-416 outcome. A probe's loss and its return run one at a time.**
+      - **Decisions, taken by the orchestrator:**
+        1. **Each call whole, in turn per probe.** `ProbeReachability` keeps a chain per probe
+           (`#inTurn`). Each `lost`, `found` and `resumed` runs only once the one called before
+           it has settled, and it runs whole: its overlay change, its tree read and its
+           re-decision. Each then reads what the one before it committed, and decides under the
+           overlay it laid itself. This fixes three orders:
+           - a loss during a return's write, the ticket's case;
+           - a return during a loss's write, which left a connected probe's sensors Unknown;
+           - a return during a loss's read of the tree, which found no hold to let go of.
+        2. **Not just the transactions.** A first version kept the overlay change at call time
+           and let only the transactions wait. Its review confirmed four defects. A newer
+           call's overlay change reached a re-decision still in flight, which then decided
+           under it in the other call's words. The guards that tried to make up for this (a
+           return stepping aside for a newer loss, a failed return restoring its hold only if
+           none was there) left a connected probe held after a failed return followed by a
+           loss and a return.
+           Taking whole calls in turn makes every guard unnecessary. The cost is that a newer
+           call's overlay change waits for the one before it, a few milliseconds at most, and a
+           result decided meanwhile sees the overlay as it was (`P-418`).
+        3. **A failed loss lets go of what it holds now.** It releases the sensors as a resync
+           has left them, rather than the list it read, since a resync can re-read the probe's
+           sensors while the loss is writing. Before, a sensor that arrived meanwhile stayed held
+           behind a hold that was never written.
+      - **Not changed, and filed.**
+        - A resync (a tree change) and the delivery sweep's `retryGivenUp` do not take turns.
+          They re-decide what a tree change moved across the overlay, or what a failure owed.
+        - A superseded session's close still calls `lost`, after the newer session's `found` if
+          the close is handled late (`P-427`).
+        - The review's run of the full suite failed one timing test, which compares one login
+          with one other (`P-428`).
+      - **Docs.** `state-machine.md`, a note after `P-415`'s, which is rewrapped.
+      - **Tests.** `probe-reachability-turns.test.ts`, against PostgreSQL. Each case holds one call
+        open, inside its write or its tree read, across the others:
+        - a loss during a return's write, and a return during a loss's write;
+        - a resumption during a silence's write;
+        - a return during a loss's tree read;
+        - loss, return, loss, return, taken in that order, each in its own words;
+        - a failed loss, a return and a newer loss;
+        - a failed return, with a loss called after it;
+        - a failed loss whose sensors a resync re-read meanwhile.
+      - **Review.** Two lenses and a verifier on the first version: 4 confirmed, 1 refuted. The
+        version that landed answers all four.
+      - **Mutants.** 5 of 5 killed: `found`, `lost` or `resumed` outside its turn, a turn that does
+        not wait, and a failed loss letting go of the list it read.
 
 - [ ] **P-417 — a hold that a result write in flight does not wait for** · S · P-415, P-416 ·
       Found 2026-10-17 in `P-415`'s reviews. A write locks only the rows a probe's hold holds
@@ -11602,6 +11648,27 @@ because each is a decision rather than a defect:
       `credential-vouching.ts` counts a write that gave way, with a scenario test of a master
       on one probe and a held dependent on another, a write holding the dependent open across
       the release.
+
+- [ ] **P-427 — a superseded session's close marks its probe lost after the newer one found it**
+      · S · P-416, R-05 · Found 2026-10-17 in `P-416`'s review. When a probe reconnects while its
+      old connection is still open, the endpoint destroys the old connection. Its `#handleClose`
+      then calls `reachability.lost` for that session's probe without asking whether a newer
+      session has replaced it, unlike the `#sessions` and `#pending` cleanup just above, which
+      goes by identity. If that close is handled after the new session's `#lookUp` has called
+      `found`, the turns `P-416` added run `lost` last. A connected probe is then held, with
+      every result decided Unknown/probe, until it next reconnects: the delivery sweep clears
+      only a silence. **Done when** a close of a session that a live newer session for the same
+      probe has replaced does not call `lost`, with a test that closes the old connection after
+      the new one's `found`.
+
+- [ ] **P-428 — the login timing test compares one login with one other** · XS · A-47 · Found
+      2026-10-17 in `P-416`'s full suite. `accounts.test.ts`, "spends comparable time on an account
+      that does not exist", times one wrong password for a real account and one for an absent
+      account, and asserts the absent one took more than a quarter as long. One stall on the
+      real account broke it: 111 ms against 600 ms, on a VM another run was sharing. It passed
+      three times out of three when rerun alone. **Done when** each side is the median of
+      several logins, so that one stall cannot decide it, and the claim (the decoy verification
+      happens at all) stands.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
