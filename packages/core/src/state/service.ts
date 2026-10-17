@@ -34,6 +34,7 @@ import type { ChannelOutcome } from './limits.js';
 import { canAcknowledge, type ResolvedAcknowledgement } from './acknowledgement.js';
 import {
   loadRuntimes,
+  lockRuntimes,
   writeAcknowledgements,
   writeSimulatedErrors,
   writeStateChanges,
@@ -72,6 +73,18 @@ export interface SensorResult {
    * history that explains nothing.
    */
   readonly channels?: ChannelOutcome | null;
+}
+
+/** Why `reevaluate` is re-deciding, and the words it may speak for (`M-08`, `P-94`). */
+export interface ReevaluationCause {
+  readonly message: string;
+  readonly sources?: readonly SensorStateCause[];
+  /**
+   * Where the check `message` comes from stopped, when the words are a held result's (`P-407`,
+   * `P-265`). Stored beside them only when they are what is said: the caller speaks for the
+   * decided cause and no withholding's words take their place.
+   */
+  readonly failure?: CheckFailure | null;
 }
 
 /**
@@ -552,22 +565,70 @@ export class SensorStateService {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: {
-      message: string;
-      sources?: readonly SensorStateCause[];
-      /**
-       * Where the check `message` comes from stopped, when the words are a held result's
-       * (`P-407`, `P-265`). Stored beside them only when they are what is said: the caller
-       * speaks for the decided cause and no withholding's words take their place.
-       */
-      failure?: CheckFailure | null;
-    },
+    cause: ReevaluationCause,
   ): Promise<number> {
     if (sensorIds.length === 0) return 0;
 
     // Read through the caller's transaction, never the cache: the flags were written moments
     // ago in this same transaction, and a cache populated before them is exactly wrong.
-    const runtimes = this.#withLiveFacts(await loadRuntimes(q, sensorIds));
+    const first = await this.#redecide(q, await loadRuntimes(q, sensorIds), at, cause);
+    // **Decided again from the rows it writes, locked** (`P-414`). The read above takes no lock,
+    // so a pause, a result or another re-decision that commits after it was overwritten by a
+    // state decided without it: Unknown written over a row whose pause flags say paused — by a
+    // hold as a transition stamped after the pause and following the state before it, by a
+    // reword with the history left saying paused. The rows this will write are locked in id order (`P-394`'s
+    // order, and the same rows it locked before, only earlier), which waits for a writer still
+    // open and reads what it committed; what is written is decided from that. Not a guard that
+    // skips a row that moved: a lost probe's sensor whose last batch landed meanwhile would keep
+    // that batch's state. The rows nothing changes stay unlocked, as they were.
+    const writing = [
+      ...new Set([...first.rewrites.map((rewrite) => rewrite.sensorId), ...first.recovered]),
+    ];
+    const { transitions, rewrites, recovered } =
+      writing.length === 0
+        ? first
+        : await this.#redecide(q, await lockRuntimes(q, writing), at, cause);
+
+    // Before the state, so a row can never say Down (Acknowledged) with no acknowledgement
+    // behind it. `reset` clears these too, and clearing twice costs nothing.
+    if (recovered.length > 0) {
+      await writeAcknowledgements(
+        q,
+        recovered.map((sensorId) => ({
+          sensorId,
+          acknowledgedAt: null,
+          acknowledgedUntil: null,
+          actorKind: null,
+          actorLabel: null,
+        })),
+      );
+      for (const sensorId of recovered) this.#cache.delete(sensorId);
+    }
+
+    await writeStateHistory(q, transitions, this.#onStatesCommitted);
+    await writeStateChanges(q, rewrites);
+    // Last, and in the same transaction: a chain armed against a state that rolled back would
+    // page somebody about a sensor that is fine. Every sensor asked about, not only the ones
+    // that moved — a reconciliation is a comparison against the present, and one that skipped
+    // the unmoved would never notice an alarm left standing by a trigger that changed.
+    await this.#alarms?.react(q, sensorIds, at);
+    this.#transitions += transitions.length;
+    this.#reevaluations += transitions.length;
+    return transitions.length;
+  }
+
+  /**
+   * What `reevaluate` would write for these rows, with the live facts laid over them: the
+   * transitions, the rewrites and the acknowledgements a recovery clears. Writes nothing but
+   * drops the cache entries it would move.
+   */
+  async #redecide(
+    q: Queryable,
+    loaded: Map<number, SensorRuntime>,
+    at: Date,
+    cause: ReevaluationCause,
+  ): Promise<{ transitions: StateTransition[]; rewrites: StateRewrite[]; recovered: number[] }> {
+    const runtimes = this.#withLiveFacts(loaded);
     const transitions: StateTransition[] = [];
     const rewrites: StateRewrite[] = [];
     const recovered: number[] = [];
@@ -688,33 +749,7 @@ export class SensorStateService {
       // sensor's next result and is the only thing that cannot go wrong.
       this.#cache.delete(sensorId);
     }
-
-    // Before the state, so a row can never say Down (Acknowledged) with no acknowledgement
-    // behind it. `reset` clears these too, and clearing twice costs nothing.
-    if (recovered.length > 0) {
-      await writeAcknowledgements(
-        q,
-        recovered.map((sensorId) => ({
-          sensorId,
-          acknowledgedAt: null,
-          acknowledgedUntil: null,
-          actorKind: null,
-          actorLabel: null,
-        })),
-      );
-      for (const sensorId of recovered) this.#cache.delete(sensorId);
-    }
-
-    await writeStateHistory(q, transitions, this.#onStatesCommitted);
-    await writeStateChanges(q, rewrites);
-    // Last, and in the same transaction: a chain armed against a state that rolled back would
-    // page somebody about a sensor that is fine. Every sensor asked about, not only the ones
-    // that moved — a reconciliation is a comparison against the present, and one that skipped
-    // the unmoved would never notice an alarm left standing by a trigger that changed.
-    await this.#alarms?.react(q, sensorIds, at);
-    this.#transitions += transitions.length;
-    this.#reevaluations += transitions.length;
-    return transitions.length;
+    return { transitions, rewrites, recovered };
   }
 
   /**

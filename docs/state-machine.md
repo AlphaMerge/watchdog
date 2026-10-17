@@ -872,6 +872,18 @@ Two further notes for whoever picks those up:
   transition into the past. An *identical* row still collides, which is what makes a replayed
   batch idempotent.
 
+- **A re-decision writes what its rows say when it writes them** (`P-414`). `reevaluate` reads
+  its rows unlocked and decides; the rows it will then write are locked in id order (the order
+  `writeStateHistory` takes them in, `P-394`) and decided again from that read, which waits for
+  a writer still open and sees what it committed. A pause, a result or a simulated error that
+  commits between the two is decided with, never written over. Before this, over a row whose
+  pause flags said paused, a lost probe's re-decision wrote Unknown into the row and into the
+  history, stamped after the pause and following the state before it, and a not-started round's
+  new words wrote Unknown into the row with the history still saying paused. The rows it decides
+  nothing for stay unlocked, so it locks no more than it did. A result is guarded against a
+  pause only (`writeRuntimes`, `P-147`): one decided before a hold and stored after the hold's
+  re-decision is `P-415`.
+
 - **The unreachable overlay is derived from the tree, not snapshotted against it** (`P-103`).
   `lost` records which sensors a probe was carrying; a move, a create or a delete changes that
   answer, and the overlay is re-derived inside the same transaction. Without it a sensor moved

@@ -282,6 +282,26 @@ export async function loadRuntimes(
   return new Map(rows.map((row) => [Number(row.object_id), toRuntime(row)]));
 }
 
+/**
+ * `loadRuntimes`, with each row locked until the caller's transaction ends (`P-414`).
+ *
+ * In id order, `writeStateHistory`'s (`P-394`), so two writers of the same sensors take them in
+ * the same order. A row another transaction has written and not committed is waited for, and
+ * read as it committed: what is decided from this cannot be overwriting something it did not see.
+ */
+export async function lockRuntimes(
+  q: Queryable,
+  sensorIds: readonly number[],
+): Promise<Map<number, SensorRuntime>> {
+  if (sensorIds.length === 0) return new Map();
+  const rows = await q.query<RuntimeRow>(
+    `SELECT ${RUNTIME_COLUMNS} FROM sensor_runtime WHERE object_id = ANY($1::bigint[])
+     ORDER BY object_id FOR NO KEY UPDATE`,
+    [[...sensorIds]],
+  );
+  return new Map(rows.map((row) => [Number(row.object_id), toRuntime(row)]));
+}
+
 /** Told what actually landed, after the transaction that wrote it commits (`U-02`). */
 export type CommittedStates = (committed: readonly StateTransition[]) => void | Promise<void>;
 
@@ -848,7 +868,8 @@ export interface StateRewrite {
  * Moves each sensor's current row without pretending a scan happened.
  *
  * No `last_result_at` guard, unlike `writeRuntimes`: there is no result to be stale against, and
- * the caller has just read these rows in this transaction.
+ * the caller has just read these rows in this transaction, locked (`lockRuntimes`, `P-414`), so
+ * nothing it did not see can be on them.
  */
 export async function writeStateChanges(
   q: Queryable,

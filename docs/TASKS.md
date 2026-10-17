@@ -11312,7 +11312,7 @@ because each is a decision rather than a defect:
       `#heldWords` for `probe` resolves them in the episode index's order (lost link, silence,
       frozen, factory, not started), with a test per pair in both orders.
 
-- [ ] **P-414 — a rewrite decided from an unlocked read can overwrite a pause committed
+- [x] **P-414 — a rewrite decided from an unlocked read can overwrite a pause committed
       meanwhile** · S · P-147 · Found 2026-10-17 in `P-410`'s design. `reevaluate` reads its
       rows with no lock (`loadRuntimes`) and `writeStateChanges` sets the state and cause
       unconditionally, so a reword or a hold decided from a read taken before a pause committed
@@ -11322,6 +11322,79 @@ because each is a decision rather than a defect:
       `writeStateChanges` cannot overwrite a state its read did not see (a guard on the row it
       read, as `writeRuntimes`'), with a test that commits a pause between the read and the
       write.
+
+      **P-414 outcome. A re-decision locks the rows it will write and decides them again from
+      that read.**
+      - **Decisions, taken by the orchestrator** and named in the push question:
+        1. **Decided again, not guarded.** A guard that skips a row that moved since the read
+           (a row version, or the state compared) would leave a lost probe's sensor at the
+           state of its last batch when that batch landed between the read and the write, where
+           today it is written Unknown. So `reevaluate` decides from its unlocked read, takes the
+           rows it will write — rewrites and the acknowledgements a recovery clears — with
+           `lockRuntimes` (`FOR NO KEY UPDATE`, in id order), and decides them again from that;
+           only the second answer is written. A writer still open is waited for and read as it
+           committed. Not a pause guard as `writeRuntimes`' either: a result or a simulated error
+           committed meanwhile is the same overwrite.
+        2. **No more rows locked than before.** Every row it locks it already locked, by
+           `writeStateHistory` (`P-394`) or by the write itself; now earlier, and all in id
+           order, which the rewrite-only rows were not. The rows it decides nothing for stay
+           unlocked, such as a lost probe's paused and simulated sensors and the probe-alarm
+           sensors re-decided beside them. A row decided unchanged from a stale read is not
+           re-checked (`P-416`).
+      - **Cost.** A second read and decision of the rows it writes, only when it writes any.
+      - **Code.** `reevaluate`'s decision is `#redecide`, run once or twice; its cause is a named
+        `ReevaluationCause`. `lockRuntimes` sits beside `loadRuntimes`.
+      - **Docs.** `state-machine.md`, a note beside `P-108`'s; `writeStateChanges`' header.
+      - **Tests.** `reevaluate-race.test.ts`, against PostgreSQL, a lost probe's re-decision with
+        something committed on another connection between its read and its write: a pause, left
+        as it is and recorded over by nothing; a pause still open when the re-decision locks,
+        waited for and left; a simulated error, which outranks the lost probe; two results
+        reaching Down, the transition written from Down and not from the Up it first read; a
+        not-started round's new words, a reword with no transition, under a pause, locked and
+        left; and of three sensors, the two it writes locked in id order and the one it leaves
+        not.
+      - **Review.** Ten findings over six things, fixed: `ReevaluationCause` had taken
+        `PolicySource`'s doc comment; the note, the comment and the test's header gave the old
+        failure the wrong signature (a lost probe's overwrite recorded Unknown after the pause;
+        only a reword left the history saying paused); the ticket's own case, a reword, had no
+        test; decision 2 named a found probe as the case that locks least, which locks most; a
+        test comment named the wrong sensor. Two refuted. And two races that were there before,
+        filed: `P-415` and `P-416`.
+      - **Mutants** 6/6 killed: `origin/main`'s whole service; the second read unlocked (the
+        pause still open and the reword); no second decision; the rows locked taken from the
+        transitions only, which leaves a reword out; the lock without its id order; the read
+        without its lock.
+
+- [ ] **P-415 — a result decided before a hold and stored after the hold's re-decision overwrites
+      it** · S · P-147 · Found 2026-10-17 in `P-414`'s review. Ingestion decides a batch, with
+      the live facts laid on as it decides (`P-412`), and the `Ingestor` writes it up to
+      `batchMaxDelayMs` later. A probe lost in between — `#handleClose` calls
+      `reachability.lost` without waiting for the session's pending batch — re-decides its
+      sensors Unknown/probe and commits first; the batch's `writeRuntimes`, which guards only a
+      pause (`P-147`), then writes its Up or Down over that. The history's newest row stays
+      Unknown (the batch's transitions are stamped as measured, before it), nothing re-decides
+      the sensor while its probe is held, and `found()` then decides it unchanged: the row says
+      Up across the outage and the history says Unknown, in the table uptime is computed from,
+      until the sensor next changes state. The same for a frozen clock, a factory's unreached
+      inputs, a check its probe could not start and a withholding, and in mirror for a batch
+      decided during a silence hold and stored after `resumed()`. **Done when** a result stored
+      after a hold's re-decision cannot leave the row disagreeing with the hold (for instance,
+      the written sensors a live hold covers are re-decided in the ingest transaction, whose
+      rows are locked by then), with a test that decides a batch, commits a lost probe's
+      re-decision and then flushes the batch.
+
+- [ ] **P-416 — a probe lost while its `found()` is still writing leaves its sensors at their last
+      reading** · S · P-414 · Found 2026-10-17 in `P-414`'s review. `#online` clears the overlay
+      before its transaction, which re-decides each sensor from Unknown/probe to what it last
+      read. A `lost()` that arrives before that commits sets the overlay again; its unlocked
+      read sees the committed Unknown/probe and decides nothing, so `P-414` locks nothing and
+      decides nothing again; `found()` then commits Up. Nothing re-decides the sensor while the
+      probe stays away, and the history records Up across the outage. A flapping link or a
+      probe in a crash loop fits the window, which is every round trip of a large probe's
+      re-decision. **Done when** `lost()` and `found()`/`resumed()` for one probe cannot
+      interleave their re-decisions (one at a time per probe, or `found()` re-deciding, or
+      owing, what was lost again since it began), with a test that holds `found()`'s
+      transaction open across a `lost()`.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
