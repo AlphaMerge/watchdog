@@ -164,8 +164,9 @@ at each scan and checks every address. When one is outside the targets, or the n
 nothing, the probe sends the device nothing and marks its result `withheld`. **That result never
 reaches the state machine.** It is not a failed scan: counted as one it would be a Down, and an
 alarm, about a device nobody asked anything of. The core takes it out of the batch and holds the
-sensor in the same set, under a second per-probe name, with the probe's own sentence. The
-transition to Unknown is stamped as the probe measured the refusal, as a result's is.
+sensor in the same set, under a second per-probe name, with the probe's own sentence and where
+it refused (`P-407`). The transition to Unknown is stamped as the probe measured the refusal, as a
+result's is.
 
 **The mark is honoured only where the probe could have refused**: on an error with no readings,
 for a sensor that probe was sent with a set whose targets left the name to it. On anything else
@@ -487,10 +488,17 @@ Five things this settles, none of which `WORKFLOW.MD` states:
   name the phase it failed in and the plain host it was acting on (`failure`, protocol 35). The
   core keeps it beside the message on the current state and on each transition: the scan's own
   when the scan's words explain the state, nothing beside a limit's or a lookup's, what is stored
-  when a person decided the state, and nothing once a pause, an acknowledgement, a hold or a
-  release writes words of its own. **Descriptive, never a cause**: nothing decides on it, so a
-  phase that moves while the state and the cause stand records no transition (invariant 10) and
-  cannot add an alarm.
+  when a person decided the state, and **the held result's own while a hold explains it**
+  (`P-407`). A check its probe refused (`A-41c`: `check`, `resolve` or `connect`, and the
+  device's host) or could not start (`P-265`: `startup` or `pool-disabled`, no host) is not
+  decided, but its sentence is the sensor's message while it is held, and where it stopped goes
+  with it: on the transition into the hold, on the current state, through a refusal renewed in
+  new words or with a new place (no transition), and through a result decided while it is held.
+  Nothing goes beside a sentence the core writes itself (`A-29`, `A-41`), since no probe named
+  anything, and nothing once a pause, an acknowledgement or a release writes words of its own. A
+  probe below protocol 35 names nothing, and its hold stores nothing. **Descriptive, never a
+  cause**: nothing decides on it, so a phase that moves while the state and the cause stand
+  records no transition (invariant 10) and cannot add an alarm.
 
 Limits that contradict each other — a warning limit past its error limit, or a lower limit above
 an upper one — are refused when they are set, with the reason. A threshold that could never fire
@@ -739,7 +747,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | any                 | `paused`            | Any pause source becomes active                    | first active (§3)      |
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
-| any but `paused`    | `unknown`           | Its probe could not start its check: the check process never reached its ready line, or the pool gave up before running it (`P-265`). The result is not stored, and the sensor carries the probe's sentence | `probe` |
+| any but `paused`    | `unknown`           | Its probe could not start its check: the check process never reached its ready line, or the pool gave up before running it (`P-265`). The result is not stored, and the sensor carries the probe's sentence and where the check stopped (`P-407`) | `probe` |
 | `unknown` (`probe`) | `up` / `warning` / `down` / `unknown` | Its probe answers again, it moved to another probe, or the probe's clock passed its last result: its last reading decides until the next one, and its message says which (`R-11`) | `scan` / `limit` / `lookup` |
 | `unknown` (`probe`) | `up` / `warning` / `down` | A check of its own started and finished after its probe could not start one: that result decides it, in one transition (`P-265`) | `scan` / `limit` / `lookup` |
 | any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled; or the sensor is outside its credentials' bounds (`A-41b`) | `access` |

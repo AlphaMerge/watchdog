@@ -12,7 +12,9 @@ import type { Migration } from './types.js';
  *
  * **Beside the message, and by the same rule** (`state-machine.md` §2.2): set when the words are
  * the scan's own and the scan failed, NULL when a limit, a lookup, a pause, an acknowledgement or
- * a hold explains the state. **Descriptive, never a cause**: nothing decides on these, and a phase
+ * a hold explains the state. Since `P-407` a hold on a result its probe refused or could not start
+ * keeps that result's place beside its words, and NULL is beside a release's or the core's own
+ * sentence; migration 082 says so in `sensor_runtime.failure_phase`'s comment. **Descriptive, never a cause**: nothing decides on these, and a phase
  * that changes while the state and the cause do not records no transition (§4.2, invariant 10).
  *
  * **Nullable, and NULL is "not named"**: every row before this, every result from a probe below

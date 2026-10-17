@@ -99,7 +99,7 @@ describe(
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
-        withheldSensors: () => vouching.withheld(),
+        withheldSensors: () => vouching.heldWords(),
       });
       const sync = new TriggerSync({ engine, logger: silent });
       h.audit.also = sync;

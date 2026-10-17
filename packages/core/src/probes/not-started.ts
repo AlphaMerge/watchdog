@@ -1,4 +1,4 @@
-import { describeError, type CheckResult, type Logger } from '@ms/shared';
+import { describeError, type CheckFailure, type CheckResult, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { PROBE_SOURCE, type DependencyRecomputer, type StateReevaluator } from './reachability.js';
@@ -203,7 +203,8 @@ export class NotStarted {
     }
     this.#place(probeObjectId, next, since);
     // Only the ones whose words changed are re-decided: a sensor held already in the same words
-    // has its hold moved forward and nothing else.
+    // has its hold moved forward and nothing else. Where it stopped is not compared: the same
+    // words name the same runner phase, and a sensor held again is not rewritten (`P-407`).
     const toMove = entering.filter(
       (result) => before.get(result.sensorId)?.message !== result.message,
     );
@@ -211,14 +212,25 @@ export class NotStarted {
       if (toMove.length > 0) {
         await this.#db.tx(async (q) => {
           const at = this.#now();
-          const byMessage = new Map<string, number[]>();
+          // One re-decision per sentence and place it stopped, so one sensor's failure is never
+          // stored beside another's words (`P-407`). A probe below protocol 35 names none.
+          const byWords = new Map<
+            string,
+            { message: string; failure: CheckFailure | null; ids: number[] }
+          >();
           for (const result of toMove) {
-            const ids = byMessage.get(result.message) ?? [];
-            ids.push(result.sensorId);
-            byMessage.set(result.message, ids);
+            const failure = result.failure ?? null;
+            const key = JSON.stringify([
+              result.message,
+              failure?.phase ?? null,
+              failure?.target ?? null,
+            ]);
+            const group = byWords.get(key) ?? { message: result.message, failure, ids: [] };
+            group.ids.push(result.sensorId);
+            byWords.set(key, group);
           }
-          for (const [message, ids] of byMessage) {
-            await this.#states.reevaluate(q, ids, at, { message, sources: PROBE_SOURCE });
+          for (const { message, failure, ids } of byWords.values()) {
+            await this.#states.reevaluate(q, ids, at, { message, sources: PROBE_SOURCE, failure });
           }
           await this.#moveAlarms(q, probeObjectId, at);
         });

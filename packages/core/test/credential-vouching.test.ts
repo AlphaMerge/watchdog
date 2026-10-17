@@ -409,7 +409,7 @@ describe(
       db = scratch.db;
       h = await buildHarness(db, {
         states: true,
-        withheldSensors: () => vouching.withheld(),
+        withheldSensors: () => vouching.heldWords(),
       });
       accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
       groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });

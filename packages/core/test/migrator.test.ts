@@ -2340,6 +2340,51 @@ describe(
       }
     });
 
+    it('says a hold keeps its check’s place in the current state’s comment, and rolls back to 081’s words (082)', async () => {
+      // `P-407`: 081's comment said NULL wherever the state is not the scan's to explain, and a
+      // refused or unstarted check's hold now keeps its place. Only a comment moves.
+      const fresh = await createScratchDatabase('held_failure_comment');
+      try {
+        const q = fresh.db;
+        const all = migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 82),
+        );
+        await migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 81),
+        ).up();
+        const comment = async (table: string): Promise<string | null> =>
+          (
+            await q.query<{ comment: string | null }>(
+              `SELECT col_description($1::regclass, attnum) AS comment
+                 FROM pg_attribute WHERE attrelid = $1::regclass AND attname = 'failure_phase'`,
+              [table],
+            )
+          )[0]?.comment ?? null;
+        const before = await comment('sensor_runtime');
+        assert.match(before ?? '', /not the scan's to explain \(P-285\)/u);
+        const transitions = await comment('sensor_state');
+
+        assert.deepEqual(
+          (await all.up()).applied.map((one) => one.id),
+          [82],
+        );
+        const after = await comment('sensor_runtime');
+        assert.match(after ?? '', /a refused or unstarted check's while it holds the sensor/u);
+        assert.match(after ?? '', /P-407/u);
+        assert.equal(await comment('sensor_state'), transitions, 'the transitions’ is still true');
+
+        assert.deepEqual(
+          (await all.down(1)).reverted.map((one) => one.id),
+          [82],
+        );
+        assert.equal(await comment('sensor_runtime'), before, '081’s words, exactly');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

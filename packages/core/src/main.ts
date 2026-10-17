@@ -84,7 +84,7 @@ import { MetricsExporter } from './metrics/exporter.js';
 import { PeriodicSweep } from './support/periodic-sweep.js';
 import { NotificationTester } from './notifications/test-send.js';
 import { StateBroadcaster } from './state/stream.js';
-import type { CommittedStates } from './state/runtime.js';
+import type { CommittedStates, HeldWords } from './state/runtime.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
 import { ProgramTransport } from './notifications/delivery/program.js';
@@ -508,7 +508,7 @@ async function serve(): Promise<void> {
   // them (`A-29`). The check needs the state service to move them, so it is built after it.
   // eslint-disable-next-line prefer-const -- assigned below, once the check exists.
   let vouchingRef: SensorVouching | undefined;
-  const nothingWithheld: ReadonlyMap<number, string> = new Map();
+  const nothingWithheld: ReadonlyMap<number, HeldWords> = new Map();
   // And for the sensors a probe's clock has frozen (`P-232`), which needs the endpoint.
   // eslint-disable-next-line prefer-const -- assigned below, once the endpoint exists.
   let clockFreezeRef: ClockFreeze | undefined;
@@ -531,7 +531,7 @@ async function serve(): Promise<void> {
     clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
     notStartedSensors: () => notStartedRef?.heldSensors() ?? noneFrozen,
     unreachedFactories: () => factoryReach.unreached(),
-    withheldSensors: () => vouchingRef?.withheld() ?? nothingWithheld,
+    withheldSensors: () => vouchingRef?.heldWords() ?? nothingWithheld,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
   // outage, and moving a subtree under one has to arm what arrives with it.

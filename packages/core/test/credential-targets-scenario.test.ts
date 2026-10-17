@@ -192,7 +192,7 @@ describe(
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
-        withheldSensors: () => vouching.withheld(),
+        withheldSensors: () => vouching.heldWords(),
         types: [sshLoad],
       });
       assert.ok(h.dependencies !== undefined, 'dependencies apply here');

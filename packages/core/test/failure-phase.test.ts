@@ -6,8 +6,16 @@ import { ApiServer } from '../src/api/server.js';
 import { Reach, Visibility } from '../src/auth/access.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
-import { readSensorState, writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
-import type { SensorResult } from '../src/state/service.js';
+import { MOVED_OFF_MESSAGE } from '../src/probes/not-started.js';
+import { PROBE_SOURCE } from '../src/probes/reachability.js';
+import {
+  readSensorState,
+  sameFailure,
+  writeRuntimes,
+  writeStateHistory,
+  type HeldWords,
+} from '../src/state/runtime.js';
+import { RELEASED_FROM_WITHHOLDING, type SensorResult } from '../src/state/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -27,13 +35,43 @@ const CONNECT: CheckFailure = { phase: 'connect', target: '192.0.2.40:22' };
 const AUTH: CheckFailure = { phase: 'authenticate', target: '192.0.2.40:22' };
 const EXEC: CheckFailure = { phase: 'exec', target: '192.0.2.40:22' };
 
+/** What a probe that could not start a check says, and where it stopped (`P-265`). */
+const GAVE_UP = 'the probe took 10012 ms to start the check and gave up';
+const STARTUP: CheckFailure = { phase: 'startup' };
+/** What a probe that refused a check says, and where (`A-41c`). */
+const REFUSED = 'Not scanned: app.dc.test did not resolve before the check’s timeout.';
+const RESOLVE: CheckFailure = { phase: 'resolve', target: 'app.dc.test' };
+const CHECK: CheckFailure = { phase: 'check', target: 'app.dc.test' };
+
+/** The holds the state service reads live, set by each test (`P-407`). */
+const unstarted = new Set<number>();
+const withheld = new Map<number, HeldWords>();
+
+describe('whether two places a check stopped are the same (P-407)', () => {
+  it('is the same phase and the same host, or both none', () => {
+    assert.equal(sameFailure(null, null), true);
+    assert.equal(sameFailure(RESOLVE, { phase: 'resolve', target: 'app.dc.test' }), true);
+    assert.equal(sameFailure(STARTUP, { phase: 'startup' }), true);
+    assert.equal(sameFailure(RESOLVE, null), false);
+    assert.equal(sameFailure(null, STARTUP), false);
+    assert.equal(sameFailure(RESOLVE, CHECK), false, 'another phase');
+    assert.equal(
+      sameFailure(RESOLVE, { phase: 'resolve', target: 'db.dc.test' }),
+      false,
+      'another host',
+    );
+    assert.equal(sameFailure(RESOLVE, { phase: 'resolve' }), false, 'a host and none');
+  });
+});
+
 /**
  * Where a failed check failed, kept beside its message by the message's rule (`P-285`,
  * `state-machine.md` §2.2): the scan's own when its words explain the state and it failed,
  * nothing beside a limit's or a lookup's words, what is stored when a person decided the state,
- * and nothing once a pause, an acknowledgement or a hold writes words of its own. **Never a
- * cause**: a phase that moves while the state and the cause stand records no transition (§4.2,
- * invariant 10), so it cannot add an alarm.
+ * the held result's own while a probe's refusal or a check it could not start is why the sensor
+ * is held (`P-407`), and nothing once a pause, an acknowledgement, a release or the core's own
+ * sentence writes words of its own. **Never a cause**: a phase that moves while the state and the
+ * cause stand records no transition (§4.2, invariant 10), so it cannot add an alarm.
  */
 describe(
   'where a check failed, beside its message (`P-285`)',
@@ -48,7 +86,11 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('failure_phase_state');
       db = scratch.db;
-      h = await buildHarness(db, { states: true });
+      h = await buildHarness(db, {
+        states: true,
+        notStartedSensors: () => unstarted,
+        withheldSensors: () => withheld,
+      });
       const server = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -75,6 +117,8 @@ describe(
     });
 
     beforeEach(async () => {
+      unstarted.clear();
+      withheld.clear();
       const probe = await h.service.create(testActor, {
         kind: 'probe',
         parentId: h.rootId,
@@ -105,6 +149,26 @@ describe(
         await writeStateHistory(q, decisions.transitions);
         await writeRuntimes(q, decisions.runtimes);
       });
+    }
+
+    /** What a hold or its release does, the way `NotStarted` and `SensorVouching` call it. */
+    async function rehold(
+      minutes: number,
+      cause: Parameters<NonNullable<Harness['states']>['reevaluate']>[3],
+    ): Promise<void> {
+      const states = h.states;
+      assert.ok(states !== undefined);
+      await db.tx((q) => states.reevaluate(q, [sensorId], at(minutes), cause));
+    }
+
+    async function said(): Promise<{
+      state: string;
+      message: string;
+      failure: CheckFailure | null;
+    }> {
+      const runtime = await readSensorState(db, sensorId);
+      assert.ok(runtime !== null);
+      return { state: runtime.state, message: runtime.message, failure: runtime.failure };
     }
 
     const failed = (minutes: number, failure?: CheckFailure): SensorResult => ({
@@ -259,6 +323,100 @@ describe(
         null,
         'the pause’s words, and nothing of the check’s beside them',
       );
+    });
+
+    it('keeps where a check its probe could not start stopped, beside the hold’s words (P-407)', async () => {
+      await report([ok(0)]);
+      await report([failed(1, CONNECT)]);
+      await report([failed(2, CONNECT)]);
+      // Held as `NotStarted.hold` holds it: the sensor in the overlay, its words and its place.
+      unstarted.add(sensorId);
+      await rehold(3, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
+      assert.deepEqual(await said(), { state: 'unknown', message: GAVE_UP, failure: STARTUP });
+      assert.deepEqual((await transitions()).at(-1), ['unknown', 'probe', 'startup', null]);
+
+      // A result decided while it is held keeps the hold's words, and their place with them.
+      await report([failed(4, EXEC)]);
+      assert.deepEqual(await said(), { state: 'unknown', message: GAVE_UP, failure: STARTUP });
+
+      // Let go, the next result decides it, and a success names nowhere it failed. The cache is
+      // forgotten here by hand because `NotStarted.release` does not yet do it (`P-409`): the
+      // result decided while held is cached with the probe unreachable.
+      unstarted.delete(sensorId);
+      h.states?.forgetSensors([sensorId]);
+      await report([ok(5)]);
+      assert.deepEqual(await current(), { state: 'up', failure: null });
+      assert.deepEqual((await transitions()).at(-1), ['up', 'scan', null, null]);
+    });
+
+    it('lets the place go with the hold’s words when the probe lets a sensor go', async () => {
+      await report([failed(1, CONNECT)]);
+      await report([failed(2, CONNECT)]);
+      unstarted.add(sensorId);
+      await rehold(3, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
+      unstarted.delete(sensorId);
+      // Moved off the probe that held it: the words are the release's, and say nowhere.
+      await rehold(4, { message: MOVED_OFF_MESSAGE, sources: PROBE_SOURCE });
+      assert.deepEqual(await said(), {
+        state: 'down',
+        message: MOVED_OFF_MESSAGE,
+        failure: null,
+      });
+      assert.deepEqual((await transitions()).at(-1), ['down', 'scan', null, null]);
+    });
+
+    it('keeps where a probe refused a check beside its refusal, follows a renewal, and goes with the words', async () => {
+      await report([failed(1, CONNECT)]);
+      await report([failed(2, CONNECT)]);
+      // Held as `SensorVouching` holds it: the probe's words and its place, from one owner.
+      withheld.set(sensorId, { message: REFUSED, failure: RESOLVE });
+      await rehold(3, { message: '', sources: ['access'] });
+      assert.deepEqual(await said(), { state: 'unknown', message: REFUSED, failure: RESOLVE });
+      assert.deepEqual((await transitions()).at(-1), [
+        'unknown',
+        'access',
+        'resolve',
+        'app.dc.test',
+      ]);
+      const held = await transitions();
+
+      // The same words with a new place: written, and no transition, since nothing decided moved.
+      withheld.set(sensorId, { message: REFUSED, failure: CHECK });
+      await rehold(4, { message: '', sources: ['access'] });
+      assert.deepEqual(await said(), { state: 'unknown', message: REFUSED, failure: CHECK });
+      // A result decided while it is held keeps the refusal's words, and their place.
+      await report([failed(5, EXEC)]);
+      assert.deepEqual(await said(), { state: 'unknown', message: REFUSED, failure: CHECK });
+
+      // The core's own sentence in its place: nothing beside it, since no probe named anything.
+      withheld.set(sensorId, { message: 'withheld by the core', failure: null });
+      await rehold(6, { message: '', sources: ['access'] });
+      assert.deepEqual(await said(), {
+        state: 'unknown',
+        message: 'withheld by the core',
+        failure: null,
+      });
+      assert.deepEqual(await transitions(), held, 'one hold, one Unknown, whatever it said');
+
+      // Let go: the release's words, and nothing of where a refused check stopped.
+      withheld.delete(sensorId);
+      await rehold(7, { message: '', sources: ['access'] });
+      assert.deepEqual(await said(), {
+        state: 'down',
+        message: RELEASED_FROM_WITHHOLDING,
+        failure: null,
+      });
+      assert.deepEqual((await transitions()).at(-1), ['down', 'scan', null, null]);
+    });
+
+    it('says nothing of a refused check beside a pause’s words over the refusal', async () => {
+      await report([failed(1, CONNECT)]);
+      withheld.set(sensorId, { message: REFUSED, failure: RESOLVE });
+      await rehold(2, { message: '', sources: ['access'] });
+      assert.deepEqual(await current(), { state: 'unknown', failure: RESOLVE });
+      await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
+      assert.deepEqual(await said(), { state: 'paused', message: 'maintenance', failure: null });
+      assert.deepEqual((await transitions()).at(-1), ['paused', 'user', null, null]);
     });
   },
 );

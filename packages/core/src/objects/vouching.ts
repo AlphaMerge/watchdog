@@ -2,6 +2,7 @@ import { describeError, type Logger } from '@ms/shared';
 import type { AccessPrincipal, Visibility } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import type { Queryable } from '../db/pool.js';
+import { sameFailure, type HeldWords } from '../state/runtime.js';
 import type { SensorStateCause } from '../state/tables.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 
@@ -153,6 +154,12 @@ interface Account {
   readonly disabled: boolean;
 }
 
+/** Whether two holds say the same words and name the same place it stopped, or are both none. */
+function sameHeld(a: HeldWords | undefined, b: HeldWords | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return a.message === b.message && sameFailure(a.failure, b.failure);
+}
+
 /**
  * The core's evaluators ask this before evaluating a sensor that republishes what it reads
  * (`A-29`), and it holds the answer as a live fact the state machine reads (§2 layer 3a).
@@ -182,14 +189,20 @@ export class SensorVouching implements VoucherCheck {
   readonly #dependencies: WithheldDependencies | undefined;
   readonly #now: () => Date;
 
-  /** Every withheld sensor, with its sentence. What `SensorStateService` lays over the facts. */
+  /** Every withheld sensor, with its sentence. */
   readonly #withheld = new Map<number, string>();
+  /**
+   * Every withheld sensor, with its sentence and where its probe stopped when that sentence is a
+   * probe's refusal (`P-407`). What `SensorStateService` lays over the facts. Set with
+   * `#withheld`, from the same owner's value, so the two cannot disagree.
+   */
+  readonly #held = new Map<number, HeldWords>();
   /**
    * Which sweep withholds which sensors, and in what words, so one sweep's answer never clears
    * another's. A sensor moving between probes is withheld by one probe's check and released by
    * the other's, in either order (`A-41`).
    */
-  readonly #byOwner = new Map<string, ReadonlyMap<number, string>>();
+  readonly #byOwner = new Map<string, ReadonlyMap<number, HeldWords>>();
   /**
    * Sensors let go by `release` whose dependents have not been settled yet, because that write
    * failed. Tried again with the next release that is evaluated.
@@ -219,6 +232,11 @@ export class SensorVouching implements VoucherCheck {
 
   withheld(): ReadonlyMap<number, string> {
     return this.#withheld;
+  }
+
+  /** `withheld`, with where each refusing probe stopped beside its words (`P-407`). */
+  heldWords(): ReadonlyMap<number, HeldWords> {
+    return this.#held;
   }
 
   stats(): VouchingStats {
@@ -353,7 +371,8 @@ export class SensorVouching implements VoucherCheck {
    */
   settleOrThrow(
     owner: string,
-    refused: ReadonlyMap<number, string>,
+    /** The probe's words for each sensor, and where it stopped (`P-407`). */
+    refused: ReadonlyMap<number, HeldWords>,
     /**
      * When what changed was decided, if not now. A probe's refusal is stamped as the probe
      * measured it, like the results either side of it: stamped with this core's clock, a hold
@@ -379,10 +398,10 @@ export class SensorVouching implements VoucherCheck {
    */
   release(owner: string, sensorIds: readonly number[]): ReleasedHold {
     const before = this.#byOwner.get(owner);
-    const taken = new Map<number, string>();
+    const taken = new Map<number, HeldWords>();
     for (const id of sensorIds) {
-      const message = before?.get(id);
-      if (message !== undefined) taken.set(id, message);
+      const words = before?.get(id);
+      if (words !== undefined) taken.set(id, words);
     }
     if (before === undefined || taken.size === 0) {
       return { released: [], undo: () => undefined, evaluated: () => Promise.resolve() };
@@ -403,7 +422,7 @@ export class SensorVouching implements VoucherCheck {
       undo: () => {
         const now = new Map(this.#byOwner.get(owner));
         // Whatever was held again meanwhile keeps its newer words.
-        for (const [id, message] of taken) if (!now.has(id)) now.set(id, message);
+        for (const [id, words] of taken) if (!now.has(id)) now.set(id, words);
         this.#byOwner.set(owner, now);
         for (const id of taken.keys()) this.#recount(id);
         this.#states?.forgetSensors?.([...taken.keys()]);
@@ -452,17 +471,29 @@ export class SensorVouching implements VoucherCheck {
     owners: ReadonlyMap<string, ReadonlyMap<number, string>>,
     alongside?: StagedSet,
   ): Promise<number> {
-    return this.#settleAll(owners, alongside, false);
+    // A sweep's words are the core's own: no probe named where anything stopped (`P-407`).
+    const words = new Map(
+      [...owners].map(([owner, refused]) => [
+        owner,
+        new Map(
+          [...refused].map(([id, message]): [number, HeldWords] => [
+            id,
+            { message, failure: null },
+          ]),
+        ),
+      ]),
+    );
+    return this.#settleAll(words, alongside, false);
   }
 
   async #settleAll(
-    owners: ReadonlyMap<string, ReadonlyMap<number, string>>,
+    owners: ReadonlyMap<string, ReadonlyMap<number, HeldWords>>,
     alongside: StagedSet | undefined,
     /** Whether a write that failed is the caller's to hear about, after the sets are put back. */
     strict: boolean,
     stamped?: Date,
   ): Promise<number> {
-    const had = new Map<string, ReadonlyMap<number, string> | undefined>();
+    const had = new Map<string, ReadonlyMap<number, HeldWords> | undefined>();
     const touched = new Set<number>([...(alongside?.entered ?? []), ...(alongside?.left ?? [])]);
     for (const [owner, refused] of owners) {
       const before = this.#byOwner.get(owner);
@@ -470,7 +501,7 @@ export class SensorVouching implements VoucherCheck {
       for (const id of before?.keys() ?? []) touched.add(id);
       for (const id of refused.keys()) touched.add(id);
     }
-    const was = new Map([...touched].map((id) => [id, this.#withheld.get(id)]));
+    const was = new Map([...touched].map((id) => [id, this.#held.get(id)]));
     for (const [owner, refused] of owners) this.#byOwner.set(owner, new Map(refused));
 
     const cameIn = new Set(alongside?.entered);
@@ -484,7 +515,9 @@ export class SensorVouching implements VoucherCheck {
     for (const id of touched) {
       const before = was.get(id);
       const now = this.#recount(id);
-      if (before === now && !cameIn.has(id) && !wentOut.has(id)) continue;
+      // The same words with a new place it stopped are a change too, re-decided so the row
+      // carries the new place beside them (`P-407`); it records no transition.
+      if (sameHeld(before, now) && !cameIn.has(id) && !wentOut.has(id)) continue;
       changed.push(id);
       const unevaluatedBefore = before !== undefined || heldBefore(id);
       const unevaluatedNow = now !== undefined || alongside?.holds(id) === true;
@@ -542,18 +575,26 @@ export class SensorVouching implements VoucherCheck {
   }
 
   /** Sets the live fact for one sensor from what the owners hold, and returns it. */
-  #recount(sensorId: number): string | undefined {
+  #recount(sensorId: number): HeldWords | undefined {
     const now = this.#heldBy(sensorId);
-    if (now === undefined) this.#withheld.delete(sensorId);
-    else this.#withheld.set(sensorId, now);
+    if (now === undefined) {
+      this.#withheld.delete(sensorId);
+      this.#held.delete(sensorId);
+    } else {
+      this.#withheld.set(sensorId, now.message);
+      this.#held.set(sensorId, now);
+    }
     return now;
   }
 
-  /** The words of the first sweep still withholding this sensor, or undefined if none is. */
-  #heldBy(sensorId: number): string | undefined {
+  /**
+   * The words of the first sweep still withholding this sensor, with where its probe stopped,
+   * or undefined if none is. One owner's value, so the place is always the words' own.
+   */
+  #heldBy(sensorId: number): HeldWords | undefined {
     for (const held of this.#byOwner.values()) {
-      const message = held.get(sensorId);
-      if (message !== undefined) return message;
+      const words = held.get(sensorId);
+      if (words !== undefined) return words;
     }
     return undefined;
   }

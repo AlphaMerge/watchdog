@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import type { CheckResult } from '@ms/shared';
+import type { CheckFailure, CheckResult } from '@ms/shared';
 import type { Mutation } from '../src/objects/audit.js';
 import { ClockFreezeSync } from '../src/probes/clock-freeze-sync.js';
 import {
@@ -22,7 +22,15 @@ const at = (seconds: number): string => new Date(T0 + seconds * 1000).toISOStrin
 const GAVE_UP = 'the probe took 10012 ms to start the check and gave up';
 const POOL = 'the worker pool has given up and cannot run checks';
 
-function unstarted(sensorId: number, seconds: number, message = GAVE_UP): CheckResult {
+const STARTUP: CheckFailure = { phase: 'startup' };
+const POOL_DISABLED: CheckFailure = { phase: 'pool-disabled' };
+
+function unstarted(
+  sensorId: number,
+  seconds: number,
+  message = GAVE_UP,
+  failure?: CheckFailure,
+): CheckResult {
   return {
     sensorId,
     at: at(seconds),
@@ -31,6 +39,7 @@ function unstarted(sensorId: number, seconds: number, message = GAVE_UP): CheckR
     durationMs: 10_012,
     channels: [],
     notStarted: true,
+    ...(failure === undefined ? {} : { failure }),
   };
 }
 
@@ -50,7 +59,13 @@ interface World {
   readonly last: Map<number, number>;
   /** The sensors still under each probe, as the tree has it. */
   readonly under: Map<number, number[]>;
-  readonly reevaluated: { ids: number[]; message: string; sources: readonly string[] }[];
+  readonly reevaluated: {
+    ids: number[];
+    message: string;
+    sources: readonly string[];
+    /** Where the check stopped, when the caller passed one (`P-407`). */
+    failure?: CheckFailure | null;
+  }[];
   recomputes: number;
   /** Refuses every write while true. */
   failing: boolean;
@@ -91,6 +106,7 @@ function holder(w: World, alarms: readonly number[] = []): NotStarted {
           ids: [...ids],
           message: cause.message,
           sources: [...cause.sources],
+          ...(cause.failure === undefined ? {} : { failure: cause.failure }),
         });
         return Promise.resolve(ids.length);
       },
@@ -121,11 +137,28 @@ describe('what a probe that could not start a check holds (`P-265`)', () => {
     assert.equal(held.carrierOf(1), undefined);
     assert.deepEqual(held.heldBy(9)?.sensorIds, new Set([2, 4]));
     assert.deepEqual(w.reevaluated, [
-      { ids: [2], message: GAVE_UP, sources: ['probe'] },
-      { ids: [4], message: POOL, sources: ['probe'] },
+      { ids: [2], message: GAVE_UP, sources: ['probe'], failure: null },
+      { ids: [4], message: POOL, sources: ['probe'], failure: null },
       { ids: [99], message: '', sources: ['probe'] },
     ]);
     assert.equal(w.recomputes, 1, 'a master that is Unknown releases what it held');
+  });
+
+  it('holds each sensor with where its check stopped, one re-decision per sentence and place (P-407)', async () => {
+    const w = world();
+    const held = holder(w);
+    await held.hold(9, [
+      unstarted(1, 0, GAVE_UP, STARTUP),
+      unstarted(2, 0, GAVE_UP, STARTUP),
+      // The same words from a probe below protocol 35, which names nowhere.
+      unstarted(3, 0, GAVE_UP),
+      unstarted(4, 0, POOL, POOL_DISABLED),
+    ]);
+    assert.deepEqual(w.reevaluated, [
+      { ids: [1, 2], message: GAVE_UP, sources: ['probe'], failure: STARTUP },
+      { ids: [3], message: GAVE_UP, sources: ['probe'], failure: null },
+      { ids: [4], message: POOL, sources: ['probe'], failure: POOL_DISABLED },
+    ]);
   });
 
   it('passes a batch with nothing marked straight through, reading nothing', async () => {

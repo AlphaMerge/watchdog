@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
   targetVerdict,
   versionFor,
+  type CheckFailure,
   type CheckResult,
   type Logger,
 } from '@ms/shared';
@@ -23,6 +24,7 @@ import {
   type Writer,
   type Writes,
 } from './sensor-reads.js';
+import { sameFailure, type HeldWords } from '../state/runtime.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 import type { ObjectId } from './types.js';
 import {
@@ -1200,10 +1202,15 @@ interface RecordWrite {
   counted: boolean;
 }
 
-/** One sensor a probe refused to scan (`A-41c`), and when it last said so, by its own clock. */
+/**
+ * One sensor a probe refused to scan (`A-41c`), when it last said so, by its own clock, and where
+ * it stopped (`P-407`): `check`, `resolve` or `connect` and the device's host, or nothing from a
+ * probe below protocol 35.
+ */
 interface ProbeRefusal {
   readonly at: number;
   readonly message: string;
+  readonly failure: CheckFailure | null;
 }
 
 /**
@@ -1212,7 +1219,7 @@ interface ProbeRefusal {
  * re-decides nothing (`A-41c`).
  */
 export interface ProbeRefusalHolds extends Pick<VoucherCheck, 'settle'> {
-  settleOrThrow(owner: string, refused: ReadonlyMap<number, string>, at?: Date): Promise<number>;
+  settleOrThrow(owner: string, refused: ReadonlyMap<number, HeldWords>, at?: Date): Promise<number>;
   release(owner: string, sensorIds: readonly number[]): ReleasedHold;
 }
 
@@ -1260,14 +1267,19 @@ function unmarked(result: CheckResult): CheckResult {
   return plain;
 }
 
-/** Whether two sets of refusals say the same words about the same sensors. */
-function sameWords(
+/** Whether two refusals say the same words and name the same place it stopped (`P-407`). */
+function sameRefusal(a: ProbeRefusal | undefined, b: ProbeRefusal): boolean {
+  return a !== undefined && a.message === b.message && sameFailure(a.failure, b.failure);
+}
+
+/** Whether two sets of refusals say the same about the same sensors. */
+function sameRefusals(
   a: ReadonlyMap<number, ProbeRefusal> | undefined,
   b: ReadonlyMap<number, ProbeRefusal>,
 ): boolean {
   if ((a?.size ?? 0) !== b.size) return false;
   for (const [sensorId, refusal] of b) {
-    if (a?.get(sensorId)?.message !== refusal.message) return false;
+    if (!sameRefusal(a?.get(sensorId), refusal)) return false;
   }
   return true;
 }
@@ -2332,9 +2344,10 @@ export class CredentialVouching {
       }
       const known = holding?.at ?? lastResultAt(result.sensorId)?.getTime();
       if (known !== undefined && at <= known) continue;
-      refused.set(result.sensorId, { at, message: result.message });
+      const said = { at, message: result.message, failure: result.failure ?? null };
+      refused.set(result.sensorId, said);
       letGo.delete(result.sensorId);
-      if (held?.get(result.sensorId)?.message !== result.message) news = Math.min(news ?? at, at);
+      if (!sameRefusal(held?.get(result.sensorId), said)) news = Math.min(news ?? at, at);
     }
 
     // What the set has to hold before anything is let go: every refusal that stands, and still
@@ -2344,11 +2357,12 @@ export class CredentialVouching {
       const was = held?.get(sensorId);
       if (was !== undefined) holdsNow.set(sensorId, was);
     }
-    // The same words at a later time move nothing anybody reads, and settle nothing.
+    // The same words at a later time move nothing anybody reads, and settle nothing. The same
+    // words with a new place it stopped do, since that place is read beside them (`P-407`).
     // Stamped as the probe measured it, as a result's transition is, so that the reading which
     // lets it go sorts after it whatever the two clocks say. Never ahead of this core's clock: a
     // refusal does not pass the gate that drops a result stamped in the future.
-    if (!sameWords(held, holdsNow)) {
+    if (!sameRefusals(held, holdsNow)) {
       await this.#settleReported(
         probeId,
         holdsNow,
@@ -2514,7 +2528,12 @@ export class CredentialVouching {
     );
     await this.#vouching?.settleOrThrow(
       `credentials-probe:${String(probeId)}`,
-      new Map([...refused].map(([sensorId, refusal]) => [sensorId, refusal.message])),
+      new Map(
+        [...refused].map(([sensorId, refusal]) => [
+          sensorId,
+          { message: refusal.message, failure: refusal.failure },
+        ]),
+      ),
       at,
     );
   }

@@ -11039,12 +11039,85 @@ because each is a decision rather than a defect:
       errors. **Done when** each of these names its phase and, where it has one, its host, as
       `adding-a-sensor-type.md` now asks, with a test per transport against its simulator.
 
-- [ ] **P-407 — a held result keeps its words but not where it failed** · XS · P-285 · Found
+- [x] **P-407 — a held result keeps its words but not where it failed** · XS · P-285 · Found
       2026-10-17 in `P-285`. A refusal (`withheld`, `A-41c`) and a check the probe could not start
       (`notStarted`, `P-265`) are not decided: the core holds the sensor through `reevaluate`
       with the result's message, and `writeStateChanges` clears the failure beside it, so the
       `resolve` or `startup` the probe named is not stored. **Done when** a held result's
       failure is stored beside its held words and cleared with them, with tests for both holds.
+
+      **P-407 outcome. Migration 082. Where a held check stopped is kept beside the words that
+      hold it.** No protocol: 081's columns and CHECKs and protocol 35's `failure` already allow
+      it. 082 only says so in `sensor_runtime.failure_phase`'s comment, which 081 wrote as NULL
+      wherever the state is not the scan's; its rollback puts 081's words back.
+      - **The ticket was narrower than the loss.** A refusal's words do not travel through
+        `reevaluate`'s cause, as the ticket said: they are `result.message`, kept by
+        `CredentialVouching` and handed to `SensorVouching`, which the state service reads live.
+        The failure was dropped in five places: at intake (`ProbeRefusal` and `NotStarted` kept
+        the message only), on the transition into the hold, in `writeStateChanges` (literal
+        NULL), on `M-28`'s reword of renewed words, and in `decide` (`withheld → null`). And a
+        refusal names `check`, `resolve` or `connect` with the device's host; a check that could
+        not start names `startup` or `pool-disabled` and no host.
+      - **Decisions, taken by the orchestrator** and named in the push question:
+        1. **Only a probe's held result stores a failure**: a refusal (owner
+           `credentials-probe:<id>`) and a check it could not start. A sentence the core writes
+           itself (`A-29`, `A-41`, a factory's voucher, the health sensors) stores none, since no
+           probe named anything; inventing `{phase:'check'}` for `A-41`'s own refusal would claim
+           a check that never ran.
+        2. **One value per owner.** `HeldWords {message, failure}` (`state/runtime.ts`) is what
+           `SensorVouching` holds per owner, so the words and the place always come from the same
+           owner. `settleOrThrow` takes it; a sweep's `settle` keeps its strings and holds none.
+        3. **A sibling accessor.** `heldWords()` beside `withheld()`, which keeps its strings for
+           its 66 test readers and `FactoryVouching`. `withheldSensors` now returns `HeldWords`,
+           so `main.ts` does not compile until it is rewired.
+        4. **A new place under the same words is news** (`sameRefusals`, `#settleAll`'s change
+           test, the reword guard): written, never a transition. Steady state is unchanged, since
+           the same sentence always carries the same phase; it is how a hold from before this
+           change, or from a probe that moved to 35, gets its place.
+        5. **`NotStarted` compares words only and groups by words and place**: a re-hold writes
+           nothing (`P-409`), and one sensor's place is never stored beside another's words.
+        6. **`reevaluate` stores `cause.failure` only beside the caller's own words**: when a
+           person, a hold or the probe decided the state, the caller speaks for that cause, and no
+           withholding's words took the message. Never beside release words.
+        7. **`StateRewrite.failure` is required**, and `writeStateChanges` writes it: a pause, an
+           acknowledgement and a release say `null` explicitly.
+        8. **A probe below 35 holds with nothing**, never a place left from an earlier refusal.
+      - **No web change.** The state line reads "access · Failed while resolving app.dc.test —
+        Not scanned: …" and "probe · The probe could not start it — the probe took …".
+      - **Docs.** `state-machine.md` §2.2's `P-285` bullet, the `A-41c` paragraph and the
+        not-started row of the transition table; 081's header.
+      - **Review.** Nine findings over five things, all fixed: `sameHeld` had taken the class's
+        doc comment; 081's comment and header said NULL beside a hold (082); a spooled reading
+        one second older than the refusal it follows, from two clock reads (one base now); the
+        harness named `withheld`; and the not-started test let go with a `forgetSensors` the
+        production release does not make (said so, and fixed by `P-409`). Three refuted.
+      - **Filed.** `P-409` (a not-started release keeps the cache that says the probe is
+        unreachable), `P-410` (a re-hold in new words keeps the first words), `P-411` (a person's
+        state keeps a hold's words after the hold).
+      - **Tests.**
+        - `failure-phase.test.ts`: `sameFailure`; a check that could not start held with
+          `startup`, kept through a result decided while held, and gone with the next success;
+          let go by a move with the release's words and none; a refusal held with `resolve`,
+          renewed with `check` and no transition, kept through a result decided while held,
+          replaced by the core's own sentence with none, let go with none; a pause over a
+          refusal.
+        - `credential-pinning.test.ts`: the stub's settles carry the place, a new place under
+          the same words settles again, a probe below 35 leaves none; `SensorVouching` gives one
+          owner's words and place in either order, puts a release back with its place, keeps the
+          place through a failed settle, re-decides a place alone and nothing for the same pair,
+          and holds a sweep's words with none; against PostgreSQL, a refusal's place on the row
+          and the transition, through a spooled failure, a renewal without a transition, and gone
+          at the next reading; an older probe's refusal with none, then the place added.
+        - `not-started.test.ts`: one re-decision per sentence and place, an older probe's with
+          none. `migrator.test.ts`: 082 forward and back, the transitions' comment untouched.
+      - **Mutants 20/20.** `writeStateChanges` back to NULL; `sameFailure` ignoring the host;
+        the hold's transition without its place; a release keeping the stored place; a pause
+        or an acknowledgement keeping it; the reword guard on words alone, or writing none;
+        `decide` holding none; a hold's own place dropped, or the caller's; the last owner's
+        place; an undo without it; `#settleAll` on words alone; `heldWords` from the strings;
+        intake, `sameRefusal` and `#settleReported` dropping it; `NotStarted` grouping by
+        words or passing none; 082's comment unchanged. `probe-episode-scenario.test.ts`: every starved ping held with `startup` on its
+          row and its Unknown transition, and let go with its own result's place.
 
 - [ ] **P-408 — a check process ready as its start-up bound fires is settled at its timeout** ·
       XS · P-260 · Found 2026-10-17 in `P-285`'s review. If the start-up timer
@@ -11056,6 +11129,41 @@ because each is a decision rather than a defect:
       `startup` and `notStarted`. The window is one event-loop turn at the 30 s start-up bound.
       **Done when** a check process whose start-up bound fired is settled as not started
       whatever it answers, with a test that holds the ready line back across the bound.
+
+- [ ] **P-409 — a not-started release keeps the cache that says the probe is unreachable** · XS
+      · P-265 · Found 2026-10-17 in `P-407`'s review. `NotStarted.release` lets a sensor go
+      without re-deciding it, as `SensorVouching.release` does, but unlike it never calls
+      `forgetSensors`. A started result older than the hold and newer than `last_result_at`
+      (the batch `[ok(t1), notStarted(t2)]`, or a resend while held) is decided while the sensor
+      is held, and `#warm` caches it with the overlay's `probeReachable: false`. The result that
+      lets it go is then decided from that cache: Unknown/probe again with the hold's words, and
+      Probe Health says the probe runs its checks again. Every later result, a real Down
+      included, is decided from the same entry, with no alarm, until it is evicted or something
+      re-decides the sensor. **Done when** the release (and `stored(false)`'s put-back) drops
+      the cache for every sensor it moves, `failure-phase.test.ts` loses its hand-made
+      `forgetSensors`, and a test against PostgreSQL holds a sensor, decides an older started
+      result while it is held, and has the next result decide it in one transition.
+
+- [ ] **P-410 — a not-started sensor held again in new words keeps the first hold's words** · S ·
+      P-265 · Found 2026-10-17 in `P-407`. `reevaluate` rewords a sensor whose state and cause
+      stand only for `access` (`M-28`), so `NotStarted.hold` re-deciding one already
+      Unknown/probe in new words writes nothing. The words do change between rounds: the start-up
+      words carry the milliseconds it took and the stderr tail, and the pool's give-up is a
+      sentence of its own. The row says the first, and its place with it. Each such round still
+      runs a transaction with `reevaluate`, `#moveAlarms` and a dependency recompute, and logs
+      the hold. **Done when** a re-hold in new words writes them and their place with no
+      transition, a re-hold that would write nothing runs nothing, and a test against
+      PostgreSQL holds twice in different words. The rule must not reword a lost probe's or a
+      frozen clock's words (`reachability.ts`, `clock-freeze.ts`).
+
+- [ ] **P-411 — a person's state keeps a hold's words after the hold** · XS · P-285 · Found
+      2026-10-17 in `P-407`'s review. An acknowledged Down that its probe could not start, or
+      refused, is held Unknown with the probe's words; the acknowledgement stays. The result
+      that lets it go decides Down (Acknowledged), which is a person's state, so `decide` keeps
+      what is stored, and the sensor reads "Down (Acknowledged) — the probe took 10012 ms to start
+      the check…" with `startup` beside it, of a probe that is running it again. **Done when** a
+      person's state reached by letting go of a hold says the person's words or the result's
+      (the rule to be decided), never the hold's, with a test for each hold.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as

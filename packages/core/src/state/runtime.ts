@@ -63,9 +63,10 @@ export interface StateTransition {
   readonly cause: SensorStateCause;
   readonly message: string;
   /**
-   * Where the check behind it failed (`P-285`), when the transition is a result's and its words
-   * are the scan's. Absent on every other path — a pause, an acknowledgement, a hold — whose
-   * words are not a check's, and absent is stored as NULL.
+   * Where the check behind it failed (`P-285`), when its words are a check's: a result's that
+   * the scan decided, or a held result's that a hold is explained by (`P-407`). Absent on every
+   * other path — a pause, an acknowledgement, a release, a hold in the core's own words — and
+   * absent is stored as NULL.
    */
   readonly failure?: CheckFailure | null;
 }
@@ -167,6 +168,22 @@ function channelVerdict(row: RuntimeRow): ChannelVerdict | null {
   const { channel_state: state, channel_cause: cause } = row;
   if (state === null || cause === null) return null;
   return state === 'up' || state === 'warning' || state === 'down' ? { state, cause } : null;
+}
+
+/**
+ * A hold's words and where the check they come from stopped (`P-407`): a probe's refusal
+ * (`A-41c`) or a check it could not start (`P-265`) names a phase, and a sentence the core wrote
+ * names none. One value, so the words and the failure always come from the same owner.
+ */
+export interface HeldWords {
+  readonly message: string;
+  readonly failure: CheckFailure | null;
+}
+
+/** Whether two failures name the same phase and the same host, or are both none. */
+export function sameFailure(a: CheckFailure | null, b: CheckFailure | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.phase === b.phase && (a.target ?? null) === (b.target ?? null);
 }
 
 /** A row's failure, or null when it names no phase (`P-285`). */
@@ -805,6 +822,12 @@ export interface StateRewrite {
   readonly state: SensorState;
   readonly cause: SensorStateCause;
   readonly message: string;
+  /**
+   * Where the check its words come from stopped: a held result's (`P-407`), and `null` beside
+   * every other rewrite's words — a pause's, an acknowledgement's, a release's, the core's own.
+   * Required, so a new rewrite says which rather than leaving a check's place beside its words.
+   */
+  readonly failure: CheckFailure | null;
   readonly since: Date;
   readonly reset: boolean;
 }
@@ -825,10 +848,11 @@ export async function writeStateChanges(
      SET state = w.state,
          cause = w.cause,
          message = w.message,
-         -- Never a check's words (P-285): a pause's, an acknowledgement's, a hold's, a release's.
-         -- What a check said of where it failed went with the words it was written beside.
-         failure_phase = NULL,
-         failure_target = NULL,
+         -- Beside the words it is written with (P-285, P-407): a held result's own, and NULL
+         -- beside a pause's, an acknowledgement's, a release's or the core's own words. What a
+         -- check said of where it failed went with the words it was written beside.
+         failure_phase = w.failure_phase,
+         failure_target = w.failure_target,
          since = w.since,
          -- last_result_at is never cleared (P-97): it is the high-water mark that makes the
          -- at-least-once probe protocol safe, and nulling it turned every duplicate into a
@@ -851,8 +875,8 @@ export async function writeStateChanges(
          channel_cause = CASE WHEN w.reset THEN NULL ELSE r.channel_cause END
      FROM unnest(
        $1::bigint[], $2::sensor_state_kind[], $3::sensor_state_cause[], $4::text[],
-       $5::timestamptz[], $6::boolean[]
-     ) AS w(sensor_id, state, cause, message, since, reset)
+       $5::timestamptz[], $6::boolean[], $7::text[], $8::text[]
+     ) AS w(sensor_id, state, cause, message, since, reset, failure_phase, failure_target)
      WHERE r.object_id = w.sensor_id
      RETURNING r.object_id::text AS object_id`,
     [
@@ -862,6 +886,8 @@ export async function writeStateChanges(
       rewrites.map((write) => write.message),
       rewrites.map((write) => write.since),
       rewrites.map((write) => write.reset),
+      rewrites.map((write) => write.failure?.phase ?? null),
+      rewrites.map((write) => write.failure?.target ?? null),
     ],
   );
   return rows.length;

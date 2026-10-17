@@ -890,6 +890,7 @@ describe(
           durationMs: 10_012,
           channels: [],
           notStarted: true as const,
+          failure: { phase: 'startup' },
         }));
 
       const step = await mark();
@@ -901,9 +902,18 @@ describe(
         assert.equal(runtime?.state, 'unknown');
         assert.equal(runtime.cause, 'probe');
         assert.equal(runtime.message, gaveUp);
+        // Where its check stopped, beside the words, on the state and on the hold (`P-407`).
+        assert.deepEqual(runtime.failure, { phase: 'startup' });
         const last = runtime.facts.lastResultAt?.getTime() ?? 0;
         assert.ok(last > 0 && last < stepAt.getTime(), 'nothing of the held result was stored');
       }
+      const heldRows = await db.query<{ phase: string | null; n: string }>(
+        `SELECT failure_phase AS phase, count(*)::text AS n FROM sensor_state
+         WHERE sensor_id = ANY($1::bigint[]) AND state = 'unknown' AND time >= $2
+         GROUP BY failure_phase`,
+        [made.pings, new Date(stepAt.getTime() - MINUTE)],
+      );
+      assert.deepEqual(heldRows, [{ phase: 'startup', n: String(PINGS) }]);
       await healthSweep();
       await fire();
       assert.deepEqual(await queued(step, made.pings), {}, 'not one alarm per sensor');
@@ -944,9 +954,15 @@ describe(
           message: failing.has(sensorId) ? 'no reply' : 'reply',
           durationMs: 12,
           channels: [],
+          ...(failing.has(sensorId) ? { failure: { phase: 'timeout' } } : {}),
         })),
       );
       assert.equal(now().unstarted.heldOn(made.probe), 0);
+      // Let go by its own result: the result's place, and none beside a success.
+      for (const id of made.pings) {
+        const runtime = await readSensorState(db, id);
+        assert.deepEqual(runtime?.failure, failing.has(id) ? { phase: 'timeout' } : null);
+      }
       for (const id of made.pings) {
         const rows = await db.query<{ state: string; previous_state: string }>(
           `SELECT state::text AS state, previous_state::text AS previous_state

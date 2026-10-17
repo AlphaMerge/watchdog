@@ -38,6 +38,8 @@ import {
   writeSimulatedErrors,
   writeStateChanges,
   writeStateHistory,
+  sameFailure,
+  type HeldWords,
   type RuntimeWrite,
   type SensorRuntime,
   type StateDecisions,
@@ -179,7 +181,9 @@ export interface SensorStateServiceOptions {
    */
   unreachedFactories?: () => ReadonlySet<number>;
   /**
-   * The sensors the core has stopped evaluating, each with the sentence that says why (`A-29`).
+   * The sensors the core has stopped evaluating, each with the sentence that says why (`A-29`)
+   * and, when that sentence is a probe's refusal (`A-41c`), where the probe stopped (`P-407`):
+   * both from one owner, so they cannot disagree.
    *
    * Live for `unreachableSensors`' reason, and laid over the facts at the same point: a sensor
    * whose voucher may no longer read what it names must read Unknown however its state comes to
@@ -187,7 +191,7 @@ export interface SensorStateServiceOptions {
    *
    * Absent means every voucher holds.
    */
-  withheldSensors?: () => ReadonlyMap<number, string>;
+  withheldSensors?: () => ReadonlyMap<number, HeldWords>;
 }
 
 export interface StateStats {
@@ -225,7 +229,8 @@ export const RELEASED_FROM_WITHHOLDING =
  * (`A-78`, `R-11`), and '' when it leaves anything else.
  *
  * - **`access`**: `RELEASED_FROM_WITHHOLDING`, whoever re-decided it. The words of a hold are the
- *   voucher check's, and it lets go with none of its own.
+ *   voucher check's or the probe's refusal, and it lets go with none of its own, and with
+ *   nothing of where a refused check stopped (`P-407`).
  * - **`probe`**: the words of the caller that let it go, when that caller says it speaks for the
  *   probe (`sources` naming it): the probe answering again, a sensor moved to another probe, the
  *   probe's clock passing the sensor's last result. Any other caller's words are about something
@@ -254,7 +259,7 @@ export class SensorStateService {
   readonly #clockFrozenSensors: (() => ReadonlySet<number>) | undefined;
   readonly #notStartedSensors: (() => ReadonlySet<number>) | undefined;
   readonly #unreachedFactories: (() => ReadonlySet<number>) | undefined;
-  readonly #withheldSensors: (() => ReadonlyMap<number, string>) | undefined;
+  readonly #withheldSensors: (() => ReadonlyMap<number, HeldWords>) | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
   /**
    * The effective failure policy per sensor.
@@ -413,23 +418,24 @@ export class SensorStateService {
         // an operator cannot make sense of and which `U-06` puts on the home screen. The rule is
         // `operatorDecided`, the same one `reevaluate` uses; the difference is that there are no
         // fresh operator words here, so what is already stored is what stays.
-        const withheldWords = operatorDecided(applied.decision)
-          ? this.#withheldMessage(sensorId, applied.decision)
+        const held = operatorDecided(applied.decision)
+          ? this.#heldWords(sensorId, applied.decision)
           : undefined;
         const message = operatorDecided(applied.decision)
-          ? (withheldWords ?? runtime.message)
+          ? (held?.message ?? runtime.message)
           : applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
             ? readingMessage(result.channels?.message ?? '', result.message)
             : result.message;
         // **Where it failed goes with the words, by the same rule** (`P-285`): the check's own
         // when it failed, what is stored when a person's or a hold's words explain the state,
-        // and nothing beside a voucher's. Nothing beside a limit's or a lookup's either: those
-        // judge readings, which only a success has. Never a cause, so a phase that moves while
-        // the state and the cause do not records no transition.
+        // and the withholding's own beside its words — a probe's refusal names where it stopped
+        // and a sentence of the core's names nothing (`P-407`). Nothing beside a limit's or a
+        // lookup's either: those judge readings, which only a success has. Never a cause, so a
+        // phase that moves while the state and the cause do not records no transition.
         const failure = operatorDecided(applied.decision)
-          ? withheldWords === undefined
+          ? held === undefined
             ? runtime.failure
-            : null
+            : held.failure
           : result.outcome === 'error'
             ? (result.failure ?? null)
             : null;
@@ -524,7 +530,16 @@ export class SensorStateService {
     q: Queryable,
     sensorIds: readonly number[],
     at: Date,
-    cause: { message: string; sources?: readonly SensorStateCause[] },
+    cause: {
+      message: string;
+      sources?: readonly SensorStateCause[];
+      /**
+       * Where the check `message` comes from stopped, when the words are a held result's
+       * (`P-407`, `P-265`). Stored beside them only when they are what is said: the caller
+       * speaks for the decided cause and no withholding's words take their place.
+       */
+      failure?: CheckFailure | null;
+    },
   ): Promise<number> {
     if (sensorIds.length === 0) return 0;
 
@@ -564,14 +579,20 @@ export class SensorStateService {
         // factory refused for its voucher that is then withheld for what it reads stays
         // `unknown`/`access`, and its message said a grant it has back was missing. No
         // transition, and the state keeps its start.
-        const reworded = this.#withheldMessage(sensorId, decision);
-        if (reworded !== undefined && reworded !== runtime.message) {
+        // Where a refusal stopped follows it too, so a refusal renewed with a new phase, or
+        // first from a probe that names one, is written though its words are the same (`P-407`).
+        const reworded = this.#heldWords(sensorId, decision);
+        if (
+          reworded !== undefined &&
+          (reworded.message !== runtime.message || !sameFailure(reworded.failure, runtime.failure))
+        ) {
           rewrites.push({
             sensorId,
             at,
             state: decision.state,
             cause: decision.cause,
-            message: reworded,
+            message: reworded.message,
+            failure: reworded.failure,
             since: runtime.since,
             reset: false,
           });
@@ -602,11 +623,23 @@ export class SensorStateService {
       //
       // **Let go from a hold, it says so** (`A-78`, `R-11`): its state is the one it had before
       // it was held, and an Up or a Down with nothing beside it said neither that nor why.
+      //
+      // **Where the check stopped goes with words that are a check's** (`P-407`): a withholding's
+      // own (a probe's refusal names it, the core's sentence nothing), or the caller's when its
+      // words are a held result's and it speaks for the cause. Never beside words on the way
+      // out, a pause's or an acknowledgement's, which say nothing of where a check stopped.
       const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
+      const held = operatorDecided(decision) ? this.#heldWords(sensorId, decision) : undefined;
       const message = !operatorDecided(decision)
         ? releasedMessage(runtime.cause, cause)
-        : (this.#withheldMessage(sensorId, decision) ??
-          (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
+        : (held?.message ?? (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
+      const failure = !operatorDecided(decision)
+        ? null
+        : held !== undefined
+          ? held.failure
+          : owned
+            ? (cause.failure ?? null)
+            : null;
       transitions.push({
         sensorId,
         at,
@@ -614,6 +647,7 @@ export class SensorStateService {
         previousState: runtime.state,
         cause: decision.cause,
         message,
+        failure,
       });
       rewrites.push({
         sensorId,
@@ -621,6 +655,7 @@ export class SensorStateService {
         state: decision.state,
         cause: decision.cause,
         message,
+        failure,
         since: at,
         reset: resuming,
       });
@@ -804,8 +839,11 @@ export class SensorStateService {
     return runtimes;
   }
 
-  /** Why the core stopped evaluating this sensor, when that is what decided it (`A-29`). */
-  #withheldMessage(sensorId: number, decision: Decision): string | undefined {
+  /**
+   * Why the core stopped evaluating this sensor, and where its probe stopped when a refusal is
+   * why, when that is what decided it (`A-29`, `P-407`).
+   */
+  #heldWords(sensorId: number, decision: Decision): HeldWords | undefined {
     if (decision.cause !== 'access') return undefined;
     return this.#withheldSensors?.().get(sensorId);
   }

@@ -1,4 +1,4 @@
-import { describeError, type Logger } from '@ms/shared';
+import { describeError, type CheckFailure, type Logger } from '@ms/shared';
 import { savepoint, type Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 
@@ -36,8 +36,14 @@ export interface StateReevaluator {
     /**
      * The words, and the one cause they speak for: the probe's (`R-11`). A sensor this lets go
      * carries them until its next result, and one it holds for the probe carries them while held.
+     * `failure` is where the check stopped, passed only by a hold whose words are a result's
+     * (`P-265`, `P-407`), and stored beside them while they are what the sensor says.
      */
-    cause: { message: string; sources: readonly 'probe'[] },
+    cause: {
+      message: string;
+      sources: readonly 'probe'[];
+      failure?: CheckFailure | null;
+    },
   ): Promise<number>;
 }
 

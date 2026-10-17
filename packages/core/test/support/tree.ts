@@ -6,6 +6,7 @@ import type { SensorCatalogue, SensorType } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { catalogueSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
 import type { Database } from '../../src/db/pool.js';
+import type { HeldWords } from '../../src/state/runtime.js';
 import { InheritanceResolver } from '../../src/settings/inheritance.js';
 import {
   LoggingAuditSink,
@@ -108,8 +109,11 @@ export async function buildHarness(
      * test about what the real types declare.
      */
     catalogue?: SensorCatalogue;
-    /** The sensors the core is declining to evaluate (`A-29`); `SensorVouching.withheld`. */
-    withheldSensors?: () => ReadonlyMap<number, string>;
+    /**
+     * The sensors the core is declining to evaluate (`A-29`), with where a refusing probe stopped
+     * (`P-407`); `SensorVouching.heldWords`.
+     */
+    withheldSensors?: () => ReadonlyMap<number, HeldWords>;
     /** A lost probe's sensors (`R-05`); `ProbeReachability.unreachableSensors`. */
     unreachableSensors?: () => ReadonlySet<number>;
     /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.frozenSensors`. */

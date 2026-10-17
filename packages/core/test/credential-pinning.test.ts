@@ -8,6 +8,7 @@ import {
   capabilitiesFor,
   PROTOCOL_VERSION,
   versionFor,
+  type CheckFailure,
   type CheckResult,
   type IngestionConfig,
 } from '@ms/shared';
@@ -53,7 +54,7 @@ import { ProbeConfigService } from '../src/probes/config.js';
 import { ProbeRefusals } from '../src/probes/refusals.js';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
-import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
+import { writeRuntimes, writeStateHistory, type HeldWords } from '../src/state/runtime.js';
 import { RELEASED_FROM_WITHHOLDING, type SensorResult } from '../src/state/service.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
 import { TriggerService } from '../src/triggers/service.js';
@@ -315,8 +316,27 @@ describe('protocol 24 is what a probe must speak to be sent such a set (A-41c)',
 const REFUSED =
   'Not scanned: sw.dc.test resolves to 192.0.2.77, which is outside the allowed targets.';
 
-function refused(sensorId: number, at: string, message = REFUSED): CheckResult {
-  return { sensorId, at, outcome: 'error', message, durationMs: 1, channels: [], withheld: true };
+function refused(
+  sensorId: number,
+  at: string,
+  message = REFUSED,
+  failure?: CheckFailure,
+): CheckResult {
+  return {
+    sensorId,
+    at,
+    outcome: 'error',
+    message,
+    durationMs: 1,
+    channels: [],
+    withheld: true,
+    ...(failure === undefined ? {} : { failure }),
+  };
+}
+
+/** A hold's words as `SensorVouching` keeps them: a probe's, and where it stopped (`P-407`). */
+function heldAs(message: string, failure: CheckFailure | null = null): HeldWords {
+  return { message, failure };
 }
 
 function measured(sensorId: number, at: string, outcome: 'ok' | 'error' = 'ok'): CheckResult {
@@ -344,7 +364,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
   async function holder(): Promise<{
     credentials: CredentialVouching;
     /** What the set was told to hold for a probe, each time it was told and took it. */
-    settled: { owner: string; refused: Map<number, string> }[];
+    settled: { owner: string; refused: Map<number, HeldWords> }[];
     /** What was let go without being re-decided. */
     released: { owner: string; sensorIds: number[] }[];
     /** What became of each release: `undo` or `evaluated`. */
@@ -357,7 +377,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
   }> {
     const clock = { ms: 5_000_000 };
     const stamps: (Date | undefined)[] = [];
-    const settled: { owner: string; refused: Map<number, string> }[] = [];
+    const settled: { owner: string; refused: Map<number, HeldWords> }[] = [];
     const released: { owner: string; sensorIds: number[] }[] = [];
     const outcomes: string[] = [];
     const control = { failSettle: false };
@@ -419,7 +439,9 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       [2],
     );
     assert.equal(reported.unearned.length, 0);
-    assert.deepEqual(settled, [{ owner: 'credentials-probe:7', refused: new Map([[1, REFUSED]]) }]);
+    assert.deepEqual(settled, [
+      { owner: 'credentials-probe:7', refused: new Map([[1, heldAs(REFUSED)]]) },
+    ]);
     assert.equal(credentials.stats().withheld, 1);
   });
 
@@ -431,7 +453,28 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
     // Other words are news: the name resolves somewhere else now.
     await credentials.reported(7, [refused(1, T(120), 'Not scanned: somewhere else.')]);
     assert.equal(settled.length, 2);
-    assert.equal(settled[1]?.refused.get(1), 'Not scanned: somewhere else.');
+    assert.equal(settled[1]?.refused.get(1)?.message, 'Not scanned: somewhere else.');
+  });
+
+  it('holds a refusal with where the probe stopped, and settles again when only that moves (P-407)', async () => {
+    const { credentials, settled } = await holder();
+    const check: CheckFailure = { phase: 'check', target: 'sw.dc.test' };
+    const resolve: CheckFailure = { phase: 'resolve', target: 'sw.dc.test' };
+    await credentials.reported(7, [refused(1, T(0), REFUSED, check)]);
+    assert.deepEqual(settled, [
+      { owner: 'credentials-probe:7', refused: new Map([[1, heldAs(REFUSED, check)]]) },
+    ]);
+    // The same words in the same place at the next scan are nothing new.
+    await credentials.reported(7, [refused(1, T(60), REFUSED, check)]);
+    assert.equal(settled.length, 1);
+    // The same words in another place are, since the place is read beside them.
+    await credentials.reported(7, [refused(1, T(120), REFUSED, resolve)]);
+    assert.equal(settled.length, 2);
+    assert.deepEqual(settled[1]?.refused.get(1), heldAs(REFUSED, resolve));
+    // And a probe below protocol 35, naming nowhere, leaves nothing of the last place.
+    await credentials.reported(7, [refused(1, T(180))]);
+    assert.equal(settled.length, 3);
+    assert.deepEqual(settled[2]?.refused.get(1), heldAs(REFUSED));
   });
 
   it('lets a sensor go at its next result that is not a refusal, without re-deciding it', async () => {
@@ -507,7 +550,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       refused(1, T(120), 'Not scanned: somewhere else.'),
     ]);
     assert.equal(released.length, 0, 'let go and refused again is still held');
-    assert.equal(settled.at(-1)?.refused.get(1), 'Not scanned: somewhere else.');
+    assert.equal(settled.at(-1)?.refused.get(1)?.message, 'Not scanned: somewhere else.');
     assert.equal(credentials.stats().withheld, 1);
   });
 
@@ -580,7 +623,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       // The batch again, as the probe sends it after the nack: held this time.
       assert.deepEqual((await credentials.reported(7, [refused(1, T(0))])).results, []);
       assert.deepEqual(settled, [
-        { owner: 'credentials-probe:7', refused: new Map([[1, REFUSED]]) },
+        { owner: 'credentials-probe:7', refused: new Map([[1, heldAs(REFUSED)]]) },
       ]);
       assert.equal(credentials.stats().withheld, 1);
     });
@@ -594,7 +637,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       // Still news, because the failed attempt was not recorded as said.
       await credentials.reported(7, [refused(1, T(60), 'Not scanned: elsewhere.')]);
       assert.equal(settled.length, 2);
-      assert.equal(settled[1]?.refused.get(1), 'Not scanned: elsewhere.');
+      assert.equal(settled[1]?.refused.get(1)?.message, 'Not scanned: elsewhere.');
     });
 
     it('goes on holding what a configuration could not let go, and lets it go at the next', async () => {
@@ -624,7 +667,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       );
       assert.equal('withheld' in (reported.results[0] ?? {}), false, 'the mark is gone');
       assert.deepEqual(settled, [
-        { owner: 'credentials-probe:7', refused: new Map([[1, REFUSED]]) },
+        { owner: 'credentials-probe:7', refused: new Map([[1, heldAs(REFUSED)]]) },
       ]);
       assert.equal(credentials.stats().withheld, 1);
     });
@@ -692,7 +735,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       assert.equal(reported.unearned.length, 0);
       // Sensor 2 is still the probe's to refuse, and is held; sensor 1 is not held by this.
       assert.deepEqual(settled, [
-        { owner: 'credentials-probe:7', refused: new Map([[2, REFUSED]]) },
+        { owner: 'credentials-probe:7', refused: new Map([[2, heldAs(REFUSED)]]) },
       ]);
       assert.equal(credentials.stats().withheld, 1);
       assert.equal(released.length, 0);
@@ -3134,7 +3177,7 @@ describe('a set that says when it did not land, and lets go without re-deciding 
     const { vouching, control } = vouchingOf();
     control.failTx = true;
     await assert.rejects(
-      vouching.settleOrThrow('credentials-probe:7', new Map([[1, 'refused']])),
+      vouching.settleOrThrow('credentials-probe:7', new Map([[1, heldAs('refused')]])),
       /deadlock detected/,
     );
     assert.equal(vouching.withheld().has(1), false, 'put back: nothing is held');
@@ -3143,14 +3186,17 @@ describe('a set that says when it did not land, and lets go without re-deciding 
     assert.equal(vouching.withheld().has(1), false);
 
     control.failTx = false;
-    assert.equal(await vouching.settleOrThrow('credentials-probe:7', new Map([[1, 'refused']])), 1);
+    assert.equal(
+      await vouching.settleOrThrow('credentials-probe:7', new Map([[1, heldAs('refused')]])),
+      1,
+    );
     assert.equal(vouching.withheld().get(1), 'refused');
   });
 
   it('re-decides at the time it is told the change was decided', async () => {
     const { vouching, calls } = vouchingOf();
     const at = new Date('2026-09-30T08:00:00.000Z');
-    await vouching.settleOrThrow('credentials-probe:7', new Map([[1, 'refused']]), at);
+    await vouching.settleOrThrow('credentials-probe:7', new Map([[1, heldAs('refused')]]), at);
     assert.equal(calls[0], 'reevaluate 1 at 2026-09-30T08:00:00.000Z');
   });
 
@@ -3159,8 +3205,8 @@ describe('a set that says when it did not land, and lets go without re-deciding 
     await vouching.settleOrThrow(
       'credentials-probe:7',
       new Map([
-        [1, 'refused'],
-        [2, 'refused'],
+        [1, heldAs('refused')],
+        [2, heldAs('refused')],
       ]),
     );
     calls.length = 0;
@@ -3177,7 +3223,7 @@ describe('a set that says when it did not land, and lets go without re-deciding 
 
   it('puts a release back as it was held', async () => {
     const { vouching, calls } = vouchingOf();
-    await vouching.settleOrThrow('credentials-probe:7', new Map([[1, 'refused']]));
+    await vouching.settleOrThrow('credentials-probe:7', new Map([[1, heldAs('refused')]]));
     const hold = vouching.release('credentials-probe:7', [1]);
     calls.length = 0;
     hold.undo();
@@ -3187,11 +3233,75 @@ describe('a set that says when it did not land, and lets go without re-deciding 
 
   it('does not count a sensor another owner still withholds as released', async () => {
     const { vouching } = vouchingOf();
-    await vouching.settleOrThrow('credentials-probe:7', new Map([[1, 'refused by the probe']]));
+    await vouching.settleOrThrow(
+      'credentials-probe:7',
+      new Map([[1, heldAs('refused by the probe')]]),
+    );
     await vouching.settle('credentials:7', new Map([[1, 'withheld by the core']]));
     const hold = vouching.release('credentials-probe:7', [1]);
     assert.deepEqual(hold.released, []);
     assert.equal(vouching.withheld().get(1), 'withheld by the core');
+  });
+
+  it('gives the words and the place of one owner, never one’s words and another’s place (P-407)', async () => {
+    const resolve: CheckFailure = { phase: 'resolve', target: 'sw.dc.test' };
+    const probeFirst = vouchingOf().vouching;
+    await probeFirst.settleOrThrow(
+      'credentials-probe:7',
+      new Map([[1, heldAs('refused by the probe', resolve)]]),
+    );
+    await probeFirst.settle('credentials:7', new Map([[1, 'withheld by the core']]));
+    assert.deepEqual(probeFirst.heldWords().get(1), heldAs('refused by the probe', resolve));
+    probeFirst.release('credentials-probe:7', [1]);
+    assert.deepEqual(probeFirst.heldWords().get(1), heldAs('withheld by the core'));
+    assert.equal(probeFirst.withheld().get(1), 'withheld by the core');
+
+    const coreFirst = vouchingOf().vouching;
+    await coreFirst.settle('credentials:7', new Map([[1, 'withheld by the core']]));
+    await coreFirst.settleOrThrow(
+      'credentials-probe:7',
+      new Map([[1, heldAs('refused by the probe', resolve)]]),
+    );
+    assert.deepEqual(coreFirst.heldWords().get(1), heldAs('withheld by the core'));
+  });
+
+  it('puts a release back with its place, and a failed settle leaves the place it had', async () => {
+    const resolve: CheckFailure = { phase: 'resolve', target: 'sw.dc.test' };
+    const check: CheckFailure = { phase: 'check', target: 'sw.dc.test' };
+    const { vouching, control } = vouchingOf();
+    await vouching.settleOrThrow('credentials-probe:7', new Map([[1, heldAs('refused', resolve)]]));
+    vouching.release('credentials-probe:7', [1]).undo();
+    assert.deepEqual(vouching.heldWords().get(1), heldAs('refused', resolve));
+
+    control.failTx = true;
+    await assert.rejects(
+      vouching.settleOrThrow('credentials-probe:7', new Map([[1, heldAs('refused', check)]])),
+      /deadlock detected/,
+    );
+    assert.deepEqual(vouching.heldWords().get(1), heldAs('refused', resolve));
+  });
+
+  it('re-decides a sensor whose place alone moved, and holds a sweep’s words with none', async () => {
+    const { vouching, calls } = vouchingOf();
+    await vouching.settleOrThrow(
+      'credentials-probe:7',
+      new Map([[1, heldAs('refused', { phase: 'check', target: 'sw.dc.test' })]]),
+    );
+    calls.length = 0;
+    await vouching.settleOrThrow(
+      'credentials-probe:7',
+      new Map([[1, heldAs('refused', { phase: 'resolve', target: 'sw.dc.test' })]]),
+    );
+    assert.equal(calls.filter((call) => call.startsWith('reevaluate')).length, 1);
+    calls.length = 0;
+    await vouching.settleOrThrow(
+      'credentials-probe:7',
+      new Map([[1, heldAs('refused', { phase: 'resolve', target: 'sw.dc.test' })]]),
+    );
+    assert.deepEqual(calls, [], 'the same words in the same place settle nothing');
+
+    await vouching.settle('factory', new Map([[2, 'its voucher may not read 9']]));
+    assert.deepEqual(vouching.heldWords().get(2), heldAs('its voucher may not read 9'));
   });
 
   it('settles what depends on a released sensor at the next release when the write failed', async () => {
@@ -3199,8 +3309,8 @@ describe('a set that says when it did not land, and lets go without re-deciding 
     await vouching.settleOrThrow(
       'credentials-probe:7',
       new Map([
-        [1, 'refused'],
-        [2, 'refused'],
+        [1, heldAs('refused')],
+        [2, heldAs('refused')],
       ]),
     );
     const first = vouching.release('credentials-probe:7', [1]);
@@ -3356,6 +3466,33 @@ describe(
       return row ?? assert.fail(`sensor ${String(sensorId)} has no runtime`);
     }
 
+    /**
+     * Where the sensor's check stopped, on its current state and on its last transition, and how
+     * many transitions it has (`P-407`).
+     */
+    async function stoppedOf(sensorId: number): Promise<{
+      now: [string | null, string | null];
+      last: [string, string | null, string | null];
+      transitions: number;
+    }> {
+      const [now] = await db.query<{ phase: string | null; target: string | null }>(
+        `SELECT failure_phase AS phase, failure_target AS target FROM sensor_runtime
+         WHERE object_id = $1`,
+        [sensorId],
+      );
+      const rows = await db.query<{ state: string; phase: string | null; target: string | null }>(
+        `SELECT state::text AS state, failure_phase AS phase, failure_target AS target
+         FROM sensor_state WHERE sensor_id = $1 ORDER BY time`,
+        [sensorId],
+      );
+      const last = rows.at(-1) ?? assert.fail(`sensor ${String(sensorId)} has no transition`);
+      return {
+        now: [now?.phase ?? null, now?.target ?? null],
+        last: [last.state, last.phase, last.target],
+        transitions: rows.length,
+      };
+    }
+
     async function drain(now: Date): Promise<void> {
       for (let round = 0; round < 40; round += 1) {
         if ((await dispatcher.dispatch(now)) === 0) return;
@@ -3415,7 +3552,7 @@ describe(
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
-        withheldSensors: () => vouching.withheld(),
+        withheldSensors: () => vouching.heldWords(),
         types: [snmpPinned, dbQuery, dbPinned, sshLoad],
       });
       const sync = new TriggerSync({ engine, logger: silent });
@@ -3998,6 +4135,74 @@ describe(
 
       await fromProbe([{ ...measured(sensor, at(-1)), message: 'up 1 d' }]);
       assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
+    });
+
+    it('keeps where its probe refused it beside the probe’s words, follows a renewal and lets both go (P-407)', async () => {
+      const { sensor } = await named(site, 'stopped');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      // One base, so the spooled reading is older than the refusal however long a batch takes.
+      const base = Date.now();
+      const t = (seconds: number): string => new Date(base + seconds * 1000).toISOString();
+      const connect = { phase: 'connect', target: 'stopped.dc.test:161' };
+      await fromProbe([
+        { ...measured(sensor, t(-8), 'error'), message: 'no response', failure: connect },
+        { ...measured(sensor, t(-7), 'error'), message: 'no response', failure: connect },
+      ]);
+      assert.deepEqual((await stoppedOf(sensor)).now, ['connect', 'stopped.dc.test:161']);
+
+      // Refused where the name resolved: the probe's words, and its place beside them.
+      await fromProbe([
+        refused(sensor, t(-5), REFUSED, { phase: 'check', target: 'stopped.dc.test' }),
+      ]);
+      assert.deepEqual(await stateOf(sensor), { state: 'unknown', message: REFUSED });
+      const held = await stoppedOf(sensor);
+      assert.deepEqual(held.now, ['check', 'stopped.dc.test']);
+      assert.deepEqual(held.last, ['unknown', 'check', 'stopped.dc.test']);
+
+      // A failed reading older than the refusal, out of a spool: decided while the sensor is held,
+      // and the refusal's words and place stand.
+      await fromProbe([
+        { ...measured(sensor, t(-6), 'error'), message: 'timed out', failure: { phase: 'get' } },
+      ]);
+      assert.deepEqual(await stateOf(sensor), { state: 'unknown', message: REFUSED });
+      assert.deepEqual((await stoppedOf(sensor)).now, ['check', 'stopped.dc.test']);
+
+      // Refused again in other words, where the name would not resolve: written, no transition.
+      const unresolved = 'Not scanned: stopped.dc.test did not resolve before the check’s timeout.';
+      await fromProbe([
+        refused(sensor, t(-3), unresolved, { phase: 'resolve', target: 'stopped.dc.test' }),
+      ]);
+      assert.deepEqual(await stateOf(sensor), { state: 'unknown', message: unresolved });
+      const renewed = await stoppedOf(sensor);
+      assert.deepEqual(renewed.now, ['resolve', 'stopped.dc.test']);
+      assert.equal(renewed.transitions, held.transitions, 'renewed words record no transition');
+
+      // Measured again: the reading decides it, and a success names nowhere it failed.
+      await fromProbe([{ ...measured(sensor, t(-1)), message: 'up 2 d' }]);
+      assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 2 d' });
+      const after = await stoppedOf(sensor);
+      assert.deepEqual(after.now, [null, null]);
+      assert.deepEqual(after.last, ['up', null, null]);
+    });
+
+    it('holds an older probe’s refusal with nothing beside it, and adds the place when the same words come with one', async () => {
+      const { sensor } = await named(site, 'upgraded');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      await fromProbe([{ ...measured(sensor, at(-6)), message: 'up 1 d' }]);
+      // Below protocol 35 a refusal names nowhere, and its hold stores nothing beside its words.
+      await fromProbe([refused(sensor, at(-4))]);
+      const before = await stoppedOf(sensor);
+      assert.deepEqual(before.now, [null, null]);
+      assert.deepEqual(before.last, ['unknown', null, null]);
+
+      // The same words from the probe at 35: news, since the place is read beside them.
+      await fromProbe([
+        refused(sensor, at(-2), REFUSED, { phase: 'check', target: 'upgraded.dc.test' }),
+      ]);
+      assert.deepEqual(await stateOf(sensor), { state: 'unknown', message: REFUSED });
+      const now = await stoppedOf(sensor);
+      assert.deepEqual(now.now, ['check', 'upgraded.dc.test']);
+      assert.equal(now.transitions, before.transitions, 'and still one Unknown');
     });
 
     it('a failed scan lets a refused sensor go to Down once, in the result’s own words', async () => {

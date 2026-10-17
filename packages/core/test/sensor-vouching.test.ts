@@ -24,7 +24,7 @@ import {
   type SensorVouchingOptions,
   type StoredVoucher,
 } from '../src/objects/vouching.js';
-import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
+import { writeRuntimes, writeStateHistory, type HeldWords } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import { TriggerService } from '../src/triggers/service.js';
 import {
@@ -53,6 +53,7 @@ const available = await databaseAvailable();
 
 const NEVER_ISSUED = 9_000_000;
 const NONE_WITHHELD: ReadonlyMap<number, string> = new Map();
+const NO_HELD_WORDS: ReadonlyMap<number, HeldWords> = new Map();
 const NONE_HELD: ReadonlySet<number> = new Set();
 
 /** The formula a factory over these sensors' `rtt` would have. */
@@ -263,7 +264,7 @@ describe(
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
-        withheldSensors: () => vouching?.withheld() ?? NONE_WITHHELD,
+        withheldSensors: () => vouching?.heldWords() ?? NO_HELD_WORDS,
         unreachedFactories: () => reach?.unreached() ?? NONE_HELD,
       });
       const sync = new TriggerSync({ engine, logger: silent });
