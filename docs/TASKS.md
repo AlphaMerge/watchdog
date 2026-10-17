@@ -11824,6 +11824,14 @@ because each is a decision rather than a defect:
       or a resolver off the pool for names the hosts file does not have), with the arms run
       again showing what it bought, or the decision not to is written down with the numbers.
 
+      **Read 2026-10-17** (`docs/findings/2026-10-17-name-lookups-a-scan.md`).
+      - **The slow arm.** At 100 ms a lookup, half the scans were given up and half were refused.
+      - **The one-zone arm.** One silent zone in ten left 6 of the other zones' 2,287 lookups
+        answered.
+      - **What would fix it.** A larger pool alone moves the slow threshold, not the zone
+        failure. Answers kept for a TTL, or a resolver off the pool with a timeout per query,
+        removes both.
+
 - [ ] **P-427 — a superseded session's close marks its probe lost after the newer one found it**
       · S · P-416, R-05 · Found 2026-10-17 in `P-416`'s review. When a probe reconnects while its
       old connection is still open, the endpoint destroys the old connection. Its `#handleClose`
@@ -31938,7 +31946,7 @@ because each is a decision rather than a defect:
         during the handshake is not ended by its signal, only by the connect timeout or by
         the pool recycling the worker after its abort grace. Read from the code, not tested.
 
-- [ ] **A-66 — what one lookup a scan costs has not been measured** · S · A-57, P-15 · Found
+- [x] **A-66 — what one lookup a scan costs has not been measured** · S · A-57, P-15 · Found
       2026-10-02 by `A-57`. SNMP by name makes one `getaddrinfo` a scan in the probe where the
       socket made one a datagram, and a resolver that stops answering holds the shared thread
       pool for every transport that resolves there, counted nowhere. **Done when** `test:perf`
@@ -32023,7 +32031,19 @@ because each is a decision rather than a defect:
         hosts-file arms give nothing up and refuse nothing. `MS_DNS_SENSORS`, `MS_DNS_MINUTES`,
         `MS_DNS_SLOW_MS`, `MS_DNS_HANG_MS`, `MS_DNS_LANES`, `MS_DNS_POOL` and `MS_DNS_ARMS`
         shape it.
-      - **Measured.** (to be filled by the orchestrator from the quiet window)
+      - **Measured** by the orchestrator, 2026-10-17, twice in one quiet window, at the defaults
+        (`docs/findings/2026-10-17-name-lookups-a-scan.md`).
+        - **A resolver that answers costs nothing measurable.** The hosts-file and answering
+          arms ran all 5,000 checks at the address arm's jitter, with at most four lookups in
+          flight.
+        - **At 100 ms a lookup the probe goes down.** The two lanes serve 20 lookups a second
+          against the 83 a scan needs. Of 5,000 scans, 58 were answered, 2,465 were given up at
+          the bound and 2,477 were refused by a full queue. Median jitter was 34 s.
+        - **One zone in ten silent takes the other nine with it.** 6 of the answering devices'
+          2,287 lookups were answered, and 2,281 were given up.
+        - **Probe Health showed both.** It read 634 lookups in flight in the slow arm and 2,500
+          in the silent arms, and given up equalled the checks failed at the bound.
+        - So `P-426` has its answer: the probe has to change how it resolves.
       - **Tests.** `sensors/test/name-lookups.test.ts` (11: `resolveWithin` answered, refused,
         at its bound, cancelled, cancelled before it began and many at once, each read on both
         sides of the resolver settling; then the guard, the pin and a catalogue check on the
