@@ -44,7 +44,10 @@ function transaction(query: Queryable['query'] = () => Promise.resolve([])): {
   };
 }
 
-/** Caches that count what they were told to forget. */
+/**
+ * Caches that count what they were told to forget. `forget` counts passes over the channel cache,
+ * and `forgotten` holds the sensors each pass was given, sorted.
+ */
 function counting(): {
   counts: {
     forget: number;
@@ -53,16 +56,20 @@ function counting(): {
     sensors: number;
     owners: number;
   };
+  forgotten: number[][];
   invalidator: (settleMs?: number) => ResultCacheInvalidator;
 } {
   const counts = { forget: 0, clearChannels: 0, policies: 0, sensors: 0, owners: 0 };
+  const forgotten: number[][] = [];
   return {
     counts,
+    forgotten,
     invalidator: (settleMs) =>
       new ResultCacheInvalidator({
         channels: {
-          forget: () => {
+          forgetMany: (sensorIds) => {
             counts.forget += 1;
+            forgotten.push([...sensorIds].sort((a, b) => a - b));
             return 0;
           },
           clear: () => {
@@ -129,6 +136,56 @@ describe('the result caches, cleared again once the change commits (`P-240`)', (
     assert.equal(counts.owners, 1);
     t.mock.timers.tick(1);
     assert.equal(counts.owners, 2);
+  });
+
+  it('forgets a sensor whose parameters an edit changed, and not one an edit only renamed (P-403)', async () => {
+    // What the sensor's type declares follows its parameters, and the resolver keeps what it
+    // decided from a declaration: an emptied `primaryName` must reach it without a restart.
+    const { counts, forgotten, invalidator } = counting();
+    const tx = transaction();
+    const edited = {
+      action: 'object.updated',
+      objectId: 15,
+      changedParams: ['primaryName'],
+    } as unknown as Mutation;
+    const renamed = {
+      action: 'object.updated',
+      objectId: 16,
+      changedParams: [],
+    } as unknown as Mutation;
+    await invalidator().record(tx.q, testActor, [edited, renamed], new Date());
+    assert.equal(counts.forget, 1);
+    tx.commit();
+    assert.equal(counts.forget, 2, 'and again once it commits');
+    assert.deepEqual(
+      { clearChannels: counts.clearChannels, policies: counts.policies, owners: counts.owners },
+      { clearChannels: 0, policies: 0, owners: 0 },
+    );
+    assert.deepEqual(forgotten, [[15], [15]]);
+  });
+
+  it('forgets every sensor of one call in one pass, now and once at the commit (P-403 review)', async () => {
+    // A move that clears 5,000 sensors' own secrets records an `object.updated` for each in one
+    // call. A pass over the channel cache each, inside the move's transaction and again after
+    // it, blocked the event loop for seconds.
+    const { counts, forgotten, invalidator } = counting();
+    const tx = transaction();
+    const cleared = Array.from(
+      { length: 5_000 },
+      (_, i) =>
+        ({
+          action: 'object.updated',
+          objectId: 1_000 + i,
+          changedParams: ['password'],
+        }) as unknown as Mutation,
+    );
+    await invalidator().record(tx.q, testActor, [...cleared, limitsSet], new Date());
+    assert.equal(counts.forget, 1, 'one pass, not one a sensor');
+    assert.equal(forgotten[0]?.length, 5_001, 'every sensor, and the channel entry’s');
+    assert.equal(tx.pending(), 1, 'and one hook for the commit');
+    tx.commit();
+    assert.equal(counts.forget, 2);
+    assert.deepEqual(forgotten[1], forgotten[0]);
   });
 
   it('runs no second pass after it is stopped', async () => {
@@ -251,5 +308,53 @@ describe('a channel read that a forget overtook is not cached (`P-240`)', () => 
     overtaken.release();
     await inFlight;
     assert.equal(channels.cached, 0);
+  });
+});
+
+describe('forgetting many sensors in one pass (`P-403` review)', () => {
+  /** Answers the resolver's channel read with an `rtt` row for each sensor it asks about. */
+  const rows: Queryable['query'] = <T>(text: string, values?: readonly unknown[]) => {
+    if (!text.includes('FROM channel c')) return Promise.resolve([] as T[]);
+    const sensors = (values?.[0] ?? []) as number[];
+    return Promise.resolve(
+      sensors.map((sensorId) => ({
+        id: sensorId,
+        sensor_id: String(sensorId),
+        key: 'rtt',
+        name: 'rtt',
+        unit: 'ms',
+        decimals: null,
+        limits: {},
+        lookup_id: null,
+        counter_bits: null,
+        scale_mul: '1',
+        scale_div: '1',
+        spike_min: null,
+        spike_max: null,
+        is_primary: false,
+      })) as unknown as T[],
+    );
+  };
+  const reading = (sensorId: number): CheckResult =>
+    ({ sensorId, channels: [{ key: 'rtt', value: 1 }] }) as unknown as CheckResult;
+
+  it('drops the named sensors’ channels and keeps the rest', async () => {
+    const channels = new ChannelResolver({ logger: silent });
+    // Sensor 10 and sensor 100 share a prefix: only the whole id names a sensor.
+    await channels.resolve({ query: rows }, [reading(10), reading(100), reading(101)]);
+    assert.equal(channels.cached, 3);
+    assert.equal(channels.forgetMany(new Set([100, 7])), 1);
+    assert.equal(channels.cached, 2);
+    let asked: number[] = [];
+    await channels.resolve(
+      {
+        query: (text, values) => {
+          if (text.includes('FROM channel c')) asked = [...((values?.[0] ?? []) as number[])];
+          return rows(text, values);
+        },
+      },
+      [reading(10), reading(100), reading(101)],
+    );
+    assert.deepEqual(asked, [100], 'only the forgotten sensor is read again');
   });
 });

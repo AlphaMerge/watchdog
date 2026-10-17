@@ -3353,7 +3353,7 @@ describe('a move or a delete is told to whatever holds sensors against a probe (
   it('calls after the commit, once for a move and once for a delete, and not for anything else', async () => {
     let called = 0;
     const invalidator = new ResultCacheInvalidator({
-      channels: { forget: () => 0, clear: () => undefined },
+      channels: { forgetMany: () => 0, clear: () => undefined },
       afterMoveOrDelete: () => {
         called += 1;
       },
@@ -4531,7 +4531,7 @@ describe(
 
       let told = 0;
       const invalidator = new ResultCacheInvalidator({
-        channels: { forget: () => 0, clear: () => undefined },
+        channels: { forgetMany: () => 0, clear: () => undefined },
         afterMoveOrDelete: () => {
           told += 1;
         },

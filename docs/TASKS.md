@@ -8711,7 +8711,7 @@ because each is a decision rather than a defect:
         - `P-405`: a create, a tree create and an edit write a declared name unfitted, so one
           over 200 characters, or empty, refuses the sensor.
 
-- [ ] **P-403 — `exe.script.advanced`'s primary never takes the program's name** · XS · P-402 ·
+- [x] **P-403 — `exe.script.advanced`'s primary never takes the program's name** · XS · P-402 ·
       Found 2026-10-17 by `P-402`. `primaryName` says "Empty uses whatever the program calls
       it". The channel is created with its sensor, before any program has run, so it is named by
       its key (`createChannels` writes the declaration, whose name is the key when `primaryName`
@@ -8724,6 +8724,104 @@ because each is a decision rather than a defect:
       **Decided 2026-10-17 by the user:** the first reading that names an existing primary still
       named by its key renames it, a write on the ingestion path, audited. **Done when** that
       rename is in place, with a test, rather than a change to the description.
+
+      **P-403 outcome. The first reading that names a primary still named by its key renames it,
+      once, in the batch's own transaction.**
+      - **The rule** (`nameFromReading`, `ingestion/channels.ts`). The row is its sensor's
+        primary and named by its key. The sensor's own stored parameters make that key primary
+        and name it by its key or not at all. A reading names it something other than its key.
+        Then the name is the reading's, and so is the unit where neither the row nor the
+        declaration has one: what a reading that created the row would have written
+        (`channelLabel`), so a primary a create made and one a reading made end the same.
+        - **Once.** Afterwards the row is not named by its key, so a later name, warm or cold,
+          is not taken. Emptying `primaryName` names it by its key again (the edit), and the next
+          reading that names it renames it, which is what "Empty uses whatever the program calls
+          it" says.
+        - **Never a person's name.** No route writes a channel's name; a person names one
+          through a parameter, which is the declaration. A `primaryName` makes the declared name
+          something of its own, and the row holds it. A row an older build named by its key while
+          a name of its own is declared is left for the start-up pass (`P-404`), which writes the
+          declared one.
+        - **Never on a fallback's word**, nor an unregistered type's: neither says anything.
+        - **Only the primary**, as decided. A declared non-primary channel named by its key
+          stays so.
+      - **The cost, at 5,000 sensors a minute.** A cached reading pays `reading.name !==
+        undefined`, and only a reading that names something pays two more comparisons against
+        the cached row. `is_primary` rides in the query that already reads the row. No query is
+        issued unless a reading names a primary still named by its key. One left as it is (a
+        name of its own, a fallback, already renamed) is held in memory (`#nameSettled`) until
+        the sensor is forgotten or the core restarts. So the common case adds no statement, which
+        a statement count in `declared-labels.test.ts` pins with a declaring resolver (see
+        Review).
+      - **An edit of a sensor's parameters now forgets the sensor** (`ResultCacheInvalidator`),
+        as a channel's entry already did. Without it, a refusal outlived the edit that undid its
+        reason (an emptied `primaryName`, parameters the type can answer for again) whenever the
+        edit rewrote no channel, until a restart. An edit that changes no parameter, such as a
+        rename of the sensor, forgets nothing. It costs one query on the next batch, per edit,
+        and one pass over the cache per audit call (see Review).
+      - **The write.** In the batch's own transaction: the `object` rows `FOR NO KEY UPDATE SKIP
+        LOCKED`, then `sensor_config`, then the channel rows, the edit's order. `SKIP LOCKED`
+        because the batch may already hold other sensors from `#create`, and a second wait in its
+        own order could cross another batch's. A held sensor is not settled; the next reading that
+        names it tries again. Everything is decided again under the lock, so two batches never
+        both rename it. The version moves by trigger, and this batch's readings carry the new
+        name.
+      - **The actor is `ingestion`** (`{ kind: 'system', component: 'ingestion' }`), the one that
+        moves a primary a reading created (`P-314`): a reading did it, and no person. Each rename
+        is a `channel.redeclared` entry through `ingestionAuditSinks`, as the start-up passes'
+        are (`P-323` by `declared-primary-startup-repair`, `P-402` by
+        `declared-label-startup-repair`). `S-18`'s limits pass writes no entry at all. The
+        sinks' invalidator forgets the sensor, so the next batch reads the name once.
+      - **No migration.** "Named by its key" is the whole mark.
+      - **Tests.** `declared-labels.test.ts`, 18 cases.
+        - 13 table cases of `nameFromReading`.
+        - 5 against the database:
+          - through a warm cache, once, audited by `ingestion`, the version moved, and the batch
+            and the next one carrying the new name;
+          - on a cold read after a restart, keeping a unit the row has;
+          - a person's `primaryName`, a row an older build named by its key under a declared
+            name, and a declared non-primary channel are all kept, and emptying `primaryName`
+            lets the next reading name it;
+          - a fallback and an unregistered type are left; afterwards a settled primary, a
+            renamed one, a named channel that is not primary and a reading that names the
+            primary by its key cost no statement warm, and only the read of the rows cold;
+          - a held sensor is skipped without waiting, and renamed at the next reading;
+          - once a forget follows parameters the type can answer for, the next reading renames
+            a primary that had been left.
+        - `cache-invalidation.test.ts`: an edit that changed a parameter forgets the sensor, now
+          and at the commit, and one that changed none forgets nothing; 5,001 sensors of one call
+          are forgotten in one pass with one hook; `forgetMany` drops only the sensors it names.
+      - **Review.** Three findings, all fixed.
+        - **A forget a sensor was a scan of the cache a sensor.** A move or a clone that clears
+          thousands of sensors' own secrets records an `object.updated` for each in one audit
+          call (`#clearSecretsSentElsewhere`), and the new branch forgot each in turn, inside the
+          mover's transaction and again after it: seconds of blocked event loop, twice. The
+          invalidator now gathers the sensors of a call and forgets them once, with one hook for
+          the commit, through `ChannelResolver.forgetMany`, which walks the cache, the settled
+          set and `#outsideLater` once each. `forget` is `forgetMany` of one. The channel
+          entries' forgets go the same way.
+        - **The unit rule's declared half was untested**: the table case named for it gave the
+          row the declared unit already. A case with a row with no unit under a declared one now
+          expects none.
+        - **The cost claim was pinned less than said.** `ingestion.test.ts`'s cache test builds
+          its resolver without a declaration, so `#nameFromReadings` issues nothing there
+          whatever the filters do. The statement count now sends, warm and cold, a name on a
+          channel that is not primary and a reading that names the primary by its key.
+      - **Mutants 29/29:**
+        - The rule: `is_primary`, the name being the key, a reading naming it by its key, a
+          fallback, the declared primary's key, or a declared name of its own ignored; the unit
+          always the reading's.
+        - The resolver: a cached reading or a cold row never wanting a name; `is_primary` not
+          carried in the cache; the lock waiting instead of `SKIP LOCKED`; the settled set not
+          consulted, not added to, or kept by `forget`; no forget after a rename; the renaming
+          batch keeping the key; no audit entry; the UPDATE writing only the unit.
+        - The invalidator: an edit of parameters forgetting nothing.
+        - Review: the invalidator forgetting a sensor at a time; `forgetMany` dropping every
+          sensor, matching ids by their first digits, or keeping a settled refusal; no forget
+          after a rename; the unit rule without its declared half; the cached path or the cold
+          path without `isPrimary`; `#wantName` without its by-key return.
+      - **Docs.** `adding-a-sensor-type.md`, and `channel.redeclared`'s comment lists its system
+        writers. `primaryName`'s description needed no change: it is true now.
 
 - [ ] **P-404 — a channel name or unit a later build changes reaches new sensors only** · S ·
       P-402 · Found 2026-10-17 by `P-402`. A create writes the declared name and unit. An edit

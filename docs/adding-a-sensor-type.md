@@ -280,20 +280,26 @@ channel the sensor is judged by.
   a create names it: your declared `name` and `unit`, from the same answer. A `name` that is empty
   or only the key, or an empty `unit`, says nothing of its own, so whatever the reading sent is kept
   there, and otherwise the key and no unit. A key you do not declare always takes the reading's
-  words; that is the only way a declared one takes the words a program prints. `exe.script.advanced`
-  declares its primary's name as its key unless the operator chose one, so a primary whose row a
-  reading creates — after an edit moves `primaryChannel` — is named by the program. One created with
-  its sensor is named by its key, and no reading renames it (`P-403`). A declared name is clipped to
-  200 characters and a unit to 50, with an ellipsis, and an empty name is the key. A create, a tree
-  create, an edit and ingestion all do this (`declaredLabel`, `P-405`), so a long one costs only its
-  tail, but keep them short: a clipped name is a worse one. If you add to an operator's text, as an
-  SNMP counter adds "/s" to the unit they chose, cut their part yourself first, so that the core's
-  cut never takes what you added (`rateUnit`). A channel created from your `{}` answer, because
-  `channels()` threw, takes no name from it, and a build whose `channels()` answers names it at its
-  first start, unless a reading of it sent a name or a unit, which it keeps. Before `P-402` a
-  reading that sent no name created the channel named by its key, and one that sent no unit created
-  it with none, as every Core Health and Probe Health reading did: the first start of a build that
-  has it writes the declared name and unit onto each row named by its key with no unit, once.
+  words. `exe.script.advanced` declares its primary's name as its key unless the operator chose one,
+  so a primary whose row a reading creates — after an edit moves `primaryChannel` — is named by the
+  program. **One created with its sensor takes the program's name from the first reading that
+  names it** (`P-403`), once, and the reading's unit where neither the row nor the declaration has
+  one: afterwards it is not named by its key, so no later reading renames it. Only the primary your
+  own answer makes primary and names by its key, or not at all, is renamed so. A `primaryName` the
+  operator chose is your declared name, and a reading never replaces it; a type that cannot answer
+  for the stored parameters renames nothing. It is a `channel.redeclared` entry by `ingestion`, and
+  the only reading that costs a query is that one: every other reading is compared with what the
+  core has cached and goes no further. A declared name is clipped to 200 characters and a unit to
+  50, with an ellipsis, and an empty name is the key. A create, a tree create, an edit and
+  ingestion all do this (`declaredLabel`, `P-405`), so a long one costs only its tail, but keep them
+  short: a clipped name is a worse one. If you add to an operator's text, as an SNMP counter adds
+  "/s" to the unit they chose, cut their part yourself first, so that the core's cut never takes
+  what you added (`rateUnit`). A channel created from your `{}` answer, because `channels()` threw,
+  takes no name from it, and a build whose `channels()` answers names it at its first start, unless
+  a reading of it sent a name or a unit, which it keeps. Before `P-402` a reading that sent no name
+  created the channel named by its key, and one that sent no unit created it with none, as every
+  Core Health and Probe Health reading did: the first start of a build that has it writes the
+  declared name and unit onto each row named by its key with no unit, once.
 - **`limits` on a channel declares default thresholds** (`S-18`). Almost no channel should have
   one: a threshold on a monitored device's response time depends on that device and belongs to the
   operator. Declare one only where the number means the same thing on every installation, which in

@@ -4,7 +4,12 @@ import type { LookupCatalogue } from '../lookups/catalogue.js';
 import type { LookupDefinition } from '../lookups/definition.js';
 import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
 import type { ChannelDeclaration } from '../objects/redeclare.js';
-import { channelLabel, type ChannelShape, type DeclaredShapes } from '../state/declared-limits.js';
+import {
+  channelLabel,
+  declaredLabel,
+  type ChannelShape,
+  type DeclaredShapes,
+} from '../state/declared-limits.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
 import { parseTransform, type ReadingTransform } from './scaling.js';
 
@@ -109,16 +114,78 @@ export interface ChannelResolverOptions {
   /**
    * Where a primary this path moves is recorded (`P-314`): a `channel.redeclared` entry for each
    * channel whose `is_primary` it changed, by the system actor `ingestion`, in the same
-   * transaction. `main.ts` gives it the database, the log and the result-cache invalidator.
+   * transaction. And a primary named by its key that a reading renames (`P-403`), the same way.
+   * `main.ts` gives it the database, the log and the result-cache invalidator.
    *
-   * Absent, the primary still moves and nothing is recorded, which is for tests about other
-   * things.
+   * Absent, the primary still moves, the name is still taken, and nothing is recorded, which is
+   * for tests about other things.
    */
   audit?: AuditSink;
 }
 
-/** Who moves a primary that a reading created (`P-314`): nobody did, the declaration did. */
-const INGESTION: Actor = { kind: 'system', component: 'ingestion' };
+/**
+ * Who moves a primary that a reading created (`P-314`), and who names a primary after the program
+ * that reports it (`P-403`): nobody did, the declaration and the reading did.
+ */
+export const INGESTION: Actor = { kind: 'system', component: 'ingestion' };
+
+/**
+ * A cached channel, with what only the resolver needs of its row: whether it is its sensor's
+ * primary, read in the same query as the rest (`P-403`).
+ */
+interface CachedChannel extends ResolvedChannel {
+  readonly isPrimary: boolean;
+}
+
+/** A primary named by its key that a reading of this batch names otherwise (`P-403`). */
+interface NameWanted {
+  readonly sensorId: number;
+  readonly key: string;
+  /** The name the newest reading of the batch that sent one sent, as a create would take it. */
+  readonly name: string;
+  readonly unit: string | undefined;
+}
+
+/**
+ * What a reading's name makes of an existing channel, or null to leave it (`P-403`).
+ *
+ * **Only a primary still named by its key, whose own declaration says nothing of its name.**
+ * `exe.script.advanced` declares its primary's name as its key unless the operator set
+ * `primaryName`, whose description promises "Empty uses whatever the program calls it". A create
+ * writes that declaration before any program has run, so without this the row stayed named by its
+ * key for good, and only a primary a reading created took the program's name (`P-402`). So the
+ * first reading that names it renames it, once: afterwards it is not named by its key.
+ *
+ * **A person's name is never replaced.** A person names a channel through a parameter, which is
+ * the declaration itself: a `primaryName` makes the declared name something of its own, and that
+ * is what the row holds. No route writes a channel's name directly (`patchChannel` takes limits,
+ * a lookup and processing). A name the declaration gives the row, the type's or a person's, is
+ * `P-404`'s pass's to write, not a reading's. Nor from a fallback: a type that cannot answer for
+ * the stored parameters says nothing either way, so nothing is renamed on its word.
+ *
+ * **The unit with it, where neither the row nor the declaration has one**: what a reading that
+ * created the row would have written (`channelLabel`), so a primary a create made and one a
+ * reading made end the same. A unit the operator chose (`primaryUnit`) is the declaration's and
+ * the row's, and stays.
+ */
+export function nameFromReading(
+  row: { readonly key: string; readonly name: string; readonly unit: string },
+  isPrimary: boolean,
+  answer: DeclaredShapes,
+  sent: { readonly name: string; readonly unit: string | undefined },
+): { name: string; unit: string } | null {
+  if (!isPrimary || row.name !== row.key || sent.name === row.key) return null;
+  // A fallback's answer is a placeholder's, and an unregistered type has none (`ChannelShape`).
+  if (answer.undeclared || answer.primary !== row.key) return null;
+  const shape = answer.shapes.get(row.key);
+  if (shape === undefined || shape.name === null) return null;
+  const declared = declaredLabel(row.key, shape.name, shape.unit ?? '');
+  if (declared.name !== row.key) return null;
+  return {
+    name: sent.name,
+    unit: row.unit === '' && declared.unit === '' ? (sent.unit ?? '') : row.unit,
+  };
+}
 
 /** A sensor's row, as far as what its type declares for a new channel goes. */
 interface SensorDeclaring {
@@ -177,6 +244,7 @@ interface ChannelRow {
   scale_div: string;
   spike_min: number | null;
   spike_max: number | null;
+  is_primary: boolean;
 }
 
 /** What `moveDeclaredPrimaries` reads back of a channel it moved, for the audit entry. */
@@ -210,7 +278,16 @@ export class ChannelResolver {
   readonly #declaredLimits: ChannelResolverOptions['declaredLimits'];
   readonly #declaredShape: ChannelResolverOptions['declaredShape'];
   readonly #audit: AuditSink | undefined;
-  readonly #cache = new Map<string, ResolvedChannel>();
+  readonly #cache = new Map<string, CachedChannel>();
+  /**
+   * `sensorId:key` of each primary named by its key that a reading named otherwise and that was
+   * left as it is (`P-403`): its declaration has a name of its own, its type could not answer,
+   * or a reading had already renamed it. So a reading that names it again costs no query. Removed
+   * by `forget`, which the invalidator calls for an edit of the sensor's parameters as well as for
+   * a channel's entry, since either can change all of those, and by `clear`; bounded by the
+   * sensors, one primary each.
+   */
+  readonly #nameSettled = new Set<string>();
   /**
    * `sensorId:key` of each channel created outside its promising type's declaration from a
    * reading inside `DECLARATION_SETTLE_MS` of its sensor's last change, with when that minute ends
@@ -250,6 +327,7 @@ export class ChannelResolver {
   clear(): void {
     this.#generation += 1;
     this.#cache.clear();
+    this.#nameSettled.clear();
   }
 
   /**
@@ -258,26 +336,42 @@ export class ChannelResolver {
    * What makes an edited limit take effect on the next scan rather than on the next restart
    * (`M-04`). Called from the audit sink, which every mutation already goes through — the same
    * reason `R-04`'s config push rides there rather than being remembered at each write site.
-   *
-   * A scan of the whole map, because the key is `sensorId:channelKey` and a second index would
-   * be a second thing to keep in step. Limit edits are rare and the map holds the v1 target's
-   * 15,000 channels, so this is microseconds on a path nobody is timing.
    */
   forget(sensorId: number): number {
+    return this.forgetMany(new Set([sensorId]));
+  }
+
+  /**
+   * Forgets these sensors' channels in one pass over what is held, however many there are.
+   *
+   * A scan of the whole map, because the key is `sensorId:channelKey` and a second index would
+   * be a second thing to keep in step. The map holds the v1 target's 15,000 channels, so one scan
+   * is microseconds; **one scan a sensor is not** (`P-403` review). A move or a clone that clears
+   * thousands of sensors' own secrets records an `object.updated` for each in one audit call, and
+   * the invalidator forgets them all, inside the mover's transaction and again after it commits:
+   * a scan each would block the event loop for seconds, twice. So the invalidator gathers the
+   * sensors of a call and forgets them here, once.
+   */
+  forgetMany(sensorIds: ReadonlySet<number>): number {
     // Any sensor's, for every read in flight: which sensors a read covers is not worth tracking
     // for an event this rare, and a read that is not cached costs one query next time.
     this.#generation += 1;
-    const prefix = `${String(sensorId)}:`;
+    if (sensorIds.size === 0) return 0;
+    const named = (key: string): boolean => sensorIds.has(Number(key.slice(0, key.indexOf(':'))));
     let dropped = 0;
     for (const key of this.#cache.keys()) {
-      if (key.startsWith(prefix)) {
+      if (named(key)) {
         this.#cache.delete(key);
         dropped += 1;
       }
     }
     // An edit may declare a key it had been waiting to count (`P-339`); the next creation decides.
     for (const key of this.#outsideLater.keys()) {
-      if (key.startsWith(prefix)) this.#outsideLater.delete(key);
+      if (named(key)) this.#outsideLater.delete(key);
+    }
+    // An edit may clear a `primaryName`, and then a reading names the primary (`P-403`).
+    for (const key of this.#nameSettled) {
+      if (named(key)) this.#nameSettled.delete(key);
     }
     return dropped;
   }
@@ -408,6 +502,7 @@ export class ChannelResolver {
   async resolve(q: Queryable, results: readonly CheckResult[]): Promise<ResolvedChannels> {
     const ids = new Map<string, ResolvedChannel>();
     const missing = new Map<string, WantedChannel>();
+    const named = new Map<string, NameWanted>();
     let outsideLater = 0;
 
     for (const result of results) {
@@ -418,6 +513,15 @@ export class ChannelResolver {
         const cached = this.#cache.get(cacheKey);
         if (cached !== undefined) {
           ids.set(cacheKey, cached);
+          // **What a cached reading pays for `P-403`: nothing but these comparisons.** A reading
+          // that sends no name, which is nearly all of them, stops at the first. One that names
+          // a primary still named by its key is the only kind that goes further, and it once.
+          if (reading.name !== undefined && cached.isPrimary && cached.name === reading.key) {
+            this.#wantName(named, cacheKey, result.sensorId, reading.key, {
+              name: reading.name,
+              unit: reading.unit,
+            });
+          }
           continue;
         }
         const at = Date.parse(result.at);
@@ -437,6 +541,7 @@ export class ChannelResolver {
     }
 
     if (missing.size === 0) {
+      if (named.size > 0) await this.#nameFromReadings(q, named, ids);
       return {
         ids,
         created: 0,
@@ -464,7 +569,7 @@ export class ChannelResolver {
 
     for (const row of found) {
       const cacheKey = `${row.sensor_id}:${row.key}`;
-      const channel: ResolvedChannel = {
+      const channel: CachedChannel = {
         id: row.id,
         name: row.name,
         unit: row.unit,
@@ -474,10 +579,21 @@ export class ChannelResolver {
         lookupId: row.lookup_id,
         lookup: this.#lookupFor(row.lookup_id),
         counterBits: row.counter_bits === 32 || row.counter_bits === 64 ? row.counter_bits : null,
+        isPrimary: row.is_primary,
       };
       ids.set(cacheKey, channel);
       if (this.#generation === generation) this.#remember(cacheKey, channel);
+      // The same test as a cached reading's, on the row just read: after a restart, the first
+      // batch is the one that renames (`P-403`).
+      const sent = missing.get(cacheKey);
+      if (sent?.name !== undefined && channel.isPrimary && channel.name === row.key) {
+        this.#wantName(named, cacheKey, sent.sensorId, row.key, {
+          name: sent.name,
+          unit: sent.unit,
+        });
+      }
     }
+    if (named.size > 0) await this.#nameFromReadings(q, named, ids);
 
     let droppedReadings = 0;
     const droppedSensors = new Set<number>();
@@ -539,7 +655,8 @@ export class ChannelResolver {
   ): Promise<ChannelRow[]> {
     return q.query<ChannelRow>(
       `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits,
-              c.lookup_id, c.counter_bits, c.scale_mul, c.scale_div, c.spike_min, c.spike_max
+              c.lookup_id, c.counter_bits, c.scale_mul, c.scale_div, c.spike_min, c.spike_max,
+              c.is_primary
        FROM channel c
        JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
          ON w.sensor_id = c.sensor_id AND w.key = c.key`,
@@ -697,6 +814,136 @@ export class ChannelResolver {
   }
 
   /**
+   * Notes that a reading of this batch names a primary still named by its key, unless the name
+   * is that key or the channel was settled already (`P-403`). The newest such reading's name, as
+   * a create keeps the newest words of its batch.
+   */
+  #wantName(
+    named: Map<string, NameWanted>,
+    cacheKey: string,
+    sensorId: number,
+    key: string,
+    sent: { readonly name: string; readonly unit: string | undefined },
+  ): void {
+    if (sent.name === key || this.#nameSettled.has(cacheKey)) return;
+    const earlier = named.get(cacheKey);
+    named.set(cacheKey, { sensorId, key, name: sent.name, unit: sent.unit ?? earlier?.unit });
+  }
+
+  /**
+   * Names each primary still named by its key after the reading that names it, where its own
+   * declaration says nothing of its name (`P-403`, `nameFromReading`).
+   *
+   * **The cost.** Only here, and only for a primary a reading of this batch names while it is
+   * still named by its key: once a sensor, since afterwards it is not, and once a sensor whose
+   * declaration has a name of its own or that cannot answer, which `#nameSettled` then holds
+   * until an edit or a restart. Every other batch issues nothing for it (`resolve`). When it does
+   * run it is one lock, one `sensor_config` read, one `channel` read and, for a rename, one
+   * UPDATE and the audit entry, in the transaction the batch already has.
+   *
+   * **Locked as `P-323`'s repair locks**: the `object` rows first, `FOR NO KEY UPDATE SKIP
+   * LOCKED`, then `sensor_config`, then `channel`, the edit's order. `SKIP LOCKED` because this
+   * batch may hold other sensors already (`#create` waits for its own), and a second wait in an
+   * order of its own could cross another batch's; a held sensor is not settled, and the next
+   * reading that names it tries again. Everything is decided again under the lock, from rows
+   * nobody else can change, so two batches never both rename it, and a primary an edit named or
+   * moved meanwhile is left.
+   *
+   * **Audited as `channel.redeclared` by `ingestion`**, the system actor that moves a primary a
+   * reading created (`P-314`), through the same sinks: the record, the log and the result-cache
+   * invalidator, which forgets the sensor so the next batch reads the new name. This batch's
+   * readings carry it already.
+   */
+  async #nameFromReadings(
+    q: Queryable,
+    named: ReadonlyMap<string, NameWanted>,
+    ids: Map<string, ResolvedChannel>,
+  ): Promise<void> {
+    const declared = this.#declaredShape;
+    if (declared === undefined) {
+      // Nothing can say whether the declaration names it, so nothing is renamed, nor asked again.
+      for (const cacheKey of named.keys()) this.#nameSettled.add(cacheKey);
+      return;
+    }
+    const sensorIds = [...new Set([...named.values()].map((one) => one.sensorId))];
+    const held = await q.query<{ id: string }>(
+      `SELECT id::text AS id FROM object WHERE id = ANY($1::bigint[])
+       ORDER BY object.id FOR NO KEY UPDATE SKIP LOCKED`,
+      [sensorIds],
+    );
+    const holding = new Set(held.map((row) => row.id));
+    const wanted = [...named.entries()].filter(([, one]) => holding.has(String(one.sensorId)));
+    if (wanted.length === 0) return;
+    const sensors = await this.#sensorsFor(
+      q,
+      wanted.map(([, one]) => one),
+    );
+    const rows = await q.query<DeclarationRow & { id: number; is_primary: boolean }>(
+      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.lookup_id,
+              c.counter_bits, c.is_primary
+       FROM channel c
+       JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
+         ON w.sensor_id = c.sensor_id AND w.key = c.key`,
+      [wanted.map(([, one]) => one.sensorId), wanted.map(([, one]) => one.key)],
+    );
+    const byKey = new Map(rows.map((row) => [`${row.sensor_id}:${row.key}`, row]));
+
+    const renames: { row: (typeof rows)[number]; name: string; unit: string }[] = [];
+    for (const [cacheKey, one] of wanted) {
+      const row = byKey.get(cacheKey);
+      const sensor = sensors.get(String(one.sensorId));
+      // Gone meanwhile: the next batch drops its readings and counts them.
+      if (row === undefined || sensor === undefined) continue;
+      const answer = declared(sensor.type, sensor.params, one.sensorId);
+      const label = nameFromReading(row, row.is_primary, answer, one);
+      const entry = ids.get(cacheKey);
+      if (label === null) {
+        this.#nameSettled.add(cacheKey);
+        // What the row says now, if another batch named it meanwhile.
+        if (entry !== undefined) ids.set(cacheKey, { ...entry, name: row.name, unit: row.unit });
+        continue;
+      }
+      renames.push({ row, ...label });
+      if (entry !== undefined) ids.set(cacheKey, { ...entry, ...label });
+    }
+    if (renames.length === 0) return;
+
+    // A change a reader sees: the sensor's version moves by trigger, as for any channel write.
+    await q.query(
+      `UPDATE channel AS c SET name = w.name, unit = w.unit
+       FROM unnest($1::integer[], $2::text[], $3::text[]) AS w(id, name, unit)
+       WHERE c.id = w.id`,
+      [
+        renames.map((one) => one.row.id),
+        renames.map((one) => one.name),
+        renames.map((one) => one.unit),
+      ],
+    );
+    // Forgotten here as well as by the audit's invalidator, which a resolver built without a sink
+    // lacks: the cache must not keep the key as the name, and the next batch reads the row once.
+    this.forgetMany(new Set(renames.map((one) => Number(one.row.sensor_id))));
+    if (this.#audit === undefined) return;
+    const mutations: Mutation[] = renames.map(({ row, name, unit }) => {
+      const before: ChannelDeclaration = {
+        name: row.name,
+        unit: row.unit,
+        lookupId: row.lookup_id,
+        counterBits: row.counter_bits,
+        isPrimary: row.is_primary,
+      };
+      return {
+        action: 'channel.redeclared',
+        objectId: Number(row.sensor_id),
+        kind: 'sensor',
+        channelKey: row.key,
+        before,
+        after: { ...before, name, unit },
+      };
+    });
+    await this.#audit.record(q, INGESTION, mutations, new Date());
+  }
+
+  /**
    * The definition a channel names, if this installation has it.
    *
    * A channel naming a lookup that is not loaded is judged by **nothing** — not by its limits.
@@ -720,7 +967,7 @@ export class ChannelResolver {
     return null;
   }
 
-  #remember(cacheKey: string, channel: ResolvedChannel): void {
+  #remember(cacheKey: string, channel: CachedChannel): void {
     // Oldest-first eviction. A channel that is still being reported is re-learned on its next
     // result, at the cost of one query; the cache exists to make the common case free, not to
     // be authoritative.

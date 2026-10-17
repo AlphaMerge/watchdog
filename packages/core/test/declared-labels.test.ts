@@ -2,10 +2,18 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { SensorType } from '@ms/sensors';
 import type { ChannelReading, CheckResult } from '@ms/shared';
-import type { Database } from '../src/db/pool.js';
-import { ChannelResolver } from '../src/ingestion/channels.js';
+import type { Database, Queryable } from '../src/db/pool.js';
+import {
+  ChannelResolver,
+  nameFromReading,
+  type ResolvedChannels,
+} from '../src/ingestion/channels.js';
 import type { Actor, AuditSink } from '../src/objects/audit.js';
-import { declaredChannelLookup } from '../src/state/declared-limits.js';
+import {
+  declaredChannelLookup,
+  type ChannelShape,
+  type DeclaredShapes,
+} from '../src/state/declared-limits.js';
 import {
   DECLARED_LABEL_PASS,
   DECLARED_LABEL_REPAIR,
@@ -94,6 +102,98 @@ const DECLARED: readonly Label[] = [
 
 /** The same rows as ingestion named them before `P-402`, from readings that sent no words. */
 const BY_KEY: readonly Label[] = KEYS.map((key) => ({ key, name: key, unit: '' }));
+
+describe('what a reading’s name makes of an existing channel (P-403)', () => {
+  /** The sensor's own answer for `value`, primary, with this name and unit. */
+  function answer(name: string, unit = '', more: Partial<DeclaredShapes> = {}): DeclaredShapes {
+    const shape: ChannelShape = { lookup: null, counterBits: null, name, unit };
+    return {
+      shapes: new Map([['value', shape]]),
+      undeclared: false,
+      primary: 'value',
+      everyKey: false,
+      ...more,
+    };
+  }
+  const byKey = { key: 'value', name: 'value', unit: '' };
+  const sent = { name: 'Free Space', unit: '%' };
+  const renamed = { name: 'Free Space', unit: '%' };
+
+  const cases: readonly {
+    what: string;
+    row?: { key: string; name: string; unit: string };
+    isPrimary?: boolean;
+    answer?: DeclaredShapes;
+    sent?: { name: string; unit: string | undefined };
+    expected: { name: string; unit: string } | null;
+  }[] = [
+    { what: 'a primary named by its key, declared by its key', expected: renamed },
+    {
+      what: 'a declared name that is empty says nothing either',
+      answer: answer(''),
+      expected: renamed,
+    },
+    { what: 'a channel that is not primary', isPrimary: false, expected: null },
+    { what: 'one named otherwise already', row: { ...byKey, name: 'Disk' }, expected: null },
+    {
+      what: 'a reading that names it by its key',
+      sent: { name: 'value', unit: '%' },
+      expected: null,
+    },
+    { what: 'a declared name of its own, a person’s', answer: answer('Disk free'), expected: null },
+    {
+      what: 'a fallback’s answer',
+      answer: answer('value', '', { undeclared: true }),
+      expected: null,
+    },
+    {
+      what: 'a declaration that makes another key primary',
+      answer: answer('value', '', { primary: 'other' }),
+      expected: null,
+    },
+    {
+      what: 'a declaration that names nothing for the key',
+      answer: answer('value', '', { shapes: new Map() }),
+      expected: null,
+    },
+    {
+      what: 'a declared unit of its own is kept',
+      row: { ...byKey, unit: 'GB' },
+      answer: answer('value', 'GB'),
+      expected: { name: 'Free Space', unit: 'GB' },
+    },
+    {
+      // An older build's row with none, under an operator's `primaryUnit` (P-403 review): the
+      // reading's unit stays off it, and the start-up pass writes the declared one (`P-404`).
+      what: 'a declared unit of its own keeps the reading’s unit off a row with none',
+      answer: answer('value', 'GB'),
+      expected: { name: 'Free Space', unit: '' },
+    },
+    {
+      what: 'a unit the row has already is kept',
+      row: { ...byKey, unit: 'B' },
+      expected: { name: 'Free Space', unit: 'B' },
+    },
+    {
+      what: 'no unit sent is no unit',
+      sent: { name: 'Free Space', unit: undefined },
+      expected: { name: 'Free Space', unit: '' },
+    },
+  ];
+  for (const one of cases) {
+    it(one.what, () => {
+      assert.deepEqual(
+        nameFromReading(
+          one.row ?? byKey,
+          one.isPrimary ?? true,
+          one.answer ?? answer('value'),
+          one.sent ?? sent,
+        ),
+        one.expected,
+      );
+    });
+  }
+});
 
 describe(
   'a channel named as its type declares it (P-402)',
@@ -393,6 +493,253 @@ describe(
           { key: 'probesSilent', name: 'Probes not delivering', unit: 'probes' },
           { key: 'sensorsOwedRedecision', name: 'Sensors owed a re-decision', unit: 'sensors' },
         ]);
+      });
+    });
+
+    describe('a primary named by its key, named by the first reading that names it (P-403)', () => {
+      /** A sensor whose channels a create wrote, before any program has run. */
+      async function createdWith(params: Params = {}): Promise<number> {
+        made += 1;
+        const created = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: `created-${String(made)}`,
+          sensorType: 'test.labelled',
+          params: { ...params },
+        });
+        harness.audit.recorded.length = 0;
+        return created.id;
+      }
+
+      /** A resolver as `main.ts` builds one: declaring, and audited. */
+      function resolverOf(types: readonly SensorType[] = [labelled]): ChannelResolver {
+        return new ChannelResolver({
+          logger: silent,
+          declaredShape: declaredChannelLookup(testCatalogue(types)),
+          audit,
+        });
+      }
+
+      function batch(
+        resolver: ChannelResolver,
+        sensorId: number,
+        channels: readonly ChannelReading[],
+        q?: Queryable,
+      ): Promise<ResolvedChannels> {
+        const results: CheckResult[] = [
+          {
+            sensorId,
+            at: new Date().toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 1,
+            channels: [...channels],
+          },
+        ];
+        return q === undefined
+          ? db.tx((tx) => resolver.resolve(tx, results))
+          : resolver.resolve(q, results);
+      }
+
+      /** Counts the statements the resolver issues: a reading that costs one is not free. */
+      function counting(): { q: Queryable; count: () => number } {
+        let statements = 0;
+        return {
+          q: {
+            query: (text, values) => {
+              statements += 1;
+              return db.query(text, values);
+            },
+          },
+          count: () => statements,
+        };
+      }
+
+      async function primary(sensorId: number): Promise<Label | undefined> {
+        return (
+          await db.query<Label>(
+            'SELECT key, name, unit FROM channel WHERE sensor_id = $1 AND is_primary',
+            [sensorId],
+          )
+        )[0];
+      }
+
+      const named = { key: 'value', value: 1, name: 'Free Space', unit: '%' } as const;
+
+      it('takes the program’s name and unit once, audited by ingestion, moving the version', async () => {
+        const id = await createdWith();
+        assert.deepEqual(await primary(id), { key: 'value', name: 'value', unit: '' });
+        const before = await versionOf(id);
+        actors.length = 0;
+        const resolver = resolverOf();
+
+        // Cached first by a reading that names nothing, as most scans are: nothing to take.
+        await batch(resolver, id, [{ key: 'value', value: 1 }]);
+        assert.deepEqual(await primary(id), { key: 'value', name: 'value', unit: '' });
+        assert.deepEqual(redeclared(), []);
+
+        const renaming = await batch(resolver, id, [named]);
+        assert.deepEqual(await primary(id), { key: 'value', name: 'Free Space', unit: '%' });
+        const resolved = renaming.ids.get(`${String(id)}:value`);
+        assert.deepEqual(
+          { name: resolved?.name, unit: resolved?.unit },
+          { name: 'Free Space', unit: '%' },
+          'the batch that renames it carries the new name already',
+        );
+        assert.deepEqual(redeclared(), [`${String(id)}/value: value>Free Space >%`]);
+        assert.deepEqual(actors, [{ kind: 'system', component: 'ingestion' }]);
+        assert.ok((await versionOf(id)) > before, 'a reader sees it, so the version moves');
+        // And the batches after it carry it, even from a resolver no invalidator reaches.
+        const after = await batch(resolver, id, [{ key: 'value', value: 2 }]);
+        assert.equal(after.ids.get(`${String(id)}:value`)?.name, 'Free Space');
+
+        // Once: a later name, through the same resolver and through a cold one, is not taken.
+        await batch(resolver, id, [{ ...named, name: 'Disk' }]);
+        await batch(resolverOf(), id, [{ ...named, name: 'Disk', unit: 'GB' }]);
+        assert.deepEqual(await primary(id), { key: 'value', name: 'Free Space', unit: '%' });
+        assert.equal(harness.audit.recorded.length, 1);
+      });
+
+      it('takes it on a cold read after a restart, and keeps a unit it already has', async () => {
+        const id = await createdWith({ primaryName: '' });
+        await db.query("UPDATE channel SET unit = 'B' WHERE sensor_id = $1 AND key = 'value'", [
+          id,
+        ]);
+        await batch(resolverOf(), id, [named]);
+        assert.deepEqual(await primary(id), { key: 'value', name: 'Free Space', unit: 'B' });
+      });
+
+      it('never replaces a name of the declaration’s own: a person’s primaryName, or a channel that is not primary', async () => {
+        const chosen = await createdWith({ primaryName: 'Disk free' });
+        const plain = await createdWith();
+        // Named by its key by an earlier build while the person's name is declared: the start-up
+        // pass writes the person's name (`P-404`), and a reading never writes the program's.
+        const older = await namedByKey({ primaryName: 'Disk free' });
+        const resolver = resolverOf();
+        await batch(resolver, chosen, [named]);
+        await batch(resolver, older, [named]);
+        // `bare` is declared by its key too, but it is not the primary the decision is about.
+        await batch(resolver, plain, [{ key: 'bare', value: 1, name: 'Bare one' }]);
+        assert.deepEqual(await primary(chosen), { key: 'value', name: 'Disk free', unit: '' });
+        assert.deepEqual(await primary(older), { key: 'value', name: 'value', unit: '' });
+        const bare = (await labels(plain)).find((one) => one.key === 'bare');
+        assert.deepEqual(bare, { key: 'bare', name: 'bare', unit: '' });
+        assert.deepEqual(redeclared(), []);
+
+        // The person empties `primaryName`, which says "whatever the program calls it": the edit
+        // names the primary by its key again, and the next reading that names it renames it.
+        await harness.service.update(
+          testActor,
+          chosen,
+          { kind: 'sensor', params: {} },
+          { kind: 'none' },
+        );
+        assert.deepEqual(await primary(chosen), { key: 'value', name: 'value', unit: '' });
+        resolver.forget(chosen);
+        harness.audit.recorded.length = 0;
+        await batch(resolver, chosen, [named]);
+        assert.deepEqual(await primary(chosen), { key: 'value', name: 'Free Space', unit: '%' });
+      });
+
+      it('leaves one whose type cannot answer, and asks nothing of it or a renamed one again', async () => {
+        const broken = await namedByKey({ gen: BROKEN });
+        const resolver = resolverOf();
+        await batch(resolver, broken, [named]);
+        assert.deepEqual(await primary(broken), { key: 'value', name: 'value', unit: '' });
+        assert.deepEqual(redeclared(), [], 'not on the word of a `{}` answer');
+        // And a type this build does not register says nothing either (`P-312`).
+        const unregistered = await createdWith();
+        await batch(resolverOf([]), unregistered, [named]);
+        assert.deepEqual(await primary(unregistered), { key: 'value', name: 'value', unit: '' });
+
+        const renamed = await createdWith();
+        await batch(resolver, renamed, [named]);
+        // The rename forgot the sensor, so the next batch reads its rows once, and then no more.
+        await batch(resolver, renamed, [named]);
+
+        // Cached by readings that name nothing, as most scans are (`P-403` review).
+        const quiet = await createdWith();
+        await batch(resolver, quiet, [
+          { key: 'bare', value: 1 },
+          { key: 'value', value: 1 },
+        ]);
+
+        const spy = counting();
+        await batch(resolver, broken, [named], spy.q);
+        await batch(resolver, renamed, [{ ...named, name: 'Other' }], spy.q);
+        await batch(resolver, renamed, [{ key: 'value', value: 2 }], spy.q);
+        // What the filters exist for: a name on a channel that is not the primary, and a
+        // reading that names the primary by its key.
+        await batch(
+          resolver,
+          quiet,
+          [
+            { key: 'bare', value: 1, name: 'Bare one' },
+            { key: 'value', value: 1, name: 'value' },
+          ],
+          spy.q,
+        );
+        assert.equal(
+          spy.count(),
+          0,
+          'a settled primary, a renamed one, a named non-primary channel and a primary named ' +
+            'by its key cost no statement',
+        );
+        // And read cold, they cost the one read of the rows that every cold batch makes.
+        const cold = counting();
+        await batch(
+          resolverOf(),
+          await createdWith(),
+          [
+            { key: 'bare', value: 1, name: 'Bare one' },
+            { key: 'value', value: 1, name: 'value' },
+          ],
+          cold.q,
+        );
+        assert.equal(cold.count(), 1, 'only the read of the existing rows');
+
+        // Parameters the type answers for, as an edit stores them: the edit's entry makes the
+        // invalidator forget the sensor, and the next reading that names the primary renames it.
+        await db.query("UPDATE sensor_config SET params = '{}'::jsonb WHERE object_id = $1", [
+          broken,
+        ]);
+        resolver.forget(broken);
+        await batch(resolver, broken, [named]);
+        assert.deepEqual(await primary(broken), { key: 'value', name: 'Free Space', unit: '%' });
+      });
+
+      it('skips a sensor another transaction holds, without waiting, and names it at a later reading', async () => {
+        const id = await createdWith();
+        let locked = (): void => undefined;
+        let release = (): void => undefined;
+        const holding = new Promise<void>((resolve) => {
+          locked = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const holder = db.tx(async (q) => {
+          await q.query('SELECT id FROM object WHERE id = $1 FOR NO KEY UPDATE', [id]);
+          locked();
+          await released;
+        });
+        const resolver = resolverOf();
+        try {
+          await within(10_000, 'the transaction holding the sensor', holding);
+          // Under the pool's lock_timeout, so a batch that waited would fail here, not pass late.
+          const resolved = await within(
+            4_000,
+            'a batch beside a held sensor',
+            batch(resolver, id, [named]),
+          );
+          assert.equal(resolved.ids.size, 1, 'the reading is taken');
+        } finally {
+          release();
+          await holder;
+        }
+        assert.deepEqual(await primary(id), { key: 'value', name: 'value', unit: '' });
+        await batch(resolver, id, [named]);
+        assert.deepEqual(await primary(id), { key: 'value', name: 'Free Space', unit: '%' });
       });
     });
 

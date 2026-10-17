@@ -350,8 +350,8 @@ describe(
       const forgot: number[] = [];
       const invalidator = new ResultCacheInvalidator({
         channels: {
-          forget: (sensorId) => {
-            forgot.push(sensorId);
+          forgetMany: (sensorIds) => {
+            forgot.push(...sensorIds);
             return 0;
           },
           clear: () => undefined,

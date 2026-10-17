@@ -1760,9 +1760,9 @@ describe(
       const handle: { resolver: ChannelResolver | null } = { resolver: null };
       const invalidator = new ResultCacheInvalidator({
         channels: {
-          forget: (sensorId) => {
-            forgot.push(sensorId);
-            return handle.resolver?.forget(sensorId) ?? 0;
+          forgetMany: (sensorIds) => {
+            forgot.push(...sensorIds);
+            return handle.resolver?.forgetMany(sensorIds) ?? 0;
           },
           clear: () => {
             handle.resolver?.clear();

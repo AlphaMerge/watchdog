@@ -169,6 +169,10 @@ export type Mutation =
        * this says what that did to the channel, and it is a `channel.*` action, so the result
        * path forgets what it cached of the channel (`M-04`). A lookup changed this way is not
        * also a `channel.lookup.set`, which is a person pointing a channel somewhere.
+       *
+       * Also written by system actors bringing a row up to what is declared without an edit:
+       * ingestion moving a primary (`P-314`) or naming one by its key after the program that
+       * reports it (`P-403`), and the start-up passes (`P-323`, `P-312`, `P-402`).
        */
       action: 'channel.redeclared';
       objectId: ObjectId;

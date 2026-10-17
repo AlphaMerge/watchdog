@@ -5,7 +5,8 @@ import type { ChannelResolver } from './channels.js';
 
 /** The caches on the result path. Narrow interfaces so this file knows nothing about either. */
 export interface ForgetsChannels {
-  forget(sensorId: number): number;
+  /** Forgets these sensors' channels in one pass, however many there are (`P-403` review). */
+  forgetMany(sensorIds: ReadonlySet<number>): number;
   clear(): void;
 }
 
@@ -96,6 +97,11 @@ export class ResultCacheInvalidator implements AuditSink {
     // Nothing here awaits or touches the database: this runs inside the caller's transaction,
     // and a mutation must not get slower because a cache needed clearing.
     const later = this.#afterCommitOf(q);
+    // **Gathered, and forgotten once after the loop** (`P-403` review). A forget is a scan of the
+    // whole channel cache, and a move or a clone that clears thousands of sensors' own secrets
+    // records an `object.updated` for each in this one call: a scan each would block the event
+    // loop for seconds inside the mover's transaction, and again after it commits.
+    const sensors = new Set<number>();
     for (const mutation of mutations) {
       // Any change to a channel, by prefix rather than by listing the actions. Every
       // `channel.*` mutation carries the sensor's id, and the alternative — three names to keep
@@ -105,7 +111,15 @@ export class ResultCacheInvalidator implements AuditSink {
       // never about a channel; the guard is what makes the prefix test type-safe as well as
       // correct.
       if (mutation.action.startsWith('channel.') && mutation.objectId !== null) {
-        this.#forgetSensor(mutation.objectId, later);
+        sensors.add(mutation.objectId);
+      } else if (mutation.action === 'object.updated' && mutation.changedParams.length > 0) {
+        // A sensor's parameters decide what its type declares for its channels (`P-297`), and
+        // the resolver keeps what it decided from a declaration: a primary named by its key that
+        // a reading may not rename (`P-403`). An edit that rewrote a channel forgets the sensor
+        // by that channel's entry; one that changed only what the declaration would say must
+        // too, or an emptied `primaryName` or a repaired parameter waits for a restart. A
+        // forgotten sensor costs one query on the next batch.
+        sensors.add(mutation.objectId);
       } else if (
         mutation.action === 'setting.set' ||
         mutation.action === 'setting.reverted' ||
@@ -131,6 +145,7 @@ export class ResultCacheInvalidator implements AuditSink {
         this.#forgetEverything(later);
       }
     }
+    if (sensors.size > 0) this.#forgetSensors(sensors, later);
     return Promise.resolve();
   }
 
@@ -139,13 +154,16 @@ export class ResultCacheInvalidator implements AuditSink {
     this.#stopped = true;
   }
 
-  #forgetSensor(sensorId: number, later: Later): void {
-    const dropped = this.#channels.forget(sensorId);
+  #forgetSensors(sensorIds: ReadonlySet<number>, later: Later): void {
+    const dropped = this.#channels.forgetMany(sensorIds);
     if (dropped > 0) {
-      this.#logger.debug({ sensorId, channels: dropped }, 'forgot a sensor’s cached channels');
+      this.#logger.debug(
+        { sensors: sensorIds.size, channels: dropped },
+        'forgot sensors’ cached channels',
+      );
     }
     later(() => {
-      this.#channels.forget(sensorId);
+      this.#channels.forgetMany(sensorIds);
     });
   }
 
