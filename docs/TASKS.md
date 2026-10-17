@@ -36285,13 +36285,16 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       Up after a reboot and the core started on an encrypted credential, and the outcome is
       recorded here.
 
-- [ ] **H-37 — the 1.0 release notes must say probes need the new package for ICMP** · S ·
+- [x] **H-37 — the 1.0 release notes must say probes need the new package for ICMP** · S ·
       H-31 · Found 2026-10-04 in `H-31`. On Debian and Ubuntu a probe's ICMP sensors read Down
       under its unit until `ms-setup` from a package carrying `H-31` has run, because only that
       opens `ping_group_range`. A remote probe installed from an earlier build and left on it
       keeps reading Down. There are no release notes yet. **Done when** whatever ships with
       `v1.0.0` says so, with the one-line check (`sysctl net.ipv4.ping_group_range` includes
       `getent group ms-probe`'s id) and the fix (upgrade, or run `ms-setup`).
+
+      **H-37 outcome.** Said, with the check and both fixes, in `docs/release-notes-1.0.md` →
+      *Every probe host: ICMP needs this release's package*.
 
 ## Release 1.1 — Windows
 
@@ -36622,12 +36625,35 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       drop-in finds out when the upgraded probe exits 78. **Done when** `setup.sh` reads the unit's
       user (`systemctl show -p User ms-probe`) and says so before restarting, with a smoke step.
 
-- [ ] **H-42 — the release notes must say what migration 073 does and does not repair** · XS ·
+- [x] **H-42 — the release notes must say what migration 073 does and does not repair** · XS ·
       P-302 · Found 2026-10-08 in `P-302`. Clones made before `P-302` stored counters as totals
       (073 fixes the width; stored totals stay), have no status lookup (073 names them, does not
       fill them), and on a fixed type may already have lost an operator's thresholds to the
       declared default at a start (unrecoverable). **Done when** the release notes say all three,
       pointing at `docs/installation.md`'s section.
+
+      **H-42 outcome.** All three said in `docs/release-notes-1.0.md` → *After the upgrade*,
+      pointing at `installation.md` → *Upgrading*, which does not state the third (`H-43`).
+
+- [ ] **H-43 — the installation guide does not say a cloned health sensor's thresholds are
+      lost** · XS · H-42, P-302 · Found 2026-10-17 in `H-42`. `installation.md` → *Upgrading*
+      says 073 makes a cloned Core Health or Probe Health sensor's copied thresholds "follow the
+      release's defaults again", which reads as a repair. It does not say that those were an
+      operator's thresholds on the source, that an earlier start may already have replaced them,
+      and that the first start after 073 replaces any left (`P-302` outcome, `limits_source`), so
+      that nothing can recover them. The release notes say it. **Done when** the guide's 073
+      paragraph says so, and what to do: set them again on the clone.
+
+- [ ] **H-44 — no operator document says migration 075 unflags a second local probe** · XS ·
+      P-382 · Found 2026-10-17 in `H-42`'s upgrade-note sweep. Migration 075 keeps one probe
+      object marked local where an installation had two or more: the one with an approved probe,
+      then the one seen most recently, then the lowest id. The others are no longer local, so
+      they can be deleted, and the local probe's readers (Core Health's local-probe log counts,
+      the machine-memory rule, the clock comparison) stop taking them as local. `installation.md`
+      §5 says how the flag behaves from now on, and nothing says what the upgrade did to an
+      existing pair; `GET /api/v1/probes` does not show the flag either. **Done when**
+      `installation.md` → *Upgrading* carries a "from a release before `P-382`" paragraph saying
+      which object kept the flag and how an operator can tell which one that is.
 
 ---
 
