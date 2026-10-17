@@ -111,7 +111,7 @@ fi
 one_format() {
   local format="$1" image container pkg install_cmd upgrade_cmd remove_cmd query_cmd
   local unping_cmd requires_cmd ping_pkg_cmd reinstall_cmd
-  local probe_pkg probe_upgrade_cmd probe_remove_cmd probe_query_cmd
+  local probe_pkg probe_upgrade_cmd probe_remove_cmd probe_query_cmd probe_swap_cmd
   case "${format}" in
     deb)
       image=ms-smoke:bookworm
@@ -124,6 +124,8 @@ one_format() {
       probe_upgrade_cmd='dpkg -i /pkg/PKG'
       probe_remove_cmd='dpkg -P ms-probe'
       probe_query_cmd='dpkg -s ms-probe'
+      # apt removes `ms` for it, the two conflicting, before it unpacks `ms-probe` (`H-40`).
+      probe_swap_cmd='DEBIAN_FRONTEND=noninteractive apt-get install -y -q /pkg/PKG'
       # **Through apt, as `installation.md` §2 says to** (`H-31`): the package depends on
       # `iputils-ping`, which `dpkg -i` would refuse to resolve, and the box has had it removed
       # below so that the dependency, not the image, is what brings `ping`.
@@ -149,6 +151,8 @@ one_format() {
       probe_upgrade_cmd='rpm -U --force /pkg/PKG'
       probe_remove_cmd='rpm -e ms-probe'
       probe_query_cmd='rpm -q ms-probe'
+      # One transaction, which installs `ms-probe` and erases `ms` after it (`H-40`).
+      probe_swap_cmd='dnf swap -y ms /pkg/PKG'
       # Through dnf, which resolves `Requires: iputils`; the image has no `ping` of its own.
       install_cmd='dnf install -y /pkg/PKG'
       unping_cmd='! rpm -q iputils >/dev/null'
@@ -581,6 +585,54 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
   [ "${probe_state}" != active ] || fail "ms-probe is still running after its package was removed"
   echo "    ${probe_remove_cmd}: unit gone, ms-probe ${probe_state}"
+
+  # --- ms swapped for ms-probe, and ms-probe erased with its probe running (H-40) -------------
+  #
+  # **The swap an operator makes when the core moves to another host**: `ms` out and `ms-probe`
+  # in, in one transaction. dnf installs `ms-probe` first and erases `ms` after it, so `ms`'s erase
+  # used to stop and disable the probe that `ms-probe` had just set up and started. apt removes
+  # `ms` first, because the two conflict, and `ms-probe`'s postinst starts the probe after that.
+  echo "==> swapping ms for ms-probe with the probe running (H-40)"
+  ${in} bash -c "${install_cmd/PKG/${pkg_name}}" >"${probe_log}" 2>&1 \
+    || { cat "${probe_log}" >&2; fail "could not install ${pkg_name} for the swap"; }
+  ${in} systemctl enable --now ms-probe.service >/dev/null 2>&1 \
+    || fail "could not start ms-probe under ms before the swap"
+  local swap_status=0 enabled
+  ${fresh} bash -c "${probe_swap_cmd/PKG/${probe_name}}" >"${probe_log}" 2>&1 || swap_status=$?
+  if [ "${swap_status}" -ne 0 ]; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "${probe_swap_cmd/PKG/${probe_name}} exited ${swap_status}"
+  fi
+  if [ "${format}" = deb ]; then
+    # Removed, not purged: apt leaves a conflicting package's configuration, as dpkg -r does.
+    # shellcheck disable=SC2016 # dpkg-query's own field syntax, for dpkg-query to expand
+    status="$(${in} dpkg-query -W -f='${db:Status-Abbrev}' ms 2>/dev/null | tr -d ' ' || true)"
+    [ "${status}" = rc ] || fail "dpkg says '${status}' for ms after the swap, not rc"
+  else
+    ! ${in} rpm -q ms >/dev/null 2>&1 || fail "ms is still installed after the swap"
+  fi
+  ${in} bash -c "${probe_query_cmd}" >/dev/null 2>&1 || fail "ms-probe is not installed after the swap"
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  enabled="$(${in} systemctl is-enabled ms-probe.service 2>/dev/null || true)"
+  if [ "${probe_state}" != active ] || [ "${enabled}" != enabled ]; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "the swap left ms-probe ${probe_state:-unknown} and ${enabled:-unknown}, not active and enabled"
+  fi
+  ${in} test ! -e /usr/lib/systemd/system/ms-core.service || fail "the core's unit survived the swap"
+  echo "    ${probe_swap_cmd/PKG/${probe_name}}: ms gone, ms-probe active and enabled"
+  grep -F 'ms-probe.service was left as it is' "${probe_log}" | sed 's/^/      /' || true
+
+  echo "==> erasing ms-probe with its probe running (H-40)"
+  ${in} bash -c "${probe_remove_cmd}" >"${probe_log}" 2>&1 \
+    || { cat "${probe_log}" >&2; fail "could not remove ms-probe after the swap"; }
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  [ "${probe_state}" != active ] || fail "ms-probe is still running after its package was erased"
+  # The enable link, left dangling, would be a unit systemd tries to start at every boot.
+  local links
+  links="$(${in} find /etc/systemd/system -name ms-probe.service -path '*.wants/*' 2>/dev/null || true)"
+  [ -z "${links}" ] || fail "the erase left ms-probe enabled: ${links}"
+  echo "    ${probe_remove_cmd}: ms-probe ${probe_state}, and no enable link left"
+
   rm -f "${probe_log}"
 
   docker rm -f "${container}" >/dev/null 2>&1 || true

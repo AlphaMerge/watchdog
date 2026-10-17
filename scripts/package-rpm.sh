@@ -194,11 +194,15 @@ fi
 # **\$1 is how many versions will remain afterwards.** On an upgrade that is 1 and this must do
 # nothing: rpm installs the new package and only then removes the old one, so stopping here
 # would stop the service that %post has already restarted, and leave the host down silently.
+# **The core only** (\`H-40\`): the probe's unit is %postun's, which can tell whether \`ms\` or
+# \`ms-probe\` is being swapped in for this package and runs it now (deploy/stop-probe-unit.sh).
 if [ "\$1" -eq 0 ]; then
 $(for svc in "${services[@]}"; do
+  [ "${svc}" = probe ] && continue
   printf '  systemctl stop "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
   printf '  systemctl disable "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
 done)
+  :
 fi
 
 %postun
@@ -209,7 +213,10 @@ fi
 # operator's drop-ins are theirs, and stay. The probe's ping drop-in is a setting for this
 # package, not data, and goes with an erase while it is still as ms-setup wrote it (\`H-34\`): rpm
 # has no purge, so the erase is the end. The text is deploy/remove-ping-conf.sh, as in the .deb.
+# The probe's unit is stopped and disabled first, before the reload, unless the package replacing
+# this one runs it now (\`H-40\`).
 if [ "\$1" -eq 0 ]; then
+$(cat "${repo_root}/deploy/stop-probe-unit.sh")
   systemctl daemon-reload >/dev/null 2>&1 || :
 $(cat "${repo_root}/deploy/remove-ping-conf.sh")
   echo "note: /etc/ms and /var/lib/ms-* were left in place." >&2

@@ -37177,12 +37177,58 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         with */opt/ms, the units, their enable links and the ping drop-in: gone, and said so* and
         */etc/ms, /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
 
-- [ ] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
+- [x] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
       Found 2026-10-07 in `H-34`. `ms`'s rpm `%preun` with `$1=0` (and the `.deb`'s `prerm` on
       removal) stops and disables `ms-probe.service`. In `dnf swap ms ms-probe` that runs after
       `ms-probe` is installed, so the swap leaves the new package's probe stopped and disabled.
       **Done when** the scriptlets skip the probe unit while `/opt/ms/libexec/ms-setup` still
       exists (the check `H-34`'s fragment uses), with a smoke case for the swap.
+
+      **H-40 outcome. The `.rpm`s leave the probe's unit to `%postun`, which can tell a swap from
+      an erase; the `.deb` needed nothing.**
+      - **Why `%postun` and not the ticket's check in `%preun`.** In `%preun` both packages'
+        files are on disk whichever case it is — `ms-probe` is already in during a swap, and an
+        erase has removed nothing yet — so `/opt/ms/libexec/ms-setup` is always there and the
+        check could not tell. Once an erase's own files have gone, a path both packages ship is
+        there only if the other package (or a tarball installation) is: the reading
+        `remove-ping-conf.sh` already uses. So `deploy/stop-probe-unit.sh`, a POSIX-sh fragment
+        with no `%`, is in both packages' `%postun` under `$1 = 0`, before the reload and the
+        ping fragment: with `ms-setup` still there it leaves the unit and says *ms-probe.service
+        was left as it is: … still installed*; with it gone it stops and disables the probe.
+        `%preun` stops and disables the core only. The cost: a plain erase leaves the probe
+        running over its departing files for the second or two the erase takes.
+      - **The enable link, by hand.** The first smoke run found that on Rocky 9 (systemd 252)
+        `systemctl disable` after the unit file has gone leaves
+        `multi-user.target.wants/ms-probe.service` pointing at nothing. The fragment then removes
+        a link by that name in `/etc/systemd/system/*.wants` that leads nowhere, and only such a
+        link: one to a unit file that is there (an operator's copy in /etc) is systemd's.
+      - **The `.deb` is unchanged**, as the ticket allowed for: `ms-probe` conflicts with `ms`,
+        so apt removes `ms` — its `prerm` stopping and disabling the probe — before it unpacks
+        `ms-probe`, whose `postinst` enables and starts it after. The smoke shows it.
+      - **Docs.** `installation.md`: a host moves from `ms` to `ms-probe` with one `apt install`
+        or `dnf swap`, and ends with the probe running, enabled, from the new package.
+      - **Tests.** `deploy-scripts.test.ts`, six, on the scriptlets themselves: `package-rpm.sh`'s
+        spec from `%pre` on, expanded by bash as the packager expands it, and each scriptlet run
+        by `sh -e` with `$1`, against stub `systemctl`, with `/opt/ms` and the links moved into
+        the sandbox. The fragment is in both packages' `%postun` once and not in the `.deb`;
+        neither `%preun` touches the probe (and `ms`'s stops and disables the core), and an
+        upgrade asks nothing; an erase with nothing left stops, disables, then reloads; a swap's
+        erase leaves it and says so; the dangling link goes and a live one and another unit's
+        stay; a failing `systemctl` fails nothing. `H-34`'s branch test follows the new order.
+        The file is 100 of 100. **Mutations 11/11**: the probe stopped in `%preun` again; no
+        fragment; the fragment after the reload; on an upgrade too; the condition inverted; no
+        disable; a failed stop failing the scriptlet; asking after the core's file, which
+        `ms-probe` does not ship; the dangling link left; a live link taken; every unit's
+        dangling link taken.
+      - **Smoke.** `smoke-packages.sh`, at the end of each box: `ms` installed with its probe
+        running, swapped for `ms-probe` in one step, then `ms-probe` erased with its probe
+        running. The first run (arm64) passed Debian 12 and failed Rocky 9 on the link above;
+        with the fix, *package smoke test passed*: Debian 12, *apt-get install -y -q
+        /pkg/ms-probe_1.0.0~rc.2_arm64.deb: ms gone, ms-probe active and enabled* and *dpkg -P
+        ms-probe: ms-probe inactive, and no enable link left*; Rocky 9, *dnf swap -y ms
+        /pkg/ms-probe-1.0.0~rc.2-1.aarch64.rpm: ms gone, ms-probe active and enabled*, with the
+        note from `ms`'s `%postun`, and *rpm -e ms-probe: ms-probe inactive, and no enable link
+        left*; each box's earlier assertions as before.
 
 - [ ] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
       · Found 2026-10-07 in `P-276`. Since `P-276` a root probe with scripts and no

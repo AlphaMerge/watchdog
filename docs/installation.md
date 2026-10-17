@@ -161,7 +161,10 @@ The tarball installer takes three flags the packages have no equivalent for, bec
 either contains a core or it does not:
 
 - `--probe-only` on a host that is only running a remote probe. The `ms-probe` package is the
-  packaged form of this, and it conflicts with `ms` so a host cannot end up with both.
+  packaged form of this, and it conflicts with `ms` so a host cannot end up with both. A host
+  moves from `ms` to `ms-probe` in one step — `sudo apt install ./ms-probe_<version>_<arch>.deb`,
+  which removes `ms` for it, or `sudo dnf swap ms ./ms-probe-<version>.<arch>.rpm` — and the
+  probe it ends with runs from the new package, enabled (`H-40`).
 - `--core-only` where the probe is somewhere else entirely.
 - `--no-start` to stage a machine that is not meant to come up yet. `MS_SETUP_NO_START=1` does
   the same for a package install, which is what baking a golden image wants.
