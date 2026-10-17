@@ -352,11 +352,13 @@ export const flowCollector: SensorType = {
     // An exporter is an address and a device's host is often a name (`P-246`). Compared as
     // strings, a router addressed by name matched none of its own flows, and failed every scan
     // with "no flows arrived" while they did. The name is resolved, and one that resolves to
-    // nothing fails naming the host rather than blaming the exporter.
+    // nothing fails naming the host rather than blaming the exporter. Resolved with the check's
+    // own resolver, signal and bound (`P-425`).
     const isDevice = onlyThisDevice
-      ? await withEarlierNote(batch, 'flow records', async () =>
-          (await import('../support/sender.js')).fromDevice(context.target.host, 'flows'),
-        )
+      ? await withEarlierNote(batch, 'flow records', async () => {
+          const { fromDevice, senderLookup } = await import('../support/sender.js');
+          return fromDevice(context.target.host, 'flows', senderLookup(context));
+        })
       : null;
     const mine =
       isDevice === null ? batch.items : batch.items.filter((item) => isDevice(item.source));

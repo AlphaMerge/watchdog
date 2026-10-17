@@ -12104,7 +12104,7 @@ because each is a decision rather than a defect:
       `handshake` for TLS, a phase for delivery) with the host, and each cancel the phase it
       was in, with a test per type.
 
-- [ ] **P-425 — a listener sensor resolves its device's name with no bound and no signal** · S ·
+- [x] **P-425 — a listener sensor resolves its device's name with no bound and no signal** · S ·
       P-246, A-66 · Found 2026-10-17 by `A-66`. `snmp.trap`, `syslog.receiver` and
       `flow.netflow` with "only this device" resolve a named device through `fromDevice`
       (`@ms/sensors` `support/sender.ts`), which calls `dns.lookup` with no bound, no
@@ -12117,6 +12117,54 @@ because each is a decision rather than a defect:
       when** the sender's lookup goes through `resolveWithin` with the check's signal and a
       bound, so a silent resolver fails the check at the bound saying so, the worker is not
       recycled, and the lookup is counted, with a test of each.
+
+      **P-425 outcome. A listener's sender is resolved as every check resolves a name.**
+      - **`fromDevice`** (`sensors/src/support/sender.ts`) waits in `resolveWithin` with the
+        check's resolver, its signal and half its timeout (`resolveBoundMs`, ten seconds at
+        most), and hands the resolver that bound. `snmp.trap`, `syslog.receiver` and
+        `flow.netflow` pass all three from their context (`senderLookup`). On a probe the
+        resolver is the probe's (`P-426`) under any target policy, since the catalogue hands
+        every check `target.resolve`.
+      - **Its failures say which**, each `phase: 'resolve'` with the host: past the bound, `that
+        name did not resolve within N ms — the probe’s resolver is not answering`; a held name, a
+        stuck lane, a full queue or `EAI_AGAIN`, `did not resolve — the probe’s resolver is not
+        answering (…)`; the probe failing to ask, `could not be resolved (…)`; more addresses
+        than the probe uses, `could not be used (…)` in the resolver's words, which name the
+        count; anything else, `did not resolve to any address (CODE)`, as before.
+      - **`DeviceAddresses` and its five-minute cache in each worker are gone**: answers are kept
+        by the probe's resolver, 30 s, so a sender's name follows a DNS change as a check's does.
+      - **Counted** in `lookupsInFlight` and `lookupsGivenUp` as every check's lookup is.
+        `administration.md` moves it out of "what still resolves for itself" and names it in the
+        Probe Health row; so does the `lookups.ts` header.
+      - **Tests.** `sensors/test/sender.test.ts` (21, 10 in the resolution suite, rewritten: every
+        address of a name in the one form, the bound handed to the resolver; nothing asked for a
+        literal or a blank host; the check's resolver asked every time; no address naming the
+        host and not given up; the bound's failure in full, at the bound, counted in flight and
+        given up; a cancel; a held name given up and a busy probe not; `senderLookup` taking the
+        context's three). `probe/test/listener-lookup.test.ts` (4, new, real workers and the
+        three real listener types in `support/lookup-registry.ts`): each type with a name the
+        resolver never answers fails at the 1 s bound of its 2 s timeout, by the check and not
+        the pool, given up 1 and in flight 1, and the same worker takes the next check; and a
+        sender asked of the probe's resolver once for two checks. Beside them, unchanged and
+        passing: `syslog` (39), `snmp-trap` (31), `flow-sensor` (38), `name-lookups` (21),
+        `listener-restart-scenario` (9), `pool-lookups` (11), `pool-resolve` (7),
+        `catalogue-registry` (5).
+      - **Mutation: 16 of 16 killed**: the lookup as it was (no bound, signal or count); no bound;
+        no signal; the bound not handed to the resolver; not counted in the thread's
+        `nameLookups`; a caller's count ignored; a held name, a busy probe and the bound's
+        failure each worded as no address; a per-worker cache kept; each of the three types
+        resolving for itself; `senderLookup` dropping the resolver or the deadline; a literal
+        address resolved.
+      - **Review.** The sender passes on the resolver's words for a name with more addresses than
+        the probe uses (`tooManyAddresses`, from `P-426`'s review): `that name could not be used
+        (core-sw1 resolved to 65 addresses, more than the 64 …)`, not `did not resolve to any
+        address (ETOOMANYADDRESSES)`, and not given up. The listener checks keep their bound
+        under `P-426`'s reviewed resolver, where a check already waiting on a stuck lookup waits
+        its own bound rather than failing at the second: `listener-lookup` unchanged and passing.
+        Tests: `sender` 22 (one new), `listener-lookup` 4, `syslog` 39, `snmp-trap` 31,
+        `flow-sensor` 38, `name-lookups` 22, `listener-restart-scenario` 9, `pool-lookups` 11,
+        `pool-resolve` 7. Mutation: 17 of 17 killed, the 16 above rerun on the reviewed
+        resolver and the too-many branch worded as no address.
 
 - [x] **P-426 — a probe runs two name lookups at a time** · M · A-66 · Found 2026-10-17 by
       `A-66`. The probe sets no `UV_THREADPOOL_SIZE`, and libuv lets `getaddrinfo` hold at most

@@ -227,11 +227,13 @@ export const syslogReceiver: SensorType = {
     const retain = Math.min(MAX_RETAINED, Number(context.params['retain'] ?? 3));
     // A sender is an address and a device's host is often a name (`P-246`). Compared as strings,
     // a device addressed by name counted nothing, for ever, and read Up at zero, where no limit
-    // can fire. The name is resolved, and one that resolves to nothing fails the check.
+    // can fire. The name is resolved, with the check's own resolver, signal and bound (`P-425`),
+    // and one that resolves to nothing fails the check.
     const isDevice = onlyThisDevice
-      ? await withEarlierNote(batch, 'messages', async () =>
-          (await import('../support/sender.js')).fromDevice(context.target.host, 'messages'),
-        )
+      ? await withEarlierNote(batch, 'messages', async () => {
+          const { fromDevice, senderLookup } = await import('../support/sender.js');
+          return fromDevice(context.target.host, 'messages', senderLookup(context));
+        })
       : null;
 
     const counts = new Map<string, number>(SEVERITIES.map((name) => [name, 0]));

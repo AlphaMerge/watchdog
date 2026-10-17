@@ -1,4 +1,10 @@
-import { checkedTarget, nameLookups, SensorCatalogue, type SensorType } from '@ms/sensors';
+import {
+  BUILT_IN_SENSOR_TYPES,
+  checkedTarget,
+  nameLookups,
+  SensorCatalogue,
+  type SensorType,
+} from '@ms/sensors';
 import { poolResolver, withResolverNotes } from '../../src/runner/resolve-client.js';
 import type {
   CheckContext,
@@ -20,6 +26,8 @@ import { fakeResolve } from './fake-names.js';
  * the `NameResolver` the test handed the pool, which answers with whatever `getaddrinfo` the test
  * handed it. Otherwise the worker resolves for itself with `fakeResolve`, by the name it is asked
  * (`fake-names.ts`). The registry reports `nameLookups`, as `catalogue-registry.ts` does.
+ *
+ * It also runs the three real listener types, whose senders are resolved the same way (`P-425`).
  */
 
 function abortable(ms: number, signal: AbortSignal): Promise<void> {
@@ -68,13 +76,20 @@ const named: SensorType = {
   },
 };
 
+/** The listener types, whose sender is resolved as a check's own name is (`P-425`). */
+const LISTENER_TYPES = ['snmp.trap', 'syslog.receiver', 'flow.netflow'];
+const listeners = BUILT_IN_SENSOR_TYPES.filter((type) => LISTENER_TYPES.includes(type.id));
+if (listeners.length !== LISTENER_TYPES.length) {
+  throw new Error(`the built-in catalogue lacks one of ${LISTENER_TYPES.join(', ')}`);
+}
+
 const through = poolResolver();
 const catalogue = new SensorCatalogue({
   resolve: through?.resolve ?? fakeResolve,
   targetPolicy: 'link-local',
-})
-  .register(named)
-  .seal();
+}).register(named);
+for (const type of listeners) catalogue.register(type);
+catalogue.seal();
 
 const registry: CheckRegistry = {
   execute(sensorType: string, context: CheckContext): Promise<CheckExecution> {

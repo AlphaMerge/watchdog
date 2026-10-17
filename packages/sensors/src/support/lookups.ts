@@ -4,9 +4,10 @@
  *
  * **Every lookup a check makes to check a name comes through `resolveWithin`**, which counts it
  * here: the credential pin (`pinTarget`, `A-41c`) and the target policy's guard (`checkedTarget`,
- * `A-54`, `A-57`), so every transport that connects to a device by name under the default policy,
- * and discovery's identification. A socket that resolves a name itself is not counted: a device
- * under `probe.targetPolicy` "none", a listener sensor's sender, the probe's own link to the core.
+ * `A-54`, `A-57`), so every transport that connects to a device by name under the default policy;
+ * a listener sensor's sender (`fromDevice`, `P-425`); and discovery's identification. A socket
+ * that resolves a name itself is not counted: a device under `probe.targetPolicy` "none", the
+ * probe's own link to the core.
  *
  * **On a probe, a lookup is asked of the probe's one resolver** (`P-426`), in its main thread, which
  * keeps answers and runs `getaddrinfo` on libuv's thread pool a bounded number at a time. A check

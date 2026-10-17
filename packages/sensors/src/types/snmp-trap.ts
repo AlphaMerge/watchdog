@@ -174,10 +174,13 @@ export const snmpTrap: SensorType = {
     // directly counts zero for ever on any device addressed by hostname — which looks exactly
     // like a quiet network, the one failure this type must not have. So the name is resolved,
     // and a name that will not resolve fails the check instead of reporting nothing. The
-    // resolver is shared with the other listener types (`P-246`).
-    const { canonicalAddress, fromDevice } = await import('../support/sender.js');
+    // resolver is shared with the other listener types (`P-246`), and is the check's own, bounded
+    // and cancelled with it (`P-425`).
+    const { canonicalAddress, fromDevice, senderLookup } = await import('../support/sender.js');
     const isDevice = onlyDevice
-      ? await withEarlierNote(batch, 'traps', () => fromDevice(host, 'notifications'))
+      ? await withEarlierNote(batch, 'traps', () =>
+          fromDevice(host, 'notifications', senderLookup(context)),
+        )
       : null;
 
     const mine: ReceivedNotification[] = [];

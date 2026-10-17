@@ -1,32 +1,22 @@
 import { strict as assert } from 'node:assert';
+import { isIP } from 'node:net';
 import { describe, it } from 'node:test';
 import {
-  canonicalAddress,
-  DeviceAddresses,
-  fromDevice,
-  RESOLVE_TTL_MS,
-  type Lookup,
-} from '../src/support/sender.js';
+  LookupCount,
+  RESOLVER_BUSY,
+  RESOLVER_HELD,
+  RESOLVER_TOO_MANY,
+} from '../src/support/lookups.js';
+import type { ResolveHost } from '../src/support/pinned-target.js';
+import { canonicalAddress, fromDevice, senderLookup } from '../src/support/sender.js';
 
 /**
  * The one resolver the three listener types share (`P-246`).
  *
  * The sockets are in each type's own tests; this is the part with the decisions in it — which
- * spellings are one address, and when the resolver is asked — against a lookup the test answers.
+ * spellings are one address, and how the device's name is resolved (`P-425`) — against a
+ * resolver the test answers.
  */
-
-/** A lookup that answers from a script, one entry per call, and records what it was asked. */
-function scripted(...answers: (readonly string[] | Error)[]): { lookup: Lookup; asked: string[] } {
-  const asked: string[] = [];
-  return {
-    asked,
-    lookup: (name) => {
-      asked.push(name);
-      const answer = answers.shift() ?? new Error('the test gave no more answers');
-      return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
-    },
-  };
-}
 
 describe('one form for a sender and a device (`P-246`)', () => {
   const cases: [string, string, string][] = [
@@ -51,99 +41,170 @@ describe('one form for a sender and a device (`P-246`)', () => {
   }
 });
 
-describe('a device’s addresses (`P-246`)', () => {
+describe('whether a sender is the device (`P-246`, `P-425`)', () => {
+  const answering =
+    (...addresses: string[]): ResolveHost =>
+    () =>
+      Promise.resolve(addresses.map((address) => ({ address, family: isIP(address) })));
+  const failing =
+    (code: string): ResolveHost =>
+    (host) =>
+      Promise.reject(Object.assign(new Error(`getaddrinfo ${code} ${host}`), { code }));
+  const never: ResolveHost = () => new Promise(() => undefined);
+
   it('resolves a name to every address it stands for, each in the one form', async () => {
-    const { lookup, asked } = scripted(['10.0.0.1', '2001:DB8::1', '::ffff:10.0.0.2']);
-    const addresses = await new DeviceAddresses({ lookup }).of(' core-sw1.example ');
-    assert.deepEqual([...addresses], ['10.0.0.1', '2001:db8::1', '10.0.0.2']);
-    assert.deepEqual(asked, ['core-sw1.example']);
+    const asked: { host: string; family: number; waitMs: number | undefined }[] = [];
+    const resolve: ResolveHost = (host, family, options) => {
+      asked.push({ host, family, waitMs: options?.waitMs });
+      return answering('10.0.0.1', '2001:DB8::1', '::ffff:10.0.0.2')(host, family);
+    };
+    const isDevice = await fromDevice(' core-sw1.example ', 'messages', {
+      resolve,
+      timeoutMs: 4_000,
+    });
+    assert.deepEqual(asked, [{ host: 'core-sw1.example', family: 0, waitMs: 2_000 }]);
+    assert.equal(isDevice('10.0.0.1'), true);
+    assert.equal(isDevice('2001:db8::1'), true);
+    assert.equal(isDevice('::ffff:10.0.0.2'), true, 'an IPv4 sender on a dual-stack listener');
+    assert.equal(isDevice('10.0.0.3'), false);
   });
 
   it('asks nothing for a literal address, of either family', async () => {
-    const { lookup, asked } = scripted();
-    const addresses = new DeviceAddresses({ lookup });
-    assert.deepEqual([...(await addresses.of('10.0.0.1'))], ['10.0.0.1']);
-    assert.deepEqual([...(await addresses.of('2001:DB8:0::1'))], ['2001:db8::1']);
-    assert.deepEqual([...(await addresses.of('::ffff:10.0.0.3'))], ['10.0.0.3']);
-    assert.deepEqual(asked, []);
+    let asked = 0;
+    const resolve: ResolveHost = () => {
+      asked += 1;
+      return Promise.resolve([]);
+    };
+    assert.equal((await fromDevice('10.0.0.1', 'messages', { resolve }))('10.0.0.1'), true);
+    assert.equal((await fromDevice('2001:DB8:0::1', 'messages', { resolve }))('2001:db8::1'), true);
+    assert.equal((await fromDevice('::ffff:10.0.0.3', 'messages', { resolve }))('10.0.0.3'), true);
+    assert.equal(asked, 0);
   });
 
-  it('asks once per name for five minutes, whatever case it is written in', async (t) => {
-    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
-    const { lookup, asked } = scripted(['10.0.0.1'], ['10.0.0.9']);
-    const addresses = new DeviceAddresses({ lookup });
-
-    assert.deepEqual([...(await addresses.of('core-sw1'))], ['10.0.0.1']);
-    assert.deepEqual([...(await addresses.of('CORE-SW1'))], ['10.0.0.1']);
-    t.mock.timers.tick(RESOLVE_TTL_MS - 1);
-    assert.deepEqual([...(await addresses.of('core-sw1'))], ['10.0.0.1']);
-    assert.equal(asked.length, 1);
-
-    // Renumbered: the next answer after the five minutes is the new one.
-    t.mock.timers.tick(1);
-    assert.deepEqual([...(await addresses.of('core-sw1'))], ['10.0.0.9']);
-    assert.equal(asked.length, 2);
+  it('asks the check’s resolver every time: answers are kept by the probe’s, not here', async () => {
+    let asked = 0;
+    const resolve: ResolveHost = (host, family) => {
+      asked += 1;
+      return answering('10.0.0.1')(host, family);
+    };
+    await fromDevice('core-sw1', 'messages', { resolve });
+    await fromDevice('core-sw1', 'messages', { resolve });
+    assert.equal(asked, 2);
   });
 
-  it('keeps each name’s answer to itself', async () => {
-    const { lookup } = scripted(['10.0.0.1'], ['10.0.0.2']);
-    const addresses = new DeviceAddresses({ lookup });
-    await addresses.of('core-sw1');
-    assert.deepEqual([...(await addresses.of('core-sw2'))], ['10.0.0.2']);
-  });
-
-  it('asks again after a name failed to resolve, rather than remembering the failure', async () => {
-    // A remembered failure would fail every scan for five minutes after DNS came back.
-    const { lookup, asked } = scripted(new Error('ENOTFOUND core-sw1'), ['10.0.0.1']);
-    const addresses = new DeviceAddresses({ lookup });
-    assert.equal((await addresses.of('core-sw1')).size, 0);
-    assert.deepEqual([...(await addresses.of('core-sw1'))], ['10.0.0.1']);
-    assert.equal(asked.length, 2);
-  });
-
-  it('asks again after an answer with no addresses in it, too', async () => {
-    const { lookup, asked } = scripted([], ['10.0.0.1']);
-    const addresses = new DeviceAddresses({ lookup });
-    assert.equal((await addresses.of('core-sw1')).size, 0);
-    assert.deepEqual([...(await addresses.of('core-sw1'))], ['10.0.0.1']);
-    assert.equal(asked.length, 2);
+  it('fails naming the host, rather than matching nothing, when the name stands for nothing', async () => {
+    for (const resolve of [failing('ENOTFOUND'), answering()]) {
+      const count = new LookupCount();
+      await assert.rejects(
+        () => fromDevice('core-sw1.example', 'messages', { resolve, counted: count }),
+        (error: Error) => {
+          assert.match(error.message, /counts only messages from core-sw1\.example/);
+          assert.match(error.message, /did not resolve to any address/);
+          assert.equal((error as { phase?: unknown }).phase, 'resolve');
+          return true;
+        },
+      );
+      assert.deepEqual(count.stats(), { inFlight: 0, givenUp: 0 }, 'an answer, not given up');
+    }
   });
 
   it('has no address for a blank host, and asks nobody', async () => {
-    const { lookup, asked } = scripted();
-    assert.equal((await new DeviceAddresses({ lookup }).of('  ')).size, 0);
-    assert.deepEqual(asked, []);
+    let asked = 0;
+    const resolve: ResolveHost = () => {
+      asked += 1;
+      return Promise.resolve([]);
+    };
+    await assert.rejects(() => fromDevice('  ', 'messages', { resolve }), /did not resolve/);
+    assert.equal(asked, 0);
   });
 
-  it('takes a shorter memory when told to', async (t) => {
-    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
-    const { lookup, asked } = scripted(['10.0.0.1'], ['10.0.0.1']);
-    const addresses = new DeviceAddresses({ lookup, ttlMs: 10 });
-    await addresses.of('core-sw1');
-    t.mock.timers.tick(10);
-    await addresses.of('core-sw1');
-    assert.equal(asked.length, 2);
-  });
-});
-
-describe('whether a sender is the device (`P-246`)', () => {
-  it('fails naming the host, rather than matching nothing, when the name stands for nothing', async () => {
-    const { lookup } = scripted(new Error('ENOTFOUND'));
+  it('fails at its bound when the resolver does not answer, saying so, and counts the lookup', async () => {
+    const count = new LookupCount();
+    const started = performance.now();
     await assert.rejects(
-      () => fromDevice('core-sw1.example', 'messages', new DeviceAddresses({ lookup })),
+      () =>
+        fromDevice('core-sw1.example', 'flows', { resolve: never, timeoutMs: 400, counted: count }),
       (error: Error) => {
-        assert.match(error.message, /counts only messages from core-sw1\.example/);
-        assert.match(error.message, /did not resolve to any address/);
+        assert.equal(
+          error.message,
+          'this sensor counts only flows from core-sw1.example, and that name did not resolve ' +
+            'within 200 ms — the probe’s resolver is not answering — so nothing could be ' +
+            'attributed to this device. Give the device a literal address, or turn off “only ' +
+            'this device”',
+        );
+        assert.equal((error as { phase?: unknown }).phase, 'resolve');
         return true;
       },
     );
+    assert.ok(performance.now() - started < 2_000, 'at the bound, half the check’s 400 ms');
+    assert.deepEqual(count.stats(), { inFlight: 1, givenUp: 1 }, 'in flight, and given up');
   });
 
-  it('compares the sender in the same form as the device', async () => {
-    const { lookup } = scripted(['10.0.0.1', '2001:db8::1']);
-    const isDevice = await fromDevice('core-sw1', 'messages', new DeviceAddresses({ lookup }));
-    assert.equal(isDevice('::ffff:10.0.0.1'), true, 'an IPv4 sender on a dual-stack listener');
-    assert.equal(isDevice('2001:DB8:0::1'), true);
-    assert.equal(isDevice('10.0.0.2'), false);
+  it('stops waiting when the check is cancelled', async () => {
+    const count = new LookupCount();
+    const controller = new AbortController();
+    const waited = fromDevice('core-sw1', 'messages', {
+      resolve: never,
+      signal: controller.signal,
+      counted: count,
+    });
+    controller.abort();
+    await assert.rejects(waited, /cancelled while core-sw1 was being resolved/);
+    assert.deepEqual(count.stats(), { inFlight: 1, givenUp: 1 });
+  });
+
+  it('fails at once naming the resolver for a name the probe holds, and counts it given up', async () => {
+    const count = new LookupCount();
+    await assert.rejects(
+      () => fromDevice('core-sw1', 'messages', { resolve: failing(RESOLVER_HELD), counted: count }),
+      /did not resolve — the probe’s resolver is not answering \(getaddrinfo ERESOLVERHELD core-sw1\)/,
+    );
+    assert.deepEqual(count.stats(), { inFlight: 0, givenUp: 1 });
+  });
+
+  it('says a probe too busy to ask is the probe, and does not count it given up', async () => {
+    const count = new LookupCount();
+    await assert.rejects(
+      () => fromDevice('core-sw1', 'messages', { resolve: failing(RESOLVER_BUSY), counted: count }),
+      /could not be resolved \(getaddrinfo ERESOLVERBUSY core-sw1\)/,
+    );
+    assert.deepEqual(count.stats(), { inFlight: 0, givenUp: 0 });
+  });
+
+  it('passes on the resolver’s words for a name with more addresses than the probe uses', async () => {
+    // `P-426`'s review: the resolver keeps this as a denial, and "no address" would say the
+    // opposite of what happened and drop the count.
+    const count = new LookupCount();
+    const resolve: ResolveHost = () =>
+      Promise.reject(
+        Object.assign(
+          new Error(
+            'core-sw1 resolved to 65 addresses, more than the 64 the probe uses for one name',
+          ),
+          { code: RESOLVER_TOO_MANY },
+        ),
+      );
+    await assert.rejects(
+      () => fromDevice('core-sw1', 'messages', { resolve, counted: count }),
+      (error: Error) => {
+        assert.match(
+          error.message,
+          /that name could not be used \(core-sw1 resolved to 65 addresses, more than the 64/,
+        );
+        assert.doesNotMatch(error.message, /did not resolve/);
+        assert.equal((error as { phase?: unknown }).phase, 'resolve');
+        return true;
+      },
+    );
+    assert.deepEqual(count.stats(), { inFlight: 0, givenUp: 0 }, 'an answer, not given up');
+  });
+
+  it('takes the check’s resolver, signal and deadline from its context', () => {
+    const controller = new AbortController();
+    const resolve = never;
+    assert.deepEqual(
+      senderLookup({ target: { resolve }, signal: controller.signal, timeoutMs: 30_000 }),
+      { resolve, signal: controller.signal, timeoutMs: 30_000 },
+    );
   });
 });
