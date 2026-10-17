@@ -5,6 +5,7 @@ import {
   failureSaid,
   type CheckRegistry,
   type CheckTarget,
+  type LookupCounters,
   type ReceivedBatch,
   type SessionCounters,
 } from './types.js';
@@ -41,7 +42,7 @@ const port = parentPort;
 
 const { registryModule, sessionReportMs } = workerData as {
   registryModule: string;
-  /** How often an idle worker says its session pools changed (`P-256`). */
+  /** How often an idle worker says its session pools or its lookups changed (`P-256`, `A-66`). */
   sessionReportMs: number;
 };
 
@@ -84,7 +85,7 @@ async function run(message: RunMessage): Promise<void> {
       ok: true,
       channels: execution.channels,
       message: execution.message ?? '',
-      ...sessions(),
+      ...counters(),
     });
   } catch (error: unknown) {
     port.postMessage({
@@ -98,7 +99,7 @@ async function run(message: RunMessage): Promise<void> {
       message: error instanceof Error ? error.message : String(error),
       // Where it failed (`P-285`), copied out: the clone would keep only the message.
       failure: failureSaid(error),
-      ...sessions(),
+      ...counters(),
     });
   } finally {
     running.delete(message.jobId);
@@ -111,26 +112,34 @@ function elapsed(startedAt: bigint): number {
 
 /** What this worker last told the pool about its session pools. */
 let reported: SessionCounters | undefined;
+/** And about its name lookups (`A-66`). */
+let reportedLookups: LookupCounters | undefined;
 
 /**
- * This worker's session-pool counters, to ride back with the result (`P-36`).
+ * This worker's session-pool counters (`P-36`) and name lookups (`A-66`), to ride back with the
+ * result.
  *
- * It costs four integers on a message that already exists. A worker running checks reports
- * this way, and `reportIdleSessions` covers the one that is not.
+ * It costs six integers on a message that already exists. A worker running checks reports
+ * this way, and `reportIdleCounters` covers the one that is not.
  *
- * Absent when the registry keeps no pools — a fixture registry, mostly — and absent means
+ * Each absent when the registry keeps none — a fixture registry, mostly — and absent means
  * absent: the pool leaves the field off rather than sending zeros, so a build with no session
  * pools gaps the channel instead of claiming a healthy nothing (`R-06`).
  */
-function sessions(): { sessions?: SessionCounters } {
-  const counters = registry.sessionCounters?.();
-  if (counters === undefined) return {};
-  reported = counters;
-  return { sessions: counters };
+function counters(): { sessions?: SessionCounters; lookups?: LookupCounters } {
+  const sessions = registry.sessionCounters?.();
+  const lookups = registry.lookupCounters?.();
+  if (sessions !== undefined) reported = sessions;
+  if (lookups !== undefined) reportedLookups = lookups;
+  return {
+    ...(sessions === undefined ? {} : { sessions }),
+    ...(lookups === undefined ? {} : { lookups }),
+  };
 }
 
 /**
- * Tells the pool when this worker's session pools changed with no check running (`P-256`).
+ * Tells the pool when this worker's session pools or its lookups changed with no check running
+ * (`P-256`, `A-66`).
  *
  * **An idle worker's counters do change.** Each pool closes a session nobody has used for its
  * `idleMs`, on a timer of its own, and the worker that holds it is usually one that has stopped
@@ -139,15 +148,31 @@ function sessions(): { sessions?: SessionCounters } {
  * the workers that had taken the device's checks during its hang had long since closed them.
  * The pool dispatches to the first idle worker, so after a spike the higher ones go quiet.
  *
+ * **A lookup is the same** (`A-66`). One a check gave up on is still in flight on the thread pool,
+ * and the resolver answers it, late or never, with no check running here. And a check waiting for
+ * a lookup has not posted its result yet, so this is also what puts that lookup in the pool's
+ * count while it waits: the timer runs while the check awaits.
+ *
  * Polled rather than told, because the pools belong to the registry and a change can come from
  * any of them. Sent only when something differs from what the pool last heard, so a quiet worker
  * sends nothing.
  */
-function reportIdleSessions(): void {
-  const counters = registry.sessionCounters?.();
-  if (counters === undefined || (reported !== undefined && same(counters, reported))) return;
-  reported = counters;
-  port.postMessage({ type: 'sessions', sessions: counters });
+function reportIdleCounters(): void {
+  const sessions = registry.sessionCounters?.();
+  if (sessions !== undefined && (reported === undefined || !same(sessions, reported))) {
+    reported = sessions;
+    port.postMessage({ type: 'sessions', sessions });
+  }
+  const lookups = registry.lookupCounters?.();
+  if (
+    lookups !== undefined &&
+    (reportedLookups === undefined ||
+      lookups.inFlight !== reportedLookups.inFlight ||
+      lookups.givenUp !== reportedLookups.givenUp)
+  ) {
+    reportedLookups = lookups;
+    port.postMessage({ type: 'lookups', lookups });
+  }
 }
 
 function same(a: SessionCounters, b: SessionCounters): boolean {
@@ -159,10 +184,10 @@ function same(a: SessionCounters, b: SessionCounters): boolean {
   );
 }
 
-// A registry that keeps no pools has nothing to report, and gets no timer.
-if (registry.sessionCounters !== undefined) {
+// A registry that keeps neither has nothing to report, and gets no timer.
+if (registry.sessionCounters !== undefined || registry.lookupCounters !== undefined) {
   // `unref`'d: the port is what keeps this thread alive, never the report.
-  setInterval(reportIdleSessions, sessionReportMs).unref();
+  setInterval(reportIdleCounters, sessionReportMs).unref();
 }
 
 port.postMessage({ type: 'ready' });

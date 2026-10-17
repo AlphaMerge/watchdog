@@ -672,6 +672,10 @@ export class ProbeHealthService {
       sessionOverflows: health?.sessionOverflows ?? null,
       sessionsEvicted: health?.sessionsEvicted ?? null,
       sessionsOpened: health?.sessionsOpened ?? null,
+      // `A-66`. The probe's name lookups: a gap for a build that does not count them and for
+      // either end below protocol 36, never a zero that reads as a resolver answering everything.
+      lookupsInFlight: health?.lookupsInFlight ?? null,
+      lookupsGivenUp: health?.lookupsGivenUp ?? null,
       scheduled: health?.scheduled ?? null,
       skippedTicks: health?.skippedTicks ?? null,
       spoolDepth: health?.spoolPending ?? null,

@@ -7,7 +7,9 @@ import {
   type LogOutputStats,
   type ProbeHealthReport,
 } from '@ms/shared';
+import { nameLookups } from '@ms/sensors';
 import type { PoolStats } from '../runner/pool.js';
+import type { LookupCounters } from '../runner/types.js';
 import type { CheckFlowStats } from './check-flow.js';
 import type { ProcessRunnerStats } from '../runner/process-runner.js';
 import type { FlowListenerStats } from '../listeners/flow-listener.js';
@@ -52,6 +54,12 @@ export interface ProbeHealthSources {
    */
   /** Whether dispatched checks are coming back, absent on a build without the watchdog. */
   checkFlow?: () => CheckFlowStats;
+  /**
+   * The name lookups made beside the scheduled pool's workers (`A-66`), on the same libuv thread
+   * pool theirs use, so the probe's count is all of them together: in the probe,
+   * `lookupsBesideThePool`. Absent, only the pool's.
+   */
+  lookups?: () => LookupCounters;
   trapListener?: () => TrapListenerStats;
   syslogListener?: () => SyslogListenerStats;
   /**
@@ -199,6 +207,7 @@ export class ProbeHealthReporter {
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
     const log = this.#sources.log?.();
+    const lookups = lookupsOf(pool.lookups, this.#sources.lookups?.());
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
     // The lowest headroom is the highest usage, so both are the lowest of what they cover.
     const { machine, limit } = this.#memoryFor(heartbeat);
@@ -244,6 +253,12 @@ export class ProbeHealthReporter {
             sessionsEvicted: pool.sessions.evicted,
             sessionsOpened: pool.sessions.opened,
           }),
+      // `A-66`: the lookups on libuv's thread pool now, whether a check still waits for them or
+      // gave up, and those given up since the probe started. Absent when nothing counts them, so
+      // both gap. Sent only to a core at protocol 36.
+      ...(lookups === undefined
+        ? {}
+        : { lookupsInFlight: lookups.inFlight, lookupsGivenUp: lookups.givenUp }),
       // Absent on a build with no child-process runner, so the channels gap rather than reading
       // a confident zero that cannot be told from a probe running no EXE or Script sensors.
       ...(children === undefined
@@ -402,6 +417,36 @@ export class ProbeHealthReporter {
     }
     return { machine, limit };
   }
+}
+
+/**
+ * Every name lookup the probe makes outside its scheduled pool's workers (`A-66`), for
+ * `ProbeHealthSources.lookups`: this thread's own, which discovery's identification makes, and
+ * the query runner's worker's, which "Check now" makes through the same registry as a scan. Each
+ * waits on the one libuv thread pool the scheduled checks' lookups wait on.
+ */
+export function lookupsBesideThePool(queries: {
+  lookupCounters(): LookupCounters | undefined;
+}): () => LookupCounters {
+  return () => {
+    const main = nameLookups.stats();
+    const queried = queries.lookupCounters();
+    return queried === undefined ? main : sumOf(main, queried);
+  };
+}
+
+/** The pool's workers' lookups and the rest together, or a gap where neither counts. */
+function lookupsOf(
+  pool: LookupCounters | undefined,
+  beside: LookupCounters | undefined,
+): LookupCounters | undefined {
+  if (pool === undefined) return beside;
+  if (beside === undefined) return pool;
+  return sumOf(pool, beside);
+}
+
+function sumOf(a: LookupCounters, b: LookupCounters): LookupCounters {
+  return { inFlight: a.inFlight + b.inFlight, givenUp: a.givenUp + b.givenUp };
 }
 
 /** The lower of two readings, where either may be a gap. */

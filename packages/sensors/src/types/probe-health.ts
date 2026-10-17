@@ -222,6 +222,21 @@ const CHANNELS: readonly ChannelDef[] = [
   // diagnosis it names was one an operator could not actually make. No threshold, for the same
   // reason as its pair: a pool that opens sessions is a pool doing its job.
   { key: 'sessionsOpened', name: 'Sessions opened', unit: 'sessions', counter: { bits: 64 } },
+  // **The probe's resolver (`A-66`), and no limit on either.** A check resolves its device's name
+  // once a scan to check it (`A-57`), on libuv's thread pool, which every worker and the main
+  // thread share and where a lookup cannot be cancelled: a resolver that stops answering holds the
+  // pool's lookup threads, and every lookup after it waits behind them whichever device it is for.
+  // In flight is how many it has not answered, the given-up ones included, so a climb that does
+  // not fall is that resolver; given up is the checks that stopped waiting. Each of those checks
+  // already fails naming the resolver, Down or, for a credential pin, Unknown, so a limit here
+  // would be one more alarm for the same outage. These say it is the resolver and how deep.
+  { key: 'lookupsInFlight', name: 'Name lookups in flight', unit: 'lookups' },
+  {
+    key: 'lookupsGivenUp',
+    name: 'Name lookups given up',
+    unit: 'lookups',
+    counter: { bits: 64 },
+  },
   // **How far memory lets the pool grow** (`P-236`). `P-34` derives the ceiling from the work
   // alone, and checks that hang to their timeout made it about 540 workers against a 4 GiB box
   // that held about a hundred: the probe grew until the kernel killed it, six times, while

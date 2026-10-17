@@ -11798,6 +11798,32 @@ because each is a decision rather than a defect:
       `handshake` for TLS, a phase for delivery) with the host, and each cancel the phase it
       was in, with a test per type.
 
+- [ ] **P-425 — a listener sensor resolves its device's name with no bound and no signal** · S ·
+      P-246, A-66 · Found 2026-10-17 by `A-66`. `snmp.trap`, `syslog.receiver` and
+      `flow.netflow` with "only this device" resolve a named device through `fromDevice`
+      (`@ms/sensors` `support/sender.ts`), which calls `dns.lookup` with no bound, no
+      `AbortSignal` and nothing counting it: the one lookup on a check's path that does not go
+      through `resolveWithin`. A resolver that does not answer holds the check to the pool's
+      timeout (`scan.timeoutMs`, 30 s), the sensor reads Down as a timed-out check rather than
+      as a name that did not resolve, the check ignores its abort, and after the grace the pool
+      terminates its worker: one worker a scan for each such sensor while the resolver is out,
+      and their lookups are not in `lookupsInFlight`. Read from the code, not reproduced. **Done
+      when** the sender's lookup goes through `resolveWithin` with the check's signal and a
+      bound, so a silent resolver fails the check at the bound saying so, the worker is not
+      recycled, and the lookup is counted, with a test of each.
+
+- [ ] **P-426 — a probe runs two name lookups at a time** · M · A-66 · Found 2026-10-17 by
+      `A-66`. The probe sets no `UV_THREADPOOL_SIZE`, and libuv lets `getaddrinfo` hold at most
+      half its four threads, so every lookup on the probe, from every worker, runs two at a
+      time: at the 5,000-sensor class a lookup a scan is 83 a second, which two lanes keep up
+      with only while the resolver answers in under about 24 ms, and two lookups the resolver
+      does not answer stop every other one on the probe, whichever device they are for.
+      `A-66`'s perf case models the two lanes. **Done when** its full-size slow, silent and
+      one-zone arms have been read, and either the probe changes how many lookups it can run
+      or how often it asks (a larger pool set before the first lookup, answers kept for a TTL,
+      or a resolver off the pool for names the hosts file does not have), with the arms run
+      again showing what it bought, or the decision not to is written down with the numbers.
+
 - [ ] **P-427 — a superseded session's close marks its probe lost after the newer one found it**
       · S · P-416, R-05 · Found 2026-10-17 in `P-416`'s review. When a probe reconnects while its
       old connection is still open, the endpoint destroys the old connection. Its `#handleClose`
@@ -31918,6 +31944,118 @@ because each is a decision rather than a defect:
       pool for every transport that resolves there, counted nowhere. **Done when** `test:perf`
       has a case at the 5,000-sensor class with named devices and a slow resolver, the numbers
       are in `docs/findings/`, and lookups in flight or given up are a Probe Health number.
+
+      **A-66 outcome.** Probe Health counts the probe's name lookups, at protocol 36, and
+      `test:perf` has the case. The measurement is the orchestrator's, from a quiet window.
+      - **Where a lookup is made, read from the code.** Every transport that connects to a
+        device by name resolves it in `checkedTarget` under `link-local` or `private` (`A-57`,
+        `A-62` for the databases), and a credential pin in `pinTarget` (`A-41c`): both wait in
+        `resolveWithin`, bounded at `resolveBoundMs`, half the transport's timeout and 10 s at
+        most (SNMP's own 5 s gives 2.5 s). Discovery's identification does the same in the main
+        thread, and **Check now** in the query runner's own worker. Not through it: a socket
+        that resolves the name itself (every transport under `none`), the listener types' sender
+        (`sender.ts`, `P-425`), ping and PowerShell (their own processes), and the probe's link
+        to the core.
+      - **The thread pool, read from the code and from libuv.** The probe sets no
+        `UV_THREADPOOL_SIZE`, in `main.ts` or in `ms-probe.service`, so libuv's pool is four
+        threads, one pool a process, which every check worker (worker threads share it) and the
+        main thread use. libuv submits `getaddrinfo` as slow I/O and lets slow I/O hold at most
+        `(threads + 1) / 2` of them, two: the file system and crypto keep the other two, and at
+        most two lookups run at once on the probe, whatever its 64 workers ask. A lookup the
+        resolver does not answer holds one of the two until glibc gives up on it, and every
+        lookup asked after it waits, whichever device it is for. At the 5,000-sensor class a
+        lookup a scan is 83 a second, which two lanes serve only from a resolver answering in
+        under about 24 ms. Read, not measured against a real resolver here: the perf case
+        models the lanes (below), and `P-426` is the decision the measurement is for.
+      - **Counted where the check waits.** `resolveWithin` counts into `nameLookups`
+        (`@ms/sensors` `support/lookups.ts`), one a thread: **in flight** from the lookup being
+        asked until the resolver answers it, whether or not the check still waits, since the
+        lookup and not the check holds the thread; **given up** when the check stops waiting
+        first, at its bound or cancelled, as a running total. A name the resolver says does not
+        exist is an answer, not a give-up.
+      - **To Probe Health.** The probe's registry answers `CheckRegistry.lookupCounters`; the
+        worker sends it with each result and on its idle timer when it changed (`P-256`'s 5 s
+        session report), since a lookup a check gave up on settles with no check running and a
+        check waiting for one has no result yet. The pool sums its workers, with a retired
+        baseline for given up; a retired worker's in flight goes with it, as `sessionsOpen`
+        does, which is a loss only for a worker terminated mid-lookup. The report adds what is
+        made beside the scheduled pool, `lookupsBesideThePool`: the main thread's own and the
+        query runner's (`QueryRunner.lookupCounters`), whose pool of one loads the same registry,
+        so a named device on **Check now** resolves as on a scan. The query runner was left out
+        until review.
+      - **A pool fix on the way.** The pool took a worker's counters only from a result it had
+        not settled yet, so a check it timed out left them on the worker, which does not send
+        unchanged counters again: the lookup that check gave up on, and its sessions, stayed off
+        Probe Health until something else changed. Now taken from every result.
+      - **Protocol 36, `lookupCounters`**: `lookupsInFlight` and `lookupsGivenUp` on the
+        heartbeat, stripped below 36, a gap for either end below it. Probe Health channels
+        **Name lookups in flight** (a gauge) and **Name lookups given up** (a 64-bit counter),
+        beside the sessions, **with no limits**: every check whose lookup was given up already
+        fails naming the resolver, Down, or Unknown under a credential pin, so a limit would be
+        a second alarm for one outage. `/metrics`: `ms_probe_name_lookups_in_flight` and
+        `ms_probe_name_lookups_given_up_total`. No migration. `administration.md` has the row
+        (what is counted and what is not); `sensor-reference.md` and `api-reference.md` are
+        regenerated.
+      - **The perf case**, `packages/probe/test/perf/name-lookups.test.ts`: a real wheel, a real
+        pool at its shipped ceiling (64) and queue (1,000), and a real catalogue whose one check
+        (`support/lookup-registry.ts`) is SNMP's resolution and nothing else, `checkedTarget`
+        with SNMP's family and timeout, then `MODEL_CHECK_MS`. 5,000 sensors on 500 named
+        devices, one minute an arm, six arms on fresh pools: addresses (no lookup, the
+        baseline); the system resolver (`getaddrinfo` for `localhost` in the worker, from the
+        hosts file); and four through **lanes**, every worker's lookups answered from the main
+        thread `(UV_THREADPOOL_SIZE + 1) / 2` at a time, first come first served, which is
+        libuv's discipline: answering (real `getaddrinfo` inside them, the model's control),
+        slow (100 ms a lookup), not answering (30 s, then `EAI_AGAIN`), and one device in ten
+        not answering beside the rest answering. A resolver this test controls cannot be put
+        under `getaddrinfo` without changing `/etc/resolv.conf`, which is why the lanes are a
+        model; they do not hold libuv's threads, so the `fs.stat` probe reads the file system's
+        share unharmed in the lane arms whatever they do. Per arm it prints the results
+        (answered, lookup given up, failed otherwise), refused, deferred, jitter (`P-15`'s),
+        check run p95, Probe Health's `lookupsInFlight` (highest, last) and `lookupsGivenUp`
+        from the real reporter, the lanes' deepest queue and what is still queued once the pool
+        has drained, their p95 wait (the lookups served and those still queued, so far) and how
+        busy they were (a lookup still held counted so far, from the wheel's start), the
+        `fs.stat` p95 and worst from the wheel's start, and how long the pool took to drain, and
+        for the zone arm how the answering devices fared. Review found the probe started before
+        the workers had loaded and the lanes' busy share counting a lookup only once answered,
+        so reading 66% with 44 queued; both fixed before the measurement. It asserts that
+        `lookupsGivenUp` is exactly the checks that failed at the lookup's bound, and that the
+        hosts-file arms give nothing up and refuse nothing. `MS_DNS_SENSORS`, `MS_DNS_MINUTES`,
+        `MS_DNS_SLOW_MS`, `MS_DNS_HANG_MS`, `MS_DNS_LANES`, `MS_DNS_POOL` and `MS_DNS_ARMS`
+        shape it.
+      - **Measured.** (to be filled by the orchestrator from the quiet window)
+      - **Tests.** `sensors/test/name-lookups.test.ts` (11: `resolveWithin` answered, refused,
+        at its bound, cancelled, cancelled before it began and many at once, each read on both
+        sides of the resolver settling; then the guard, the pin and a catalogue check on the
+        thread's own count). `probe/test/pool-lookups.test.ts` (11, real workers through
+        `support/lookup-registry.ts`: nothing for a registry that counts nothing, an address and
+        an answer and `ENOTFOUND` as neither, three workers summed, the idle report of a late
+        answer and of a lookup still waited for, the pool's timeout, given up never falling
+        across a shrink, and a query's lookup given up reaching the reporter beside a scan's and
+        the main thread's through `lookupsBesideThePool`). One case each in `health-types`,
+        `catalogue-registry`, `core/probe-health` and `metrics`, two in `probe-health-report`,
+        three in `capabilities`. The perf case was smoke-run at 200 sensors for a quarter of a
+        minute an arm on a pool of 8 with a 5 s hang, once before review and once after: six of six
+        passed. After: the address arm made no lookup, and the hosts-file, answering and slow
+        arms answered every one and gave none up, jitter p95 2 to 5 ms; the not-answering arm
+        gave all 50 up, Probe Health read 44 in flight and 50 given up, the lanes were 95% busy
+        with 42 still queued and a p95 wait of 15 s, and the pool took 4.1 s to drain; the zone
+        arm gave up 18, 13 of them the answering devices' (32 of 45 answered) behind the 5 that
+        were not. Not numbers: a smoke on a shared VM, at about 50 checks an arm.
+      - **Mutation: 24 of 24 killed.** Not tracking a lookup; no give-up at the bound, on a
+        cancel, or for a check already cancelled; never counting an answer down; a fresh count
+        as the default; the given-up channel as a gauge; the registry answering zeros; the
+        worker leaving them off its result; its idle report leaving them out; the pool ignoring
+        that report; the pool fix reverted; the pool reporting one worker's in flight; no
+        retired baseline; the report dropping the main thread's in flight; given up reporting
+        in flight; no strip below 36; the capability at 35; the core reading in flight as given
+        up; the exporter's counter reading in flight; the query runner answering nothing,
+        `lookupsBesideThePool` leaving out the query runner's or the main thread's, and the sum
+        both reports share dropping the second's in flight. Each built and failed its file.
+      - **Not covered by a test:** the line in `main.ts` that hands the query runner to
+        `lookupsBesideThePool`, which is tested.
+      - **Filed:** `P-425` (the listener types resolve a sender with no bound and no signal) and
+        `P-426` (the probe's two lookup lanes, decided from this measurement).
 
 - [x] **A-67 — an IPv6 address under TLS has only been tried on webhook delivery** · S · A-60 ·
       Found 2026-10-02 by `A-60`. Node's `checkServerIdentity` (v24.19 in the toolchain) reads

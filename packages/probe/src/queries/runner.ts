@@ -1,7 +1,7 @@
 import type { CheckResult, Logger, ProbeQuery, QueryFailure } from '@ms/shared';
 import { CheckPool, type SubmitOutcome } from '../runner/pool.js';
 import { ProcessRunner, type ProcessRunnerOptions } from '../runner/process-runner.js';
-import type { CheckRequest, ResultMeta } from '../runner/types.js';
+import type { CheckRequest, LookupCounters, ResultMeta } from '../runner/types.js';
 
 /**
  * Runs what the core asked for *now*, and answers on the id it asked with (`R-09`).
@@ -111,6 +111,18 @@ export class QueryRunner {
 
   async start(): Promise<void> {
     await this.#pool.start();
+  }
+
+  /**
+   * The name lookups this runner's worker made, as the scheduled pool reports its own (`A-66`).
+   *
+   * "Check now" runs the same registry, so a named device is resolved here exactly as on a
+   * scan, on the same libuv thread pool, and a lookup given up here holds a thread there as one
+   * given up on a scan does. `undefined` until the worker has said anything, as the pool has it.
+   * The process runner's checks resolve in processes of their own, on pools of their own.
+   */
+  lookupCounters(): LookupCounters | undefined {
+    return this.#pool.lookupCounters();
   }
 
   /**

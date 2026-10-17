@@ -36,7 +36,7 @@ import { pingOnce } from './discovery/ping-probe.js';
 import { IdentifyRunner } from './discovery/identify-runner.js';
 import { handTargetPolicy } from './target-policy-env.js';
 import { LIVE_SOURCES } from './discovery/sources.js';
-import { ProbeHealthReporter } from './health/report.js';
+import { lookupsBesideThePool, ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { BUILD, VERSION } from './version.js';
 import { dispatchTables } from './catalogue.js';
@@ -545,6 +545,10 @@ async function main(): Promise<void> {
     // nobody, while a probe saturated by shell-outs looked healthy.
     children: () => processRunner.stats(),
     checkFlow: () => checkFlow.stats(),
+    // The name lookups beside the workers' the pool sums (`A-66`): this thread's, where
+    // discovery's identification resolves a named host, and the query runner's, where "Check
+    // now" does. All of them on the same libuv thread pool.
+    lookups: lookupsBesideThePool(queries),
     // Only when this probe runs that listener. What the channels are for is `rejected`: a device
     // sending the wrong community has every message dropped before the ring, so the sensor reads
     // a quiet network rather than a receiver turning everything away (`P-64`).

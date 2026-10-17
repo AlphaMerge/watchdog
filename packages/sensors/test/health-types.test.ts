@@ -113,6 +113,28 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
+  it('carries the name lookups as a gauge and a counter, without limits, beside the sessions (`A-66`)', () => {
+    // Each check whose lookup was given up already fails naming the resolver, so a limit here
+    // would be a second alarm for one resolver outage.
+    const channels = probeHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'lookupsInFlight'),
+      { key: 'lookupsInFlight', name: 'Name lookups in flight', unit: 'lookups' },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'lookupsGivenUp'),
+      {
+        key: 'lookupsGivenUp',
+        name: 'Name lookups given up',
+        unit: 'lookups',
+        counter: { bits: 64 },
+      },
+    );
+    const keys = channels.map((one) => one.key);
+    assert.equal(keys.indexOf('lookupsInFlight'), keys.indexOf('sessionsOpened') + 1);
+    assert.equal(keys.indexOf('lookupsGivenUp'), keys.indexOf('lookupsInFlight') + 1);
+  });
+
   it('carries what each listener kept out of a first scan as a counter, without limits (`P-270`)', () => {
     // Not a loss: the sensor's message names it, and a limit would alarm on every reconnect after
     // an outage the link channels already alarm on. Each beside its listener's overwritten count.

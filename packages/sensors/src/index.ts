@@ -88,6 +88,10 @@ export {
 } from './support/checked-target.js';
 export { snmpPool } from './support/snmp/pool.js';
 export type { SnmpPoolStats } from './support/snmp/pool.js';
+// And what this thread's name lookups are doing (`A-66`), for Probe Health: counted where every
+// check that resolves a name to check it waits for the answer.
+export { LookupCount, nameLookups } from './support/lookups.js';
+export type { LookupCounters } from './support/lookups.js';
 export { sshPool } from './support/ssh/pool.js';
 export type { SshPoolStats } from './support/ssh/pool.js';
 

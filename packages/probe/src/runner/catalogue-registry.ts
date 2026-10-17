@@ -1,6 +1,12 @@
-import { snmpPool, sshPool } from '@ms/sensors';
+import { nameLookups, snmpPool, sshPool } from '@ms/sensors';
 import { missingTypeError, probeCatalogue } from '../catalogue.js';
-import type { CheckContext, CheckExecution, CheckRegistry, SessionCounters } from './types.js';
+import type {
+  CheckContext,
+  CheckExecution,
+  CheckRegistry,
+  LookupCounters,
+  SessionCounters,
+} from './types.js';
 
 /**
  * The registry a probe runs (P-05), loaded by path into each pool worker.
@@ -46,6 +52,14 @@ const registry: CheckRegistry = {
       evicted: snmp.evicted + ssh.evicted,
       opened: snmp.opened + ssh.opened,
     };
+  },
+
+  /**
+   * This worker's name lookups (`A-66`): those its checks are waiting for, those they gave up on
+   * and the resolver has not answered yet, and how many were given up. The pool sums them.
+   */
+  lookupCounters(): LookupCounters {
+    return nameLookups.stats();
   },
 };
 

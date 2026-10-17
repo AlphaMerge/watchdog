@@ -1067,6 +1067,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `sessionOverflows` | Sessions opened past the bound | sessions | 64-bit counter → rate; default limits: error above 0.5 |
 | `sessionsEvicted` | Sessions closed when idle | sessions | 64-bit counter → rate |
 | `sessionsOpened` | Sessions opened | sessions | 64-bit counter → rate |
+| `lookupsInFlight` | Name lookups in flight | lookups | — |
+| `lookupsGivenUp` | Name lookups given up | lookups | 64-bit counter → rate |
 | `poolCeiling` | Worker pool ceiling | workers | — |
 | `poolMemoryCap` | Workers memory can hold | workers | — |
 | `poolHeldBack` | Workers held back by memory | workers | — |

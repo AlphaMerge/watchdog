@@ -710,6 +710,18 @@ const PROBE_METRICS: readonly Metric[] = [
     help: 'Device sessions opened. Read against evictions to spot a pool that never reuses one.',
     counter: true,
   },
+  // `A-66`. The probe's resolver: lookups it has not answered, and those checks gave up on.
+  {
+    key: 'lookupsInFlight',
+    name: 'ms_probe_name_lookups_in_flight',
+    help: 'Name lookups the probe’s resolver has not answered yet, whether or not a check still waits for them. A count that climbs and does not fall is the resolver not answering.',
+  },
+  {
+    key: 'lookupsGivenUp',
+    name: 'ms_probe_name_lookups_given_up_total',
+    help: 'Name lookups a check stopped waiting for before the resolver answered: its bound passed, or it was cancelled.',
+    counter: true,
+  },
   {
     key: 'spoolCorrupt',
     name: 'ms_probe_spool_corrupt_total',

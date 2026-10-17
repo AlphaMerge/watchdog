@@ -10,6 +10,7 @@ import {
   notStarted,
   type CheckPhase,
   type CheckRequest,
+  type LookupCounters,
   type ResultMeta,
   type SessionCounters,
 } from './types.js';
@@ -91,7 +92,9 @@ const OVER_CEILING_RETRY_MS = 250;
  *
  * The pools close idle sessions every `idleMs` — 60 s for SNMP, 120 s for SSH — so five seconds
  * puts a close on Probe Health well inside the interval it happened in, for a comparison of four
- * integers per worker and no message at all when nothing changed.
+ * integers per worker and no message at all when nothing changed. Its name lookups ride the same
+ * timer (`A-66`): a lookup settles with no check running, and a check waiting for one has no
+ * result to carry it yet.
  */
 const SESSION_REPORT_MS = 5_000;
 
@@ -195,6 +198,12 @@ export interface PoolStats {
    * Session-pool counters summed across workers, absent when no registry keeps pools (`P-36`).
    */
   sessions?: SessionCounters;
+  /**
+   * Name lookups summed across workers, absent when no registry counts them (`A-66`): those in
+   * flight on the thread pool now, waited for or given up, and those given up since the pool
+   * started.
+   */
+  lookups?: LookupCounters;
   /** Checks refused because the queue was full. */
   refused: number;
   /**
@@ -295,8 +304,8 @@ export interface CheckPoolOptions {
    */
   startHangLimit?: number;
   /**
-   * How often an idle worker reports a change in its session pools (`P-256`).
-   * `SESSION_REPORT_MS` unless a test sets it.
+   * How often an idle worker reports a change in its session pools (`P-256`) or its name lookups
+   * (`A-66`). `SESSION_REPORT_MS` unless a test sets it.
    */
   sessionReportMs?: number;
   /** Module whose default export is a `CheckRegistry`. P-05 supplies the real one. */
@@ -345,6 +354,8 @@ interface Slot {
    * a build whose registry keeps no pools.
    */
   sessions: SessionCounters | undefined;
+  /** This worker's name lookups as of its last result or report (`A-66`), per slot likewise. */
+  lookups: LookupCounters | undefined;
   /**
    * Set when the pool itself is taking this worker out of service.
    *
@@ -515,6 +526,18 @@ export class CheckPool {
    * — a retired worker holds no sessions, and saying it does would be worse than saying nothing.
    */
   #retiredSessions = { overflowed: 0, evicted: 0, opened: 0 };
+  /**
+   * Lookups given up by workers the pool has already retired (`A-66`), for the same reason.
+   *
+   * **What a retired worker had in flight is left out**, as `open` is, and that is a loss: a
+   * lookup cannot be cancelled, so one a terminated worker was waiting for still holds its thread
+   * until the resolver answers, and nothing is left to say when it has. A worker is terminated
+   * only for a check that ignored its abort, and the lookup is bounded below the check's time, so
+   * a lookup is what keeps a worker running a check only when the pool's timeout is the shorter.
+   */
+  #retiredLookups = { givenUp: 0 };
+  /** Whether a worker this pool retired had reported lookups, so a pool of them still reads. */
+  #lookupsReported = false;
 
   #nextJobId = 0;
   #nextWorkerId = 0;
@@ -677,15 +700,39 @@ export class CheckPool {
    * Called wherever a slot leaves `#slots` — shrink, crash, failed start — because the published
    * totals are a sum over live workers and a worker leaving must not make a cumulative counter
    * fall. Idempotent by clearing the slot's snapshot: a crash path that also runs the shrink
-   * path would otherwise bank the same numbers twice.
+   * path would otherwise bank the same numbers twice. Its lookups the same way (`A-66`).
    */
-  #bankSessions(slot: Slot): void {
+  #bankCounters(slot: Slot): void {
+    const lookups = slot.lookups;
+    if (lookups !== undefined) {
+      this.#retiredLookups.givenUp += lookups.givenUp;
+      this.#lookupsReported = true;
+      slot.lookups = undefined;
+    }
     const counters = slot.sessions;
     if (counters === undefined) return;
     this.#retiredSessions.overflowed += counters.overflowed;
     this.#retiredSessions.evicted += counters.evicted;
     this.#retiredSessions.opened += counters.opened;
     slot.sessions = undefined;
+  }
+
+  /**
+   * What every worker's name lookups add up to, or `undefined` if none has ever reported
+   * (`A-66`): a registry that does not count them gaps both channels rather than reading zero.
+   */
+  lookupCounters(): LookupCounters | undefined {
+    let reported = this.#lookupsReported;
+    let inFlight = 0;
+    let givenUp = this.#retiredLookups.givenUp;
+    for (const slot of this.#slots) {
+      const lookups = slot.lookups;
+      if (lookups === undefined) continue;
+      reported = true;
+      inFlight += lookups.inFlight;
+      givenUp += lookups.givenUp;
+    }
+    return reported ? { inFlight, givenUp } : undefined;
   }
 
   /**
@@ -919,6 +966,10 @@ export class CheckPool {
       ...(() => {
         const sessions = this.sessionCounters();
         return sessions === undefined ? {} : { sessions };
+      })(),
+      ...(() => {
+        const lookups = this.lookupCounters();
+        return lookups === undefined ? {} : { lookups };
       })(),
       refused: this.#refused,
       discarded: this.#discarded,
@@ -1175,7 +1226,7 @@ export class CheckPool {
     this.#shrunk += 1;
     this.#logger.info({ from: this.#slots.length, ...why }, 'shrinking the check pool');
     slot.retired = true;
-    this.#bankSessions(slot);
+    this.#bankCounters(slot);
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
     this.#terminating += 1;
@@ -1265,7 +1316,21 @@ export class CheckPool {
       slot.sessions = (message as { sessions: SessionCounters }).sessions;
       return;
     }
+    if (parsed.type === 'lookups') {
+      // A lookup settled with no check waiting for it, or a check is still waiting (`A-66`).
+      slot.lookups = (message as { lookups: LookupCounters }).lookups;
+      return;
+    }
     if (parsed.type !== 'result') return;
+
+    // **The worker's counters whatever became of the check**, and before it is matched to one
+    // (`A-66`). They are the worker's, not the check's, and a worker that sent them on a result
+    // does not send them again until they change: taken only from a result the pool had not
+    // already settled, a check the pool timed out left the lookup it gave up on in flight and
+    // given up on the worker and nowhere else, for as long as the resolver did not answer.
+    const counted = message as { sessions?: SessionCounters; lookups?: LookupCounters };
+    if (counted.sessions !== undefined) slot.sessions = counted.sessions;
+    if (counted.lookups !== undefined) slot.lookups = counted.lookups;
 
     const job = slot.job;
     if (job === undefined || job.id !== parsed.jobId) return;
@@ -1284,11 +1349,9 @@ export class CheckPool {
         /** What the error said of where it failed (`failureSaid`); bounded by `failureOf`. */
         failure?: unknown;
         channels?: { key: string; value: number; name?: string; unit?: string }[];
-        sessions?: SessionCounters;
       };
       record(this.#run, result.durationMs);
       this.#recordTypeDuration(job.request.sensorType, result.durationMs);
-      if (result.sessions !== undefined) slot.sessions = result.sessions;
       if (result.ok) {
         this.#completed += 1;
         this.#emit(job, slot, 'execute', {
@@ -1351,7 +1414,7 @@ export class CheckPool {
     // return first, so the slot that killed the pool stayed in `#slots` for the life of the
     // process — counted as `poolSize`, and enough to stop `poolUsage` gapping the way it does at
     // size 0, so the reading was "0% of five workers" rather than no reading at all (`P-62`).
-    this.#bankSessions(slot);
+    this.#bankCounters(slot);
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
 
@@ -1517,7 +1580,7 @@ export class CheckPool {
    */
   async #recycle(slot: Slot): Promise<void> {
     slot.retired = true;
-    this.#bankSessions(slot);
+    this.#bankCounters(slot);
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
     slot.job = undefined;
@@ -1603,6 +1666,7 @@ export class CheckPool {
       ready: false,
       idleSince: process.hrtime.bigint(),
       sessions: undefined,
+      lookups: undefined,
       job: undefined,
       retired: false,
       gone: false,

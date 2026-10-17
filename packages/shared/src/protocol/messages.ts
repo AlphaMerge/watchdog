@@ -67,6 +67,14 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * beside `outcome: 'error'`. Until 35 the phase reached the core only inside the message's prose.
  * A core below 35 is sent the result without it, and keeps the prose, which still says it.
  *
+ * Version 36 adds `lookupsInFlight` and `lookupsGivenUp`, under `lookupCounters` (`A-66`): the
+ * name lookups on the probe's libuv thread pool that its resolver has not answered yet, whether
+ * or not a check still waits for them, and a running total of those a check stopped waiting for.
+ * A lookup cannot be cancelled, so a resolver that stops answering holds the pool's lookup threads
+ * for every transport that resolves on the probe, and until 36 nothing counted it. Two new fields
+ * in a closed schema under one capability: a core below 36 is sent neither, and a probe below 36
+ * sends neither and both channels gap.
+ *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
@@ -197,7 +205,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 35;
+export const PROTOCOL_VERSION = 36;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -625,6 +633,16 @@ export interface ProbeHealthReport {
   sessionOverflows?: number;
   sessionsEvicted?: number;
   sessionsOpened?: number;
+  /**
+   * Name lookups on the probe's libuv thread pool (`A-66`), as the checks that resolve a name to
+   * check it count them: in the pool's workers and in the probe's main thread together.
+   * `lookupsInFlight` is how many the resolver has not answered yet, whether or not a check still
+   * waits for them, and `lookupsGivenUp` a running total of those a check stopped waiting for, at
+   * its bound or cancelled. **Absent together**, and absent on a build that does not count them.
+   * Sent only to a core at protocol 36.
+   */
+  lookupsInFlight?: number;
+  lookupsGivenUp?: number;
   /**
    * The child-process runner (`P-61`).
    *
@@ -1172,6 +1190,8 @@ const PROBE_HEALTH_SCHEMA = {
     sessionOverflows: { type: 'integer', minimum: 0 },
     sessionsEvicted: { type: 'integer', minimum: 0 },
     sessionsOpened: { type: 'integer', minimum: 0 },
+    lookupsInFlight: { type: 'integer', minimum: 0 },
+    lookupsGivenUp: { type: 'integer', minimum: 0 },
     childSlots: { type: 'integer', minimum: 0 },
     childBusy: { type: 'integer', minimum: 0 },
     childQueued: { type: 'integer', minimum: 0 },

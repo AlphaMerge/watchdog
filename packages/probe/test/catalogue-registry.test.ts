@@ -3,7 +3,11 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { CREDENTIALS_WITHHELD as SENSORS_CREDENTIALS_WITHHELD } from '@ms/sensors';
+import {
+  checkedTarget,
+  CREDENTIALS_WITHHELD as SENSORS_CREDENTIALS_WITHHELD,
+  nameLookups,
+} from '@ms/sensors';
 import registry from '../src/runner/catalogue-registry.js';
 import { CREDENTIALS_WITHHELD } from '../src/runner/types.js';
 
@@ -121,5 +125,29 @@ describe('the probe’s check registry', () => {
         }),
       /this device's host "-f" begins with "-".*correct the device’s host/,
     );
+  });
+
+  it('reports this thread’s name lookups, as the guard counted them (A-66)', async () => {
+    // The worker asks the registry, so the registry must answer with what `resolveWithin`
+    // counted in its thread: here, one lookup a resolver never answers, given up at its bound.
+    const before = registry.lookupCounters?.();
+    assert.ok(before !== undefined, 'the probe’s registry counts lookups');
+    assert.deepEqual(before, nameLookups.stats());
+    await assert.rejects(
+      checkedTarget({
+        host: 'switch.example.invalid',
+        resolve: () => new Promise(() => undefined),
+        family: 4,
+        timeoutMs: 100,
+        signal: new AbortController().signal,
+        verb: 'query',
+        doing: 'querying switch.example.invalid:161 over SNMP',
+      }),
+      /did not resolve within 50 ms/,
+    );
+    assert.deepEqual(registry.lookupCounters?.(), {
+      inFlight: before.inFlight + 1,
+      givenUp: before.givenUp + 1,
+    });
   });
 });

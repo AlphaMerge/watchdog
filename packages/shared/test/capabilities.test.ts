@@ -69,6 +69,7 @@ describe('what a protocol version can do', () => {
       checkNotStarted: false,
       certificateBinding: false,
       failurePhase: false,
+      lookupCounters: false,
     });
   });
 
@@ -140,6 +141,7 @@ describe('what a protocol version can do', () => {
       checkNotStarted: 33,
       certificateBinding: 34,
       failurePhase: 35,
+      lookupCounters: 36,
     };
     const names = Object.keys(ARRIVED) as (keyof ProbeCapabilities)[];
     assert.deepEqual(
@@ -293,15 +295,19 @@ describe('the health a peer can be sent', () => {
     spoolRejected: 40,
     spoolOversized: 2,
     instanceId: '0b4c1f2e-7d3a-4e5b-9c6d-8a1f2e3d4c5b',
+    lookupsInFlight: 37,
+    lookupsGivenUp: 1_250,
   };
-  /** `health` as a core at 31 is sent it: everything but 32's four fields (`P-283`). */
+  /** `health` as a core at 32 to 35 is sent it: everything but 36's two fields (`A-66`). */
+  const { lookupsInFlight: _inFlight, lookupsGivenUp: _givenUp, ...withoutLookups } = health;
+  /** `health` as a core at 31 is sent it: that, less 32's four fields (`P-283`). */
   const {
     resultChannelsDropped: _unsendableChannels,
     spoolRejected: _spoolRejected,
     spoolOversized: _spoolOversized,
     instanceId: _instanceId,
     ...withoutUnsendable
-  } = health;
+  } = withoutLookups;
   /** `health` as a core at 30 is sent it: that, less 31's six fields (`P-270`, `P-275`). */
   const {
     trapEarlier: _trapEarlier,
@@ -693,9 +699,58 @@ describe('the health a peer can be sent', () => {
     assert.equal(read('childStartupMs', { ...times, max: -1 }), undefined);
   });
 
+  it('leaves 36’s lookups out for a core at 35, and keeps 35’s', () => {
+    // `A-66`: one capability, two fields, stripped together.
+    const fields = ['lookupsInFlight', 'lookupsGivenUp'];
+    for (const version of [16, 26, 31, 32, 35]) {
+      const sent = healthForPeer(health, version);
+      for (const field of fields) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    for (const version of [32, 33, 34, 35]) {
+      assert.deepEqual(healthForPeer(health, version), withoutLookups, String(version));
+    }
+    assert.equal(healthForPeer(health, 35).resultChannelsDropped, 17);
+    const sent = healthForPeer(health, 36);
+    assert.equal(sent.lookupsInFlight, 37);
+    assert.equal(sent.lookupsGivenUp, 1_250);
+    // Alone, each is stripped below 36 and kept at it.
+    for (const field of fields) {
+      assert.deepEqual(healthForPeer({ memoryMb: 1, [field]: 3 }, 35), { memoryMb: 1 }, field);
+      assert.deepEqual(
+        healthForPeer({ memoryMb: 1, [field]: 3 }, 36),
+        { memoryMb: 1, [field]: 3 },
+        field,
+      );
+    }
+  });
+
+  it('knows 36’s two lookup counts in this build’s health schema, as counts', () => {
+    // The other end of the gate: a core at 36 is sent them, so its schema must take them.
+    const read = (field: string, sent: unknown): unknown => {
+      const parsed = parseProbeToCore({
+        type: 'heartbeat',
+        seq: 1,
+        sentAt: 'now',
+        health: { memoryMb: 12, [field]: sent },
+      });
+      if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+      assert.equal(parsed.health?.memoryMb, 12, `${field} cost the heartbeat its health`);
+      return (parsed.health as Record<string, unknown>)[field];
+    };
+    for (const field of ['lookupsInFlight', 'lookupsGivenUp']) {
+      assert.equal(read(field, 7), 7, field);
+      assert.equal(read(field, 0), 0, field);
+      // A value no count can be is a gap on the channel, and the heartbeat is kept (`P-224`).
+      assert.equal(read(field, -1), undefined, field);
+      assert.equal(read(field, 1.5), undefined, field);
+    }
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 35);
-    assert.deepEqual(healthForPeer(health, 32), health);
+    assert.equal(PROTOCOL_VERSION, 36);
+    assert.deepEqual(healthForPeer(health, 36), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -754,6 +809,9 @@ describe('the health a peer can be sent', () => {
       spoolOversized: 32,
       // `P-284` review: the process the totals belong to, under the same capability.
       instanceId: 32,
+      // `A-66`: two new fields under one capability, at the version that adds them.
+      lookupsInFlight: 36,
+      lookupsGivenUp: 36,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -783,7 +841,7 @@ describe('the health a peer can be sent', () => {
   it('names the listeners’ counters at 13, and strips them for no core it can meet (P-294)', () => {
     // Named after the fact: protocol 13 added them, and only a comment on `P-64` held the number
     // until the add-sensor form needed it. Nothing on the wire changes for the name.
-    assert.equal(PROTOCOL_VERSION, 35, 'naming an old version does not bump the protocol');
+    assert.equal(PROTOCOL_VERSION, 36, 'naming an old version does not bump the protocol');
     assert.equal(versionFor('listenerCounters'), 13);
     assert.equal(capabilitiesFor(12).listenerCounters, false);
     assert.equal(capabilitiesFor(13).listenerCounters, true);
@@ -898,6 +956,7 @@ describe('the health a peer can be sent', () => {
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -934,6 +993,7 @@ describe('the child start-up counters (`P-260`)', () => {
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
   });
 });
@@ -952,6 +1012,7 @@ describe('the check workers not started (`P-263`)', () => {
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
   });
 });
@@ -972,12 +1033,14 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
     assert.deepEqual(missingCapabilities(31), [
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
   });
 });
@@ -992,6 +1055,7 @@ describe('the readings a probe could not send (`P-283`)', () => {
       'say which checks it could not start, so their sensors are held rather than failed',
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
   });
 });
@@ -1004,6 +1068,7 @@ describe('a check the probe could not start (`P-265`)', () => {
     assert.deepEqual(missingCapabilities(33), [
       'be told that it presented a certificate other than the one its identity is bound to',
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
   });
 });
@@ -1015,6 +1080,7 @@ describe('a certificate other than the bound one (`P-326`)', () => {
     assert.equal(capabilitiesFor(34).certificateBinding, true);
     assert.deepEqual(missingCapabilities(34), [
       'say where a failed check failed, as a phase and a host beside its message',
+      'report the name lookups its resolver has not answered, and those it gave up on',
     ]);
   });
 
@@ -1036,7 +1102,22 @@ describe('where a failed check failed (`P-285`)', () => {
     assert.equal(versionFor('failurePhase'), 35);
     assert.equal(capabilitiesFor(34).failurePhase, false);
     assert.equal(capabilitiesFor(35).failurePhase, true);
-    assert.deepEqual(missingCapabilities(35), []);
+    assert.equal(
+      missingCapabilities(35).some((said) => said.includes('where a failed check failed')),
+      false,
+    );
+  });
+});
+
+describe('the name lookups a probe counts (`A-66`)', () => {
+  it('are reported from 36, and by nothing older', () => {
+    assert.equal(versionFor('lookupCounters'), 36);
+    assert.equal(capabilitiesFor(35).lookupCounters, false);
+    assert.equal(capabilitiesFor(36).lookupCounters, true);
+    assert.deepEqual(missingCapabilities(35), [
+      'report the name lookups its resolver has not answered, and those it gave up on',
+    ]);
+    assert.deepEqual(missingCapabilities(36), []);
   });
 });
 

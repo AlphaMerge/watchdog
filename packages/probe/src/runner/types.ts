@@ -9,9 +9,21 @@ import type { CheckFailure, CheckResult } from '@ms/shared';
  * `CheckTarget` for P-08 is what surfaced it — the probe's copy would have gone on compiling
  * without the field the sensor needed.
  */
-export type { CheckContext, CheckExecution, CheckTarget, ReceivedBatch } from '@ms/sensors';
+export type {
+  CheckContext,
+  CheckExecution,
+  CheckTarget,
+  LookupCounters,
+  ReceivedBatch,
+} from '@ms/sensors';
 
-import type { CheckContext, CheckExecution, CheckTarget, ReceivedBatch } from '@ms/sensors';
+import type {
+  CheckContext,
+  CheckExecution,
+  CheckTarget,
+  LookupCounters,
+  ReceivedBatch,
+} from '@ms/sensors';
 
 export interface CheckRequest {
   sensorId: number;
@@ -120,6 +132,13 @@ export interface CheckRegistry {
    * is `R-06` and the rule that no-data is not zero.
    */
   sessionCounters?(): SessionCounters;
+  /**
+   * Optional (`A-66`): what this registry's checks have asked of the resolver, as this thread's
+   * `nameLookups` counts it. Reported the way `sessionCounters` is, with every result and by an
+   * idle worker when it changed, because a lookup a check gave up on is still in flight after
+   * the check has gone and settles with no check running. Absent, the channels gap.
+   */
+  lookupCounters?(): LookupCounters;
 }
 
 /**

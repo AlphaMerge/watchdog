@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
 import { targetVerdict } from '@ms/shared';
 import { restrictionOf } from '../credentials/index.js';
+import { nameLookups, type LookupCount } from './lookups.js';
 
 /**
  * A device named by host name, checked against a credential set's address targets (`A-41c`).
@@ -294,16 +295,23 @@ export async function pinTarget(
  *
  * Shared by the two places that resolve a name in order to check it: `pinTarget` above, and the
  * HTTP transport's target-policy guard (`A-54`). Each says what its own refusal reads as.
+ *
+ * **And counted here, for Probe Health** (`A-66`): the lookup is in flight until the resolver
+ * answers it, whether or not the check still waits, and one the check stops waiting for is given
+ * up. `nameLookups` says why the lookup and not the check is what is counted.
  */
 export function resolveWithin(
   pending: Promise<readonly ResolvedAddress[]>,
   signal: AbortSignal | undefined,
   boundMs: number,
   errors: { readonly cancelled: () => Error; readonly timedOut: () => Error },
+  counted: LookupCount = nameLookups,
 ): Promise<readonly ResolvedAddress[]> {
+  counted.track(pending);
   if (signal?.aborted === true) {
     // Nobody is waiting for it any more, and a rejection nobody handles ends the worker.
     pending.catch(() => undefined);
+    counted.gaveUp();
     return Promise.reject(errors.cancelled());
   }
   return new Promise((resolve, reject) => {
@@ -313,10 +321,12 @@ export function resolveWithin(
     };
     const onAbort = (): void => {
       done();
+      counted.gaveUp();
       reject(errors.cancelled());
     };
     const timer = setTimeout(() => {
       done();
+      counted.gaveUp();
       reject(errors.timedOut());
     }, boundMs);
     signal?.addEventListener('abort', onAbort, { once: true });

@@ -228,6 +228,11 @@ export interface ProbeCapabilities {
    * it is a plain host, the target. Stripped below; the message's prose still says it.
    */
   failurePhase: boolean;
+  /**
+   * Reports its name lookups (`A-66`): two fields, `lookupsInFlight` and `lookupsGivenUp`,
+   * stripped below this together.
+   */
+  lookupCounters: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -272,6 +277,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   certificateBinding:
     'be told that it presented a certificate other than the one its identity is bound to',
   failurePhase: 'say where a failed check failed, as a phase and a host beside its message',
+  lookupCounters: 'report the name lookups its resolver has not answered, and those it gave up on',
 };
 
 /**
@@ -336,6 +342,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.lookupCounters) {
+    const { lookupsInFlight: _inFlight, lookupsGivenUp: _givenUp, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.unsendableReadings) {
     const {
       resultChannelsDropped: _channels,

@@ -809,6 +809,20 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(older['workerStartupFailed'], null);
     });
 
+    it('carries the probe’s name lookups, and gaps both for a probe that cannot say (`A-66`)', () => {
+      // Distinct values, so a channel reading its neighbour's field is seen.
+      const { reading } = build(() =>
+        connected({ health: { ...FULL, lookupsInFlight: 37, lookupsGivenUp: 1_250 } }),
+      ).read(probeId);
+      assert.equal(reading['lookupsInFlight'], 37);
+      assert.equal(reading['lookupsGivenUp'], 1_250);
+      // A probe or a core below 36 sends neither, and both gap rather than read zero: a resolver
+      // nobody counted is not one answering everything.
+      const { reading: older } = build(() => connected()).read(probeId);
+      assert.equal(older['lookupsInFlight'], null);
+      assert.equal(older['lookupsGivenUp'], null);
+    });
+
     /**
      * The stall the probe reports, as a channel an operator can alarm on (`H-01`).
      *

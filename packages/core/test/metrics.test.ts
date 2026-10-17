@@ -460,6 +460,22 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_workers_not_started_total${label}`), false);
     });
 
+    it('exports the probe’s name lookups, and nothing for a probe that sent none', async () => {
+      // `A-66`. Distinct values, so a series reading its neighbour's field is seen.
+      const label = `{probe="${String(probeId)}"}`;
+      const stuck = (): ProbeLink => ({
+        ...connected,
+        health: { ...connected.health, lookupsInFlight: 37, lookupsGivenUp: 1_250 },
+      });
+      const metrics = parse((await varying(stuck).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_name_lookups_in_flight${label}`), 37);
+      assert.equal(metrics.get(`ms_probe_name_lookups_given_up_total${label}`), 1_250);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_name_lookups_in_flight${label}`), false);
+      assert.equal(without.has(`ms_probe_name_lookups_given_up_total${label}`), false);
+    });
+
     it('exports the readings a probe could not send, and nothing for a probe that sent none', async () => {
       // `P-283`. Distinct values, so a series reading its neighbour's field is seen.
       const label = `{probe="${String(probeId)}"}`;

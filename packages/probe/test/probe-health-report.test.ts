@@ -11,6 +11,7 @@ import {
 import { PROCESS_INSTANCE, ProbeHealthReporter } from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
+import type { LookupCounters } from '../src/runner/types.js';
 import type { DrainStats } from '../src/spool/drain.js';
 import type { SpoolStats } from '../src/spool/spool.js';
 import type { WheelStats } from '../src/scheduler/wheel.js';
@@ -116,6 +117,10 @@ function reporter(options: {
   limit?: AvailableMemoryLow | null;
   /** A real sampler, for the tests about when memory is read. Replaces `machine` and `limit`. */
   memory?: MemorySampler;
+  /** What the pool's workers' lookups add up to (`A-66`). Absent, the pool reports none. */
+  poolLookups?: LookupCounters;
+  /** The main thread's own lookups (`A-66`). Absent, no such source. */
+  mainLookups?: LookupCounters;
 }): ProbeHealthReporter {
   let cpuCall = 0;
   let clockCall = 0;
@@ -123,7 +128,13 @@ function reporter(options: {
   let clock = 0n;
   return new ProbeHealthReporter({
     scheduler: () => WHEEL,
-    pool: () => POOL,
+    pool: () =>
+      options.poolLookups === undefined ? POOL : { ...POOL, lookups: options.poolLookups },
+    ...(options.mainLookups === undefined
+      ? {}
+      : {
+          lookups: (): LookupCounters => options.mainLookups ?? { inFlight: 0, givenUp: 0 },
+        }),
     ...(options.children === false ? {} : { children: () => options.childStats ?? CHILDREN }),
     ...(options.spool === false ? {} : { spool: () => SPOOL }),
     ...(options.drain === false
@@ -172,6 +183,30 @@ describe('the probe’s own health report', () => {
     const report = reporter({}).report();
     assert.equal(report.workerStartupFailed, 6);
     assert.equal(report.workerCrashes, 0);
+  });
+
+  it('reports the name lookups of the pool’s workers and of the main thread together (`A-66`)', () => {
+    // One libuv thread pool under both, so the probe's count is their sum. Distinct values, so a
+    // field reading its neighbour, or one side dropped, is seen.
+    const both = reporter({
+      poolLookups: { inFlight: 30, givenUp: 1_200 },
+      mainLookups: { inFlight: 7, givenUp: 50 },
+    }).report();
+    assert.equal(both.lookupsInFlight, 37);
+    assert.equal(both.lookupsGivenUp, 1_250);
+    const pool = reporter({ poolLookups: { inFlight: 30, givenUp: 1_200 } }).report();
+    assert.equal(pool.lookupsInFlight, 30);
+    assert.equal(pool.lookupsGivenUp, 1_200);
+    const main = reporter({ mainLookups: { inFlight: 7, givenUp: 50 } }).report();
+    assert.equal(main.lookupsInFlight, 7);
+    assert.equal(main.lookupsGivenUp, 50);
+  });
+
+  it('leaves the name lookups out when nothing counts them, so both gap (`A-66`)', () => {
+    // A registry that does not count them reports none, and no zero may stand in for that.
+    const report = reporter({}).report();
+    assert.equal('lookupsInFlight' in report, false);
+    assert.equal('lookupsGivenUp' in report, false);
   });
 
   it('reports the child-process runner, which is a second runner and a second set of counters', () => {
