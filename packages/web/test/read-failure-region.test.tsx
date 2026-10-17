@@ -137,6 +137,12 @@ function open(element: React.JSX.Element, at = '/', pattern = '*'): void {
   );
 }
 
+/**
+ * A page renders and settles in milliseconds alone, and the full suite runs 90 files at once on
+ * a shared VM: the default second was missed there by the Settings tab once.
+ */
+const LOADED = { timeout: 3_000 };
+
 /** The polite region a loading line is in: never the line itself, never an alert. */
 async function regionOf(line: string): Promise<{ region: HTMLElement; said: HTMLElement }> {
   const said = await waitFor(() => {
@@ -145,7 +151,7 @@ async function regionOf(line: string): Promise<{ region: HTMLElement; said: HTML
       .find((one) => one.getAttribute('role') === null && one.closest('[role="status"]') !== null);
     if (found === undefined) throw new Error(`no region holds “${line}”`);
     return found;
-  });
+  }, LOADED);
   const region = said.closest<HTMLElement>('[role="status"]');
   if (region === null) throw new Error('no region');
   return { region, said };
@@ -167,7 +173,7 @@ async function failsIn(
   });
   await waitFor(() => {
     expect(region.textContent).toContain(FAILED);
-  });
+  }, LOADED);
   expect(region.isConnected).toBe(true);
   expect(said.isConnected).toBe(false);
   expect(region.getAttribute('role')).toBe('status');
