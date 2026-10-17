@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { CheckFailure, CheckResult } from '@ms/shared';
+import { pino } from 'pino';
 import type { Mutation } from '../src/objects/audit.js';
 import { ClockFreezeSync } from '../src/probes/clock-freeze-sync.js';
 import {
@@ -8,7 +9,7 @@ import {
   NotStarted,
   type NotStartedOptions,
 } from '../src/probes/not-started.js';
-import { silent, testActor } from './support/tree.js';
+import { testActor } from './support/tree.js';
 
 /**
  * The sensors whose checks their probe could not start (`P-265`), over a stand-in database: what
@@ -69,6 +70,10 @@ interface World {
   recomputes: number;
   /** Each call to drop what the state service cached, with its sensors (`P-409`). */
   readonly forgotten: number[][];
+  /** Transactions opened (`P-410`). */
+  transactions: number;
+  /** What it logged, as written (`P-410`). */
+  readonly logs: { level: number; msg: string; held?: number; reworded?: number }[];
   /** Refuses every write while true. */
   failing: boolean;
 }
@@ -80,6 +85,8 @@ function world(): World {
     reevaluated: [],
     recomputes: 0,
     forgotten: [],
+    transactions: 0,
+    logs: [],
     failing: false,
   };
 }
@@ -105,9 +112,19 @@ function holder(w: World, alarms: readonly number[] = []): NotStarted {
   return new NotStarted({
     db: {
       query,
-      tx: <T>(fn: (inner: unknown) => Promise<T>) => fn(q),
+      tx: <T>(fn: (inner: unknown) => Promise<T>) => {
+        w.transactions += 1;
+        return fn(q);
+      },
     } as unknown as NotStartedOptions['db'],
-    logger: silent,
+    logger: pino(
+      { level: 'debug' },
+      {
+        write: (line: string) => {
+          w.logs.push(JSON.parse(line) as World['logs'][number]);
+        },
+      },
+    ),
     states: {
       reevaluate: (_q, ids, _at, cause) => {
         if (w.failing) return Promise.reject(new Error('the transaction is aborted'));
@@ -244,6 +261,166 @@ describe('what a probe that could not start a check holds (`P-265`)', () => {
     assert.equal(held.carrierOf(1), 9);
     // And sensor 1's hold is the one it had: a result after it lets it go.
     assert.equal(held.release(9, [ran(1, 3)]).released, 1);
+  });
+});
+
+describe('a sensor held again in other words (`P-410`)', () => {
+  const WARN = 40;
+  const warned = (w: World): World['logs'] => w.logs.filter((one) => one.level === WARN);
+
+  it('rewords it alone: no alarm moved, no recompute, no warning, one transaction', async () => {
+    const w = world();
+    const held = holder(w, [99]);
+    await held.hold(9, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    assert.deepEqual(w.reevaluated, [
+      { ids: [1], message: GAVE_UP, sources: ['probe'], failure: STARTUP },
+      { ids: [99], message: '', sources: ['probe'] },
+    ]);
+    assert.equal(w.recomputes, 1);
+    assert.equal(w.transactions, 1);
+    assert.equal(warned(w).length, 1);
+
+    // The pool gave up: other words, another place. Said, and nothing else moves.
+    await held.hold(9, [unstarted(1, 10, POOL, POOL_DISABLED)]);
+    assert.deepEqual(w.reevaluated.slice(2), [
+      { ids: [1], message: POOL, sources: ['probe'], failure: POOL_DISABLED },
+    ]);
+    assert.equal(w.recomputes, 1, 'who holds it did not change');
+    assert.equal(w.transactions, 2);
+    assert.equal(warned(w).length, 1, 'said once, when it was held');
+    assert.equal(w.logs.at(-1)?.reworded, 1);
+    assert.deepEqual(held.heldWords().get(1), { message: POOL, failure: POOL_DISABLED });
+
+    // The same words in the same place open nothing.
+    await held.hold(9, [unstarted(1, 20, POOL, POOL_DISABLED)]);
+    assert.equal(w.transactions, 2);
+    assert.equal(w.reevaluated.length, 3);
+
+    // The same words in another place are said: the place is read beside them.
+    await held.hold(9, [unstarted(1, 30, POOL, STARTUP)]);
+    assert.equal(w.transactions, 3);
+    assert.deepEqual(w.reevaluated.at(-1), {
+      ids: [1],
+      message: POOL,
+      sources: ['probe'],
+      failure: STARTUP,
+    });
+  });
+
+  it('moves the alarm once for a batch that holds one sensor and rewords another', async () => {
+    const w = world();
+    const held = holder(w, [99]);
+    await held.hold(9, [unstarted(1, 0)]);
+    const recomputes = w.recomputes;
+    await held.hold(9, [unstarted(2, 10), unstarted(1, 10, POOL)]);
+    assert.equal(w.reevaluated.filter((one) => one.ids.includes(99)).length, 2, 'once a hold');
+    assert.equal(w.recomputes, recomputes + 1);
+    assert.equal(warned(w).at(-1)?.held, 1, 'the one it held, not the one it reworded');
+  });
+
+  it('gives each sensor its carrier’s words, through a hand-off and a put-back', async () => {
+    const held = holder(world());
+    await held.hold(9, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    await held.hold(8, [unstarted(1, 5, POOL, POOL_DISABLED)]);
+    assert.equal(held.carrierOf(1), 8);
+    assert.deepEqual(held.heldWords().get(1), { message: POOL, failure: POOL_DISABLED });
+    assert.equal(held.heldWords().size, 1);
+
+    // Probe 8 lets it go: probe 9 still holds it, in its own words.
+    const gone = held.release(8, [ran(1, 10)]);
+    assert.equal(held.carrierOf(1), 9);
+    assert.deepEqual(held.heldWords().get(1), { message: GAVE_UP, failure: STARTUP });
+    gone.stored(false);
+    assert.deepEqual(held.heldWords().get(1), { message: POOL, failure: POOL_DISABLED });
+    assert.equal(held.heldWords().has(2), false);
+    assert.equal(held.heldWords().get(2), undefined);
+  });
+
+  it('never puts a sensor back under a carrier that has let it go since', async () => {
+    const held = holder(world());
+    await held.hold(9, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    await held.hold(8, [unstarted(1, 5, POOL, POOL_DISABLED)]);
+    // 9 lets it go while 8 carries it, then 8 lets it go for good, then 9's batch is not stored:
+    // 9 holds it again, and 8, which no longer does, cannot be the one whose words it says.
+    const nine = held.release(9, [ran(1, 10)]);
+    assert.equal(held.carrierOf(1), 8);
+    held.release(8, [ran(1, 10)]).stored(true);
+    assert.equal(held.heldSensors().has(1), false);
+    nine.stored(false);
+    assert.equal(held.carrierOf(1), 9);
+    assert.deepEqual(held.heldWords().get(1), { message: GAVE_UP, failure: STARTUP });
+  });
+
+  it('keeps the carrier through a put-back when that carrier still holds the sensor', async () => {
+    const held = holder(world());
+    await held.hold(9, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    await held.hold(8, [unstarted(1, 5, POOL, POOL_DISABLED)]);
+    const nine = held.release(9, [ran(1, 10)]);
+    assert.equal(held.carrierOf(1), 8);
+    nine.stored(false);
+    assert.equal(held.heldOn(9), 1, 'and 9 holds it again');
+    assert.equal(held.carrierOf(1), 8, 'under 8, which held it last');
+    assert.deepEqual(held.heldWords().get(1), { message: POOL, failure: POOL_DISABLED });
+  });
+
+  it('never takes the carrier from a hold made since the release', async () => {
+    // 9 lets go of its only hold, 8 holds the sensor before 9's batch is known not stored.
+    const alone = holder(world());
+    await alone.hold(9, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    const nine = alone.release(9, [ran(1, 10)]);
+    assert.equal(alone.heldSensors().has(1), false);
+    await alone.hold(8, [unstarted(1, 15, POOL, POOL_DISABLED)]);
+    nine.stored(false);
+    assert.equal(alone.heldOn(9), 1);
+    assert.equal(alone.carrierOf(1), 8);
+    assert.deepEqual(alone.heldWords().get(1), { message: POOL, failure: POOL_DISABLED });
+
+    // 9's release hands the sensor to 8, which holds it again in other words before 9's batch is
+    // known not stored: the hand-off was this release's, the rewording is since.
+    const handed = holder(world());
+    await handed.hold(8, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    await handed.hold(9, [unstarted(1, 5, GAVE_UP, STARTUP)]);
+    const again = handed.release(9, [ran(1, 10)]);
+    assert.equal(handed.carrierOf(1), 8);
+    await handed.hold(8, [unstarted(1, 15, POOL, POOL_DISABLED)]);
+    again.stored(false);
+    assert.equal(handed.carrierOf(1), 8);
+    assert.deepEqual(handed.heldWords().get(1), { message: POOL, failure: POOL_DISABLED });
+  });
+
+  it('compares a round with what the sensor says, which is its carrier’s words', async () => {
+    const w = world();
+    const held = holder(w);
+    await held.hold(9, [unstarted(1, 0, GAVE_UP, STARTUP)]);
+    await held.hold(8, [unstarted(1, 5, POOL, POOL_DISABLED)]);
+    assert.equal(w.transactions, 2);
+    // 9's own words again, which are not what the sensor says: 8's are.
+    await held.hold(9, [unstarted(1, 10, GAVE_UP, STARTUP)]);
+    assert.equal(held.carrierOf(1), 9);
+    assert.equal(w.transactions, 3);
+    assert.deepEqual(w.reevaluated.at(-1), {
+      ids: [1],
+      message: GAVE_UP,
+      sources: ['probe'],
+      failure: STARTUP,
+    });
+    // 8 again in what the sensor now says opens nothing, though they are not 8's last words.
+    await held.hold(8, [unstarted(1, 15, GAVE_UP, STARTUP)]);
+    assert.equal(held.carrierOf(1), 8);
+    assert.equal(w.transactions, 3);
+  });
+
+  it('keeps the words it had when the rewording cannot be written, and says the new ones when sent again', async () => {
+    const w = world();
+    const held = holder(w);
+    await held.hold(9, [unstarted(1, 0)]);
+    w.failing = true;
+    await assert.rejects(held.hold(9, [unstarted(1, 5, POOL)]));
+    assert.deepEqual(held.heldWords().get(1), { message: GAVE_UP, failure: null });
+    w.failing = false;
+    await held.hold(9, [unstarted(1, 5, POOL)]);
+    assert.deepEqual(w.reevaluated.at(-1)?.ids, [1]);
+    assert.equal(w.reevaluated.at(-1)?.message, POOL);
   });
 });
 

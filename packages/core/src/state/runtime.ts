@@ -180,6 +180,18 @@ export interface HeldWords {
   readonly failure: CheckFailure | null;
 }
 
+/**
+ * A hold the state service reads live, sensor by sensor: what holds it and the words to say
+ * (`P-410`). A `ReadonlyMap` is one, and so is a view that reads its words where they are kept.
+ */
+export type HeldWordsLookup = Pick<ReadonlyMap<number, HeldWords>, 'has' | 'get' | 'size'>;
+
+/** Whether two holds say the same words and name the same place it stopped, or are both none. */
+export function sameHeldWords(a: HeldWords | undefined, b: HeldWords | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return a.message === b.message && sameFailure(a.failure, b.failure);
+}
+
 /** Whether two failures name the same phase and the same host, or are both none. */
 export function sameFailure(a: CheckFailure | null, b: CheckFailure | null): boolean {
   if (a === null || b === null) return a === b;

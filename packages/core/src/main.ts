@@ -84,7 +84,7 @@ import { MetricsExporter } from './metrics/exporter.js';
 import { PeriodicSweep } from './support/periodic-sweep.js';
 import { NotificationTester } from './notifications/test-send.js';
 import { StateBroadcaster } from './state/stream.js';
-import type { CommittedStates, HeldWords } from './state/runtime.js';
+import type { CommittedStates, HeldWords, HeldWordsLookup } from './state/runtime.js';
 import { WebhookTransport } from './notifications/delivery/webhook.js';
 import { slackTransport, teamsTransport } from './notifications/delivery/chat.js';
 import { ProgramTransport } from './notifications/delivery/program.js';
@@ -517,6 +517,7 @@ async function serve(): Promise<void> {
   // dependency recompute built below.
   // eslint-disable-next-line prefer-const -- assigned below, once the recompute exists.
   let notStartedRef: NotStarted | undefined;
+  const noneUnstarted: HeldWordsLookup = new Map();
   const states = new SensorStateService({
     db,
     logger,
@@ -529,7 +530,7 @@ async function serve(): Promise<void> {
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
     clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
-    notStartedSensors: () => notStartedRef?.heldSensors() ?? noneFrozen,
+    notStartedSensors: () => notStartedRef?.heldWords() ?? noneUnstarted,
     unreachedFactories: () => factoryReach.unreached(),
     withheldSensors: () => vouchingRef?.heldWords() ?? nothingWithheld,
   });

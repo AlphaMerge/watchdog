@@ -6,7 +6,7 @@ import type { SensorCatalogue, SensorType } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { catalogueSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
 import type { Database } from '../../src/db/pool.js';
-import type { HeldWords } from '../../src/state/runtime.js';
+import type { HeldWords, HeldWordsLookup } from '../../src/state/runtime.js';
 import { InheritanceResolver } from '../../src/settings/inheritance.js';
 import {
   LoggingAuditSink,
@@ -118,8 +118,11 @@ export async function buildHarness(
     unreachableSensors?: () => ReadonlySet<number>;
     /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.frozenSensors`. */
     clockFrozenSensors?: () => ReadonlySet<number>;
-    /** The sensors whose checks their probe could not start (`P-265`); `NotStarted.heldSensors`. */
-    notStartedSensors?: () => ReadonlySet<number>;
+    /**
+     * The sensors whose checks their probe could not start (`P-265`), with their probe's words
+     * (`P-410`); `NotStarted.heldWords`.
+     */
+    notStartedSensors?: () => HeldWordsLookup;
     /** The factories held for their inputs' probe (`M-26`); `FactoryReach.unreached`. */
     unreachedFactories?: () => ReadonlySet<number>;
     /** How long a change waits for the tree lock (`P-229`); 30 s unless a test is about it. */

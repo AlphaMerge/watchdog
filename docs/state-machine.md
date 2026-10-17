@@ -492,8 +492,9 @@ Five things this settles, none of which `WORKFLOW.MD` states:
   (`P-407`). A check its probe refused (`A-41c`: `check`, `resolve` or `connect`, and the
   device's host) or could not start (`P-265`: `startup` or `pool-disabled`, no host) is not
   decided, but its sentence is the sensor's message while it is held, and where it stopped goes
-  with it: on the transition into the hold, on the current state, through a refusal renewed in
-  new words or with a new place (no transition), and through a result decided while it is held.
+  with it: on the transition into the hold, on the current state, through a refusal renewed, or
+  a check held again by its probe's next round, in new words or with a new place (no
+  transition, `P-410`), and through a result decided while it is held.
   Nothing goes beside a sentence the core writes itself (`A-29`, `A-41`), since no probe named
   anything, and nothing once a pause, an acknowledgement or a release writes words of its own. A
   probe below protocol 35 names nothing, and its hold stores nothing. **Descriptive, never a
@@ -747,7 +748,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | any                 | `paused`            | Any pause source becomes active                    | first active (§3)      |
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
-| any but `paused`    | `unknown`           | Its probe could not start its check: the check process never reached its ready line, or the pool gave up before running it (`P-265`). The result is not stored, and the sensor carries the probe's sentence and where the check stopped (`P-407`) | `probe` |
+| any but `paused`    | `unknown`           | Its probe could not start its check: the check process never reached its ready line, or the pool gave up before running it (`P-265`). The result is not stored, and the sensor carries the probe's sentence and where the check stopped (`P-407`). Held again by a later round in other words or with another place, it says those, with no transition (`P-410`) | `probe` |
 | `unknown` (`probe`) | `up` / `warning` / `down` / `unknown` | Its probe answers again, it moved to another probe, or the probe's clock passed its last result: its last reading decides until the next one, and its message says which (`R-11`) | `scan` / `limit` / `lookup` |
 | `unknown` (`probe`) | `up` / `warning` / `down` | A check of its own started and finished after its probe could not start one: that result decides it, in one transition (`P-265`) | `scan` / `limit` / `lookup` |
 | any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled; or the sensor is outside its credentials' bounds (`A-41b`) | `access` |
@@ -884,6 +885,23 @@ Two further notes for whoever picks those up:
   (`P-249`). The not-started overlay (`P-265`) is kept in step on the same mutations, in the same
   sink: a sensor moved off the probe that could not start its check is let go at once, since that
   probe will not send it again.
+
+- **Whose words a sensor held for its probe says** (`P-410`). A lost probe, a frozen clock, a
+  factory's unreached inputs and a check its probe could not start all lay `probeReachable:
+  false` over the facts and decide the same `unknown`/`probe`, so moving between them is never a
+  transition. The first three write their words once, on the re-decision that holds the sensor. A
+  check that could not start is the one hold whose words change while it stands — each round
+  names its own start-up time and the check process's last output, or the pool's give-up — so its
+  words and place are read live, as a withheld sensor's are (`M-28`), and the latest round's are
+  written whenever the sensor is re-decided, with no transition. **Only while nothing else holds
+  the sensor for its probe**: a lost probe's, a frozen clock's or a factory's words stand over it,
+  and when that hold lets go first the not-started words are written in its place. A round in
+  the same words and place writes nothing and opens no transaction; one in new words rewords the
+  sensor and moves no alarm, since who holds it did not change. A sensor held as not-started
+  *before* its probe was lost or its clock froze keeps the not-started words until that hold ends
+  (`P-413`). Two probes hold one sensor only when it moved between their batches; it says the
+  words of the probe the core placed it under last, a round is compared with those, and a hold
+  put back after a batch that was not stored keeps its own place in that order.
 
 - **A resume is a floor on staleness, not an erasure of it** (`P-97`). `last_result_at` is the
   high-water mark that makes the at-least-once protocol safe; `resumed_at` is what says nothing

@@ -1,6 +1,7 @@
 import { describeError, type CheckFailure, type CheckResult, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
+import { sameHeldWords, type HeldWords, type HeldWordsLookup } from '../state/runtime.js';
 import {
   PROBE_SOURCE,
   type DependencyRecomputer,
@@ -47,10 +48,18 @@ export interface NotStartedOptions {
   readonly now?: () => Date;
 }
 
-/** What one probe holds: each sensor, by when its last check that could not start was made. */
+/**
+ * What one probe holds: each sensor, by when its last check that could not start was made, and
+ * what that check said and where it stopped (`P-410`).
+ */
 interface Held {
   readonly at: number;
-  readonly message: string;
+  /**
+   * When this core placed it, against every other probe's holds: the one placed last carries the
+   * sensor. A probe's `at` is its own clock, and orders nothing between two probes.
+   */
+  readonly order: number;
+  readonly words: HeldWords;
 }
 
 /** A batch's results with the ones that could not start taken out, and how many were held. */
@@ -73,6 +82,11 @@ export interface ReleasedBatch {
 
 const NOTHING_RELEASED: ReleasedBatch = { released: 0, stored: () => undefined };
 
+/** What a check that could not start said, and where it stopped: none from below protocol 35. */
+function wordsOf(result: CheckResult): HeldWords {
+  return { message: result.message, failure: result.failure ?? null };
+}
+
 /**
  * The sensors whose last check their probe could not start (`P-265`).
  *
@@ -90,6 +104,13 @@ const NOTHING_RELEASED: ReleasedBatch = { released: 0, stored: () => undefined }
  * takes it out of the set *before* the batch reaches the state machine, without a re-evaluation,
  * so it goes from Unknown to whatever that result says in one transition. If the batch is not
  * stored the probe sends it again, so the sensor is put back until it is.
+ *
+ * **Its words are the latest round's** (`P-410`). Each round names its own start-up time and the
+ * check process's last output, or the pool's give-up, so the state service reads them live from
+ * `heldWords`, as it reads a withheld sensor's, and a sensor held again in other words says them
+ * with no transition. Two probes hold one sensor only when it moved between their batches; it
+ * says the words of the one this core placed it under last, and a put-back keeps its own place
+ * in that order, so it never takes the carrier from a hold made since.
  *
  * **Not persisted**, as `ClockFreeze` is not. A core that restarts reads the sensor as it was
  * written, Unknown with the probe's words, until its next result.
@@ -112,8 +133,10 @@ export class NotStarted {
   readonly #byProbe = new Map<number, Map<number, Held>>();
   /** When each probe first held something, while it still does (`M-22`). */
   readonly #since = new Map<number, Date>();
-  /** Which probe holds each sensor; the one that held it last, when two do. */
-  readonly #carrier = new Map<number, number>();
+  /** The last `Held.order` given. */
+  #placed = 0;
+  /** `#held`, with each sensor's words from the probe carrying it. Allocated once. */
+  readonly #words: HeldWordsLookup;
 
   constructor(options: NotStartedOptions) {
     this.#db = options.db;
@@ -122,10 +145,27 @@ export class NotStarted {
     this.#dependencies = options.dependencies;
     this.#probeAlarms = options.probeAlarms ?? ((): readonly number[] => []);
     this.#now = options.now ?? ((): Date => new Date());
+    const held = this.#held;
+    this.#words = {
+      get size(): number {
+        return held.size;
+      },
+      has: (sensorId) => held.has(sensorId),
+      get: (sensorId) => this.#wordsOf(sensorId),
+    };
   }
 
   heldSensors(): ReadonlySet<number> {
     return this.#held;
+  }
+
+  /**
+   * The held sensors, each with what its carrier's last check that could not start said and
+   * where it stopped (`P-410`). What the state service lays over the facts, and says. A view: it
+   * reads the sets as they are, so a hold put back after a write that failed reads as it was.
+   */
+  heldWords(): HeldWordsLookup {
+    return this.#words;
   }
 
   /** How many of one probe's sensors are held, for its Probe Health. */
@@ -142,9 +182,9 @@ export class NotStarted {
       : { sensorIds: new Set(held.keys()), since };
   }
 
-  /** The probe that holds this sensor, while one does (`M-22`). */
+  /** The probe that holds this sensor, while one does; the one that held it last, when two do (`M-22`). */
   carrierOf(sensorId: number): number | undefined {
-    return this.#carrier.get(sensorId);
+    return this.#carrying(sensorId)?.probeObjectId;
   }
 
   /**
@@ -200,22 +240,31 @@ export class NotStarted {
 
     const before = new Map(current);
     const since = this.#since.get(probeObjectId) ?? this.#now();
-    const carriers = new Map(
-      entering.map((result) => [result.sensorId, this.#carrier.get(result.sensorId)]),
+    // What each sensor says now, which is its carrier's words: another probe's, when that one held
+    // it last.
+    const said = new Map(
+      entering.map((result) => [result.sensorId, this.#wordsOf(result.sensorId)]),
     );
     const next = new Map(current);
     for (const result of entering) {
-      next.set(result.sensorId, { at: Date.parse(result.at), message: result.message });
+      this.#placed += 1;
+      next.set(result.sensorId, {
+        at: Date.parse(result.at),
+        order: this.#placed,
+        words: wordsOf(result),
+      });
       this.#held.add(result.sensorId);
-      this.#carrier.set(result.sensorId, probeObjectId);
     }
     this.#place(probeObjectId, next, since);
-    // Only the ones whose words changed are re-decided: a sensor held already in the same words
-    // has its hold moved forward and nothing else. Where it stopped is not compared: the same
-    // words name the same runner phase, and a sensor held again is not rewritten (`P-407`).
-    const toMove = entering.filter(
-      (result) => before.get(result.sensorId)?.message !== result.message,
+    // New to this probe's set moves its alarm with it. Held again in words or a place other than
+    // the sensor says is reworded, with no transition, and moves nothing else (`P-410`). The same
+    // words and place move the hold forward and open nothing.
+    const entered = entering.filter((result) => !before.has(result.sensorId));
+    const reworded = entering.filter(
+      (result) =>
+        before.has(result.sensorId) && !sameHeldWords(said.get(result.sensorId), wordsOf(result)),
     );
+    const toMove = [...entered, ...reworded];
     try {
       if (toMove.length > 0) {
         await this.#db.tx(async (q) => {
@@ -240,33 +289,32 @@ export class NotStarted {
           for (const { message, failure, ids } of byWords.values()) {
             await this.#states.reevaluate(q, ids, at, { message, sources: PROBE_SOURCE, failure });
           }
-          await this.#moveAlarms(q, probeObjectId, at);
+          if (entered.length > 0) await this.#moveAlarms(q, probeObjectId, at);
         });
       }
     } catch (error) {
       this.#place(probeObjectId, before, since);
-      for (const [id, carrier] of carriers) {
-        if (carrier === undefined) {
-          this.#held.delete(id);
-          this.#carrier.delete(id);
-        } else {
-          this.#carrier.set(id, carrier);
-        }
-      }
+      this.#recount(entering.map((result) => result.sensorId));
       this.#logger.error(
         { probeObjectId, sensors: entering.length, err: describeError(error) },
         'could not hold the sensors whose checks a probe could not start; the batch is refused',
       );
       throw error;
     }
-    if (toMove.length > 0) {
+    if (entered.length > 0) {
       this.#logger.warn(
         {
           probeObjectId,
-          held: toMove.length,
-          sensorIds: toMove.slice(0, 20).map((r) => r.sensorId),
+          held: entered.length,
+          sensorIds: entered.slice(0, 20).map((r) => r.sensorId),
         },
         'sensors held Unknown: their probe could not start their checks',
+      );
+    }
+    if (reworded.length > 0) {
+      this.#logger.debug(
+        { probeObjectId, reworded: reworded.length },
+        'sensors held again in new words: their probe still cannot start their checks',
       );
     }
     return { results: kept, held: entering.length, dropped };
@@ -294,11 +342,7 @@ export class NotStarted {
     const since = this.#since.get(probeObjectId) ?? this.#now();
     const next = new Map([...current].filter(([id]) => !letGo.has(id)));
     this.#place(probeObjectId, next, since);
-    const carriers = new Map<number, number | undefined>();
-    for (const id of letGo.keys()) {
-      carriers.set(id, this.#carrier.get(id));
-      this.#forget(id, probeObjectId);
-    }
+    this.#recount(letGo.keys());
     // **Decided from the row, not from what was cached while held** (`P-409`, as `A-41c`'s
     // release). A started result older than the hold, decided while the sensor was held, left it
     // cached with the probe unable to run it, and the result letting it go was decided from that:
@@ -312,14 +356,13 @@ export class NotStarted {
         // Put back what is still missing: a hold made since, by a later batch, stands.
         const now = this.#byProbe.get(probeObjectId) ?? new Map<number, Held>();
         const back = new Map(now);
+        // Each in its own place in the order, so the carrier is the one that held it last: a hold
+        // made since by another probe keeps it, and its words (`P-410`).
         for (const [id, held] of letGo) {
-          if (back.has(id)) continue;
-          back.set(id, held);
-          this.#held.add(id);
-          const carrier = carriers.get(id);
-          this.#carrier.set(id, carrier ?? probeObjectId);
+          if (!back.has(id)) back.set(id, held);
         }
         this.#place(probeObjectId, back, this.#since.get(probeObjectId) ?? since);
+        this.#recount(letGo.keys());
         // Held again: what was cached for a result nobody stored must not go on saying it is let
         // go.
         this.#states.forgetSensors([...letGo.keys()]);
@@ -349,12 +392,9 @@ export class NotStarted {
       const current = this.#byProbe.get(probeObjectId) ?? new Map<number, Held>();
       const since = this.#since.get(probeObjectId) ?? this.#now();
       const before = new Map(current);
-      const carriers = new Map(gone.map((id) => [id, this.#carrier.get(id)]));
       this.#place(probeObjectId, new Map([...current].filter(([id]) => !gone.includes(id))), since);
-      const freed = gone.filter((id) => {
-        this.#forget(id, probeObjectId);
-        return !this.#held.has(id);
-      });
+      this.#recount(gone);
+      const freed = gone.filter((id) => !this.#held.has(id));
       try {
         const at = this.#now();
         if (freed.length > 0) {
@@ -366,10 +406,7 @@ export class NotStarted {
         await this.#moveAlarms(q, probeObjectId, at);
       } catch (error) {
         this.#place(probeObjectId, before, since);
-        for (const [id, carrier] of carriers) {
-          this.#held.add(id);
-          this.#carrier.set(id, carrier ?? probeObjectId);
-        }
+        this.#recount(gone);
         this.#logger.error(
           { probeObjectId, sensors: gone.length, err: describeError(error) },
           'could not let go the sensors a tree change moved off the probe that held them; the ' +
@@ -385,6 +422,23 @@ export class NotStarted {
     return moved;
   }
 
+  /** What the probe carrying this sensor last said of it, if any holds it. */
+  #wordsOf(sensorId: number): HeldWords | undefined {
+    return this.#carrying(sensorId)?.held.words;
+  }
+
+  /** The probe that placed its hold of this sensor last, of those that hold it, and that hold. */
+  #carrying(sensorId: number): { probeObjectId: number; held: Held } | undefined {
+    let carrying: { probeObjectId: number; held: Held } | undefined;
+    for (const [probeObjectId, sensors] of this.#byProbe) {
+      const held = sensors.get(sensorId);
+      if (held !== undefined && (carrying === undefined || held.order > carrying.held.order)) {
+        carrying = { probeObjectId, held };
+      }
+    }
+    return carrying;
+  }
+
   /** The probe's own alarm and the dependency recompute, as `ClockFreeze` moves them. */
   async #moveAlarms(q: Queryable, probeObjectId: number, at: Date): Promise<void> {
     const alarms = this.#probeAlarms(probeObjectId);
@@ -396,19 +450,12 @@ export class NotStarted {
     await this.#dependencies.recompute(q, at);
   }
 
-  /**
-   * Takes a sensor out of the union once no probe's set holds it, and hands it to the probe that
-   * still does when another does.
-   */
-  #forget(sensorId: number, probeObjectId: number): void {
-    for (const [other, held] of this.#byProbe) {
-      if (other !== probeObjectId && held.has(sensorId)) {
-        if (this.#carrier.get(sensorId) === probeObjectId) this.#carrier.set(sensorId, other);
-        return;
-      }
+  /** Keeps `#held` the union of the sets for these sensors, once the sets have changed. */
+  #recount(sensorIds: Iterable<number>): void {
+    for (const id of sensorIds) {
+      if (this.#carrying(id) === undefined) this.#held.delete(id);
+      else this.#held.add(id);
     }
-    this.#held.delete(sensorId);
-    this.#carrier.delete(sensorId);
   }
 
   /** Sets one probe's set, and when it began, or clears both when the set is empty. */

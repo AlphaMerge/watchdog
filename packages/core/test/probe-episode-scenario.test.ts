@@ -26,7 +26,12 @@ import { NotStarted } from '../src/probes/not-started.js';
 import { ProbeReachability } from '../src/probes/reachability.js';
 import { ReachabilitySync } from '../src/probes/reachability-sync.js';
 import { AlarmService, type Alarm } from '../src/state/alarms.js';
-import { readSensorState, writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
+import {
+  readSensorState,
+  writeRuntimes,
+  writeStateHistory,
+  type HeldWords,
+} from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import type { SensorState } from '../src/state/tables.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
@@ -161,6 +166,7 @@ describe(
       inputsOf: (id) => now().index.inputsOf(id),
     };
     const none: ReadonlySet<number> = new Set();
+    const nothingHeld: ReadonlyMap<number, HeldWords> = new Map();
 
     let batch = 0;
     /** Probe Health results through ingestion, the way the core's own sweep sends them. */
@@ -573,7 +579,7 @@ describe(
         alarms: engine,
         unreachableSensors: () => core?.reachability.unreachableSensors() ?? none,
         clockFrozenSensors: () => core?.freeze.frozenSensors() ?? none,
-        notStartedSensors: () => core?.unstarted.heldSensors() ?? none,
+        notStartedSensors: () => core?.unstarted.heldWords() ?? nothingHeld,
         unreachedFactories: () => core?.reach.unreached() ?? none,
       });
       triggerSync = new TriggerSync({ engine, logger: silent });
@@ -940,6 +946,58 @@ describe(
       await healthSweep();
       await fire();
       assert.deepEqual(await queued(again, [...made.pings, health]), {}, 'no second wave');
+
+      // A round in other words (`P-410`): half the checks gave up after their own time with
+      // their own output, and the pool gave up on the other half. Each ping says its round's
+      // words and place, with no transition, no alarm and the episode as it was.
+      const reworded = await mark();
+      const rewordAt = new Date(stepAt.getTime() + 15_000);
+      const slower = 'the probe took 10034 ms to start the check and gave up: node: warning';
+      const pool = 'the worker pool has given up and cannot run checks';
+      const sinceBefore = new Map<number, number>();
+      for (const id of made.pings) {
+        sinceBefore.set(id, (await readSensorState(db, id))?.since.getTime() ?? 0);
+      }
+      await ingestProbe(
+        made.probe,
+        made.pings.map((sensorId, index) => ({
+          sensorId,
+          at: rewordAt.toISOString(),
+          outcome: 'error' as const,
+          message: index % 2 === 0 ? slower : pool,
+          durationMs: 10_034,
+          channels: [],
+          notStarted: true as const,
+          failure: { phase: index % 2 === 0 ? 'startup' : 'pool-disabled' },
+        })),
+      );
+      assert.equal(now().unstarted.heldOn(made.probe), PINGS);
+      for (const [index, id] of made.pings.entries()) {
+        const runtime = await readSensorState(db, id);
+        assert.equal(runtime?.state, 'unknown');
+        assert.equal(runtime.message, index % 2 === 0 ? slower : pool);
+        assert.deepEqual(runtime.failure, {
+          phase: index % 2 === 0 ? 'startup' : 'pool-disabled',
+        });
+        assert.equal(runtime.since.getTime(), sinceBefore.get(id), 'held since the first round');
+      }
+      // The history keeps the place it was held with; the row follows the latest round.
+      assert.deepEqual(
+        await db.query<{ phase: string | null; n: string }>(
+          `SELECT failure_phase AS phase, count(*)::text AS n FROM sensor_state
+           WHERE sensor_id = ANY($1::bigint[]) AND state = 'unknown' AND time >= $2
+           GROUP BY failure_phase`,
+          [made.pings, new Date(stepAt.getTime() - MINUTE)],
+        ),
+        [{ phase: 'startup', n: String(PINGS) }],
+      );
+      await healthSweep();
+      await fire();
+      assert.deepEqual(
+        await queued(reworded, [...made.pings, health]),
+        {},
+        'and no wave for words',
+      );
 
       // The probe starts its checks again. Each ping is let go by its own result, which decides
       // it in one step: Unknown to what it measured, and nothing in between.

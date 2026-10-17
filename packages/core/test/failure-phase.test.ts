@@ -44,8 +44,14 @@ const RESOLVE: CheckFailure = { phase: 'resolve', target: 'app.dc.test' };
 const CHECK: CheckFailure = { phase: 'check', target: 'app.dc.test' };
 
 /** The holds the state service reads live, set by each test (`P-407`). */
-const unstarted = new Set<number>();
+const unstarted = new Map<number, HeldWords>();
 const withheld = new Map<number, HeldWords>();
+/** The other holds of a sensor for its probe, which write their words once (`P-410`). */
+const unreachable = new Set<number>();
+const frozen = new Set<number>();
+const unreached = new Set<number>();
+const POOL = 'the worker pool has given up and cannot run checks';
+const POOL_DISABLED: CheckFailure = { phase: 'pool-disabled' };
 
 describe('whether two places a check stopped are the same (P-407)', () => {
   it('is the same phase and the same host, or both none', () => {
@@ -90,6 +96,9 @@ describe(
         states: true,
         notStartedSensors: () => unstarted,
         withheldSensors: () => withheld,
+        unreachableSensors: () => unreachable,
+        clockFrozenSensors: () => frozen,
+        unreachedFactories: () => unreached,
       });
       const server = new ApiServer({
         config: {
@@ -118,6 +127,9 @@ describe(
 
     beforeEach(async () => {
       unstarted.clear();
+      unreachable.clear();
+      frozen.clear();
+      unreached.clear();
       withheld.clear();
       const probe = await h.service.create(testActor, {
         kind: 'probe',
@@ -330,7 +342,7 @@ describe(
       await report([failed(1, CONNECT)]);
       await report([failed(2, CONNECT)]);
       // Held as `NotStarted.hold` holds it: the sensor in the overlay, its words and its place.
-      unstarted.add(sensorId);
+      unstarted.set(sensorId, { message: GAVE_UP, failure: STARTUP });
       await rehold(3, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
       assert.deepEqual(await said(), { state: 'unknown', message: GAVE_UP, failure: STARTUP });
       assert.deepEqual((await transitions()).at(-1), ['unknown', 'probe', 'startup', null]);
@@ -352,7 +364,7 @@ describe(
     it('lets the place go with the hold’s words when the probe lets a sensor go', async () => {
       await report([failed(1, CONNECT)]);
       await report([failed(2, CONNECT)]);
-      unstarted.add(sensorId);
+      unstarted.set(sensorId, { message: GAVE_UP, failure: STARTUP });
       await rehold(3, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
       unstarted.delete(sensorId);
       // Moved off the probe that held it: the words are the release's, and say nowhere.
@@ -407,6 +419,68 @@ describe(
         failure: null,
       });
       assert.deepEqual((await transitions()).at(-1), ['down', 'scan', null, null]);
+    });
+
+    it('says a check held again in new words, with its place, and records nothing (P-410)', async () => {
+      await report([ok(0)]);
+      unstarted.set(sensorId, { message: GAVE_UP, failure: STARTUP });
+      await rehold(1, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
+      const held = await transitions();
+      const since = (await readSensorState(db, sensorId))?.since;
+      assert.deepEqual(held.at(-1), ['unknown', 'probe', 'startup', null]);
+
+      // The probe's next round: the pool gave up. Its words and its place, and no transition.
+      unstarted.set(sensorId, { message: POOL, failure: POOL_DISABLED });
+      await rehold(2, { message: POOL, sources: PROBE_SOURCE, failure: POOL_DISABLED });
+      assert.deepEqual(await said(), { state: 'unknown', message: POOL, failure: POOL_DISABLED });
+      assert.deepEqual(await transitions(), held);
+      assert.equal((await readSensorState(db, sensorId))?.since.getTime(), since?.getTime());
+
+      // The same words in another place are written too.
+      unstarted.set(sensorId, { message: POOL, failure: STARTUP });
+      await rehold(3, { message: POOL, sources: PROBE_SOURCE, failure: STARTUP });
+      assert.deepEqual(await said(), { state: 'unknown', message: POOL, failure: STARTUP });
+      // And a result decided while it is held says the latest round's.
+      await report([failed(4, EXEC)]);
+      assert.deepEqual(await said(), { state: 'unknown', message: POOL, failure: STARTUP });
+      assert.deepEqual(await transitions(), held, 'one hold, one Unknown');
+    });
+
+    for (const [other, set, words] of [
+      ['a lost probe', unreachable, 'the probe carrying this sensor stopped answering'],
+      ['a frozen clock', frozen, 'set the probe host clock'],
+      ['a factory’s unreached inputs', unreached, 'what it reads is on a lost probe'],
+    ] as const) {
+      it(`leaves ${other}’s words standing, and says the check’s when that lets go first (P-410)`, async () => {
+        await report([ok(0)]);
+        set.add(sensorId);
+        await rehold(1, { message: words, sources: PROBE_SOURCE });
+        assert.deepEqual(await said(), { state: 'unknown', message: words, failure: null });
+        const held = await transitions();
+
+        // Its probe cannot start the check either: the other hold's words still say it.
+        unstarted.set(sensorId, { message: GAVE_UP, failure: STARTUP });
+        await rehold(2, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
+        assert.deepEqual(await said(), { state: 'unknown', message: words, failure: null });
+
+        // That hold lets go and the check's remains: its words, with no transition.
+        set.delete(sensorId);
+        await rehold(3, { message: 'the probe is answering again', sources: PROBE_SOURCE });
+        assert.deepEqual(await said(), { state: 'unknown', message: GAVE_UP, failure: STARTUP });
+        assert.deepEqual(await transitions(), held);
+      });
+    }
+
+    it('says the hold’s words, and its place, when a held sensor is resumed (P-410)', async () => {
+      await report([ok(0)]);
+      unstarted.set(sensorId, { message: GAVE_UP, failure: STARTUP });
+      await rehold(1, { message: GAVE_UP, sources: PROBE_SOURCE, failure: STARTUP });
+      await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
+      assert.deepEqual(await said(), { state: 'paused', message: 'maintenance', failure: null });
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
+      // Still held: Unknown for its probe, in the probe's words rather than none.
+      assert.deepEqual(await said(), { state: 'unknown', message: GAVE_UP, failure: STARTUP });
+      assert.deepEqual((await transitions()).at(-1), ['unknown', 'probe', 'startup', null]);
     });
 
     it('says nothing of a refused check beside a pause’s words over the refusal', async () => {

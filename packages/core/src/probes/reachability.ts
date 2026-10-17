@@ -37,7 +37,9 @@ export interface StateReevaluator {
      * The words, and the one cause they speak for: the probe's (`R-11`). A sensor this lets go
      * carries them until its next result, and one it holds for the probe carries them while held.
      * `failure` is where the check stopped, passed only by a hold whose words are a result's
-     * (`P-265`, `P-407`), and stored beside them while they are what the sensor says.
+     * (`P-265`, `P-407`), and stored beside them while they are what the sensor says. A sensor
+     * its probe could not start says its probe's latest round, read live whoever re-decides it
+     * (`P-410`): these are what a transition says when nothing live answers.
      */
     cause: {
       message: string;

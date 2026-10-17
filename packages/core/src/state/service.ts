@@ -40,6 +40,7 @@ import {
   writeStateHistory,
   sameFailure,
   type HeldWords,
+  type HeldWordsLookup,
   type RuntimeWrite,
   type SensorRuntime,
   type StateDecisions,
@@ -169,9 +170,14 @@ export interface SensorStateServiceOptions {
    * `unreachableSensors` is, because it is the same answer: the probe is at fault, and nothing
    * about the device is known.
    *
+   * With what each check said and where it stopped (`P-410`): the sensor's message whoever
+   * re-decides it, as a withheld sensor's are (`M-28`), while no lost probe, frozen clock or held
+   * factory holds it too. Each round names its own start-up time and output, so these are the one
+   * probe hold whose words change while it stands.
+   *
    * Absent means every probe starts its checks.
    */
-  notStartedSensors?: () => ReadonlySet<number>;
+  notStartedSensors?: () => HeldWordsLookup;
   /**
    * The Sensor Factories whose every channel reads a sensor on a lost or frozen probe (`M-26`).
    * Laid over the facts as `unreachableSensors` is, because it is the same answer one step
@@ -257,7 +263,7 @@ export class SensorStateService {
   readonly #onStatesCommitted: CommittedStates | undefined;
   readonly #unreachableSensors: (() => ReadonlySet<number>) | undefined;
   readonly #clockFrozenSensors: (() => ReadonlySet<number>) | undefined;
-  readonly #notStartedSensors: (() => ReadonlySet<number>) | undefined;
+  readonly #notStartedSensors: (() => HeldWordsLookup) | undefined;
   readonly #unreachedFactories: (() => ReadonlySet<number>) | undefined;
   readonly #withheldSensors: (() => ReadonlyMap<number, HeldWords>) | undefined;
   readonly #cache = new Map<number, SensorRuntime>();
@@ -581,6 +587,8 @@ export class SensorStateService {
         // transition, and the state keeps its start.
         // Where a refusal stopped follows it too, so a refusal renewed with a new phase, or
         // first from a probe that names one, is written though its words are the same (`P-407`).
+        // And a check its probe could not start, held again in new words or with a new place,
+        // says the latest round's (`P-410`).
         const reworded = this.#heldWords(sensorId, decision);
         if (
           reworded !== undefined &&
@@ -627,7 +635,8 @@ export class SensorStateService {
       // **Where the check stopped goes with words that are a check's** (`P-407`): a withholding's
       // own (a probe's refusal names it, the core's sentence nothing), or the caller's when its
       // words are a held result's and it speaks for the cause. Never beside words on the way
-      // out, a pause's or an acknowledgement's, which say nothing of where a check stopped.
+      // out, a pause's or an acknowledgement's, which say nothing of where a check stopped. A
+      // not-started sensor's come from its probe's latest round, whoever re-decides it (`P-410`).
       const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
       const held = operatorDecided(decision) ? this.#heldWords(sensorId, decision) : undefined;
       const message = !operatorDecided(decision)
@@ -841,11 +850,22 @@ export class SensorStateService {
 
   /**
    * Why the core stopped evaluating this sensor, and where its probe stopped when a refusal is
-   * why, when that is what decided it (`A-29`, `P-407`).
+   * why, when that is what decided it (`A-29`, `P-407`). And for a sensor held for its probe, what
+   * its last check that could not start said (`P-410`), **only while nothing else holds it for its
+   * probe**: a lost probe's, a frozen clock's and a held factory's words are written by their own
+   * re-decision, and stand.
    */
   #heldWords(sensorId: number, decision: Decision): HeldWords | undefined {
-    if (decision.cause !== 'access') return undefined;
-    return this.#withheldSensors?.().get(sensorId);
+    if (decision.cause === 'access') return this.#withheldSensors?.().get(sensorId);
+    if (decision.cause !== 'probe') return undefined;
+    if (
+      this.#unreachableSensors?.().has(sensorId) === true ||
+      this.#clockFrozenSensors?.().has(sensorId) === true ||
+      this.#unreachedFactories?.().has(sensorId) === true
+    ) {
+      return undefined;
+    }
+    return this.#notStartedSensors?.().get(sensorId);
   }
 
   /**

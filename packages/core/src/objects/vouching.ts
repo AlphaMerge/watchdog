@@ -2,7 +2,7 @@ import { describeError, type Logger } from '@ms/shared';
 import type { AccessPrincipal, Visibility } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import type { Queryable } from '../db/pool.js';
-import { sameFailure, type HeldWords } from '../state/runtime.js';
+import { sameHeldWords, type HeldWords } from '../state/runtime.js';
 import type { SensorStateCause } from '../state/tables.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 
@@ -152,12 +152,6 @@ export interface VouchingStats {
 interface Account {
   readonly role: AccountRole;
   readonly disabled: boolean;
-}
-
-/** Whether two holds say the same words and name the same place it stopped, or are both none. */
-function sameHeld(a: HeldWords | undefined, b: HeldWords | undefined): boolean {
-  if (a === undefined || b === undefined) return a === b;
-  return a.message === b.message && sameFailure(a.failure, b.failure);
 }
 
 /**
@@ -517,7 +511,7 @@ export class SensorVouching implements VoucherCheck {
       const now = this.#recount(id);
       // The same words with a new place it stopped are a change too, re-decided so the row
       // carries the new place beside them (`P-407`); it records no transition.
-      if (sameHeld(before, now) && !cameIn.has(id) && !wentOut.has(id)) continue;
+      if (sameHeldWords(before, now) && !cameIn.has(id) && !wentOut.has(id)) continue;
       changed.push(id);
       const unevaluatedBefore = before !== undefined || heldBefore(id);
       const unevaluatedNow = now !== undefined || alongside?.holds(id) === true;

@@ -11075,7 +11075,7 @@ because each is a decision rather than a defect:
            the same sentence always carries the same phase; it is how a hold from before this
            change, or from a probe that moved to 35, gets its place.
         5. **`NotStarted` compares words only and groups by words and place**: a re-hold writes
-           nothing (`P-409`), and one sensor's place is never stored beside another's words.
+           nothing (`P-410`), and one sensor's place is never stored beside another's words.
         6. **`reevaluate` stores `cause.failure` only beside the caller's own words**: when a
            person, a hold or the probe decided the state, the caller speaks for that cause, and no
            withholding's words took the message. Never beside release words.
@@ -11163,7 +11163,7 @@ because each is a decision rather than a defect:
       - **Mutants 2/2**: the release's forget (the scenario fails too, so the defect was real),
         and the put-back's.
 
-- [ ] **P-410 — a not-started sensor held again in new words keeps the first hold's words** · S ·
+- [x] **P-410 — a not-started sensor held again in new words keeps the first hold's words** · S ·
       P-265 · Found 2026-10-17 in `P-407`. `reevaluate` rewords a sensor whose state and cause
       stand only for `access` (`M-28`), so `NotStarted.hold` re-deciding one already
       Unknown/probe in new words writes nothing. The words do change between rounds: the start-up
@@ -11174,6 +11174,72 @@ because each is a decision rather than a defect:
       transition, a re-hold that would write nothing runs nothing, and a test against
       PostgreSQL holds twice in different words. The rule must not reword a lost probe's or a
       frozen clock's words (`reachability.ts`, `clock-freeze.ts`).
+
+      **P-410 outcome. A check its probe could not start says its latest round, while nothing
+      else holds it for its probe.**
+      - **Decisions, taken by the orchestrator** and named in the push question:
+        1. **The order is the episode index's** (lost link, silence, frozen, factory, not
+           started), and this builds its last step only: not-started words are written only
+           while that hold is the only one on the sensor. A lost probe's, a frozen clock's or a
+           factory's words stand over them, and when that hold lets go first the not-started
+           words are written in its place, with no transition. A higher hold that arrives
+           *after* a not-started one is `P-413`.
+        2. **Live words, read by the state service, as `M-28`'s**. `NotStarted.heldWords()` is a
+           view over its sets (`has`, `get`, `size`, `HeldWordsLookup` in `state/runtime.ts`),
+           the words from the sensor's carrier; `#heldWords` answers for `probe` from it unless
+           the sensor is lost, frozen or a held factory. Not a flag on `reevaluate`'s cause,
+           which every probe path passes alike; not `NotStarted` writing rows itself.
+           `notStartedSensors` now takes the view, so `main.ts` did not compile until rewired.
+        3. **A new place under the same words is news**, as for a refusal (`P-407` decision 4),
+           which reverses `P-407` decision 5's words-only compare.
+        4. **What a round runs.** New to the probe's set: re-decided, its alarm moved, a
+           warning. Held again in other words or another place: re-decided in one transaction
+           and logged at debug; no alarm moved and no recompute, since who holds it did not
+           change. The same words and place: nothing.
+        5. **Accepted**: new words for a sensor that is also lost, frozen, paused or simulated
+           still open one transaction that writes nothing; `NotStarted` cannot see those facts.
+      - **Beyond the ticket, in the same direction**: a found or resumed probe, a thawed clock,
+        a resume from a pause and a lifted simulation now write the not-started words of a
+        sensor still held, where they wrote nothing or `''`.
+      - **The carrier is worked out, not kept.** Words follow the carrier, so who carries a
+        sensor that two probes hold (one moved between their batches) now matters. Each hold
+        takes the next number in an order the core gives it, the carrier is the holder with the
+        highest, and a hold put back after a batch that was not stored keeps its number. A
+        probe's `at` cannot order holds: it is that probe's clock. The kept `#carrier` map and
+        its three restore loops are gone, and a round is compared with the words the sensor
+        says, which are its carrier's, not the round's probe's own last.
+      - **Docs.** `state-machine.md` §2.2, the not-started row, and a bullet on whose words a
+        sensor held for its probe says.
+      - **Review.** Three findings over one thing, fixed: the put-back chose the carrier from
+        what it captured at the release, so it took the carrier from a hold made since (another
+        probe's, or a rewording after the release's own hand-off) and the sensor read an older
+        round's words, and no test kept a carrier that still held the sensor. The reviewer's
+        first fix (keep a current carrier that still holds) broke the hand-off case; the order
+        handles both. Two refuted.
+      - **Filed.** `P-413` (a higher hold that arrives later does not take the words), `P-414`
+        (a rewrite decided from an unlocked read can overwrite a pause committed meanwhile).
+      - **Tests.**
+        - `not-started.test.ts`: a reword re-decides the sensor alone, moves no alarm, runs no
+          recompute, warns nothing and opens one transaction; the same words and place open
+          none; the same words in another place open one; a batch holding one sensor and
+          rewording another moves the alarm once and warns of one; the words follow the carrier
+          through a hand-off and a put-back, and never a carrier that has let go; a put-back
+          keeps a carrier that still holds the sensor, and never takes it from a hold made since
+          the release, alone or after the release's own hand-off; a round is compared with the
+          carrier's words; a rewording that cannot be written keeps the words it had.
+        - `failure-phase.test.ts`, against PostgreSQL: a re-hold in new words and then a new
+          place, with no transition and the same `since`, kept by a result decided while held;
+          a lost probe's, a frozen clock's and a factory's words standing over a not-started
+          hold, and the not-started words written when that hold lets go; a held sensor resumed
+          from a pause says the hold's words and place.
+        - `probe-episode-scenario.test.ts` (`M-17`): a round in other words rewords all 150
+          pings, keeps their `since` and the history's place, and queues no alarm.
+      - **Mutants** 19/19 killed: the state service's four precedence checks and its not-started
+        words; the reword compare (message only, or the probe's own last words), the alarm move
+        and warning gated on entering, the place dropped, the transaction gated on the round, the
+        view's size; the carrier taken from the first holder, a put-back renumbered, the order
+        not advanced, and each of the hold, release, put-back and resync steps that keep the sets
+        and their union.
 
 - [ ] **P-411 — a person's state keeps a hold's words after the hold** · XS · P-285 · Found
       2026-10-17 in `P-407`'s review. An acknowledged Down that its probe could not start, or
@@ -11195,6 +11261,28 @@ because each is a decision rather than a defect:
       is narrow. **Done when** a runtime loaded under one overlay is not remembered after the
       overlay has moved (a generation, as `#policyGeneration` is), with a test that holds the
       load open across a release.
+
+- [ ] **P-413 — a hold for a sensor's probe that arrives after a not-started one does not take
+      its words** · S · P-410 · Found 2026-10-17 in `P-410`. `P-410` writes a check's words only
+      while no lost probe, frozen clock or held factory also holds the sensor, so those stand
+      over them; but each of those writes its words once, on the re-decision that holds the
+      sensor, and a sensor already Unknown/probe for a check that could not start takes the
+      same-state branch and keeps the not-started words. So does one `NotStarted.resync` frees
+      onto a lost probe (`ReachabilitySync` runs first). Lost, frozen and factory holds also go
+      first-come among themselves. **Done when** each hold publishes its words per sensor and
+      `#heldWords` for `probe` resolves them in the episode index's order (lost link, silence,
+      frozen, factory, not started), with a test per pair in both orders.
+
+- [ ] **P-414 — a rewrite decided from an unlocked read can overwrite a pause committed
+      meanwhile** · S · P-147 · Found 2026-10-17 in `P-410`'s design. `reevaluate` reads its
+      rows with no lock (`loadRuntimes`) and `writeStateChanges` sets the state and cause
+      unconditionally, so a reword or a hold decided from a read taken before a pause committed
+      can write Unknown over a row whose pause flags say paused, while `sensor_state` says
+      paused. `writeRuntimes` has `P-147`'s guard; this path has none. `P-410` makes it likelier
+      by rewording on every round of a starved probe. Same family as `P-412`. **Done when**
+      `writeStateChanges` cannot overwrite a state its read did not see (a guard on the row it
+      read, as `writeRuntimes`'), with a test that commits a pause between the read and the
+      write.
 
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
