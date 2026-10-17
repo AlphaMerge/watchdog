@@ -11384,7 +11384,7 @@ because each is a decision rather than a defect:
         not advanced, and each of the hold, release, put-back and resync steps that keep the sets
         and their union.
 
-- [ ] **P-411 — a person's state keeps a hold's words after the hold** · XS · P-285 · Found
+- [x] **P-411 — a person's state keeps a hold's words after the hold** · XS · P-285 · Found
       2026-10-17 in `P-407`'s review. An acknowledged Down that its probe could not start, or
       refused, is held Unknown with the probe's words; the acknowledgement stays. The result
       that lets it go decides Down (Acknowledged), which is a person's state, so `decide` keeps
@@ -11396,6 +11396,85 @@ because each is a decision rather than a defect:
       **Decided 2026-10-17 by the user:** the person's words, the acknowledgement's message,
       never the hold's. **Done when** so, with one test per hold: a lost link, a silence, a
       frozen clock, a factory's unreached inputs, a check not started.
+
+      **P-411 outcome. An acknowledged Down that a hold lets go says the acknowledgement's words,
+      whatever the hold and whatever takes it out, kept beside the acknowledgement.**
+      - **Decision, the user's:** the person's words, never the hold's. Carried through here in
+        five ways, named for the push question:
+        1. **Never the release's either.** A hold's owner re-decides a sensor it lets go in words
+           of its own (`R-11`, `REACHED_MESSAGE`), which are about the probe and say nothing of
+           why nobody is paged. So every way out onto a person's state says the person's: the
+           owner's re-decision (`#redecide`), the result that follows a hold let go without one
+           (`decide`, as `NotStarted.release` lets go), and a simulated error over a held sensor,
+           which layer 2 decides before layer 3. Nothing of where a check stopped goes beside
+           them; the failure is `null`, as the acknowledgement wrote it.
+        2. **The words are kept beside the acknowledgement**, in a column of their own,
+           `sensor_runtime.acknowledged_message` (migration 084, reserved for this by the
+           orchestrator), written by `writeAcknowledgements` with the other acknowledgement
+           columns and cleared wherever they are: a recovery or a lapse (`writeRuntimes`), a
+           resume (`writeStateChanges`), a withdrawal. A constraint keeps the words from
+           outliving the acknowledgement. First built as a read of the history, the newest
+           transition into Down (Acknowledged), which review showed is not the acknowledgement's
+           record: one accepted on a stored Down while a hold was already laid writes no
+           transition of its own, so the release said an earlier, recovered outage's words; a
+           retention anchor carries a housekeeping sentence; a release before `P-411` wrote the
+           hold's words or none, which an upgrade would have repeated. The audit log is the
+           acknowledgement's own record, but it is one entry per call on the object acknowledged,
+           pruned on its own horizon, so it backfills the column and nothing reads it after.
+        3. **The words of the acknowledgement in force.** One made again over an acknowledged
+           sensor in new words writes them to the column, so a hold that lets it go says the new
+           words, though the sensor still says the first until then (`P-429`).
+        4. **A withholding too** (layer 3a), though the ticket names the five holds for the
+           probe: a refusal's words on a person's state are the same mistake. `isHeld`
+           (`machine.ts`) names all six.
+        5. **A lapse says them too.** When the result that lets a hold go is the one that finds
+           the acknowledgement lapsed, the Down it leaves (`down`/`user`) says the
+           acknowledgement's words, as a lapse no hold had taken says them
+           (`acknowledgementDecided`).
+      - **Migration 084.** Adds the column, its constraint and its comment, and backfills every
+        acknowledgement in force from its own records, both written in its transaction at the
+        instant `acknowledged_at` holds: the audit entry at that instant when exactly one
+        acknowledgement was audited then (one call covers every sensor it reached), else its
+        transition into Down (Acknowledged) at that instant, never a retention anchor. One that
+        left neither, as one whose audit entry was pruned and whose transition was never written,
+        stays NULL and says nothing, never another's words. The rollback drops the constraint and
+        the column; the sensor's own message is untouched either way.
+      - **Cost.** No query: the column comes with the row on the batch read, NULL on every row
+        nobody has acknowledged. Who acknowledged stays off that read (`M-13`).
+      - **Docs.** `state-machine.md` §2.4 gains a bullet on what a person's state says once a hold
+        lets it go, and where its words are kept; the bullet on whose words a held sensor says
+        names a person's beside the release's.
+      - **Tests.**
+        - `hold-words.test.ts`, against PostgreSQL: for each of the five holds and a withholding,
+          let go by its owner's re-decision and by the result that follows it, 12 cases. An
+          acknowledged Down that the hold takes says the hold's words; let go, it is Down
+          (Acknowledged) in the acknowledgement's words with no failure, on the row and on its
+          transition, the newest, and the next result keeps them. An acknowledgement with no
+          words leaves none of the hold's; one that lapses at the result that lets the hold go
+          leaves Down in its words. A simulated error over a lost link and over a withholding,
+          set and lifted, and the hold let go (2). The acknowledgement in force: one made after
+          a recovery, one made again in new words (2), and one made over a hold not yet
+          re-decided, after an earlier outage's. The history not read: a later row in a hold's
+          words as a release before `P-411` wrote it, and a retention anchor (2).
+        - `migrator.test.ts`, 084: each source of the backfill and its order, the anchor and two
+          calls audited in one millisecond left NULL, the constraint, the rollback and a second
+          `up`. `runtime-row.test.ts` holds both reads to the new column.
+        - Run with `P-413` and their neighbours, rebased on `origin/main` at `5936e43c`: 33
+          files, 1,091 tests, all passing, none skipped.
+      - **Review.** Five findings, fixed: a simulated error over a held acknowledged sensor said
+        nothing, since the history was read only for a sensor no hold held (found twice); the
+        history read found an earlier outage's acknowledgement when this one was accepted over a
+        hold, a retention anchor's sentence, and a pre-`P-411` release's words; and no case had
+        two acknowledgements to tell the newest from the oldest. The column and the cases above
+        answer all five.
+      - **Mutants** 14/14 killed: either path keeping the hold's words (`decide`, `#redecide`); a
+        withholding not counted as a hold; `decide` keeping where the check stopped beside the
+        person's words; a lapse's Down not counted as the acknowledgement's; the person's words
+        only for a sensor its probe reaches and that is vouched for, the history read's guard
+        (the simulated-error cases); the words never written; a second acknowledgement keeping
+        the first's words; a recovery or a resume leaving them, which the constraint refuses; and
+        in 084's backfill, each bound dropped (two calls audited at once, a retention anchor, the
+        instant) and its two sources swapped (`migrator.test.ts`).
 
 - [x] **P-412 — a decide that straddles a move can cache a hold's overlay after the move let it
       go** · S · P-253 · Found 2026-10-17 in `P-409`'s review. `#warm` lays the live overlay over
@@ -11929,6 +12008,16 @@ because each is a decision rather than a defect:
       three times out of three when rerun alone. **Done when** each side is the median of
       several logins, so that one stall cannot decide it, and the claim (the decoy verification
       happens at all) stands.
+
+- [ ] **P-429 — re-wording an acknowledgement does not reword the sensor** · XS · M-02, P-411 ·
+      Found 2026-10-17 in `P-411`. `canAcknowledge` lets an operator acknowledge a sensor that is
+      already Down (Acknowledged), and the columns take the new deadline and actor, but the
+      re-decision it runs decides the same state and cause, and the same-state branch rewords
+      only a hold's words (`#heldWords`), so the sensor keeps the first acknowledgement's message
+      until a hold lets it go, when it says the new one: `P-411` keeps the words in force in
+      `sensor_runtime.acknowledged_message` (migration 084), which the re-wording writes.
+      **Done when** an acknowledgement over an acknowledged sensor says its own words on the
+      sensor at once, with a test that acknowledges again in new words.
 
 - [ ] **P-430 — a silent probe whose link drops stays silent until it reconnects** · XS · P-74,
       P-413 · Found 2026-10-17 in `P-413`. `ProbeReachability.lost` returns at once for a probe

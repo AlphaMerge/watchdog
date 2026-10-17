@@ -745,6 +745,7 @@ describe('acknowledgedBy.kind in ms:sensorState', () => {
     acknowledged_until: null,
     acknowledged_by_kind: kind,
     acknowledged_by_label: null,
+    acknowledged_message: null,
     simulated_error: false,
     channel_state: null,
     channel_cause: null,

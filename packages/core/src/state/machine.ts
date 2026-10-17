@@ -151,6 +151,28 @@ export function operatorDecided(decision: Decision): boolean {
 }
 
 /**
+ * Whether this is a hold's state (`P-411`): Unknown because the sensor is held for its probe
+ * (layer 3: a lost link, a silence, a frozen clock, a factory's unreached inputs, a check its
+ * probe could not start) or withheld (layer 3a). Each says its hold's words.
+ */
+export function isHeld(decision: Decision): boolean {
+  return (
+    decision.state === 'unknown' && (decision.cause === 'probe' || decision.cause === 'access')
+  );
+}
+
+/**
+ * Whether a person's acknowledgement decided this (§2.4, `P-411`): Down (Acknowledged), or the
+ * Down its lapse leaves, which says the suppression ended. Both say the acknowledgement's words.
+ */
+export function acknowledgementDecided(decision: Decision): boolean {
+  return (
+    decision.cause === 'user' &&
+    (decision.state === 'down_acknowledged' || decision.state === 'down')
+  );
+}
+
+/**
  * What a sensor whose readings decided its state says (`P-345`): the channel's sentence, which is
  * why it is in that state, then the check's own, when the two differ.
  *

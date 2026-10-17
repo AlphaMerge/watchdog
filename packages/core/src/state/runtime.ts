@@ -36,6 +36,15 @@ export interface SensorRuntime {
    */
   readonly acknowledgedBy?: { readonly kind: ActorKind; readonly label: string | null } | null;
   /**
+   * What the acknowledgement in force said (`P-411`, migration 084), or `null` when none is in
+   * force, or one made before 084 left no record of its words.
+   *
+   * Kept beside the acknowledgement because `message` is the sensor's words and a hold replaces
+   * them: a sensor a hold lets go onto Down (Acknowledged), or onto the Down its lapse leaves, says
+   * these again. Written and cleared with the acknowledgement's other columns.
+   */
+  readonly acknowledgedMessage: string | null;
+  /**
    * The machine's inputs. `probeReachable` and `vouchedFor` are **not** persisted — each is a
    * live fact, about a connection or about grants, and a value read from a table would be a
    * claim about the past.
@@ -127,6 +136,8 @@ interface RuntimeRow {
   /** Only the single-sensor read selects these; the hot path does not need them (`M-13`). */
   acknowledged_by_kind?: ActorKind | null;
   acknowledged_by_label?: string | null;
+  /** What the acknowledgement said, or NULL with none (`P-411`). A decision reads it. */
+  acknowledged_message: string | null;
   simulated_error: boolean;
   /** §2.2's answer, or null when nothing was judged. Both columns move together (`P-85`). */
   channel_state: SensorState | null;
@@ -139,7 +150,7 @@ const RUNTIME_COLUMNS = `
   object_id::text AS object_id, state, cause, message, failure_phase, failure_target, since,
   consecutive_failures, last_result_at,
   paused_by_parent, paused_by_dependency, paused_by_schedule, paused_manually,
-  acknowledged_at, acknowledged_until, simulated_error,
+  acknowledged_at, acknowledged_until, acknowledged_message, simulated_error,
   channel_state, channel_cause, resumed_at
 `;
 
@@ -236,6 +247,7 @@ function toRuntime(row: RuntimeRow): SensorRuntime {
       row.acknowledged_by_kind == null
         ? null
         : { kind: row.acknowledged_by_kind, label: row.acknowledged_by_label ?? null },
+    acknowledgedMessage: row.acknowledged_message,
     facts: {
       pause: {
         parent: row.paused_by_parent,
@@ -677,6 +689,7 @@ export async function writeRuntimes(
          acknowledged_until = CASE WHEN w.acknowledged THEN r.acknowledged_until END,
          acknowledged_by_kind = CASE WHEN w.acknowledged THEN r.acknowledged_by_kind END,
          acknowledged_by_label = CASE WHEN w.acknowledged THEN r.acknowledged_by_label END,
+         acknowledged_message = CASE WHEN w.acknowledged THEN r.acknowledged_message END,
          channel_state = w.channel_state,
          channel_cause = w.channel_cause
      FROM (
@@ -762,6 +775,7 @@ export async function readSensorState(
             r.acknowledged_until,
             r.acknowledged_by_kind,
             r.acknowledged_by_label,
+            r.acknowledged_message,
             coalesce(r.simulated_error, false) AS simulated_error,
             -- Every field of RuntimeRow, or toRuntime silently rebuilds different facts from
             -- the same sensor depending on which query read it. runtime-row.test.ts is what
@@ -884,6 +898,11 @@ export interface AcknowledgementWrite {
   readonly acknowledgedUntil: Date | null;
   readonly actorKind: ActorKind | null;
   readonly actorLabel: string | null;
+  /**
+   * What it says, kept beside it for a sensor a hold lets go to say again (`P-411`); `null` with
+   * a clearing. The re-decision that follows writes the same words as the sensor's own.
+   */
+  readonly message: string | null;
 }
 
 /**
@@ -904,10 +923,11 @@ export async function writeAcknowledgements(
      SET acknowledged_at = w.acknowledged_at,
          acknowledged_until = w.acknowledged_until,
          acknowledged_by_kind = w.actor_kind,
-         acknowledged_by_label = w.actor_label
+         acknowledged_by_label = w.actor_label,
+         acknowledged_message = w.message
      FROM unnest(
-       $1::bigint[], $2::timestamptz[], $3::timestamptz[], $4::text[], $5::text[]
-     ) AS w(sensor_id, acknowledged_at, acknowledged_until, actor_kind, actor_label)
+       $1::bigint[], $2::timestamptz[], $3::timestamptz[], $4::text[], $5::text[], $6::text[]
+     ) AS w(sensor_id, acknowledged_at, acknowledged_until, actor_kind, actor_label, message)
      WHERE r.object_id = w.sensor_id
      RETURNING r.object_id::text AS object_id`,
     [
@@ -916,6 +936,7 @@ export async function writeAcknowledgements(
       writes.map((write) => write.acknowledgedUntil),
       writes.map((write) => write.actorKind),
       writes.map((write) => write.actorLabel),
+      writes.map((write) => write.message),
     ],
   );
   return rows.length;
@@ -982,6 +1003,7 @@ export async function writeStateChanges(
          acknowledged_until = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_until END,
          acknowledged_by_kind = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_kind END,
          acknowledged_by_label = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_by_label END,
+         acknowledged_message = CASE WHEN w.reset THEN NULL ELSE r.acknowledged_message END,
          -- A resume clears the verdict with the rest of the interval nobody watched: §3 says
          -- the sensor awaits its next scan rather than returning to what it was. Every other
          -- rewrite leaves it alone, which is the whole point — a re-decide without a reading

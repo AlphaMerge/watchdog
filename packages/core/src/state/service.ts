@@ -17,10 +17,12 @@ import type { Database, Queryable } from '../db/pool.js';
 import type { ActorKind } from '../objects/audit.js';
 import { SCAN_RETRY_WARNINGS } from '../settings/registry.js';
 import {
+  acknowledgementDecided,
   applyResult,
   clearedByRecovery,
   clearedByResume,
   evaluate,
+  isHeld,
   isPaused,
   isStaleResult,
   operatorDecided,
@@ -526,11 +528,19 @@ export class SensorStateService {
         // an operator cannot make sense of and which `U-06` puts on the home screen. The rule is
         // `operatorDecided`, the same one `reevaluate` uses; the difference is that there are no
         // fresh operator words here, so what is already stored is what stays.
+        //
+        // **Unless what is stored is a hold's, and a person's state is what follows it** (`P-411`):
+        // an acknowledged Down held for its probe, let go by this result, said the hold's words
+        // after it, of a probe that was running the check again. It says the acknowledgement's,
+        // kept beside it where no hold writes (migration 084).
+        const personal = acknowledgementDecided(applied.decision) && isHeld(runtime);
         const held = operatorDecided(applied.decision)
           ? this.#heldWords(sensorId, applied.decision)
           : undefined;
         const message = operatorDecided(applied.decision)
-          ? (held?.message ?? runtime.message)
+          ? personal
+            ? (runtime.acknowledgedMessage ?? '')
+            : (held?.message ?? runtime.message)
           : applied.decision.cause === 'limit' || applied.decision.cause === 'lookup'
             ? readingMessage(result.channels?.message ?? '', result.message)
             : result.message;
@@ -541,9 +551,11 @@ export class SensorStateService {
         // lookup's either: those judge readings, which only a success has. Never a cause, so a
         // phase that moves while the state and the cause do not records no transition.
         const failure = operatorDecided(applied.decision)
-          ? held === undefined
-            ? runtime.failure
-            : held.failure
+          ? personal
+            ? null
+            : held === undefined
+              ? runtime.failure
+              : held.failure
           : result.outcome === 'error'
             ? (result.failure ?? null)
             : null;
@@ -571,6 +583,8 @@ export class SensorStateService {
           // The clock on "Down for 2h 15m" starts when the state did, and does not restart
           // because the sensor failed again in the same way.
           since: changed ? result.at : runtime.since,
+          // Gone with the acknowledgement when a recovery or a lapse clears it, as on the row.
+          acknowledgedMessage: applied.facts.acknowledged ? runtime.acknowledgedMessage : null,
           facts: applied.facts,
         };
       }
@@ -673,6 +687,7 @@ export class SensorStateService {
           acknowledgedUntil: null,
           actorKind: null,
           actorLabel: null,
+          message: null,
         })),
       );
       for (const sensorId of recovered) this.#cache.delete(sensorId);
@@ -790,18 +805,28 @@ export class SensorStateService {
       // out, a pause's or an acknowledgement's, which say nothing of where a check stopped. A
       // not-started sensor's come from its probe's latest round, whoever re-decides it (`P-410`),
       // and every hold's from the hold, whoever re-decides it (`P-413`).
+      //
+      // **Let go onto a person's state, it says the person's words** (`P-411`): the
+      // acknowledgement's, never the hold's and never the release's, which are about the probe
+      // and not about why nobody is paged. Whatever takes it out of the hold, a release or a
+      // simulated error over it (layer 2 above layer 3); kept beside the acknowledgement, so
+      // they are there whichever it is (migration 084).
       const owned = cause.sources === undefined || cause.sources.includes(decision.cause);
+      const personal = acknowledgementDecided(decision) && isHeld(runtime);
       const held = operatorDecided(decision) ? this.#heldWords(sensorId, decision) : undefined;
       const message = !operatorDecided(decision)
         ? releasedMessage(runtime.cause, cause)
-        : (held?.message ?? (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
-      const failure = !operatorDecided(decision)
-        ? null
-        : held !== undefined
-          ? held.failure
-          : owned
-            ? (cause.failure ?? null)
-            : null;
+        : personal
+          ? (runtime.acknowledgedMessage ?? '')
+          : (held?.message ?? (owned ? cause.message : (pauseMessages.get(sensorId) ?? '')));
+      const failure =
+        !operatorDecided(decision) || personal
+          ? null
+          : held !== undefined
+            ? held.failure
+            : owned
+              ? (cause.failure ?? null)
+              : null;
       transitions.push({
         sensorId,
         at,
@@ -906,6 +931,7 @@ export class SensorStateService {
         acknowledgedUntil: acknowledgement?.acknowledgedUntil ?? null,
         actorKind: acknowledgement === null ? null : actor.kind,
         actorLabel: acknowledgement === null ? null : actor.label,
+        message: acknowledgement?.message ?? null,
       })),
     );
     // The cache holds the pre-acknowledgement facts, and `reevaluate` reads through `q` rather

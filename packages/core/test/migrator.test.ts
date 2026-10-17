@@ -2385,6 +2385,150 @@ describe(
       }
     });
 
+    it('keeps what the acknowledgement in force said beside it, from its own records, and rolls back to none (084)', async () => {
+      // `P-411`: the words a sensor a hold lets go onto Down (Acknowledged) says again, kept
+      // where no hold writes. Backfilled from the acknowledgement's audit entry, else from its own
+      // transition, both at the instant `acknowledged_at` holds, and never from any other row.
+      const fresh = await createScratchDatabase('acknowledged_message');
+      try {
+        const q = fresh.db;
+        const all = migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 84),
+        );
+        await migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 82),
+        ).up();
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const sensor = async (name: string, acknowledgedAt: string | null): Promise<string> => {
+          const id = await insert('sensor', name, device);
+          await q.query(`INSERT INTO sensor_config (object_id, type) VALUES ($1, 'ping')`, [id]);
+          await q.query(
+            `UPDATE sensor_runtime SET state = 'down_acknowledged', cause = 'user',
+                    message = 'the probe carrying this sensor stopped answering',
+                    acknowledged_at = $2
+             WHERE object_id = $1`,
+            [id, acknowledgedAt],
+          );
+          return id;
+        };
+        const audit = async (at: string, objectId: string, message: string): Promise<void> => {
+          await q.query(
+            `INSERT INTO audit_log (at, action, object_id, object_kind, actor_kind, actor_ref, summary)
+             VALUES ($1, 'sensor.acknowledged', $2, 'device', 'user', '1',
+                     jsonb_build_object('until', NULL, 'message', $3::text, 'sensorsAffected', 1))`,
+            [at, objectId, message],
+          );
+        };
+        const transition = async (
+          at: string,
+          id: string,
+          previous: string,
+          message: string,
+          carried = false,
+        ): Promise<void> => {
+          await q.query(
+            `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message, carried)
+             VALUES ($1, $2, 'down_acknowledged', $3, 'user', $4, $5)`,
+            [at, id, previous, message, carried],
+          );
+        };
+
+        // Audited, one call covering it from its device: the audit entry's words, before the
+        // transition's.
+        const audited = await sensor('audited', '2026-10-17T08:00:00.001Z');
+        await audit('2026-10-17T08:00:00.001Z', device, 'ticket 4471');
+        await transition('2026-10-17T08:00:00.001Z', audited, 'down', 'not these');
+        // Its audit entry pruned: its own transition's words, not the release's written later.
+        const transitioned = await sensor('transitioned', '2026-10-17T08:01:00.001Z');
+        await transition('2026-10-17T08:01:00.001Z', transitioned, 'down', 'ticket 4472');
+        await transition('2026-10-17T08:02:00.001Z', transitioned, 'unknown', 'a hold’s words');
+        // Neither kept: a retention anchor at that instant is not its transition.
+        const anchored = await sensor('anchored', '2026-10-17T08:03:00.001Z');
+        await transition(
+          '2026-10-17T08:03:00.001Z',
+          anchored,
+          'down_acknowledged',
+          'state carried forward past the retention horizon',
+          true,
+        );
+        // Two calls audited in one millisecond, and no transition: whose is not known.
+        await sensor('ambiguous', '2026-10-17T08:04:00.001Z');
+        await audit('2026-10-17T08:04:00.001Z', device, 'one');
+        await audit('2026-10-17T08:04:00.001Z', probe, 'another');
+        // Not acknowledged: nothing, whatever was audited.
+        const none = await sensor('none', null);
+        await audit('2026-10-17T08:05:00.001Z', none, 'cleared since');
+
+        assert.deepEqual(
+          (await all.up()).applied.map((one) => one.id),
+          [84],
+        );
+        const words = async (): Promise<Record<string, string | null>> =>
+          Object.fromEntries(
+            (
+              await q.query<{ name: string; message: string | null }>(
+                `SELECT o.name, r.acknowledged_message AS message
+                 FROM sensor_runtime r JOIN object o ON o.id = r.object_id
+                 WHERE o.parent_id = $1 ORDER BY o.name`,
+                [device],
+              )
+            ).map((row) => [row.name, row.message]),
+          );
+        assert.deepEqual(await words(), {
+          ambiguous: null,
+          anchored: null,
+          audited: 'ticket 4471',
+          none: null,
+          transitioned: 'ticket 4472',
+        });
+
+        // Never without the acknowledgement it belongs to.
+        await assert.rejects(
+          q.query(`UPDATE sensor_runtime SET acknowledged_message = 'x' WHERE object_id = $1`, [
+            none,
+          ]),
+          /violates check constraint "sensor_runtime_acknowledged_message_ck"/,
+        );
+
+        assert.deepEqual(
+          (await all.down(1)).reverted.map((one) => one.id),
+          [84],
+        );
+        const column = await q.query(
+          `SELECT 1 FROM information_schema.columns
+           WHERE table_name = 'sensor_runtime' AND column_name = 'acknowledged_message'`,
+        );
+        assert.equal(column.length, 0);
+        const [kept] = await q.query<{ message: string }>(
+          'SELECT message FROM sensor_runtime WHERE object_id = $1',
+          [audited],
+        );
+        assert.equal(
+          kept?.message,
+          'the probe carrying this sensor stopped answering',
+          'the sensor’s own words are left as they were',
+        );
+        assert.deepEqual(
+          (await all.up()).applied.map((one) => one.id),
+          [84],
+        );
+        assert.equal((await words())['audited'], 'ticket 4471', 'and backfilled again');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

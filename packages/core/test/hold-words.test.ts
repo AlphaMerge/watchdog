@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { CheckFailure, CheckResult } from '@ms/shared';
 import { CompositeAuditSink } from '../src/audit/store.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 import type { Database } from '../src/db/pool.js';
 import { FactoryReach, REACHED_MESSAGE, UNREACHED_MESSAGE } from '../src/factory/reach.js';
 import { FROZEN_MESSAGE } from '../src/probes/clock-freeze.js';
@@ -39,17 +40,33 @@ const at = (minutes: number): Date => new Date(T0.getTime() + minutes * 60_000);
 /** What a probe that could not start a check says, and where it stopped (`P-265`). */
 const GAVE_UP = 'the probe took 10012 ms to start the check and gave up';
 const STARTUP: CheckFailure = { phase: 'startup' };
+/** What a probe that refused a check says, and where (`A-41c`). */
+const REFUSED = 'Not scanned: app.dc.test did not resolve before the check’s timeout.';
+const RESOLVE: CheckFailure = { phase: 'resolve', target: 'app.dc.test' };
 const EXEC: CheckFailure = { phase: 'exec', target: '192.0.2.43:22' };
 /** What a caller re-deciding a sensor says: never what a hold says while it holds (`P-413`). */
 const CALLER = 'the words of whoever re-decided it';
 /** What a release says, as each hold's owner lets a sensor go in words of its own (`R-11`). */
 const RELEASED = 'let go, and until its next result it stands where it stood before';
+const NOBODY = 'ticket 4471: the switch is being replaced';
+/** An acknowledgement before the one in force, of an outage since recovered (`P-411`). */
+const EARLIER = 'ticket 4470: the uplink is being re-patched';
+/** What a simulated error says when it is what decides the state (`M-14`). */
+const SIMULATION = 'chain test';
+/** What a retention anchor says in place of the words of the row it carries (`S-15`). */
+const ANCHORED = 'state carried forward past the retention horizon';
+/**
+ * Minutes after `T0` that sort after an acknowledgement stamped now, with half an hour to spare,
+ * so the transitions that follow one are the newest rows (`P-411`).
+ */
+const AFTER = 90;
 
 const lost = new Map<number, HeldWords>();
 const silentProbe = new Map<number, HeldWords>();
 const frozen = new Map<number, HeldWords>();
 const unreached = new Map<number, HeldWords>();
 const unstarted = new Map<number, HeldWords>();
+const withheld = new Map<number, HeldWords>();
 
 /** One hold: the set the state service reads it from, and the words its owner publishes. */
 interface Hold {
@@ -58,6 +75,13 @@ interface Hold {
   readonly words: HeldWords;
   readonly sources: ReevaluationCause['sources'];
 }
+
+const LOST_LINK: Hold = {
+  name: 'a lost link',
+  held: lost,
+  words: { message: LOST_MESSAGE, failure: null },
+  sources: PROBE_SOURCE,
+};
 
 const NOT_STARTED: Hold = {
   name: 'a check not started',
@@ -71,12 +95,7 @@ const NOT_STARTED: Hold = {
  * owner publishes: `ProbeReachability`'s two reasons, `ClockFreeze`, `FactoryReach`, `NotStarted`.
  */
 const HOLDS: readonly Hold[] = [
-  {
-    name: 'a lost link',
-    held: lost,
-    words: { message: LOST_MESSAGE, failure: null },
-    sources: PROBE_SOURCE,
-  },
+  LOST_LINK,
   {
     name: 'a silence',
     held: silentProbe,
@@ -98,14 +117,22 @@ const HOLDS: readonly Hold[] = [
   NOT_STARTED,
 ];
 
+/** And the hold that is not for the probe, whose words follow the same rule out (`P-411`). */
+const WITHHOLDING: Hold = {
+  name: 'a withholding',
+  held: withheld,
+  words: { message: REFUSED, failure: RESOLVE },
+  sources: ['access'],
+};
+
 /**
- * Whose words a sensor held for its probe says (`P-413`), against PostgreSQL. Each hold is laid as
- * its owner lays it — the sensor in the live set, with its words — and re-decided as its owner
- * re-decides it, in the words of a caller that is not the hold, so what the sensor says can only
- * be the hold's.
+ * Whose words a sensor held for its probe says (`P-413`), and what a person's state says once a
+ * hold lets go of it (`P-411`), against PostgreSQL. Each hold is laid as its owner lays it — the
+ * sensor in the live set, with its words — and re-decided as its owner re-decides it, in the words
+ * of a caller that is not the hold, so what the sensor says can only be the hold's.
  */
 describe(
-  'whose words a held sensor says (P-413)',
+  'whose words a held sensor says (P-413, P-411)',
   { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
   () => {
     let scratch: ScratchDatabase;
@@ -123,6 +150,7 @@ describe(
         clockFrozenSensors: () => frozen,
         unreachedFactories: () => unreached,
         notStartedSensors: () => unstarted,
+        withheldSensors: () => withheld,
       });
     });
 
@@ -131,7 +159,7 @@ describe(
     });
 
     beforeEach(async () => {
-      for (const one of [lost, silentProbe, frozen, unreached, unstarted]) one.clear();
+      for (const one of [lost, silentProbe, frozen, unreached, unstarted, withheld]) one.clear();
       const probe = await h.service.create(testActor, {
         kind: 'probe',
         parentId: h.rootId,
@@ -320,6 +348,165 @@ describe(
           });
         }
       }
+    }
+
+    // ── P-411: a person's state after each hold ───────────────────────────────────────────────
+
+    async function acknowledge(message: string, minutes?: number): Promise<void> {
+      await h.service.acknowledge(
+        testActor,
+        sensorId,
+        minutes === undefined ? { kind: 'indefinite' } : { kind: 'duration', minutes },
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        message,
+      );
+    }
+
+    async function simulate(simulated: boolean, minutes: number): Promise<void> {
+      const states = h.states;
+      assert.ok(states !== undefined);
+      await db.tx((q) => states.simulate(q, [sensorId], simulated, SIMULATION, at(minutes)));
+    }
+
+    /** Down (Acknowledged) in the person's words, on the row and on its newest transition. */
+    async function personal(message: string, why: string): Promise<void> {
+      assert.deepEqual(await said(), { state: 'down_acknowledged', message, failure: null }, why);
+      assert.deepEqual((await transitions()).at(-1), ['down_acknowledged', 'user', message, null]);
+    }
+
+    for (const hold of [...HOLDS, WITHHOLDING]) {
+      for (const by of ['its owner’s re-decision', 'the result that follows it'] as const) {
+        it(`says the acknowledgement’s words, never ${hold.name}’s, when ${by} lets an acknowledged Down go`, async () => {
+          await report([failed(1, EXEC)]);
+          await report([failed(2, EXEC)]);
+          await acknowledge(NOBODY);
+          assert.deepEqual(await said(), {
+            state: 'down_acknowledged',
+            message: NOBODY,
+            failure: null,
+          });
+
+          await arrive(hold, AFTER + 1);
+          assert.deepEqual(await said(), { state: 'unknown', ...hold.words });
+
+          if (by === 'its owner’s re-decision') {
+            await leave(hold, AFTER + 2);
+          } else {
+            // Let go without a re-decision, as `NotStarted.release` lets go: the result decides.
+            hold.held.delete(sensorId);
+            await report([failed(AFTER + 2, EXEC)]);
+          }
+          await personal(NOBODY, 'the person’s words, and nothing of where a check stopped');
+
+          // And the next result keeps them, as it keeps any person's.
+          await report([failed(AFTER + 3, EXEC)]);
+          await personal(NOBODY, 'kept');
+        });
+      }
+    }
+
+    it('says nothing a hold said when an acknowledgement’s own words are none', async () => {
+      await report([failed(1)]);
+      await report([failed(2)]);
+      await acknowledge('');
+      await arrive(NOT_STARTED, AFTER + 1);
+      unstarted.delete(sensorId);
+      await report([failed(AFTER + 2, EXEC)]);
+      await personal('', 'none of the hold’s');
+    });
+
+    it('says the acknowledgement’s words when the result that lets a hold go finds it lapsed', async () => {
+      await report([failed(1, EXEC)]);
+      await report([failed(2, EXEC)]);
+      await acknowledge(NOBODY, 5);
+      await arrive(NOT_STARTED, 3);
+      assert.deepEqual(await said(), { state: 'unknown', ...NOT_STARTED.words });
+
+      // An hour after the acknowledgement by the result's clock (§2.4), so it lapses as this
+      // result lets the hold go: the Down its lapse leaves, which says what a lapse says.
+      unstarted.delete(sensorId);
+      await report([failed(120, EXEC)]);
+      assert.deepEqual(
+        await said(),
+        { state: 'down', message: NOBODY, failure: null },
+        'the person’s words, as a lapse that no hold had taken says them',
+      );
+      assert.deepEqual((await transitions()).at(-1), ['down', 'user', NOBODY, null]);
+    });
+
+    // A simulated error over a held sensor decides it before the hold does (layer 2 above layer
+    // 3), and an acknowledgement makes that Down (Acknowledged): a person's state, out of a hold.
+    for (const hold of [LOST_LINK, WITHHOLDING]) {
+      it(`says the acknowledgement’s words when a simulated error takes an acknowledged Down out of ${hold.name}, and when it lets go`, async () => {
+        await report([failed(1, EXEC)]);
+        await report([failed(2, EXEC)]);
+        await acknowledge(NOBODY);
+        await arrive(hold, AFTER + 1);
+
+        await simulate(true, AFTER + 2);
+        await personal(NOBODY, 'the person’s words, not none and not the simulation’s');
+        await simulate(false, AFTER + 3);
+        assert.deepEqual(await said(), { state: 'unknown', ...hold.words }, 'held again');
+        await leave(hold, AFTER + 4);
+        await personal(NOBODY, 'and the same once it lets go');
+      });
+    }
+
+    // The words of the acknowledgement in force, whatever the history holds.
+    for (const again of ['after a recovery', 'over the first, in new words'] as const) {
+      it(`says the acknowledgement in force when a hold lets it go, one made ${again}`, async () => {
+        await report([failed(1, EXEC)]);
+        await report([failed(2, EXEC)]);
+        await acknowledge(EARLIER);
+        if (again === 'after a recovery') {
+          await report([ok(3)]);
+          assert.equal((await said()).state, 'up', 'the recovery cleared the first');
+          await report([failed(4, EXEC)]);
+          await report([failed(5, EXEC)]);
+        }
+        await acknowledge(NOBODY);
+        await arrive(NOT_STARTED, AFTER + 1);
+        await leave(NOT_STARTED, AFTER + 2);
+        await personal(NOBODY, 'the newer acknowledgement’s words');
+      });
+    }
+
+    it('says the acknowledgement in force when it was made over a hold not yet re-decided', async () => {
+      await report([failed(1, EXEC)]);
+      await report([failed(2, EXEC)]);
+      await acknowledge(EARLIER);
+      await report([ok(3)]);
+      await report([failed(4, EXEC)]);
+      await report([failed(5, EXEC)]);
+
+      // The lost link is laid and its re-decision has not run: the row still says Down, so the
+      // acknowledgement is accepted, and it decides Unknown — no transition of its own.
+      lost.set(sensorId, LOST_LINK.words);
+      await acknowledge(NOBODY);
+      assert.deepEqual(await said(), { state: 'unknown', ...LOST_LINK.words });
+      await redecide(AFTER + 1, { message: CALLER, sources: PROBE_SOURCE });
+      await leave(LOST_LINK, AFTER + 2);
+      await personal(NOBODY, 'never the recovered outage’s acknowledgement');
+    });
+
+    for (const [what, previous, message, carried] of [
+      ['a release before P-411 wrote', 'unknown', GAVE_UP, false],
+      ['a retention anchor carries', 'down_acknowledged', ANCHORED, true],
+    ] as const) {
+      it(`says the acknowledgement’s words, not what ${what}, when a hold lets it go`, async () => {
+        await report([failed(1, EXEC)]);
+        await report([failed(2, EXEC)]);
+        await acknowledge(NOBODY);
+        await db.query(
+          `INSERT INTO sensor_state (time, sensor_id, state, previous_state, cause, message, carried)
+           VALUES ($1, $2, 'down_acknowledged', $3, 'user', $4, $5)`,
+          [at(AFTER), sensorId, previous, message, carried],
+        );
+        await arrive(NOT_STARTED, AFTER + 1);
+        await leave(NOT_STARTED, AFTER + 2);
+        await personal(NOBODY, 'the history is not where they are kept');
+      });
     }
   },
 );

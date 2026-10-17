@@ -611,6 +611,23 @@ Applied last, and only to `down`:
   writes the history it would have written live. *Decided by `M-02`.* It follows that there is no
   sweep: an acknowledgement lapses when the next result notices, which is at most one scan
   interval late and is the same rule a replay obeys.
+- **Let go by a hold, it says the acknowledgement's words** (`P-411`, *decided by the user*). An
+  acknowledged Down that a hold then takes — a lost link, a silence, a frozen clock, a factory's
+  unreached inputs, a check its probe could not start, a withholding — reads Unknown in the hold's
+  words, and the acknowledgement stays, since nothing recovered. Whatever takes it out of the hold
+  onto a person's state — the hold's own re-decision, the result that follows it, or a simulated
+  error over it, which layer 2 decides before layer 3 — it says the acknowledgement's message: never
+  the hold's, which a result kept as stored and so said of a probe that was running the check again,
+  and never the release's, which is about the probe and not about why nobody is paged. Nothing of
+  where a check stopped goes beside it. The Down an acknowledgement's lapse leaves, at that result,
+  says the same. **The words are kept beside the acknowledgement**
+  (`sensor_runtime.acknowledged_message`, migration 084), written with its other columns and cleared
+  with them, because the row's message is the sensor's and a hold replaces it. Not read from the
+  history, which does not hold them reliably: an acknowledgement accepted on a stored Down while a
+  hold was already laid writes no transition of its own, one made again in new words writes none
+  either (`P-429`), a retention anchor carries a housekeeping sentence, and a release before `P-411`
+  wrote the hold's words or none. So the words are those of the acknowledgement in force, the newest
+  one made.
 - **The clearing is persisted, not merely computed.** `M-02` cleared the acknowledgement in the
   machine's facts and left the columns alone, so a cache eviction or a restart brought a silenced
   alarm back silenced. `RuntimeWrite.acknowledged` carries it to the row (`M-13`), and a result
@@ -943,22 +960,23 @@ Two further notes for whoever picks those up:
   not start. The state service reads the five live, as it reads a withheld sensor's (`M-28`), and
   resolves them in one place, whoever re-decides the sensor: a hold that arrives over another
   rewords it, one that lets go while another still holds it leaves the next one's words, and the
-  last to let go leaves none of them, only the release's own words. None of these is a transition,
-  and none moves an alarm. Before `P-413` each wrote its words once, on the re-decision that held
-  the sensor, so the first to arrive kept its words under any that came later, a sensor freed onto a
-  lost probe by a move kept the not-started words, and a factory let go said the hold's words until
-  its result. The words are the hold's, not its caller's: a sensor that arrives under a lost probe
-  by a move says that its probe stopped answering, not that its probe changed, and one a move takes
-  between a probe whose link is lost and one that is silent is reworded, though it stays held. A
-  check that could not start is the one hold whose words change while it stands — each round names
-  its own start-up time and the check process's last output, or the pool's give-up — and its latest
-  round's words and place are written whenever it is the hold the sensor says; a round in the same
-  words and place writes nothing and opens no transaction, and one in new words rewords the sensor
-  and moves no alarm. The other four name no place, since no check ran. Two probes hold one sensor
-  for a check not started only when it moved between their batches; it says the words of the probe
-  the core placed it under last, a round is compared with those, and a hold put back after a batch
-  that was not stored keeps its own place in that order. A probe that is silent and then loses its
-  link keeps its silence, and its words, until it reconnects (`P-430`).
+  last to let go leaves none of them: the release's own words, or a person's (`P-411`, §2.4). None
+  of these is a transition, and none moves an alarm. Before `P-413` each wrote its words once, on
+  the re-decision that held the sensor, so the first to arrive kept its words under any that came
+  later, a sensor freed onto a lost probe by a move kept the not-started words, and a factory let go
+  said the hold's words until its result. The words are the hold's, not its caller's: a sensor that
+  arrives under a lost probe by a move says that its probe stopped answering, not that its probe
+  changed, and one a move takes between a probe whose link is lost and one that is silent is
+  reworded, though it stays held. A check that could not start is the one hold whose words change
+  while it stands — each round names its own start-up time and the check process's last output, or
+  the pool's give-up — and its latest round's words and place are written whenever it is the hold
+  the sensor says; a round in the same words and place writes nothing and opens no transaction, and
+  one in new words rewords the sensor and moves no alarm. The other four name no place, since no
+  check ran. Two probes hold one sensor for a check not started only when it moved between their
+  batches; it says the words of the probe the core placed it under last, a round is compared with
+  those, and a hold put back after a batch that was not stored keeps its own place in that order. A
+  probe that is silent and then loses its link keeps its silence, and its words, until it reconnects
+  (`P-430`).
 
 - **A resume is a floor on staleness, not an erasure of it** (`P-97`). `last_result_at` is the
   high-water mark that makes the at-least-once protocol safe; `resumed_at` is what says nothing
