@@ -126,11 +126,12 @@ export interface CheckRegistry {
  * Where a thrown error said it failed (`P-285`), as plain values a worker can post and a check
  * process can print: an error's own fields survive neither `postMessage`'s structured clone nor
  * JSON, which keep only its message. Sniffed by shape, as `UNKNOWN_SENSOR_TYPE` is, so neither
- * needs `@ms/sensors`: `SshError`, `SnmpError`, `DbError`, `CredentialsWithheldError` and
- * `TargetRefusedError` carry a `phase`, and a `target` or a `host`. **Nothing else of the error**
- * — no `command`, `oid`, refused `address` or cause — since `scrubbedError` scrubs only the
- * message and the stack. Bounded again by the runner (`failureOf`), which keeps a target only
- * when it is a plain host.
+ * needs `@ms/sensors`: `SshError`, `SnmpError`, `DbError`, `CredentialsWithheldError`,
+ * `TargetRefusedError` and, since `P-406`, every `PhasedError` (TLS, mail, Windows, HTTP, ping,
+ * scripts and the target guard's lookup) carry a `phase`, and a `target` or a `host`. **Nothing
+ * else of the error** — no `command`, `oid`, refused `address` or cause — since `scrubbedError`
+ * scrubs only the message and the stack. Bounded again by the runner (`failureOf`), which keeps
+ * a target only when it is a plain host.
  */
 export function failureSaid(error: unknown): CheckFailure | undefined {
   if (typeof error !== 'object' || error === null) return undefined;

@@ -91,7 +91,9 @@ export const icmpJitter: SensorType = {
       parsePingOutput,
       summarise,
       jitterOf,
+      PingError,
       runPing,
+      sentNone,
     } = await import('../support/ping.js');
 
     const host = context.target.host;
@@ -106,13 +108,18 @@ export const icmpJitter: SensorType = {
     };
 
     const { command, args } = pingCommand(pingPlatform(process.platform), context.target, params);
-    const run = await runPing(command, args, context.signal);
+    const run = await runPing(command, args, context.signal, host);
     const outcome = parsePingOutput(run.output, count);
 
     if (outcome.times.length === 0) {
-      throw new Error(
-        `${host} did not answer any of ${String(outcome.transmitted)} pings — there is no ` +
-          'round-trip time to measure the steadiness of',
+      // Not the device's silence when ping sent nothing (`P-406`): see `sentNone`.
+      throw (
+        sentNone(run, host) ??
+        new PingError(
+          `${host} did not answer any of ${String(outcome.transmitted)} pings — there is no ` +
+            'round-trip time to measure the steadiness of',
+          { phase: 'echo', host },
+        )
       );
     }
 
@@ -121,10 +128,11 @@ export const icmpJitter: SensorType = {
     if (jitter === null) {
       // One reply is a round-trip time and not a jitter figure. Reporting zero would say
       // "perfectly stable" about a link that answered once out of twenty.
-      throw new Error(
+      throw new PingError(
         `${host} answered only ${String(outcome.times.length)} of ` +
           `${String(outcome.transmitted)} pings — jitter is the variation *between* replies, and ` +
           'one reply has none',
+        { phase: 'echo', host },
       );
     }
 

@@ -80,17 +80,25 @@ export interface DbDriver {
   connect(options: DbConnectOptions, signal: AbortSignal): Promise<DbConnection>;
 }
 
-/** Where in a check a database failure happened, where the failure says. */
-export type DbPhase = 'connect' | 'query';
+/**
+ * Where in a check a database failure happened, where the failure says: the device's name
+ * (`resolve`), reaching the server (`connect`), its TLS (`handshake`), the login the credential
+ * was refused at (`authenticate`), and the query (`query`). A database the login names that the
+ * server does not have is `connect`: no session was made.
+ */
+export type DbPhase = 'resolve' | 'connect' | 'handshake' | 'authenticate' | 'query';
 
 export class DbError extends Error {
   /** The phase the check failed in, when the failure is of one phase and no other. */
   readonly phase: DbPhase | undefined;
+  /** The device's host, where the failure was the server's (`P-406`). */
+  readonly host: string | undefined;
 
-  constructor(message: string, phase?: DbPhase) {
+  constructor(message: string, phase?: DbPhase, host?: string) {
     super(message);
     this.name = 'DbError';
     this.phase = phase;
+    this.host = host === '' ? undefined : host;
   }
 }
 
@@ -152,6 +160,7 @@ function connectTimedOut(
       : `${where} routed the login to ${routedTo}, which accepted no connection ${within} — ` +
           firewall,
     'connect',
+    options.host,
   );
 }
 
@@ -236,6 +245,9 @@ function chainOf(error: unknown): unknown[] {
 /** The codes a driver puts around a socket's own, which say nothing of what went wrong. */
 const WRAPPERS = new Set(['', 'ESOCKET']);
 
+/** A certificate or TLS failure's code: Node's and OpenSSL's, or `mysql2`'s for all of them. */
+const TLS_CODE = /^(?:HANDSHAKE_SSL_ERROR$|CERT_|UNABLE_TO_|ERR_TLS_|ERR_SSL_)/;
+
 export function describeDbError(
   error: unknown,
   options: DbConnectOptions,
@@ -261,18 +273,26 @@ export function describeDbError(
   // **Named for the server that failed**, which after a redirect is the routed one: the
   // device answered, and it is where it sent the login that nothing listens or resolves.
   const routedTo = phase === 'connect' ? routedOf(chain) : undefined;
+  // Every failure here says where it was and the device's host (`P-406`).
+  const host = options.host;
   if (code === 'ECONNREFUSED') {
     return new DbError(
       routedTo === undefined
         ? `nothing is listening at ${where}`
         : `${where} routed the login to ${routedTo}, where nothing is listening`,
+      'connect',
+      host,
     );
   }
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    // The device's own name, or a name it routed to, which is still the connect: the device's
+    // name resolved, as `DbRoutedUnresolvedError` says of the guard's lookup.
     return new DbError(
       routedTo === undefined
         ? `the device’s host name did not resolve, connecting to ${where}`
         : `${where} routed the login to ${routedTo}, a host name that did not resolve`,
+      routedTo === undefined ? 'resolve' : 'connect',
+      host,
     );
   }
   const socketTimedOut = code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT';
@@ -284,6 +304,7 @@ export function describeDbError(
         'socket timed out — the server stopped answering, or something between dropped the ' +
         'connection without closing it',
       'query',
+      host,
     );
   }
   // **Each driver's own connect timer says it differently** (`A-70`), and neither said how
@@ -310,16 +331,32 @@ export function describeDbError(
     return new DbError(
       `${engine} at ${where} refused the credential for “${options.username}” — the database ` +
         'credential on this device or above it is wrong, or the account is not allowed from here',
+      'authenticate',
+      host,
     );
   }
+  // **SQL Server refused the login, and `tedious` does not say why** (`P-406`): it codes every
+  // error the server sends during the login `ELOGIN` and keeps the last one's words, which for
+  // a wrong password and for a database it does not have alike are "Login failed for user" —
+  // the 18456 that told them apart stays on the token (`lib/token/handler.js`, `onErrorMessage`).
+  // So it is the login that failed, said in the server's words, and not "the credential".
+  if (code === 'ELOGIN') {
+    return new DbError(`${engine} at ${where}: ${message}`, 'authenticate', host);
+  }
   if (code === '3D000' || code === 'ER_BAD_DB_ERROR') {
-    return new DbError(`${engine} at ${where} has no database called “${options.database}”`);
+    return new DbError(
+      `${engine} at ${where} has no database called “${options.database}”`,
+      'connect',
+      host,
+    );
   }
   if (code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'SELF_SIGNED_CERT_IN_CHAIN') {
     return new DbError(
       `the certificate at ${where} is self-signed and this sensor verifies certificates — most ` +
         'database servers ship with exactly such a certificate, so turning verification off ' +
         'here is usually the right answer and is still encrypted',
+      'handshake',
+      host,
     );
   }
   // **`mysql2` and `tedious` take no identity check of ours** (`A-70`), and Node's own reads an
@@ -338,8 +375,17 @@ export function describeDbError(
       `${engine} at ${where}: the certificate could not be checked against an IPv6 address — ` +
         'this driver cannot verify one, whatever the certificate lists. Give the device a ' +
         `name the certificate is for, or its IPv4 address. (${message})`,
-      'connect',
+      'handshake',
+      host,
     );
   }
-  return new DbError(`${engine} at ${where}: ${message}`);
+  // **Every other certificate or TLS failure on the way in is the handshake** (`P-406`), in the
+  // driver's words: Node's code where the driver keeps it (`pg`, `tedious`), and `mysql2`'s
+  // `HANDSHAKE_SSL_ERROR`, which it writes over whatever Node's was
+  // (`lib/commands/client_handshake.js`), for every one of them.
+  if (phase === 'connect' && chain.some((one) => TLS_CODE.test(codeOf(one)))) {
+    return new DbError(`${engine} at ${where}: ${message}`, 'handshake', host);
+  }
+  // The driver's own words, in the phase the check was in.
+  return new DbError(`${engine} at ${where}: ${message}`, phase, host);
 }

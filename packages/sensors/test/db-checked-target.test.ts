@@ -50,6 +50,7 @@ import { dbMssql } from '../src/types/db-mssql.js';
 import { dbMysql } from '../src/types/db-mysql.js';
 import { dbPostgresql } from '../src/types/db-postgresql.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
+import { failedIn } from './support/failed-in.js';
 
 /**
  * The database sensors, held to the address that was checked (`A-62`).
@@ -1690,6 +1691,8 @@ describe('what a database driver is handed', () => {
       'the device’s host name did not resolve to an address, connecting to ' +
         'nowhere.policy.invalid:5433 (ENOTFOUND)',
     );
+    // The guard's own failure says where it was, for every transport it stands in front of.
+    assert.deepEqual(failedIn(error), { phase: 'resolve', target: 'nowhere.policy.invalid' });
     assert.equal(lookups, 1);
     assert.deepEqual(seen, []);
   });
@@ -3172,6 +3175,77 @@ describe('what a database failure reads as', () => {
       describeDbError(altname(), at('::1'), 'PostgreSQL').message,
       /could not be checked/,
     );
+    // A certificate's failure, of the handshake, at the device's address (`P-406`).
+    assert.deepEqual(failedIn(describeDbError(altname(), at('::1'), 'MySQL')), {
+      phase: 'handshake',
+      target: '::1',
+    });
+  });
+
+  it('says where each failure was, and the device’s host (P-406)', () => {
+    const coded = (code: string, message = 'nope'): Error =>
+      Object.assign(new Error(message), { code });
+    const cases: [Error, string, RegExp][] = [
+      [coded('ECONNREFUSED'), 'connect', /^nothing is listening at /],
+      [coded('ENOTFOUND'), 'resolve', /did not resolve/],
+      [coded('EAI_AGAIN'), 'resolve', /did not resolve/],
+      [coded('28P01'), 'authenticate', /refused the credential for “monitor”/],
+      [coded('28000'), 'authenticate', /refused the credential/],
+      [coded('ER_ACCESS_DENIED_ERROR'), 'authenticate', /refused the credential/],
+      [
+        new Error('Login failed for user “monitor” (18456)'),
+        'authenticate',
+        /refused the credential/,
+      ],
+      [coded('ELOGIN', 'Login failed for user “monitor”.'), 'authenticate', /: Login failed for/],
+      [coded('3D000'), 'connect', /has no database called/],
+      [coded('ER_BAD_DB_ERROR'), 'connect', /has no database called/],
+      [coded('DEPTH_ZERO_SELF_SIGNED_CERT'), 'handshake', /is self-signed/],
+      // `mysql2` codes every certificate failure so, over Node's own code.
+      [coded('HANDSHAKE_SSL_ERROR', 'self-signed certificate'), 'handshake', /: self-signed/],
+      [coded('CERT_HAS_EXPIRED', 'certificate has expired'), 'handshake', /: certificate has/],
+      [
+        coded('UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'unable to verify the first certificate'),
+        'handshake',
+        /: unable to verify the first certificate$/,
+      ],
+      [
+        coded('ERR_TLS_CERT_ALTNAME_INVALID', "Hostname/IP does not match certificate's altnames"),
+        'handshake',
+        /altnames$/,
+      ],
+      [coded('ETIMEDOUT'), 'connect', /accepted no connection/],
+      [coded('XX000', 'the server fell over'), 'connect', /: the server fell over$/],
+    ];
+    for (const [error, phase, words] of cases) {
+      const described = describeDbError(error, options, 'PostgreSQL');
+      assert.match(described.message, words, phase);
+      assert.deepEqual(failedIn(described), { phase, target: NAME }, described.message);
+    }
+    // The driver's own words in the query are the query's, as its socket timing out is, and a
+    // TLS code there too: the handshake is on the way in.
+    for (const code of ['XX000', 'ETIMEDOUT', 'CERT_HAS_EXPIRED']) {
+      assert.deepEqual(
+        failedIn(describeDbError(coded(code), options, 'PostgreSQL', 'query')),
+        { phase: 'query', target: NAME },
+        code,
+      );
+    }
+    // A name the device routed the login to that did not resolve is still the connect: the
+    // device's own name resolved.
+    const routed = Object.assign(
+      new Error('Failed to connect', {
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), {
+          code: 'ENOTFOUND',
+          routedTo: 'replica.policy.invalid:11000',
+        }),
+      }),
+      { code: 'ESOCKET' },
+    );
+    assert.deepEqual(failedIn(describeDbError(routed, options, 'Microsoft SQL Server')), {
+      phase: 'connect',
+      target: NAME,
+    });
   });
 });
 

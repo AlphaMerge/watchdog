@@ -10,6 +10,7 @@ import {
   buildScript,
   readEnvelope,
   type Envelope,
+  type WindowsPhase,
 } from './envelope.js';
 
 /**
@@ -153,10 +154,15 @@ export async function runPowerShell(
     ...(options.depth === undefined ? {} : { depth: options.depth }),
   });
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  // Where each failure was (`P-406`). PowerShell that could not be run is this probe's own
+  // failure, so it names no machine; once it ran, it was running for `host`.
+  const local = { phase: 'exec' } as const;
+  const ran = { phase: 'exec', host: options.host } as const;
   if (encoded.length > MAX_ENCODED_LENGTH) {
     throw new WindowsError(
       `this check's script encodes to ${String(encoded.length)} characters and Windows caps a ` +
         `command line at ${String(MAX_ENCODED_LENGTH)}`,
+      local,
     );
   }
 
@@ -177,6 +183,7 @@ export async function runPowerShell(
       `${file} could not be started: ${run.message} (${run.code}) — a Windows check needs ` +
         'PowerShell on the probe, so this probe must be running on Windows, or have ' +
         `PowerShell 7 installed and \`probe.powerShellPath\` pointing at it`,
+      local,
     );
   }
   if (run.outcome === 'timeout') {
@@ -187,15 +194,17 @@ export async function runPowerShell(
             `ended (${abortReason(options.signal)}), and was ${how}${tail(scrub(run.stderr))}`
         : `PowerShell was still running after ${String(options.timeoutMs)} ms and was ` +
             `${how}${tail(scrub(run.stderr))}`,
+      ran,
     );
   }
   if (run.outcome === 'signalled') {
-    throw new WindowsError(`PowerShell was killed by ${run.signal}${tail(scrub(run.stderr))}`);
+    throw new WindowsError(`PowerShell was killed by ${run.signal}${tail(scrub(run.stderr))}`, ran);
   }
   if (run.truncated) {
     throw new WindowsError(
       `PowerShell printed more than ${String(MAX_OUTPUT_BYTES)} bytes — a reading parsed out of ` +
         'a truncated stream is worse than no reading',
+      ran,
     );
   }
 
@@ -209,14 +218,17 @@ export async function runPowerShell(
     if (run.code !== 0) {
       throw new WindowsError(
         `PowerShell exited with code ${String(run.code)}${tail(scrub(run.stderr)) || tail(scrub(run.stdout))}`,
+        ran,
       );
     }
-    throw error;
+    // The envelope's words, and the machine they were about.
+    throw error instanceof WindowsError ? new WindowsError(error.message, ran, error) : error;
   }
 
   if (!envelope.ok) {
     throw new WindowsError(
       describe(envelope.category, options) + envelope.error + ` [${envelope.category}]`,
+      { phase: phaseOf(envelope.category), host: options.host },
     );
   }
   return { data: envelope.data, durationMs: run.durationMs };
@@ -266,6 +278,16 @@ function describe(category: string, options: PowerShellOptions): string {
     return `${where} answered, and what this sensor asked for is not there: `;
   }
   return '';
+}
+
+/**
+ * Where PowerShell's own error says the check failed, from its category: the ones `describe`
+ * gives a sentence to, and the query for the rest, since the snippet is one query.
+ */
+function phaseOf(category: string): WindowsPhase {
+  if (category === 'AuthenticationError' || category === 'PermissionDenied') return 'authenticate';
+  if (category === 'ConnectionError' || category === 'ResourceUnavailable') return 'connect';
+  return 'query';
 }
 
 function tail(text: string): string {

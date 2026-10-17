@@ -24,6 +24,7 @@ import { queryCim, whereOf } from '../src/types/windows-shared.js';
 import { windowsService } from '../src/types/windows-service.js';
 import { CHECK_ABORT_GRACE_MIN_MS, WORKER_PROGRAM_GRACE_MAX_MS } from '@ms/shared';
 import { installFakePowerShell } from '@ms/simulators';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 import { pollWithin, within } from './support/within.js';
 
 /**
@@ -132,6 +133,20 @@ describe('reading the envelope', () => {
   it('refuses a result line that is not JSON, or is not an object', () => {
     assert.throws(() => readEnvelope(`${RESULT_MARKER}{oops`), WindowsError);
     assert.throws(() => readEnvelope(`${RESULT_MARKER}"a string"`), /not an object/);
+  });
+
+  it('says what it could not read was what PowerShell printed, on no machine of its own (P-406)', () => {
+    // `runPowerShell` adds the machine; the reader alone knows only what it was given.
+    for (const printed of ['Windows PowerShell\n', `${RESULT_MARKER}{oops`, `${RESULT_MARKER}1`]) {
+      let thrown: unknown;
+      try {
+        readEnvelope(printed);
+      } catch (error: unknown) {
+        thrown = error;
+      }
+      assert.ok(thrown instanceof WindowsError, printed);
+      assert.deepEqual(failedIn(thrown), { phase: 'exec', target: undefined }, printed);
+    }
   });
 });
 
@@ -385,6 +400,51 @@ describe('running it', () => {
     process.env[POWERSHELL_ENV] = '/nonexistent/powershell';
     try {
       await assert.rejects(() => run('#FAKE:ok'), /could not be started.*running on Windows/s);
+    } finally {
+      process.env[POWERSHELL_ENV] = saved ?? FAKE;
+    }
+  });
+});
+
+describe('where a Windows check failed (P-406)', () => {
+  // Against the fake PowerShell: no Windows machine is needed to say where the transport was,
+  // only the categories a real one gives its errors and the ways its process ends.
+  const remote = { host: 'server01' };
+
+  it('names WinRM, the account and the query from the category PowerShell gave its error', async () => {
+    for (const [category, phase] of [
+      ['ConnectionError', 'connect'],
+      ['ResourceUnavailable', 'connect'],
+      ['AuthenticationError', 'authenticate'],
+      ['PermissionDenied', 'authenticate'],
+      ['ObjectNotFound', 'query'],
+      ['NotSpecified', 'query'],
+    ] as const) {
+      const error = await rejectionOf(() => run(`#FAKE:error ${category}|It went wrong.`, remote));
+      assert.ok(error instanceof WindowsError, category);
+      assert.deepEqual(failedIn(error), { phase, target: 'server01' }, category);
+    }
+  });
+
+  it('names PowerShell itself when it hangs, crashes or answers what cannot be read', async () => {
+    for (const directive of ['#FAKE:crash Boom.', '#FAKE:silent', '#FAKE:badjson', '#FAKE:flood']) {
+      const error = await rejectionOf(() => run(directive, remote));
+      assert.deepEqual(failedIn(error), { phase: 'exec', target: 'server01' }, directive);
+    }
+    const hung = await rejectionOf(() => run('#FAKE:hang', { ...remote, timeoutMs: 700 }));
+    assert.deepEqual(failedIn(hung), { phase: 'exec', target: 'server01' }, String(hung));
+  });
+
+  it('names no machine for this probe’s own, or for a PowerShell this probe could not start', async () => {
+    const own = await rejectionOf(() => run('#FAKE:error AuthenticationError|Access is denied.'));
+    assert.deepEqual(failedIn(own), { phase: 'authenticate', target: undefined });
+
+    const saved = process.env[POWERSHELL_ENV];
+    process.env[POWERSHELL_ENV] = '/nonexistent/powershell';
+    try {
+      const missing = await rejectionOf(() => run('#FAKE:ok', remote));
+      assert.match(String(missing), /could not be started/);
+      assert.deepEqual(failedIn(missing), { phase: 'exec', target: undefined });
     } finally {
       process.env[POWERSHELL_ENV] = saved ?? FAKE;
     }

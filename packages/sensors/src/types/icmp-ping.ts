@@ -4,7 +4,9 @@ import {
   parsePingOutput,
   pingCommand,
   pingPlatform,
+  PingError,
   runPing,
+  sentNone,
   summarise,
   type PingParams,
 } from '../support/ping.js';
@@ -100,17 +102,22 @@ export const icmpPing: SensorType = {
     }
 
     const { command, args } = pingCommand(pingPlatform(process.platform), context.target, params);
-    const run = await runPing(command, args, context.signal);
+    const run = await runPing(command, args, context.signal, host);
     const outcome = parsePingOutput(run.output, params.count);
 
     if (outcome.times.length === 0) {
       // Unreachable is a failed check, not a successful measurement of nothing: there is no
       // round-trip time, and inventing one for the primary channel would be a lie a graph
       // cannot distinguish from a fast reply. The message carries the target and the counts,
-      // because "ETIMEDOUT" alone is not a diagnosis (CLAUDE.md).
-      throw new Error(
-        `no ICMP reply from ${host} (${String(outcome.transmitted)} sent, 0 replies)` +
-          (run.detail === '' ? '' : `: ${run.detail}`),
+      // because "ETIMEDOUT" alone is not a diagnosis (CLAUDE.md). Unless ping sent nothing: a
+      // name it could not resolve, or a probe it could not ping from, is not the device's silence.
+      throw (
+        sentNone(run, host) ??
+        new PingError(
+          `no ICMP reply from ${host} (${String(outcome.transmitted)} sent, 0 replies)` +
+            (run.detail === '' ? '' : `: ${run.detail}`),
+          { phase: 'echo', host },
+        )
       );
     }
 

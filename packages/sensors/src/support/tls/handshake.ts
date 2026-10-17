@@ -7,6 +7,7 @@ import {
 } from 'node:tls';
 import { isIP, type LookupFunction } from 'node:net';
 import { certificateListsAddress, serverIdentity } from '@ms/shared';
+import { PhasedError } from '../phased-error.js';
 
 /**
  * One TLS handshake, and what it revealed (`T-11`, `T-12`).
@@ -60,12 +61,20 @@ export interface TlsHandshake {
   readonly elapsedMs: number;
 }
 
-export class TlsError extends Error {
-  readonly host: string;
-  constructor(message: string, host: string, cause?: unknown) {
-    super(message, cause === undefined ? undefined : { cause });
+/**
+ * Where a handshake failed (`P-406`): before the connection was made (`connect`), or on it
+ * (`handshake`). A name that did not resolve fails in the target guard, as `resolve`, and only
+ * reaches here as `resolve` where nothing checked it first.
+ */
+export type TlsPhase = 'resolve' | 'connect' | 'handshake';
+
+export class TlsError extends PhasedError {
+  override readonly phase: TlsPhase;
+
+  constructor(message: string, where: { phase: TlsPhase; host: string }, cause?: unknown) {
+    super(message, where, cause);
     this.name = 'TlsError';
-    this.host = host;
+    this.phase = where.phase;
   }
 }
 
@@ -126,12 +135,21 @@ export function handshake(
       reject(
         new TlsError(
           `could not start a TLS connection to ${target.host}: ${text(error)}`,
-          target.host,
+          { phase: 'connect', host: target.host },
           error,
         ),
       );
       return;
     }
+    // Made once the TCP connection is, so a failure says whether it was before or on it.
+    let connected = false;
+    socket.once('connect', () => {
+      connected = true;
+    });
+    const at = (): { phase: TlsPhase; host: string } => ({
+      phase: connected ? 'handshake' : 'connect',
+      host: target.host,
+    });
 
     const finish = (outcome: () => void): void => {
       if (settled) return;
@@ -144,9 +162,7 @@ export function handshake(
 
     const onAbort = (): void => {
       finish(() => {
-        reject(
-          new TlsError(`the check was cancelled while connecting to ${target.host}`, target.host),
-        );
+        reject(new TlsError(`the check was cancelled while connecting to ${target.host}`, at()));
       });
     };
     signal.addEventListener('abort', onAbort, { once: true });
@@ -158,7 +174,7 @@ export function handshake(
             new TlsError(
               `${target.host}:${String(target.port)} did not complete a TLS handshake within ` +
                 `${String(target.timeoutMs)} ms`,
-              target.host,
+              at(),
             ),
           );
         });
@@ -190,22 +206,24 @@ export function handshake(
 
     socket.once('error', (error: NodeJS.ErrnoException) => {
       finish(() => {
-        reject(describe(error, target));
+        reject(describe(error, target, at().phase));
       });
     });
   });
 }
 
-function describe(error: NodeJS.ErrnoException, target: TlsTarget): TlsError {
+/** `phase` is where the socket had got to: `handshake` once the TCP connection was made. */
+function describe(error: NodeJS.ErrnoException, target: TlsTarget, phase: TlsPhase): TlsError {
   const where = `${target.host}:${String(target.port)}`;
+  const host = target.host;
   switch (error.code) {
     case 'ECONNREFUSED':
-      return new TlsError(`nothing is listening at ${where}`, target.host, error);
+      return new TlsError(`nothing is listening at ${where}`, { phase: 'connect', host }, error);
     case 'ENOTFOUND':
     case 'EAI_AGAIN':
       return new TlsError(
         `the device’s host name did not resolve, connecting to ${where}`,
-        target.host,
+        { phase: 'resolve', host },
         error,
       );
     case 'ECONNRESET':
@@ -213,17 +231,21 @@ function describe(error: NodeJS.ErrnoException, target: TlsTarget): TlsError {
         `${where} closed the connection during the TLS handshake — this is what a plain-text ` +
           'service does when something tries to speak TLS to it, and what a server does when it ' +
           'shares no protocol version with the client',
-        target.host,
+        { phase, host },
         error,
       );
     case 'ERR_SSL_UNSUPPORTED_PROTOCOL':
     case 'ERR_SSL_NO_PROTOCOLS_AVAILABLE':
     case 'ERR_SSL_VERSION_TOO_LOW':
-      return new TlsError(`${where} does not accept this TLS version`, target.host, error);
+      return new TlsError(
+        `${where} does not accept this TLS version`,
+        { phase: 'handshake', host },
+        error,
+      );
     default:
       return new TlsError(
         `the TLS handshake with ${where} failed: ${text(error)}`,
-        target.host,
+        { phase, host },
         error,
       );
   }

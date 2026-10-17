@@ -1,8 +1,14 @@
 import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext, CheckTarget } from '../src/contract.js';
+import { PingError } from '../src/support/ping.js';
+import { icmpJitter } from '../src/types/icmp-jitter.js';
 import { icmpPing } from '../src/types/icmp-ping.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 
 /**
  * The ping sensor against the real binary.
@@ -138,5 +144,86 @@ describe('icmp.ping', () => {
       () => icmpPing.execute(context({}, undefined, { host: '', ipVersion: 'auto' })),
       /no host to ping/,
     );
+  });
+});
+
+describe('where a ping failed (P-406)', () => {
+  // TEST-NET-1 (RFC 5737) answers nothing, deterministically, and loopback is always there.
+  const silent: CheckTarget = { host: '192.0.2.1', ipVersion: 'v4' };
+
+  it('names the echoes, and the device, when nothing replies', async () => {
+    for (const type of [icmpPing, icmpJitter]) {
+      const error = await rejectionOf(() =>
+        type.execute(
+          context({ count: 2, timeoutMs: 1_500, intervalSeconds: 0.2 }, undefined, silent),
+        ),
+      );
+      assert.ok(error instanceof PingError, `${type.id}: ${String(error)}`);
+      assert.deepEqual(failedIn(error), { phase: 'echo', target: '192.0.2.1' }, type.id);
+    }
+  });
+
+  it('names the echoes when the check is cancelled while pinging', async () => {
+    const controller = new AbortController();
+    const running = rejectionOf(() =>
+      icmpPing.execute(context({ count: 20, timeoutMs: 60_000 }, controller.signal)),
+    );
+    setTimeout(() => {
+      controller.abort();
+    }, 150);
+    assert.deepEqual(failedIn(await running), { phase: 'echo', target: '127.0.0.1' });
+  });
+
+  it('names the lookup, and the device’s name, when ping’s resolver does not know it', async () => {
+    // `.invalid` is reserved (RFC 6761): no resolver anywhere answers it with an address.
+    const unknown: CheckTarget = { host: 'nosuch.invalid', ipVersion: 'auto' };
+    for (const type of [icmpPing, icmpJitter]) {
+      const error = await rejectionOf(() =>
+        type.execute(
+          context({ count: 2, timeoutMs: 5_000, intervalSeconds: 0.2 }, undefined, unknown),
+        ),
+      );
+      assert.match(String(error), /could not resolve nosuch\.invalid/, type.id);
+      assert.deepEqual(
+        failedIn(error),
+        { phase: 'resolve', target: 'nosuch.invalid' },
+        `${type.id}: ${String(error)}`,
+      );
+    }
+  });
+
+  it('names ping, and no device, when it could not ping from this probe at all', async () => {
+    // A `ping` that cannot open its socket, as in a container without `CAP_NET_RAW`: it says
+    // so, prints no statistics and exits 2, having sent nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'ms-ping-'));
+    writeFileSync(
+      join(dir, 'ping'),
+      "#!/bin/sh\necho 'ping: socket: Operation not permitted' >&2\nexit 2\n",
+      { mode: 0o755 },
+    );
+    const path = process.env['PATH'];
+    process.env['PATH'] = dir;
+    try {
+      for (const type of [icmpPing, icmpJitter]) {
+        const error = await rejectionOf(() => type.execute(context({ count: 2 })));
+        assert.match(String(error), /ping sent no echo to 127\.0\.0\.1: .*Operation not permitted/);
+        assert.deepEqual(failedIn(error), { phase: 'exec', target: undefined }, type.id);
+      }
+    } finally {
+      process.env['PATH'] = path;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the program, and no device, when this probe cannot run ping', async () => {
+    const path = process.env['PATH'];
+    process.env['PATH'] = '/nonexistent';
+    try {
+      const error = await rejectionOf(() => icmpPing.execute(context({ count: 1 })));
+      assert.match(String(error), /binary is not available on this probe/);
+      assert.deepEqual(failedIn(error), { phase: 'exec', target: undefined });
+    } finally {
+      process.env['PATH'] = path;
+    }
   });
 });

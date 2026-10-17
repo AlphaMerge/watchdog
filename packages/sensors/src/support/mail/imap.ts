@@ -1,4 +1,4 @@
-import { MailConnection, MailError, type MailConnectionOptions } from './connection.js';
+import { MailConnection, type MailConnectionOptions } from './connection.js';
 
 /**
  * As much IMAP4rev1 as a monitoring check needs (`T-17`).
@@ -47,13 +47,14 @@ export class ImapSession {
       );
       const hello = greeting[0] ?? '';
       if (!/^\*\s+(OK|PREAUTH)\b/.test(hello)) {
-        throw new MailError(`${options.host} did not greet: ${hello || '(nothing)'}`);
+        throw connection.failed(`${options.host} did not greet: ${hello || '(nothing)'}`);
       }
       session.#readCapabilities(greeting);
       if (options.security === 'starttls') {
+        connection.phase = 'handshake';
         const reply = await session.command('STARTTLS', 'the STARTTLS reply');
         if (reply.status !== 'OK') {
-          throw new MailError(
+          throw connection.failed(
             `${options.host} refused STARTTLS: ${reply.text} — this sensor was told to require ` +
               'encryption, and continuing in the clear would send the password in plain text',
           );
@@ -82,8 +83,9 @@ export class ImapSession {
   }
 
   async login(username: string, password: string): Promise<void> {
+    this.#connection.phase = 'authenticate';
     if (this.#capabilities.has('LOGINDISABLED')) {
-      throw new MailError(
+      throw this.#connection.failed(
         'this server advertises LOGINDISABLED, which means it will not accept a password on an ' +
           'unencrypted connection — use STARTTLS or implicit TLS',
       );
@@ -94,18 +96,19 @@ export class ImapSession {
       `LOGIN ${quoted(username)} ••••••`,
     );
     if (reply.status !== 'OK') {
-      throw new MailError(`authentication was refused: ${reply.text}`);
+      throw this.#connection.failed(`authentication was refused: ${reply.text}`);
     }
   }
 
   /** `STATUS` — counts without selecting, which is what a mailbox-depth check is. */
   async status(mailbox: string): Promise<ImapStatus> {
+    this.#connection.phase = 'query';
     const reply = await this.command(
       `STATUS ${quoted(mailbox)} (MESSAGES RECENT UNSEEN)`,
       'the mailbox status',
     );
     if (reply.status !== 'OK') {
-      throw new MailError(`the mailbox ${mailbox} could not be read: ${reply.text}`);
+      throw this.#connection.failed(`the mailbox ${mailbox} could not be read: ${reply.text}`);
     }
     const line = reply.untagged.find((one) => /STATUS/i.test(one)) ?? '';
     const read = (name: string): number => {
@@ -117,9 +120,10 @@ export class ImapSession {
 
   /** `SELECT`, which a search or a delete needs and `STATUS` does not. */
   async select(mailbox: string): Promise<number> {
+    this.#connection.phase = 'query';
     const reply = await this.command(`SELECT ${quoted(mailbox)}`, 'the mailbox to be selected');
     if (reply.status !== 'OK') {
-      throw new MailError(`the mailbox ${mailbox} could not be selected: ${reply.text}`);
+      throw this.#connection.failed(`the mailbox ${mailbox} could not be selected: ${reply.text}`);
     }
     for (const line of reply.untagged) {
       const match = /^\*\s+(\d+)\s+EXISTS/i.exec(line);
@@ -131,7 +135,8 @@ export class ImapSession {
   /** Sequence numbers matching a search. `HEADER Subject "…"` is what a round trip uses. */
   async search(criteria: string): Promise<number[]> {
     const reply = await this.command(`SEARCH ${criteria}`, 'the search results');
-    if (reply.status !== 'OK') throw new MailError(`the search was refused: ${reply.text}`);
+    if (reply.status !== 'OK')
+      throw this.#connection.failed(`the search was refused: ${reply.text}`);
     const line = reply.untagged.find((one) => /^\*\s+SEARCH/i.test(one)) ?? '';
     return line
       .replace(/^\*\s+SEARCH/i, '')
@@ -149,11 +154,13 @@ export class ImapSession {
       'the messages to be flagged',
     );
     if (stored.status !== 'OK') {
-      throw new MailError(`the test messages could not be flagged for deletion: ${stored.text}`);
+      throw this.#connection.failed(
+        `the test messages could not be flagged for deletion: ${stored.text}`,
+      );
     }
     const expunged = await this.command('EXPUNGE', 'the mailbox to be expunged');
     if (expunged.status !== 'OK') {
-      throw new MailError(
+      throw this.#connection.failed(
         `the test messages were flagged but not removed: ${expunged.text} — a round-trip sensor ` +
           'whose cleanup fails fills a mailbox one message a minute',
       );

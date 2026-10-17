@@ -1,5 +1,6 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
 import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import type { TlsPhase } from '../support/tls/handshake.js';
 
 /**
  * Which TLS versions a device still accepts, scored (`T-12`).
@@ -78,7 +79,7 @@ export const tlsSecurity: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
-    const { handshake } = await import('../support/tls/handshake.js');
+    const { handshake, TlsError } = await import('../support/tls/handshake.js');
 
     const host = context.target.host;
     if (host === '') throw new Error('the device has no host to connect to');
@@ -104,6 +105,8 @@ export const tlsSecurity: SensorType = {
     let cipher: string | null = null;
     let anyReachable = false;
     let lastFailure = '';
+    // Where the last attempt failed (`P-406`): a refused connection, or a refused handshake.
+    let lastPhase: TlsPhase = 'handshake';
 
     for (const version of VERSIONS) {
       if (context.signal.aborted) throw new Error(`the check was cancelled while probing ${host}`);
@@ -124,15 +127,17 @@ export const tlsSecurity: SensorType = {
       } catch (error) {
         accepted.set(version.id, false);
         lastFailure = error instanceof Error ? error.message : String(error);
+        if (error instanceof TlsError) lastPhase = error.phase;
         // A refused *version* is the reading. A refused connection is a broken check, and the
         // two look different: one leaves the others succeeding.
       }
     }
 
     if (!anyReachable) {
-      throw new Error(
+      throw new TlsError(
         `${host}:${String(port)} accepted no TLS version at all — either it does not speak TLS ` +
           `on this port, or it is unreachable. The last attempt said: ${lastFailure}`,
+        { phase: lastPhase, host },
       );
     }
 

@@ -1,3 +1,5 @@
+import { PhasedError } from '../phased-error.js';
+
 /**
  * The PowerShell wrapper and what comes back from it (`T-09`).
  *
@@ -9,10 +11,22 @@
  * failure this file exists to make impossible.
  */
 
-export class WindowsError extends Error {
-  constructor(message: string) {
-    super(message);
+/**
+ * Where a Windows check failed (`P-406`): reaching the machine over WinRM (`connect`), the
+ * account it was refused (`authenticate`), the query once there (`query`), or PowerShell itself:
+ * started, run to its end and read (`exec`). From the category PowerShell gave its error, and
+ * from how the process ended.
+ */
+export type WindowsPhase = 'connect' | 'authenticate' | 'query' | 'exec';
+
+export class WindowsError extends PhasedError {
+  override readonly phase: WindowsPhase;
+
+  /** `host` is the machine asked, absent or empty for the probe's own. */
+  constructor(message: string, where: { phase: WindowsPhase; host?: string }, cause?: unknown) {
+    super(message, where, cause);
     this.name = 'WindowsError';
+    this.phase = where.phase;
   }
 }
 
@@ -167,10 +181,14 @@ export function readEnvelope(
     const at = line.indexOf(RESULT_MARKER);
     if (at >= 0) found = line.slice(at + RESULT_MARKER.length).trim();
   }
+  // PowerShell's own output, which is where it failed whatever the snippet asked. No host: this
+  // reads text, and `runPowerShell` says which machine it was about.
+  const reading = { phase: 'exec' } as const;
   if (found === null) {
     throw new WindowsError(
       'PowerShell printed no result line — the interpreter started and the script did not ' +
         `finish${quote(scrub(stdout))}`,
+      reading,
     );
   }
 
@@ -181,10 +199,14 @@ export function readEnvelope(
     throw new WindowsError(
       `PowerShell's result line is not JSON: ${error instanceof Error ? error.message : 'unknown'}` +
         quote(scrub(found)),
+      reading,
     );
   }
   if (!isRecord(parsed)) {
-    throw new WindowsError(`PowerShell's result line is not an object${quote(scrub(found))}`);
+    throw new WindowsError(
+      `PowerShell's result line is not an object${quote(scrub(found))}`,
+      reading,
+    );
   }
 
   if (parsed['ok'] === true) return { ok: true, data: parsed['data'] };

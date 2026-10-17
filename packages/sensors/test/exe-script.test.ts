@@ -23,6 +23,7 @@ import { abortReason, endedHow } from '../src/support/program-ended.js';
 import { SCRIPT_GRACE_MS } from '../src/types/exe-script-shared.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 import { RESULT_LIMITS } from '@ms/shared';
+import { failedIn } from './support/failed-in.js';
 import { pollWithin } from './support/within.js';
 
 /**
@@ -470,6 +471,40 @@ describe('exe.script', () => {
   it('runs in a process of its own, which is why P-03 came first', () => {
     assert.equal(exeScript.isolation, 'process');
     assert.equal(exeScriptAdvanced.isolation, 'process');
+  });
+});
+
+describe('where a script check failed (P-406)', () => {
+  // A script runs on the probe, whatever device it is about, so none names a host.
+  const failed = async (
+    type: typeof exeScript,
+    params: Record<string, unknown>,
+  ): Promise<{ phase: unknown; target: unknown }> => {
+    let error: unknown;
+    try {
+      await run(type, params);
+    } catch (failure: unknown) {
+      error = failure;
+    }
+    assert.ok(error instanceof Error, `${String(params['program'])} did not fail`);
+    return failedIn(error);
+  };
+  const exec = { phase: 'exec', target: undefined };
+  const output = { phase: 'output', target: undefined };
+
+  it('names the run: not found, a non-zero exit, a timeout, too much printed, an error it reported', async () => {
+    assert.deepEqual(await failed(exeScript, { program: 'missing.sh' }), exec);
+    assert.deepEqual(await failed(exeScript, { program: 'fail.sh' }), exec);
+    assert.deepEqual(await failed(exeScript, { program: 'slow.sh', timeoutMs: 1_000 }), exec);
+    assert.deepEqual(await failed(exeScript, { program: 'noisy.sh', format: 'number' }), exec);
+    assert.deepEqual(await failed(exeScript, { program: 'warn.sh' }), exec);
+    assert.deepEqual(await failed(exeScriptAdvanced, { program: 'prtg-error.sh' }), exec);
+  });
+
+  it('names the output when what the program printed is not a reading', async () => {
+    assert.deepEqual(await failed(exeScript, { program: 'silent.sh' }), output);
+    assert.deepEqual(await failed(exeScript, { program: 'ok.sh', format: 'number' }), output);
+    assert.deepEqual(await failed(exeScriptAdvanced, { program: 'number.sh' }), output);
   });
 });
 

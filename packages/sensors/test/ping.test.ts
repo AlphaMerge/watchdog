@@ -9,9 +9,11 @@ import {
   pingCommand,
   pingPlatform,
   runPing,
+  sentNone,
   summarise,
   type PingParams,
 } from '../src/support/ping.js';
+import { failedIn } from './support/failed-in.js';
 
 const PARAMS: PingParams = { count: 4, packetSize: 32, timeoutMs: 5_000 };
 const target = (host: string, ipVersion: CheckTarget['ipVersion'] = 'auto'): CheckTarget => ({
@@ -429,5 +431,45 @@ describe('running ping (`P-277`)', () => {
     // stdout, the newline between them, and stderr: each kept to the bound.
     assert.equal(run.output.length, 2 * PING_OUTPUT_CHARS + 1);
     assert.ok(run.detail.length <= PING_OUTPUT_CHARS);
+  });
+});
+
+describe('a ping that sent nothing (P-406)', () => {
+  const ran = (output: string): { output: string; detail: string } => ({
+    output,
+    detail: output.trim().split('\n')[0] ?? '',
+  });
+
+  it('is the lookup when ping’s resolver did not know the name, on every platform', () => {
+    for (const said of [
+      'ping: nosuch.invalid: Name or service not known',
+      'ping: nosuch.invalid: Temporary failure in name resolution',
+      'ping: nosuch.invalid: No address associated with hostname',
+      'ping: cannot resolve nosuch.invalid: Unknown host',
+      'Ping request could not find host nosuch.invalid. Please check the name and try again.',
+      "ping: bad address 'nosuch.invalid'",
+    ]) {
+      const error = sentNone(ran(said), 'nosuch.invalid');
+      assert.match(String(error), /could not resolve nosuch\.invalid, so no echo was sent/, said);
+      assert.deepEqual(failedIn(error), { phase: 'resolve', target: 'nosuch.invalid' }, said);
+    }
+  });
+
+  it('is ping itself, on no device, when it could not ping from this probe', () => {
+    for (const said of [
+      'ping: socket: Operation not permitted',
+      'ping: connect: Network is unreachable',
+      '',
+    ]) {
+      const error = sentNone(ran(said), '192.0.2.1');
+      assert.match(String(error), /ping sent no echo to 192\.0\.2\.1/, said);
+      assert.deepEqual(failedIn(error), { phase: 'exec', target: undefined }, said);
+    }
+  });
+
+  it('is nothing of its own when ping sent its echoes and printed what came back', () => {
+    for (const output of [LINUX_UNREACHABLE, WINDOWS_UNREACHABLE, LINUX_PARTIAL]) {
+      assert.equal(sentNone(ran(output), '192.0.2.1'), null);
+    }
   });
 });

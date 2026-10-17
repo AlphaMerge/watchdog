@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer as createNetServer, type Server as NetServer } from 'node:net';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
 import { mailImap } from '../src/types/mail-imap.js';
@@ -12,6 +13,7 @@ import { mailSmtp } from '../src/types/mail-smtp.js';
 import { Mailbox, imapServer, pop3Server, smtpServer, type RunningServer } from '@ms/simulators';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import { assertDeclaresEveryKey } from './support/declared-keys.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 
 /**
  * The four mail sensors against the in-house simulators.
@@ -551,6 +553,171 @@ describe('mail.roundtrip', () => {
         }),
       /the relay would not take the test message: the recipient .* was refused: 550/,
     );
+  });
+});
+
+describe('where a mail check failed (P-406)', () => {
+  const at = (phase: string): { phase: string; target: string } => ({
+    phase,
+    target: '127.0.0.1',
+  });
+  const wrong = { credentials: { mail: { username: 'ops', password: 'wrong' } } };
+  const send = { from: 'a@example.invalid', to: 'b@example.invalid' };
+  /** A raw server on 127.0.0.1, closed by `stop`, for what no simulator does. */
+  const listen = (server: NetServer): Promise<number> =>
+    new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        resolve(typeof address === 'object' && address !== null ? address.port : 0);
+      });
+    });
+  const stop = (server: NetServer): Promise<void> =>
+    new Promise((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+
+  it('names the connection when nothing listens, the greeting is refused, or never comes', async () => {
+    const refusing = await start(smtpServer, { refuseAt: 'greeting' });
+    const silent = await start(smtpServer, { greetingDelayMs: 5_000 });
+    for (const [params, words] of [
+      [{ port: 1 }, /nothing is listening/],
+      [{ port: refusing }, /greeted with 554/],
+      [{ port: silent, timeoutMs: 1_000 }, /did not finish the greeting/],
+    ] as const) {
+      const error = await rejectionOf(() => run(mailSmtp, params));
+      assert.match(String(error), words);
+      assert.deepEqual(failedIn(error), at('connect'), String(error));
+    }
+  });
+
+  it('names the handshake when STARTTLS was required and is not offered, in each protocol', async () => {
+    for (const [type, make] of [
+      [mailSmtp, smtpServer],
+      [mailPop3, pop3Server],
+      [mailImap, imapServer],
+    ] as const) {
+      const port = await start(make, { offerStartTls: false });
+      const error = await rejectionOf(() => run(type, { port, security: 'starttls' }));
+      assert.deepEqual(failedIn(error), at('handshake'), `${type.id}: ${String(error)}`);
+    }
+  });
+
+  it('names the login when the password is refused, in each protocol', async () => {
+    const smtp = await start(smtpServer);
+    const pop3 = await start(pop3Server);
+    const imap = await start(imapServer);
+    for (const [type, params] of [
+      [mailSmtp, { port: smtp, requireAuth: true }],
+      [mailPop3, { port: pop3 }],
+      [mailImap, { port: imap }],
+    ] as const) {
+      const error = await rejectionOf(() => run(type, params, wrong));
+      assert.match(String(error), /authentication was refused/, type.id);
+      assert.deepEqual(failedIn(error), at('authenticate'), `${type.id}: ${String(error)}`);
+    }
+  });
+
+  it('names the step a reset came in, in the socket’s own words', async () => {
+    // A POP3 server that greets, takes the user name, and resets the connection at the
+    // password: no reply to read, only the socket's own error, while logging in.
+    const resetting = createNetServer((socket) => {
+      socket.on('error', () => undefined);
+      socket.write('+OK ready\r\n');
+      let said = '';
+      socket.on('data', (chunk: Buffer) => {
+        said += chunk.toString('latin1');
+        if (/^PASS /m.test(said)) socket.resetAndDestroy();
+        else if (said.endsWith('\r\n')) socket.write('+OK\r\n');
+      });
+    });
+    const port = await listen(resetting);
+    try {
+      const error = await rejectionOf(() => run(mailPop3, { port }));
+      assert.match(String(error), /ECONNRESET/);
+      assert.deepEqual(failedIn(error), at('authenticate'), String(error));
+    } finally {
+      await stop(resetting);
+    }
+  });
+
+  it('names the handshake over implicit TLS once connected, and the connection before', async () => {
+    // A plain-text server where TLS was expected: it answers the client’s hello with a greeting.
+    const plain = await start(smtpServer);
+    const spoken = await rejectionOf(() => run(mailSmtp, { port: plain, security: 'tls' }));
+    assert.deepEqual(failedIn(spoken), at('handshake'), String(spoken));
+
+    // One that takes the connection and never answers: the handshake runs out of time, and a
+    // cancel during it is the handshake as well.
+    const silent = createNetServer((socket) => {
+      socket.resume();
+      socket.on('error', () => undefined);
+    });
+    const port = await listen(silent);
+    try {
+      const timedOut = await rejectionOf(() =>
+        run(mailSmtp, { port, security: 'tls', timeoutMs: 1_000 }),
+      );
+      assert.match(String(timedOut), /did not complete a TLS handshake within 1000 ms/);
+      assert.deepEqual(failedIn(timedOut), at('handshake'), String(timedOut));
+
+      const controller = new AbortController();
+      setTimeout(() => {
+        controller.abort();
+      }, 200);
+      const cancelled = await rejectionOf(() =>
+        run(mailSmtp, { port, security: 'tls' }, { signal: controller.signal }),
+      );
+      assert.match(String(cancelled), /cancelled during the TLS handshake/);
+      assert.deepEqual(failedIn(cancelled), at('handshake'), String(cancelled));
+    } finally {
+      await stop(silent);
+    }
+
+    const refused = await rejectionOf(() => run(mailSmtp, { port: 1, security: 'tls' }));
+    assert.deepEqual(failedIn(refused), at('connect'), String(refused));
+  });
+
+  it('names the sending when the relay refuses the message, and keeps it through the round trip', async () => {
+    const port = await start(smtpServer, { refuseAt: 'rcpt-to' });
+    const direct = await rejectionOf(() => run(mailSmtp, { port, ...send }));
+    assert.deepEqual(failedIn(direct), at('send'), String(direct));
+
+    const readPort = await start(imapServer);
+    const round = await rejectionOf(() =>
+      run(mailRoundTrip, {
+        ...send,
+        smtpPort: port,
+        readPort,
+        smtpSecurity: 'none',
+        readSecurity: 'none',
+      }),
+    );
+    assert.match(String(round), /the relay would not take the test message/);
+    assert.deepEqual(failedIn(round), at('send'), String(round));
+  });
+
+  it('names the mailbox when its cleanup is refused, over IMAP and POP3', async () => {
+    const smtpPort = await start(smtpServer);
+    for (const [readWith, make] of [
+      ['imap', imapServer],
+      ['pop3', pop3Server],
+    ] as const) {
+      const readPort = await start(make, { refuseAt: 'quit' });
+      const error = await rejectionOf(() =>
+        run(mailRoundTrip, {
+          ...send,
+          readWith,
+          smtpPort,
+          readPort,
+          smtpSecurity: 'none',
+          readSecurity: 'none',
+          deliveryTimeoutMs: 5_000,
+        }),
+      );
+      assert.deepEqual(failedIn(error), at('query'), `${readWith}: ${String(error)}`);
+    }
   });
 });
 

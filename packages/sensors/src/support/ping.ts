@@ -1,4 +1,23 @@
 import type { CheckTarget } from '../contract.js';
+import { PhasedError } from './phased-error.js';
+
+/**
+ * Where a ping failed (`P-406`): the echoes, which the device did not answer (`echo`); the
+ * lookup of the device's name, which `ping` makes itself and its resolver did not know
+ * (`resolve`); or the `ping` program, which this probe could not run or could not ping from
+ * (`exec`, with no host: the device was never asked).
+ */
+export type PingPhase = 'resolve' | 'echo' | 'exec';
+
+export class PingError extends PhasedError {
+  override readonly phase: PingPhase;
+
+  constructor(message: string, where: { phase: PingPhase; host?: string | undefined }) {
+    super(message, where);
+    this.name = 'PingError';
+    this.phase = where.phase;
+  }
+}
 
 /**
  * Building and reading `ping`, kept separate from running it.
@@ -249,6 +268,33 @@ export function parsePingOutput(output: string, requested: number): PingOutcome 
 }
 
 /**
+ * Every resolver's words for a name it does not know: iputils (`Name or service not known`,
+ * `Temporary failure in name resolution`, `No address associated with hostname`), BSD and macOS
+ * (`cannot resolve … Unknown host`), Windows (`could not find host`) and BusyBox (`bad address`).
+ */
+const UNRESOLVED =
+  /Name or service not known|Temporary failure in name resolution|No address associated with hostname|cannot resolve|Unknown host|could not find host|bad address/i;
+
+/**
+ * Why a ping that got no reply got none, when it sent nothing (`P-406`). Ping prints its
+ * statistics once it has sent echoes, and only then, so without them none went: its resolver
+ * did not know the name (`resolve`, on the device's name), or it could not ping from this probe
+ * at all, as with a socket it may not open or a route it has not got (`exec`, and no host).
+ * Null when it did send them and the device did not answer, which the caller says as `echo`.
+ */
+export function sentNone(run: PingRun, host: string): PingError | null {
+  if (UNIX_SUMMARY.test(run.output) || WINDOWS_SUMMARY.test(run.output)) return null;
+  const said = run.detail === '' ? '' : `: ${run.detail}`;
+  if (UNRESOLVED.test(run.output)) {
+    return new PingError(`ping could not resolve ${host}, so no echo was sent${said}`, {
+      phase: 'resolve',
+      host,
+    });
+  }
+  return new PingError(`ping sent no echo to ${host}${said}`, { phase: 'exec' });
+}
+
+/**
  * What a check's message adds about duplicates: nothing when there were none (`P-282`).
  *
  * Said rather than dropped silently, because a device answering twice is worth knowing in itself
@@ -339,6 +385,8 @@ export async function runPing(
   command: string,
   args: readonly string[],
   signal: AbortSignal,
+  /** The device pinged, which a check cancelled while it was pinging names (`P-406`). */
+  host?: string,
 ): Promise<PingRun> {
   // Imported here rather than at the top of the module: the core loads this catalogue for
   // schemas and channel declarations and never calls execute, so it should not pay for the
@@ -370,16 +418,25 @@ export async function runPing(
 
     child.on('error', (error: NodeJS.ErrnoException) => {
       if (signal.aborted) {
-        reject(new Error(`the check was cancelled before ${command} finished`));
+        reject(
+          new PingError(`the check was cancelled before ${command} finished`, {
+            phase: 'echo',
+            host,
+          }),
+        );
         return;
       }
       if (error.code === 'ENOENT') {
         // A probe running in a minimal container is the usual cause, and it fails identically
         // on every check until someone installs the binary — so say which binary.
-        reject(new Error(`the "${command}" binary is not available on this probe`));
+        reject(
+          new PingError(`the "${command}" binary is not available on this probe`, {
+            phase: 'exec',
+          }),
+        );
         return;
       }
-      reject(new Error(`could not run ${command}: ${error.message}`));
+      reject(new PingError(`could not run ${command}: ${error.message}`, { phase: 'exec' }));
     });
 
     child.on('close', (code, killSignal) => {

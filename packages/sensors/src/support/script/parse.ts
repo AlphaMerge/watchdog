@@ -4,6 +4,14 @@ import { ScriptError } from './resolve.js';
 // never reaches `fast-xml-parser`.
 import { parseXml } from '../xml.js';
 
+/** What the program printed, which this cannot read as a reading (`P-406`). */
+const unreadable = (message: string): ScriptError => new ScriptError(message, 'output');
+/**
+ * What the program said of its own run, read: it ran and reported that it failed, as an exit
+ * code does, so the phase is the run's and not the reading's.
+ */
+const reported = (message: string): ScriptError => new ScriptError(message, 'exec');
+
 /**
  * What a program's output means (`T-19`).
  *
@@ -71,7 +79,7 @@ export function parseSimple(
 ): ScriptOutput {
   const text = stdout.trim();
   if (text === '') {
-    throw new ScriptError(
+    throw unreadable(
       'the program printed nothing on stdout — a check needs a reading, and a program that ' +
         'succeeded silently has not produced one',
     );
@@ -80,9 +88,7 @@ export function parseSimple(
   if (format === 'number') {
     const value = Number(text);
     if (!Number.isFinite(value)) {
-      throw new ScriptError(
-        `this sensor expects a plain number and the program printed ${quote(text)}`,
-      );
+      throw unreadable(`this sensor expects a plain number and the program printed ${quote(text)}`);
     }
     return { channels: [{ key, value }], message: '', returnCode: null };
   }
@@ -98,7 +104,7 @@ export function parseSimple(
   const first = line.indexOf(':');
   const second = first < 0 ? -1 : line.indexOf(':', first + 1);
   if (first < 0 || second < 0) {
-    throw new ScriptError(
+    throw unreadable(
       `this sensor expects returncode:value:message and the program printed ${quote(line)} — ` +
         'set the output format to "number" if it prints only a reading',
     );
@@ -107,20 +113,20 @@ export function parseSimple(
   const returnCode = Number(line.slice(0, first).trim());
   if (!Number.isInteger(returnCode)) {
     // Scrubbed before it is cut at the colon, which could fall inside a secret (`S-21`).
-    throw new ScriptError(`${quote(scrub(line).split(':')[0] ?? '')} is not a return code`);
+    throw unreadable(`${quote(scrub(line).split(':')[0] ?? '')} is not a return code`);
   }
   const raw = line.slice(first + 1, second).trim();
   const value = Number(raw);
   const message = line.slice(second + 1).trim();
 
   if (returnCode !== 0) {
-    throw new ScriptError(
+    throw reported(
       `the program reported ${String(returnCode)} (${describeReturnCode(returnCode)})` +
         (message === '' ? '' : `: ${message}`),
     );
   }
   if (!Number.isFinite(value)) {
-    throw new ScriptError(
+    throw unreadable(
       `the program reported success with ${quote(raw)} as its value, which is not a number`,
     );
   }
@@ -147,7 +153,7 @@ export function parseAdvanced(
 ): ScriptOutput {
   const text = stdout.trim();
   if (text === '') {
-    throw new ScriptError('the program printed nothing on stdout');
+    throw unreadable('the program printed nothing on stdout');
   }
   if (text.startsWith('<')) return parsePrtgXml(text, primaryKey, scrub);
   return parseJson(text, primaryKey, scrub);
@@ -169,7 +175,7 @@ function parsePrtgXml(
   const tree = parseXml(text);
   const root = firstOf(tree['prtg']);
   if (!isRecord(root)) {
-    throw new ScriptError(
+    throw unreadable(
       'the program printed XML with no <prtg> element — that is the shape an advanced script ' +
         'returns, and the whole document was ' +
         quote(scrub(text).slice(0, 200)),
@@ -178,7 +184,7 @@ function parsePrtgXml(
 
   const error = asText(firstOf(root['error']));
   if (error === '1' || error.toLowerCase() === 'true') {
-    throw new ScriptError(
+    throw reported(
       `the program reported an error: ${asText(firstOf(root['text'])) || 'it gave no reason'}`,
     );
   }
@@ -224,14 +230,14 @@ function parseJson(
   try {
     document = JSON.parse(text) as unknown;
   } catch (error) {
-    throw new ScriptError(
+    throw unreadable(
       'the program did not print JSON: ' +
         (error instanceof Error ? error.message : String(error)) +
         ` — it printed ${quote(scrub(text).slice(0, 120))}`,
     );
   }
   if (!isRecord(document)) {
-    throw new ScriptError('the program printed JSON that is not an object');
+    throw unreadable('the program printed JSON that is not an object');
   }
 
   // PRTG's own shape, so an existing advanced script works unchanged.
@@ -239,7 +245,7 @@ function parseJson(
   if (isRecord(prtg)) {
     const error = prtg['error'];
     if (error === 1 || error === '1' || error === true) {
-      throw new ScriptError(
+      throw reported(
         `the program reported an error: ${asText(prtg['text']) || 'it gave no reason'}`,
       );
     }
@@ -261,7 +267,7 @@ function parseJson(
   // The simple shape: one value and a message.
   const value = numberFrom(document['value']);
   if (value === null) {
-    throw new ScriptError(
+    throw unreadable(
       'the JSON has no "value", no "channels" and no "prtg" — one of those is what this sensor ' +
         'reads, and the whole document was ' +
         quote(scrub(text).slice(0, 200)),
@@ -276,10 +282,10 @@ function parseJson(
 
 function channelsFrom(raw: unknown, primaryKey: string): ScriptChannel[] {
   if (!Array.isArray(raw)) {
-    throw new ScriptError('the channel list is not an array');
+    throw unreadable('the channel list is not an array');
   }
   if (raw.length === 0) {
-    throw new ScriptError(
+    throw unreadable(
       'the program returned no channels — a check with nothing to report is a failed check, ' +
         'not a reading of none',
     );
@@ -303,12 +309,12 @@ function channelsFrom(raw: unknown, primaryKey: string): ScriptChannel[] {
     });
   }
   if (out.length === 0) {
-    throw new ScriptError('none of the channels the program returned had a numeric value');
+    throw unreadable('none of the channels the program returned had a numeric value');
   }
   // The primary must be present or the sensor has no channel to be judged by, and a silently
   // absent primary is a sensor that looks healthy while reporting nothing anybody watches.
   if (!out.some((channel) => channel.key === primaryKey)) {
-    throw new ScriptError(
+    throw unreadable(
       `the program returned no channel called "${primaryKey}", which is the one this sensor is ` +
         `judged by — it returned ${out.map((channel) => channel.key).join(', ')}`,
     );

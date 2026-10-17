@@ -1,4 +1,4 @@
-import { MailConnection, MailError, type MailConnectionOptions } from './connection.js';
+import { MailConnection, type MailConnectionOptions } from './connection.js';
 
 /**
  * As much POP3 as a monitoring check needs (`T-17`).
@@ -47,12 +47,13 @@ export class Pop3Session {
     try {
       const greeting = await session.#read(okOrError, 'the greeting');
       if (!(greeting[0] ?? '').startsWith('+OK')) {
-        throw new MailError(`${options.host} did not greet: ${greeting[0] ?? '(nothing)'}`);
+        throw connection.failed(`${options.host} did not greet: ${greeting[0] ?? '(nothing)'}`);
       }
       if (options.security === 'starttls') {
+        connection.phase = 'handshake';
         const ready = await session.#send('STLS', okOrError, 'the STLS reply');
         if (!(ready[0] ?? '').startsWith('+OK')) {
-          throw new MailError(
+          throw connection.failed(
             `${options.host} refused STLS: ${ready[0] ?? ''} — this sensor was told to require ` +
               'encryption, and continuing in the clear would send the password in plain text',
           );
@@ -67,32 +68,35 @@ export class Pop3Session {
   }
 
   async login(username: string, password: string): Promise<void> {
+    this.#connection.phase = 'authenticate';
     const user = await this.#send(`USER ${username}`, okOrError, 'the USER reply');
     if (!(user[0] ?? '').startsWith('+OK')) {
-      throw new MailError(`the user name was refused: ${user[0] ?? ''}`);
+      throw this.#connection.failed(`the user name was refused: ${user[0] ?? ''}`);
     }
     // Not logged, not put in a message, and never echoed back: this is the one line of the
     // conversation that must not appear in a transcript a failure shows.
     const pass = await this.#send(`PASS ${password}`, okOrError, 'the PASS reply', true);
     if (!(pass[0] ?? '').startsWith('+OK')) {
-      throw new MailError(`authentication was refused: ${pass[0] ?? ''}`);
+      throw this.#connection.failed(`authentication was refused: ${pass[0] ?? ''}`);
     }
   }
 
   /** `STAT` — the count and total size, which is what a mailbox-depth check is. */
   async stat(): Promise<{ count: number; bytes: number }> {
+    this.#connection.phase = 'query';
     const reply = await this.#send('STAT', okOrError, 'the STAT reply');
     const match = /^\+OK\s+(\d+)\s+(\d+)/.exec(reply[0] ?? '');
     if (match === null) {
-      throw new MailError(`STAT answered something this cannot read: ${reply[0] ?? ''}`);
+      throw this.#connection.failed(`STAT answered something this cannot read: ${reply[0] ?? ''}`);
     }
     return { count: Number(match[1]), bytes: Number(match[2]) };
   }
 
   async list(): Promise<Pop3Message[]> {
+    this.#connection.phase = 'query';
     const reply = await this.#send('LIST', untilDot, 'the message list');
     if ((reply[0] ?? '').startsWith('-ERR')) {
-      throw new MailError(`LIST was refused: ${reply[0] ?? ''}`);
+      throw this.#connection.failed(`LIST was refused: ${reply[0] ?? ''}`);
     }
     const out: Pop3Message[] = [];
     for (const line of reply.slice(1, -1)) {
@@ -106,7 +110,7 @@ export class Pop3Session {
   async headers(number: number): Promise<string[]> {
     const reply = await this.#send(`TOP ${String(number)} 0`, untilDot, 'the message headers');
     if ((reply[0] ?? '').startsWith('-ERR')) {
-      throw new MailError(
+      throw this.#connection.failed(
         `TOP was refused for message ${String(number)}: ${reply[0] ?? ''} — a server without TOP ` +
           'cannot be used for a round trip, because finding one message would mean downloading ' +
           'every message in the mailbox',
@@ -119,7 +123,9 @@ export class Pop3Session {
   async markDeleted(number: number): Promise<void> {
     const reply = await this.#send(`DELE ${String(number)}`, okOrError, 'the DELE reply');
     if (!(reply[0] ?? '').startsWith('+OK')) {
-      throw new MailError(`message ${String(number)} could not be deleted: ${reply[0] ?? ''}`);
+      throw this.#connection.failed(
+        `message ${String(number)} could not be deleted: ${reply[0] ?? ''}`,
+      );
     }
   }
 
@@ -133,7 +139,7 @@ export class Pop3Session {
     try {
       const reply = await this.#send('QUIT', okOrError, 'the QUIT reply');
       if (!(reply[0] ?? '').startsWith('+OK')) {
-        throw new MailError(
+        throw this.#connection.failed(
           `the server refused QUIT: ${reply[0] ?? ''} — anything marked for deletion in this ` +
             'session has not been deleted',
         );

@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
+import { PhasedError } from '../phased-error.js';
 
 /**
  * Turning a sensor parameter into a program this probe is willing to run (`T-19`).
@@ -24,10 +25,20 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
  * is itself a symlink work correctly rather than being refused.
  */
 
-export class ScriptError extends Error {
-  constructor(message: string) {
-    super(message);
+/**
+ * Where a script check failed (`P-406`): finding, starting, running and ending its program
+ * (`exec`), or reading what it printed (`output`). Never a host: the program runs on the probe,
+ * whatever device it is about.
+ */
+export type ScriptPhase = 'exec' | 'output';
+
+export class ScriptError extends PhasedError {
+  override readonly phase: ScriptPhase;
+
+  constructor(message: string, phase: ScriptPhase = 'exec') {
+    super(message, { phase });
     this.name = 'ScriptError';
+    this.phase = phase;
   }
 }
 

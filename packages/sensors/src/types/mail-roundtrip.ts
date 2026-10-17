@@ -136,6 +136,7 @@ export const mailRoundTrip: SensorType = {
 
   async execute(context: CheckContext): Promise<CheckExecution> {
     const { SmtpSession } = await import('../support/mail/smtp.js');
+    const { MailError } = await import('../support/mail/connection.js');
     const { readCredential, readTransport } = await import('../support/mail/schema.js');
 
     const host = context.target.host;
@@ -193,7 +194,11 @@ export const mailRoundTrip: SensorType = {
       await session.quit();
     } catch (error) {
       session.close();
-      throw new Error(`the relay would not take the test message: ${describe(error)}`);
+      const message = `the relay would not take the test message: ${describe(error)}`;
+      // Reworded, and still where it failed (`P-406`).
+      throw error instanceof MailError
+        ? new MailError(message, { phase: error.phase, host }, error)
+        : new Error(message);
     }
     const sendTime = ms(sendStarted, process.hrtime.bigint());
 

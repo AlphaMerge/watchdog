@@ -57,6 +57,7 @@ import { sshLoad } from '../src/types/ssh-load.js';
 import { tlsCertificate } from '../src/types/tls-certificate.js';
 import { tlsSecurity } from '../src/types/tls-security.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 import { pollWithin } from './support/within.js';
 
 /**
@@ -387,6 +388,11 @@ describe('checkedTarget: one lookup, every answer checked', () => {
         error.message ===
           `the device’s host name did not resolve to an address, connecting to ${NAME}:22 (ENOTFOUND)`,
     );
+    // Said as the lookup of the device’s name (`P-406`), for whatever transport asked.
+    assert.deepEqual(
+      failedIn(await rejectionOf(() => checkedTarget(check(rebinding(), { resolve: failing })))),
+      { phase: 'resolve', target: NAME },
+    );
     // No answer the transport would use: nothing, a name where an address belongs, or only
     // the other family.
     for (const [answers, family, words] of [
@@ -421,13 +427,18 @@ describe('checkedTarget: one lookup, every answer checked', () => {
   it('gives a resolver that does not answer half the check’s time, and ends with the check', async () => {
     const hanging: ResolveHost = () => new Promise(() => undefined);
     const started = process.hrtime.bigint();
-    await assert.rejects(
-      () => checkedTarget(check(rebinding(), { resolve: hanging, timeoutMs: 600 })),
+    const timedOut = await rejectionOf(() =>
+      checkedTarget(check(rebinding(), { resolve: hanging, timeoutMs: 600 })),
+    );
+    assert.match(
+      String(timedOut),
       new RegExp(
         `^Error: the device’s host name did not resolve within 300 ms, connecting to ${NAME}:22 — ` +
           'the probe’s resolver is not answering$',
       ),
     );
+    // Both of the guard’s own ways of giving up are the lookup of the device’s name (`P-406`).
+    assert.deepEqual(failedIn(timedOut), { phase: 'resolve', target: NAME });
     const tookMs = Number(process.hrtime.bigint() - started) / 1e6;
     assert.ok(tookMs >= 250 && tookMs < 5_000, `took ${String(tookMs)} ms`);
 
@@ -438,10 +449,12 @@ describe('checkedTarget: one lookup, every answer checked', () => {
     setTimeout(() => {
       controller.abort();
     }, 30);
-    await assert.rejects(
-      () => pending,
+    const cancelled = await rejectionOf(() => pending);
+    assert.match(
+      String(cancelled),
       new RegExp(`^Error: the check was cancelled while connecting to ${NAME}:22$`),
     );
+    assert.deepEqual(failedIn(cancelled), { phase: 'resolve', target: NAME });
   });
 
   it('guardOf carries the pin, the policy and the resolver with the host', () => {
@@ -1410,12 +1423,13 @@ describe('ICMP ping is not held to the policy', () => {
   it('makes no lookup in the probe: ping is handed the name, and resolves it itself', async () => {
     const dns = rebinding();
     // A name nothing resolves: the failure is ping's own, not a refusal and not the guard's.
+    // Its resolver's, since `P-406`, and no longer "no ICMP reply": no echo was ever sent.
     await assert.rejects(
       () => catalogueOf(icmpPing, dns).execute('icmp.ping', contextFor(NAME)),
       (error: unknown) =>
         error instanceof Error &&
         !(error instanceof TargetRefusedError) &&
-        /no ICMP reply from device\.policy\.invalid/.test(error.message),
+        /ping could not resolve device\.policy\.invalid/.test(error.message),
     );
     assert.equal(dns.calls.length, 0);
     const { args } = pingCommand(

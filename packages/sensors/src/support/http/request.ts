@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 import { serverIdentity, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
 import { checkedTarget, type CheckedTarget } from '../checked-target.js';
+import { PhasedError } from '../phased-error.js';
 import {
   isCredentialsWithheld,
   pinnedLookup,
@@ -22,6 +23,25 @@ import {
  * the request is made — which is the part with the redirect rules, the two timings and the bound
  * on how much of a response is kept.
  */
+
+/**
+ * Where a request failed (`P-406`): the device's name (`resolve`), the connection (`connect`),
+ * its TLS and certificate (`handshake`), or the exchange once connected: no answer in time, an
+ * answer cut off, a redirect loop (`request`). What a sensor then makes of the answer it got, a
+ * status or a body it does not accept, is the sensor's, not the request's.
+ */
+export type HttpPhase = 'resolve' | 'connect' | 'handshake' | 'request';
+
+export class HttpError extends PhasedError {
+  override readonly phase: HttpPhase;
+
+  /** `host` is the device's host, never the URL: the message has that. */
+  constructor(message: string, where: { phase: HttpPhase; host: string }, cause?: unknown) {
+    super(message, where, cause);
+    this.name = 'HttpError';
+    this.phase = where.phase;
+  }
+}
 
 export interface HttpRequestOptions {
   readonly host: string;
@@ -190,8 +210,11 @@ function checkedForRequest(
     // words the request has always used for it.
     unresolved: (error) =>
       error === undefined
-        ? new Error(`the device’s host name did not resolve, requesting ${where}`)
-        : describeFailure(error, options, options.path),
+        ? new HttpError(`the device’s host name did not resolve, requesting ${where}`, {
+            phase: 'resolve',
+            host: options.host,
+          })
+        : describeFailure(error, options, options.path, false, 'resolve'),
   });
 }
 
@@ -232,6 +255,8 @@ export async function fetchHttp(
 
   for (;;) {
     const send = options.scheme === 'https' ? httpsRequest : httpRequest;
+    // How far the latest attempt got, which its failure names (`P-406`).
+    let reached: HttpPhase = 'connect';
     const exchange = (
       pinned: PinnedAddress | undefined,
       // How long this attempt has in all, and how long to connect when another address follows.
@@ -311,29 +336,40 @@ export async function fetchHttp(
           },
         );
 
-        const unanswered = (): Error =>
-          new Error(
+        // Before the connection was made, or on it (`P-406`).
+        const unanswered = (phase: HttpPhase): Error =>
+          new HttpError(
             `${options.scheme}://${options.host}:${String(options.port)}${path} did not answer ` +
               `within ${String(options.timeoutMs)} ms`,
+            { phase, host: options.host },
           );
         // **The connection has a bound of its own.** `setTimeout` below starts counting once the
         // socket is connected, so an address that never answers the SYN was left to the
         // system's own connect timeout, minutes long. With another checked address to try it
         // gets `connectMs` and the next is tried; the last gets what is left of the request.
         let connected = false;
+        // Where the exchange has got to, for a failure (`P-406`): the TLS handshake follows the
+        // connection for `https`, and the request is on its way once that is done.
+        reached = 'connect';
+        const onward: HttpPhase = options.scheme === 'https' ? 'handshake' : 'request';
         req.once('socket', (socket) => {
+          socket.once('secureConnect', () => {
+            reached = 'request';
+          });
           // Made already, between the request and this event: there is nothing to wait for.
           if (!socket.connecting && socket.remoteAddress !== undefined) {
             connected = true;
+            reached = onward;
             return;
           }
           socket.once('connect', () => {
             connected = true;
+            reached = onward;
           });
           const slow = setTimeout(() => {
             req.destroy(
               connectMs === undefined
-                ? unanswered()
+                ? unanswered('connect')
                 : Object.assign(new Error('the connection was not made in time'), {
                     code: CONNECT_SLOW,
                   }),
@@ -347,7 +383,7 @@ export async function fetchHttp(
           socket.once('close', made);
         });
         req.setTimeout(attemptMs, () => {
-          req.destroy(unanswered());
+          req.destroy(unanswered(reached));
         });
         req.on('error', (error) => {
           reject(connected ? error : new NeverConnected(error));
@@ -380,7 +416,13 @@ export async function fetchHttp(
           continue;
         }
         const error = never ? failure.reason : failure;
-        throw describeFailure(error, options, path, checked?.byGuard === true);
+        throw describeFailure(
+          error,
+          options,
+          path,
+          checked?.byGuard === true,
+          never ? 'connect' : reached,
+        );
       }
     }
 
@@ -395,10 +437,11 @@ export async function fetchHttp(
       break;
     }
     if (redirects >= options.maxRedirects) {
-      throw new Error(
+      throw new HttpError(
         `${options.host} redirected more than ${String(options.maxRedirects)} times from ` +
           `${options.path} — the last pointed at ${location}, which is usually a ` +
           'redirect loop',
+        { phase: 'request', host: options.host },
       );
     }
 
@@ -517,49 +560,81 @@ export function resolveRedirect(
   return `${url.pathname}${url.search}`;
 }
 
-/** Turns a socket or TLS failure into something that names the cause. */
+/**
+ * Turns a socket or TLS failure into something that names the cause, and where it was (`P-406`):
+ * `phase` is where the request had got to, `connect` before its connection was made and
+ * `request` on it, and a failure that says its own phase or names a cause of one says that.
+ */
 function describeFailure(
   error: unknown,
   options: HttpRequestOptions,
   path: string,
   byGuard = false,
+  phase: HttpPhase = 'request',
 ): Error {
   const where = `${options.scheme}://${options.host}:${String(options.port)}${path}`;
+  const at = (named: HttpPhase): { phase: HttpPhase; host: string } => ({
+    phase: named,
+    host: options.host,
+  });
   // A refusal over where the credentials may go is not a failure of the request (`A-41c`): it
   // keeps its class, which is what makes the sensor read Unknown rather than Down. **Unless the
   // address was the guard's own** (`A-54`): no credential set is behind that pin, so the same
   // refusal is a failed request, said without the words about credentials.
   if (isCredentialsWithheld(error)) {
     return byGuard
-      ? new Error(
+      ? new HttpError(
           `requesting ${where} was refused: the connection was not made to the address of ` +
             `${options.host} that was checked against the target policy, so nothing it ` +
             'answered is used — a proxy between the probe and the device does this',
+          at('connect'),
         )
       : error;
   }
   const code = (error as NodeJS.ErrnoException).code ?? '';
   const message = error instanceof Error ? error.message : String(error);
+  // A timeout this module raised already knows which side of the connection it fell on.
+  const here = error instanceof HttpError ? error.phase : phase;
 
-  if (code === 'ABORT_ERR') return new Error(`the check was cancelled while requesting ${where}`);
-  if (code === 'ECONNREFUSED') return new Error(`nothing is listening at ${where}`);
-  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return new Error(`the device’s host name did not resolve, requesting ${where}`);
+  if (code === 'ABORT_ERR') {
+    return new HttpError(`the check was cancelled while requesting ${where}`, at(here), error);
   }
-  if (code === 'CERT_HAS_EXPIRED') return new Error(`the certificate at ${where} has expired`);
+  if (code === 'ECONNREFUSED') {
+    return new HttpError(`nothing is listening at ${where}`, at('connect'), error);
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return new HttpError(
+      `the device’s host name did not resolve, requesting ${where}`,
+      at('resolve'),
+      error,
+    );
+  }
+  if (code === 'CERT_HAS_EXPIRED') {
+    return new HttpError(`the certificate at ${where} has expired`, at('handshake'), error);
+  }
   if (code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'SELF_SIGNED_CERT_IN_CHAIN') {
-    return new Error(
+    return new HttpError(
       `the certificate at ${where} is self-signed and this sensor verifies certificates — turn ` +
         'that off if it is meant to be, or use a TLS Certificate sensor to watch it properly',
+      at('handshake'),
+      error,
     );
   }
   if (code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
-    return new Error(`the certificate at ${where} is not valid for ${options.host}`);
+    return new HttpError(
+      `the certificate at ${where} is not valid for ${options.host}`,
+      at('handshake'),
+      error,
+    );
   }
   if (options.verifyTls && code.startsWith('UNABLE_TO_')) {
-    return new Error(`the certificate at ${where} could not be verified: ${message}`);
+    return new HttpError(
+      `the certificate at ${where} could not be verified: ${message}`,
+      at('handshake'),
+      error,
+    );
   }
-  return new Error(`requesting ${where} failed: ${message}`);
+  return new HttpError(`requesting ${where} failed: ${message}`, at(here), error);
 }
 
 /** The parameters every HTTP sensor shares, so the three forms cannot drift apart. */

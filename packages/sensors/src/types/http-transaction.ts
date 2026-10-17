@@ -7,6 +7,7 @@ import type {
 } from '../contract.js';
 import { authorizationFor, scrub, secretsOf } from '../support/http/auth.js';
 import { extract, MAX_PATTERN, PatternError } from '../support/pattern.js';
+import { reworded } from '../support/phased-error.js';
 import { isCredentialsWithheld } from '../support/pinned-target.js';
 import { scrubberOf } from '../support/secrets.js';
 import { HTTP_COMMON_SCHEMA } from './http-shared.js';
@@ -477,12 +478,13 @@ export const httpTransaction: SensorType = {
         // A refusal over where the credentials may go keeps its class (`A-41c`): rewrapped, it
         // would read as a failed step, and the sensor Down for a device nothing was sent to.
         if (isCredentialsWithheld(error)) throw error;
-        throw new Error(
-          scrub(
-            `${where} failed: ${error instanceof Error ? error.message : String(error)}`,
-            secrets,
-          ),
+        const message = scrub(
+          `${where} failed: ${error instanceof Error ? error.message : String(error)}`,
+          secrets,
         );
+        // Reworded for the step, and still where the request failed (`P-406`): the request's,
+        // the target guard's lookup or the policy's refusal, whichever it was.
+        throw reworded(error, message);
       });
 
       total += response.totalMs;

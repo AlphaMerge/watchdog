@@ -1,4 +1,4 @@
-import { MailConnection, MailError, type MailConnectionOptions } from './connection.js';
+import { MailConnection, type MailConnectionOptions } from './connection.js';
 
 /**
  * As much SMTP as a monitoring check needs (`T-17`).
@@ -46,26 +46,28 @@ export class SmtpSession {
     try {
       const greeting = await session.#read('the greeting');
       if (greeting.code !== 220) {
-        throw new MailError(
+        throw connection.failed(
           `${options.host} greeted with ${String(greeting.code)} rather than 220: ${greeting.text}`,
         );
       }
       await session.#hello(options.host);
       if (options.security === 'starttls') {
+        connection.phase = 'handshake';
         if (!session.#capabilities.has('STARTTLS')) {
           // Named rather than silently continuing in the clear. A sensor that quietly downgraded
           // would report a healthy relay while sending credentials in plain text.
-          throw new MailError(
+          throw connection.failed(
             `${options.host} does not offer STARTTLS, and this sensor was told to require it`,
           );
         }
         const ready = await session.command('STARTTLS', 'the STARTTLS reply');
         if (ready.code !== 220) {
-          throw new MailError(`STARTTLS was refused with ${String(ready.code)}: ${ready.text}`);
+          throw connection.failed(`STARTTLS was refused with ${String(ready.code)}: ${ready.text}`);
         }
         await connection.upgrade(signal);
         // The capability list before and after an upgrade are different documents — AUTH in
         // particular usually appears only once the connection is encrypted.
+        connection.phase = 'connect';
         await session.#hello(options.host);
       }
     } catch (error) {
@@ -99,7 +101,7 @@ export class SmtpSession {
     }
     const plain = await this.command(`HELO ${name}`, 'the HELO reply');
     if (plain.code !== 250) {
-      throw new MailError(
+      throw this.#connection.failed(
         `${host} refused both EHLO and HELO — the last was ${String(plain.code)}: ${plain.text}`,
       );
     }
@@ -107,32 +109,41 @@ export class SmtpSession {
   }
 
   async authenticate(username: string, password: string): Promise<void> {
+    this.#connection.phase = 'authenticate';
     if (this.#capabilities.has('AUTH=PLAIN')) {
       const token = Buffer.from(`\0${username}\0${password}`).toString('base64');
       const reply = await this.command(`AUTH PLAIN ${token}`, 'the authentication reply');
       if (reply.code === 235) return;
-      throw new MailError(`authentication was refused: ${String(reply.code)} ${reply.text}`);
+      throw this.#connection.failed(
+        `authentication was refused: ${String(reply.code)} ${reply.text}`,
+      );
     }
     if (this.#capabilities.has('AUTH=LOGIN')) {
       const start = await this.command('AUTH LOGIN', 'the authentication challenge');
       if (start.code !== 334) {
-        throw new MailError(`AUTH LOGIN was refused: ${String(start.code)} ${start.text}`);
+        throw this.#connection.failed(
+          `AUTH LOGIN was refused: ${String(start.code)} ${start.text}`,
+        );
       }
       const asked = await this.command(
         Buffer.from(username).toString('base64'),
         'the password challenge',
       );
       if (asked.code !== 334) {
-        throw new MailError(`the user name was refused: ${String(asked.code)} ${asked.text}`);
+        throw this.#connection.failed(
+          `the user name was refused: ${String(asked.code)} ${asked.text}`,
+        );
       }
       const done = await this.command(
         Buffer.from(password).toString('base64'),
         'the authentication reply',
       );
       if (done.code === 235) return;
-      throw new MailError(`authentication was refused: ${String(done.code)} ${done.text}`);
+      throw this.#connection.failed(
+        `authentication was refused: ${String(done.code)} ${done.text}`,
+      );
     }
-    throw new MailError(
+    throw this.#connection.failed(
       'this server offers no authentication mechanism this sensor can use — it advertised ' +
         (this.#capabilities.size === 0
           ? 'nothing at all, which means it only speaks HELO'
@@ -150,12 +161,13 @@ export class SmtpSession {
    * cannot forget.
    */
   async send(from: string, to: string, message: string): Promise<string> {
+    this.#connection.phase = 'send';
     for (const [what, address] of [
       ['sender', from],
       ['recipient', to],
     ] as const) {
       if (/[\r\n]/.test(address)) {
-        throw new MailError(
+        throw this.#connection.failed(
           `the ${what} address contains a line break, which would end the SMTP command and let ` +
             'whatever follows it be read as another one',
         );
@@ -163,17 +175,19 @@ export class SmtpSession {
     }
     const sender = await this.command(`MAIL FROM:<${from}>`, 'the MAIL FROM reply');
     if (sender.code !== 250) {
-      throw new MailError(`the sender ${from} was refused: ${String(sender.code)} ${sender.text}`);
+      throw this.#connection.failed(
+        `the sender ${from} was refused: ${String(sender.code)} ${sender.text}`,
+      );
     }
     const recipient = await this.command(`RCPT TO:<${to}>`, 'the RCPT TO reply');
     if (recipient.code !== 250 && recipient.code !== 251) {
-      throw new MailError(
+      throw this.#connection.failed(
         `the recipient ${to} was refused: ${String(recipient.code)} ${recipient.text}`,
       );
     }
     const start = await this.command('DATA', 'the DATA reply');
     if (start.code !== 354) {
-      throw new MailError(
+      throw this.#connection.failed(
         `the server would not accept a message: ${String(start.code)} ${start.text}`,
       );
     }
@@ -186,7 +200,7 @@ export class SmtpSession {
     this.#connection.write(`${body}\r\n.`);
     const accepted = await this.#read('the message to be accepted');
     if (accepted.code !== 250) {
-      throw new MailError(
+      throw this.#connection.failed(
         `the message was refused after DATA: ${String(accepted.code)} ${accepted.text}`,
       );
     }

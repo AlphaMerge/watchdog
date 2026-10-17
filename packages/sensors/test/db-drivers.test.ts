@@ -6,6 +6,7 @@ import { mysqlDriver } from '../src/support/db/mysql.js';
 import { postgresqlDriver } from '../src/support/db/postgresql.js';
 import type { DbConnectOptions, DbDriver } from '../src/support/db/driver.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 
 /**
  * The three drivers against three real servers.
@@ -207,6 +208,81 @@ for (const engine of ENGINES) {
       await assert.rejects(
         () => runDbCheck(engine.driver, context(engine, { query: engine.one, port: 1 })),
         /nothing is listening|connect/i,
+      );
+    });
+
+    it('says where it failed, and the server’s host, from the real driver (P-406)', async (t) => {
+      if (!engine.available) {
+        t.skip(`${engine.name} is not running`);
+        return;
+      }
+      const host = engine.options.host;
+      const wrongPassword = await rejectionOf(() =>
+        runDbCheck(
+          engine.driver,
+          context(
+            engine,
+            { query: engine.one },
+            { database: { username: engine.options.username, password: 'definitely-wrong' } },
+          ),
+        ),
+      );
+      assert.deepEqual(
+        failedIn(wrongPassword),
+        { phase: 'authenticate', target: host },
+        String(wrongPassword),
+      );
+
+      const refused = await rejectionOf(() =>
+        runDbCheck(engine.driver, context(engine, { query: engine.one, port: 1 })),
+      );
+      assert.deepEqual(failedIn(refused), { phase: 'connect', target: host }, String(refused));
+
+      // Each server says a database it does not have its own way: PostgreSQL as 3D000; MariaDB,
+      // to an account that may not see it, as access denied to that database; SQL Server as a
+      // failed login, in the same words as the wrong password. Each says where, and the host.
+      const missing = await rejectionOf(() =>
+        runDbCheck(
+          engine.driver,
+          context(engine, { query: engine.one, database: 'no_such_database_p406' }),
+        ),
+      );
+      if (engine.name === 'PostgreSQL') {
+        assert.match(String(missing), /has no database called “no_such_database_p406”/);
+      }
+      assert.deepEqual(
+        failedIn(missing),
+        {
+          phase: engine.name === 'Microsoft SQL Server' ? 'authenticate' : 'connect',
+          target: host,
+        },
+        String(missing),
+      );
+    });
+
+    it('says a certificate it will not accept is the handshake, from the real driver (P-406)', async (t) => {
+      if (!engine.available) {
+        t.skip(`${engine.name} is not running`);
+        return;
+      }
+      // The dev PostgreSQL speaks no TLS at all, so there is no certificate to refuse.
+      if (engine.name === 'PostgreSQL') {
+        t.skip('the dev PostgreSQL offers no TLS');
+        return;
+      }
+      // Both dev servers present a self-signed certificate. `mysql2` codes its failure
+      // `HANDSHAKE_SSL_ERROR` over Node's own code, which is what this proves is still read.
+      const refused = await rejectionOf(() =>
+        runDbCheck(
+          engine.driver,
+          context(engine, { query: engine.one, encrypt: 'require', verifyTls: true }),
+        ),
+      );
+      assert.match(String(refused), /self-signed/);
+      assert.deepEqual(
+        failedIn(refused),
+        { phase: 'handshake', target: engine.options.host },
+        String(refused),
       );
     });
   });

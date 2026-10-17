@@ -10,6 +10,7 @@ import {
 import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 import { SCRUBBED } from '../src/support/secrets.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 
 /**
  * A real login flow, against a server that behaves like the ones this sensor exists for.
@@ -415,6 +416,36 @@ describe('http.transaction', () => {
       ],
     });
     assert.equal(execution.channels.length, 2);
+  });
+
+  it('keeps where a step’s request failed through the step’s own words (P-406)', async () => {
+    let error: unknown;
+    try {
+      await run({ port: 1, steps: [{ name: 'open the page', path: '/login' }] });
+    } catch (failure: unknown) {
+      error = failure;
+    }
+    assert.match(String(error), /step 1 of 1 \(open the page\) failed: nothing is listening/);
+    assert.deepEqual(failedIn(error), { phase: 'connect', target: '127.0.0.1' });
+  });
+
+  it('keeps the guard’s lookup and the policy’s refusal through the step’s own words (P-406)', async () => {
+    const steps = [{ name: 'open the page', path: '/login' }];
+    // A resolver that never answers: the guard gives up at half the check's time.
+    const name = 'device.transaction.invalid';
+    const hanging = (): Promise<never> => new Promise(() => undefined);
+    const stalled = await rejectionOf(() =>
+      run({ timeoutMs: 600, steps }, { target: { host: name, ipVersion: 'v4', resolve: hanging } }),
+    );
+    assert.match(String(stalled), /step 1 of 1 \(open the page\) failed: .*did not resolve within/);
+    assert.deepEqual(failedIn(stalled), { phase: 'resolve', target: name });
+
+    // A link-local address, refused by the default policy before a socket is made.
+    const refused = await rejectionOf(() =>
+      run({ steps }, { target: { host: '169.254.169.254', ipVersion: 'v4' } }),
+    );
+    assert.match(String(refused), /step 1 of 1 \(open the page\) failed: /);
+    assert.deepEqual(failedIn(refused), { phase: 'check', target: '169.254.169.254' });
   });
 });
 

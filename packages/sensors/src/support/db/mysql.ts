@@ -113,9 +113,13 @@ export const mysqlDriver: DbDriver = {
             throw new DbError(
               `the query was still running after ${String(options.statementTimeoutMs)} ms and ` +
                 'the server stopped it',
+              'query',
+              options.host,
             );
           }
-          if (querySignal.aborted) throw new DbError('the check was cancelled while querying');
+          if (querySignal.aborted) {
+            throw new DbError('the check was cancelled while querying', 'query', options.host);
+          }
           throw describeDbError(error, options, 'MySQL', 'query');
         } finally {
           querySignal.removeEventListener('abort', onAbort);

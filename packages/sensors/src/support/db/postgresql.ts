@@ -132,9 +132,13 @@ function wrap(client: pg.Client, options: DbConnectOptions): DbConnection {
             `the query was still running after ${String(options.statementTimeoutMs)} ms and ` +
               'PostgreSQL cancelled it — the statement timeout is server-side, so nothing was ' +
               'left running',
+            'query',
+            options.host,
           );
         }
-        if (signal.aborted) throw new DbError('the check was cancelled while querying');
+        if (signal.aborted) {
+          throw new DbError('the check was cancelled while querying', 'query', options.host);
+        }
         throw describeDbError(error, options, 'PostgreSQL', 'query');
       } finally {
         signal.removeEventListener('abort', onAbort);

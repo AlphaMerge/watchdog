@@ -11047,7 +11047,7 @@ because each is a decision rather than a defect:
         - Web (7): a target that is not text; a snapshot's failure; the state line; the Log
           tab; the Logs page; a phase read off the prototype; a row without the field.
 
-- [ ] **P-406 — half the transports name no phase, so their failures say none** · S · P-285 ·
+- [x] **P-406 — half the transports name no phase, so their failures say none** · S · P-285 ·
       Found 2026-10-17 in `P-285`. A result says where it failed only when the error the check
       threw has a `phase`. `SnmpError`, `SshError`, `CredentialsWithheldError`,
       `TargetRefusedError` and some `DbError`s do. `TlsError` has a host and no phase.
@@ -11056,6 +11056,107 @@ because each is a decision rather than a defect:
       failed lookup and a missing database name none. Ping, HTTP and the script types throw plain
       errors. **Done when** each of these names its phase and, where it has one, its host, as
       `adding-a-sensor-type.md` now asks, with a test per transport against its simulator.
+
+      **P-406 outcome. Every transport says where it failed, and on which host.**
+      - **One base, `PhasedError`** (`support/phased-error.ts`): a `phase` and a `host`, the shape
+        the probe's `failureSaid` already reads, so nothing changed in the probe or the core.
+        `TlsError`, `MailError`, `WindowsError`, `HttpError`, `PingError` and `ScriptError`
+        extend it, each with its phases as a type. `DbError` keeps its class and gains a `host`.
+        The target guard's own failures to resolve (no answer, too slow, cancelled) are
+        `resolve` with the device's name, for every socket transport.
+      - **Phases.** TLS: `resolve`, `connect`, `handshake` once the TCP connection is made. Mail,
+        all three protocols: `connect` to the greeting, `handshake` (implicit TLS once connected,
+        or `STARTTLS`), `authenticate`, `send` (SMTP from `MAIL FROM`), `query` (reading or
+        cleaning up a mailbox), and a socket error mid-conversation is the step it came in.
+        Windows: PowerShell's error category gives `connect`, `authenticate` or `query`, and
+        PowerShell itself is `exec`. Databases: `resolve`; `connect` (refused, too slow, no such
+        database); `handshake` (every certificate or TLS failure on the way in, `mysql2`'s
+        `HANDSHAKE_SSL_ERROR` among them); `authenticate` (`28P01`, `28000`,
+        `ER_ACCESS_DENIED_ERROR`, 18456, `ELOGIN`); `query`; the host on each. HTTP: `resolve`,
+        `connect`, `handshake` for `https`, and `request` once connected (no answer in time, a
+        cancel, a redirect loop). Ping: `echo` (ping printed what came back and nothing did, or
+        the check was cancelled while pinging), `resolve` (ping's own resolver did not know the
+        name) and `exec` (no `ping`, or a `ping` that could not ping from this probe). Scripts:
+        `exec` (did not start, failed, timed out, reported an error) and `output` (what it
+        printed is not a reading).
+      - **Decided: a new phase word only where none fitted.** The new ones are `handshake`,
+        `send`, `request`, `echo` and `output`. The web reads them as "Failed in “handshake” on
+        …" until it has words for them (`P-423`).
+      - **Decided: no host where the failure was on the probe's own machine.** That covers a
+        PowerShell that could not start or ran locally, a missing `ping` binary or one that sent
+        nothing, and every script: the device was never asked.
+      - **Decided: SQL Server's refused login is `authenticate`, in the server's own words.**
+        `tedious` codes every error the server sends during the login `ELOGIN` and keeps only
+        the last. The server ends both a wrong password and a missing database with "Login
+        failed for user", so the login failed, but saying "the credential" would be a guess.
+        MariaDB tells an account that may not see a database "access denied to that database",
+        and that stays the driver's words, at `connect`.
+      - **The rewordings keep where.** The round trip's "the relay would not take the test
+        message" and an HTTP transaction step's own words are thrown again with the phase and
+        host of the error they reword. The step reads them by shape (`reworded`), so the target
+        guard's lookup and the policy's refusal keep theirs as well as the request's.
+      - **Not done, filed.** The new phases have no words in the web (`P-423`). A sensor's
+        verdict on what the device answered names no phase (`P-424`).
+      - **Tests.** These use each transport's existing harness and no live target.
+        - `tls.test.ts`: port 1 and a plain-text port, for both TLS types, and a name an injected
+          resolver fails.
+        - `mail.test.ts`: the simulators refusing or delaying the greeting, offering no
+          `STARTTLS`, refusing the password and refusing `RCPT TO` (direct and through the round
+          trip), and refusing the cleanup; a raw POP3 server that resets at `PASS`; and implicit
+          TLS against the plain simulator, against a server that never answers (its timeout and
+          a cancel), and against port 1.
+        - `windows-transport.test.ts`: the fake PowerShell's categories, crash, silence, bad
+          JSON, flood and hang; the probe's own machine; a missing interpreter; `readEnvelope`
+          alone.
+        - `db-checked-target.test.ts`: a table over `describeDbError`, certificate codes and
+          `HANDSHAKE_SSL_ERROR` among its rows, and a TLS code in a query left to the query.
+        - `db-drivers.test.ts`: all three real servers, for a wrong password, port 1 and a
+          missing database; and MariaDB and SQL Server refusing their self-signed certificates
+          when verifying (the dev PostgreSQL offers no TLS, and skips).
+        - `icmp-ping.test.ts`: TEST-NET-1 for both ping types, a cancel, `PATH` with no `ping`,
+          `nosuch.invalid` for both types, and a fake `ping` that cannot open its socket.
+        - `ping.test.ts`: what each platform's `ping` says when it sent nothing.
+        - `http.test.ts`: the simulator's hang, loop and teapot, port 1, and https to the http
+          port.
+        - `http-transaction.test.ts`: port 1, a resolver that never answers, and a link-local
+          address the policy refuses.
+        - `exe-script.test.ts`: as above.
+        - `target-policy-transports.test.ts`: the guard's lookup that fails, is too slow, or is
+          cancelled.
+        - In all, 485/485 across the ten files. One run under load failed `tls.security, on its
+          first handshake and no other` on its 250 ms timing margin; the file then passed alone,
+          70/70. The neighbours (the other transport and policy files, `ping.test.ts`, the
+          probe's `process-runner`, `check-pool` and `sweep`) passed 817/817.
+        - After the review: the six files it touched (mail, icmp-ping, ping, http-transaction,
+          db-checked-target, db-drivers) 291/292, with the one skip the PostgreSQL TLS case
+          above. Their neighbours (http, tls, db-shared, jitter-range, the three policy files,
+          http-ssrf, windows-transport, exe-script and the probe's `sweep`) 768/768.
+      - **Mutants 17/17 killed.** Each one broke a phase, a host or a rewording in its own
+        transport, and each was killed by that transport's tests: the TLS `handshake`, SMTP's
+        login, Windows categories, `ELOGIN`, ping's no-reply and host, HTTP's handshake, request
+        and lookup, script output, the guard's lookups, both rewordings, `tls.security`'s last
+        phase, the database host, `readEnvelope`, and mail's socket error. Two survived their
+        first run, `readEnvelope`'s phase and mail's socket error. The `readEnvelope` test and
+        the POP3 reset are what now kill them.
+      - **Review.** Four findings, all fixed in this commit:
+        - Implicit-TLS mail said `connect` for its handshake failures, its timer and its cancel.
+          `open` now marks the TCP connection, as `tls/handshake.ts` and HTTP do.
+        - Ping said `echo` on the device for a name it could not resolve and for a probe that
+          could not open its socket. `sentNone` says `echo` only when ping printed its
+          statistics, `resolve` on its resolver's words, and otherwise `exec` with no host. The
+          message no longer says "4 sent" when nothing was sent, and
+          `target-policy-transports.test.ts` now expects those words.
+        - A transaction step's rewording kept the phase only from an `HttpError`, which lost the
+          guard's `resolve` and the policy's `check`. It now keeps any phase, by shape.
+        - `describeDbError` said `connect` for any certificate failure but self-signed and the
+          IPv6 case, and so for every MySQL one, since `mysql2` codes them all
+          `HANDSHAKE_SSL_ERROR`. Those codes are now `handshake` on the way in. The ranking of
+          several addresses, which `A-74` edits, is untouched.
+        - Six more mutants, all killed: the connection mark, ping saying it sent nothing, ping
+          reading its resolver's words, the step keeping only an `HttpError`'s phase, the missing
+          `HANDSHAKE_SSL_ERROR`, and a TLS code in a query read as the handshake.
+      - **On the way.** The first draft of the new TLS describe hung its file: its plain server
+        never read, so the client's hang-up never surfaced and `close` waited on the socket.
 
 - [x] **P-407 — a held result keeps its words but not where it failed** · XS · P-285 · Found
       2026-10-17 in `P-285`. A refusal (`withheld`, `A-41c`) and a check the probe could not start
@@ -11672,6 +11773,30 @@ because each is a decision rather than a defect:
       `credential-vouching.ts` counts a write that gave way, with a scenario test of a master
       on one probe and a held dependent on another, a write holding the dependent open across
       the release.
+
+- [ ] **P-423 — the web has no words for the phases `P-406` added** · XS · P-406 · Found
+      2026-10-17 in `P-406`. Five phases are new: `handshake` (TLS, mail, HTTP, databases),
+      `send` (SMTP), `request` (HTTP), `echo` (ping) and `output` (scripts). `failure-words.ts`
+      knows none of them, so the web says "Failed in “handshake” on 192.0.2.7". That is honest
+      but not words. **Done when** each of the five has a lead with a host and without one, in
+      `failure-words.ts`'s table, with its test.
+
+- [ ] **P-424 — a sensor's verdict on what the device answered names no phase** · S · P-406 ·
+      Found 2026-10-17 in `P-406`. The transports now say where they failed, but the sensor
+      types judge what came back with plain `Error`s, so nothing is stored beside the words:
+      - an HTTP status, body, pattern or header the sensor does not accept (`http-shared.ts`,
+        `http-content.ts`, `http-advanced.ts`, a transaction step's check);
+      - a query that returned the wrong number of rows (`db-shared.ts`);
+      - a round-trip message the relay took and the mailbox never got;
+      - a TLS handshake with no certificate;
+      - a Windows query with no rows (`windows-memory.ts`, `windows-cpu.ts`);
+      - the types' own cancels between two transport calls (`tls.security` between versions,
+        the round trip while it polls, a database check before it connects).
+
+      A missing credential or host is configuration, and stays without one. **Done when** each
+      verdict names the phase it judged (`request` for HTTP, `query` for a database or Windows,
+      `handshake` for TLS, a phase for delivery) with the host, and each cancel the phase it
+      was in, with a test per type.
 
 - [ ] **P-427 — a superseded session's close marks its probe lost after the newer one found it**
       · S · P-416, R-05 · Found 2026-10-17 in `P-416`'s review. When a probe reconnects while its

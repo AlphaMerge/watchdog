@@ -71,7 +71,7 @@ export const mssqlDriver: DbDriver = {
     await new Promise<void>((resolve, reject) => {
       const onAbort = (): void => {
         connection.close();
-        reject(new DbError('the check was cancelled while connecting'));
+        reject(new DbError('the check was cancelled while connecting', 'connect', options.host));
       };
       signal.addEventListener('abort', onAbort, { once: true });
       connection.on('connect', (error?: Error) => {
@@ -96,6 +96,8 @@ export const mssqlDriver: DbDriver = {
                 new DbError(
                   `the query was still running after ${String(options.statementTimeoutMs)} ms ` +
                     'and was cancelled',
+                  'query',
+                  options.host,
                 ),
               );
               return;

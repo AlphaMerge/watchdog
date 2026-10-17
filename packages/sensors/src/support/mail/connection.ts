@@ -2,6 +2,7 @@ import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { serverIdentity, type TargetPolicy } from '@ms/shared';
 import { checkedTarget, lookupFor } from '../checked-target.js';
+import { PhasedError } from '../phased-error.js';
 import {
   isCredentialsWithheld,
   pinnedLookup,
@@ -54,10 +55,21 @@ export interface MailConnectionOptions {
 /** How much a server may say before this gives up. Generous for a mailbox listing, and bounded. */
 const MAX_REPLY_BYTES = 4 * 1024 * 1024;
 
-export class MailError extends Error {
-  constructor(message: string) {
-    super(message);
+/**
+ * Where a mail check failed (`P-406`), the same words for all three protocols: reaching the
+ * server and being greeted (`connect`), TLS, immediate or after `STARTTLS` (`handshake`), the
+ * login (`authenticate`), handing SMTP a message (`send`), and reading or cleaning up a mailbox
+ * (`query`). A name that did not resolve fails in the target guard, as `resolve`.
+ */
+export type MailPhase = 'resolve' | 'connect' | 'handshake' | 'authenticate' | 'send' | 'query';
+
+export class MailError extends PhasedError {
+  override readonly phase: MailPhase;
+
+  constructor(message: string, where: { phase: MailPhase; host: string }, cause?: unknown) {
+    super(message, where, cause);
     this.name = 'MailError';
+    this.phase = where.phase;
   }
 }
 
@@ -67,6 +79,8 @@ export class MailConnection {
   #closed: Error | null = null;
   #waiting: (() => void) | null = null;
   readonly #options: MailConnectionOptions;
+  /** Where the conversation is, for a failure the connection itself raises (`P-406`). */
+  #phase: MailPhase = 'connect';
   /** Every line the server sent, for a failure that can show the conversation. */
   readonly transcript: string[] = [];
 
@@ -76,13 +90,26 @@ export class MailConnection {
     this.#bind(socket);
   }
 
+  /**
+   * The step the protocol is at, which a failure the connection raises names: set by the
+   * session as it moves from one to the next.
+   */
+  set phase(phase: MailPhase) {
+    this.#phase = phase;
+  }
+
+  /** A failure at the step the protocol is at, or at `phase`, on this connection's host. */
+  failed(message: string, phase: MailPhase = this.#phase, cause?: unknown): MailError {
+    return new MailError(message, { phase, host: this.#options.host }, cause);
+  }
+
   #bind(socket: Socket | TLSSocket): void {
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
       this.#buffer += chunk;
       if (this.#buffer.length > MAX_REPLY_BYTES) {
         this.#fail(
-          new MailError(
+          this.failed(
             `${this.#options.host} sent more than ${String(MAX_REPLY_BYTES)} bytes in one reply`,
           ),
         );
@@ -91,10 +118,11 @@ export class MailConnection {
       this.#waiting?.();
     });
     socket.on('error', (error: Error) => {
-      this.#fail(error);
+      // Its own words, at the step it came in (`P-406`).
+      this.#fail(error instanceof MailError ? error : this.failed(error.message, undefined, error));
     });
     socket.on('close', () => {
-      this.#fail(new MailError(`${this.#options.host} closed the connection`));
+      this.#fail(this.failed(`${this.#options.host} closed the connection`));
     });
   }
 
@@ -131,6 +159,10 @@ export class MailConnection {
         ? lookupFor(options.host, checked)
         : { lookup: pinnedLookup(options.host, pinned) };
     const socket = await new Promise<Socket | TLSSocket>((resolve, reject) => {
+      // Made once the TCP connection is (`P-406`): over implicit TLS, what fails after it is the
+      // handshake, as `tls/handshake.ts` and the HTTP request say.
+      let connected = false;
+      const reached = (): MailPhase => (connected ? 'handshake' : 'connect');
       const done = (error: Error): void => {
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
@@ -141,8 +173,12 @@ export class MailConnection {
           made.destroy();
           done(
             new MailError(
-              `${options.host}:${String(options.port)} did not accept a connection within ` +
-                `${String(options.timeoutMs)} ms`,
+              connected
+                ? `${options.host}:${String(options.port)} accepted the connection and did not ` +
+                    `complete a TLS handshake within ${String(options.timeoutMs)} ms`
+                : `${options.host}:${String(options.port)} did not accept a connection within ` +
+                    `${String(options.timeoutMs)} ms`,
+              { phase: reached(), host: options.host },
             ),
           );
         },
@@ -152,7 +188,14 @@ export class MailConnection {
       timer.unref();
       const onAbort = (): void => {
         made.destroy();
-        done(new MailError(`the check was cancelled while connecting to ${options.host}`));
+        done(
+          new MailError(
+            connected
+              ? `the check was cancelled during the TLS handshake with ${options.host}`
+              : `the check was cancelled while connecting to ${options.host}`,
+            { phase: reached(), host: options.host },
+          ),
+        );
       };
       signal.addEventListener('abort', onAbort, { once: true });
 
@@ -177,6 +220,11 @@ export class MailConnection {
               ...(family === 0 ? {} : { family }),
               ...pin,
             });
+      if (options.security === 'tls') {
+        made.once('connect', () => {
+          connected = true;
+        });
+      }
 
       made.once(options.security === 'tls' ? 'secureConnect' : 'connect', () => {
         // Before anything is said on it, and so before a password is (`A-41c`): the far end
@@ -193,7 +241,7 @@ export class MailConnection {
         resolve(made);
       });
       made.once('error', (error: Error) => {
-        done(describe(error, options));
+        done(describe(error, options, reached()));
       });
     });
 
@@ -217,16 +265,17 @@ export class MailConnection {
     const secure = await new Promise<TLSSocket>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(
-          new MailError(
+          this.failed(
             `${this.#options.host} did not complete a TLS handshake within ` +
               `${String(this.#options.timeoutMs)} ms of STARTTLS`,
+            'handshake',
           ),
         );
       }, this.#options.timeoutMs);
       timer.unref();
       const onAbort = (): void => {
         clearTimeout(timer);
-        reject(new MailError(`the check was cancelled during the TLS handshake`));
+        reject(this.failed(`the check was cancelled during the TLS handshake`, 'handshake'));
       };
       signal.addEventListener('abort', onAbort, { once: true });
 
@@ -252,7 +301,7 @@ export class MailConnection {
       upgraded.once('error', (error: Error) => {
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
-        reject(describe(error, this.#options));
+        reject(describe(error, this.#options, 'handshake'));
       });
     });
 
@@ -285,11 +334,11 @@ export class MailConnection {
       }
       if (this.#closed !== null) throw this.#closed;
       if (signal.aborted) {
-        throw new MailError(`the check was cancelled while waiting for ${what}`);
+        throw this.failed(`the check was cancelled while waiting for ${what}`);
       }
       const left = deadline - Date.now();
       if (left <= 0) {
-        throw new MailError(
+        throw this.failed(
           `${this.#options.host} did not finish ${what} within ` +
             `${String(this.#options.timeoutMs)} ms` +
             (this.#buffer === '' ? ' (it sent nothing at all)' : ''),
@@ -341,28 +390,54 @@ function isAddress(host: string): boolean {
   return /^[0-9.]+$/.test(host) || host.includes(':');
 }
 
-/** Turns a socket or TLS failure into something that names the cause. */
-function describe(error: unknown, options: MailConnectionOptions): Error {
+/**
+ * Turns a socket or TLS failure into something that names the cause, and where it was: `phase`
+ * is where the socket had got to: `connect`, or `handshake` once connected over implicit TLS or
+ * upgrading after `STARTTLS`. A TLS failure comes only after the connection, so that is enough.
+ */
+function describe(
+  error: unknown,
+  options: MailConnectionOptions,
+  phase: MailPhase = 'connect',
+): Error {
   // A refusal over where the credentials may go keeps its class (`A-41c`): that is what makes
   // the sensor read Unknown rather than Down.
   if (isCredentialsWithheld(error)) return error;
   const where = `${options.host}:${String(options.port)}`;
   const code = (error as NodeJS.ErrnoException).code ?? '';
   const message = error instanceof Error ? error.message : String(error);
+  const at = (named: MailPhase): { phase: MailPhase; host: string } => ({
+    phase: named,
+    host: options.host,
+  });
 
-  if (code === 'ECONNREFUSED') return new MailError(`nothing is listening at ${where}`);
-  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return new MailError(`the device’s host name did not resolve, connecting to ${where}`);
+  if (code === 'ECONNREFUSED') {
+    return new MailError(`nothing is listening at ${where}`, at('connect'), error);
   }
-  if (code === 'CERT_HAS_EXPIRED') return new MailError(`the certificate at ${where} has expired`);
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return new MailError(
+      `the device’s host name did not resolve, connecting to ${where}`,
+      at('resolve'),
+      error,
+    );
+  }
+  if (code === 'CERT_HAS_EXPIRED') {
+    return new MailError(`the certificate at ${where} has expired`, at('handshake'), error);
+  }
   if (code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'SELF_SIGNED_CERT_IN_CHAIN') {
     return new MailError(
       `the certificate at ${where} is self-signed and this sensor verifies certificates — turn ` +
         'that off if it is meant to be, or watch it properly with a TLS Certificate sensor',
+      at('handshake'),
+      error,
     );
   }
   if (code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
-    return new MailError(`the certificate at ${where} is not valid for ${options.host}`);
+    return new MailError(
+      `the certificate at ${where} is not valid for ${options.host}`,
+      at('handshake'),
+      error,
+    );
   }
-  return new MailError(`connecting to ${where} failed: ${message}`);
+  return new MailError(`connecting to ${where} failed: ${message}`, at(phase), error);
 }

@@ -1,6 +1,7 @@
 import { isIP, type LookupFunction } from 'node:net';
 import { excepts, refuses, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../contract.js';
+import { PhasedError } from './phased-error.js';
 import {
   resolveBoundMs,
   resolveWithin,
@@ -124,7 +125,7 @@ export function guardOf(
 }
 
 /** A resolution the guard gave up on. Its message is already the whole diagnosis. */
-class ResolveGivenUp extends Error {}
+class ResolveGivenUp extends PhasedError {}
 
 function refusal(
   check: Pick<TargetCheck, 'host' | 'verb' | 'exception'>,
@@ -264,6 +265,8 @@ export async function checkedTarget(check: TargetCheck): Promise<CheckedTarget |
   // Bounded, and ended with the check: `getaddrinfo` cannot be cancelled, and a resolver that
   // does not answer would otherwise hold the check until its runner gave up on it.
   const boundMs = resolveBoundMs(check.timeoutMs);
+  // Where each of the guard's own failures was (`P-406`): the device's name, while resolving it.
+  const resolving = { phase: 'resolve', host } as const;
   let answers: Awaited<ReturnType<ResolveHost>>;
   try {
     answers = await resolveWithin(
@@ -271,11 +274,13 @@ export async function checkedTarget(check: TargetCheck): Promise<CheckedTarget |
       check.signal,
       boundMs,
       {
-        cancelled: () => new ResolveGivenUp(`the check was cancelled while ${check.doing}`),
+        cancelled: () =>
+          new ResolveGivenUp(`the check was cancelled while ${check.doing}`, resolving),
         timedOut: () =>
           new ResolveGivenUp(
             `the device’s host name did not resolve within ${String(boundMs)} ms, ` +
               `${check.doing} — the probe’s resolver is not answering`,
+            resolving,
           ),
       },
     );
@@ -300,9 +305,10 @@ export async function checkedTarget(check: TargetCheck): Promise<CheckedTarget |
 function unresolved(check: TargetCheck, error: unknown): Error {
   const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
   const family = check.family === 4 ? 'an IPv4 ' : check.family === 6 ? 'an IPv6 ' : 'an ';
-  return new Error(
+  return new PhasedError(
     `the device’s host name did not resolve to ${family}address, ${check.doing}` +
       (typeof code === 'string' && code !== '' ? ` (${code})` : ''),
+    { phase: 'resolve', host: check.host },
   );
 }
 

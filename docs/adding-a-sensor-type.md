@@ -427,7 +427,12 @@ than from the form.
   it is a plain host, an address, or either with a port: anything with `@`, `/`, `?`, `#` or a
   space is left off, so never put a URL there. Nothing else of the error crosses: not a command,
   not an OID, not a cause. An error with no `phase` leaves no `failure`, and the message alone
-  says it.
+  says it. A transport without an error class of its own extends `PhasedError`
+  (`support/phased-error.ts`), as TLS, mail, Windows, HTTP, ping and the script types do
+  (`P-406`); the target guard's own failure to resolve a name is already `resolve` with the
+  host. Leave the host off where the failure was on the probe's own machine (a program it could
+  not start, a script it ran). A sensor's verdict on what the device answered, a status or a body
+  it does not accept, names no phase yet (`P-424`).
 
 ### `preview(input)` (optional)
 

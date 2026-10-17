@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
+import { createServer as createNetServer, type Server as NetServer } from 'node:net';
 import { createServer, type Server } from 'node:tls';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -16,6 +17,7 @@ import {
   addressesOf,
 } from '../src/support/tls/handshake.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 
 /**
  * Real TLS servers with real certificates, generated here.
@@ -345,5 +347,70 @@ describe('tls.security', () => {
         .map((c) => c.key),
       ['score'],
     );
+  });
+});
+
+describe('where a TLS check failed (P-406)', () => {
+  /** A port that answers in plain text and hangs up, as a web server on the wrong port does. */
+  let plain: NetServer | undefined;
+  let plainPort = 0;
+  before(async () => {
+    plain = createNetServer((socket) => {
+      // Read what the client sends, or its hang-up never surfaces as `end`, the socket stays
+      // open, and `close` below waits on it for ever. A reset as the client gives up is fine.
+      socket.resume();
+      socket.on('error', () => undefined);
+      socket.end('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n');
+    });
+    plainPort = await new Promise<number>((resolve) => {
+      plain?.listen(0, '127.0.0.1', () => {
+        const address = plain?.address();
+        resolve(typeof address === 'object' && address !== null ? address.port : 0);
+      });
+    });
+  });
+  after(async () => {
+    await new Promise<void>((resolve) => {
+      if (plain === undefined) resolve();
+      else
+        plain.close(() => {
+          resolve();
+        });
+    });
+  });
+
+  it('names the connection, and the host, when nothing is listening', async () => {
+    for (const type of [tlsCertificate, tlsSecurity]) {
+      const error = await rejectionOf(() => run(type, { port: 1, timeoutMs: 2_000 }));
+      assert.deepEqual(failedIn(error), { phase: 'connect', target: '127.0.0.1' }, type.id);
+    }
+  });
+
+  it('names the handshake when the connection was made and the far end does not speak TLS', async () => {
+    for (const type of [tlsCertificate, tlsSecurity]) {
+      const error = await rejectionOf(() => run(type, { port: plainPort, timeoutMs: 4_000 }));
+      assert.deepEqual(failedIn(error), { phase: 'handshake', target: '127.0.0.1' }, type.id);
+    }
+  });
+
+  it('names the lookup, in the target guard, when the device’s name does not resolve', async () => {
+    const error = await rejectionOf(() =>
+      run(
+        tlsCertificate,
+        { port: 443 },
+        {
+          target: {
+            host: 'nowhere.tls.invalid',
+            ipVersion: 'v4',
+            resolve: () =>
+              Promise.reject(
+                Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+              ),
+          },
+        },
+      ),
+    );
+    assert.match(String(error), /did not resolve/);
+    assert.deepEqual(failedIn(error), { phase: 'resolve', target: 'nowhere.tls.invalid' });
   });
 });

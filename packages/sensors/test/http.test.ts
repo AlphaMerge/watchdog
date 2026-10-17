@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { httpRequest } from '../src/types/http.js';
 import { resolveRedirect, statusAccepted } from '../src/support/http/request.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
+import { failedIn, rejectionOf } from './support/failed-in.js';
 
 /**
  * A real HTTP server, because the interesting behaviour is all at the protocol edges: a redirect
@@ -244,6 +245,64 @@ describe('http.request', () => {
     }, 50);
     await assert.rejects(() => pending, /cancelled/);
     assert.ok(Date.now() - started < 3_000);
+  });
+});
+
+describe('where a request failed (P-406)', () => {
+  const at = (phase: string): { phase: string; target: string } => ({
+    phase,
+    target: '127.0.0.1',
+  });
+
+  it('names the connection, and the host, when nothing is listening', async () => {
+    assert.deepEqual(failedIn(await rejectionOf(() => run({ port: 1 }))), at('connect'));
+  });
+
+  it('names the handshake when the connection was made and TLS was not spoken on it', async () => {
+    const error = await rejectionOf(() => run({ scheme: 'https', path: '/' }));
+    assert.deepEqual(failedIn(error), at('handshake'), String(error));
+  });
+
+  it('names the request once connected: no answer in time, a cancel, a redirect loop', async () => {
+    const hung = await rejectionOf(() => run({ path: '/hang', timeoutMs: 500 }));
+    assert.match(String(hung), /did not answer within 500 ms/);
+    assert.deepEqual(failedIn(hung), at('request'));
+
+    const controller = new AbortController();
+    const cancelled = rejectionOf(() =>
+      run({ path: '/hang', timeoutMs: 30_000 }, { signal: controller.signal }),
+    );
+    setTimeout(() => {
+      controller.abort();
+    }, 200);
+    assert.deepEqual(failedIn(await cancelled), at('request'));
+
+    assert.deepEqual(failedIn(await rejectionOf(() => run({ path: '/loop' }))), at('request'));
+  });
+
+  it('names the lookup when the device’s name does not resolve', async () => {
+    const error = await rejectionOf(() =>
+      run(
+        {},
+        {
+          target: {
+            host: 'nowhere.http.invalid',
+            ipVersion: 'v4',
+            resolve: () =>
+              Promise.reject(
+                Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+              ),
+          },
+        },
+      ),
+    );
+    assert.deepEqual(failedIn(error), { phase: 'resolve', target: 'nowhere.http.invalid' });
+  });
+
+  it('names nothing for a status the sensor does not accept: the request worked', async () => {
+    const error = await rejectionOf(() => run({ path: '/teapot' }));
+    assert.match(String(error), /answered 418/);
+    assert.deepEqual(failedIn(error), { phase: undefined, target: undefined });
   });
 });
 
