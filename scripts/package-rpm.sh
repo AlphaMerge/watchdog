@@ -193,9 +193,21 @@ fi
 # reason: the CA it issued the first time must survive, and so must an edited configuration.
 # **What it did is written down for %posttrans** (\`H-40\` review): one word, which ms-setup writes
 # only at the end of a run that succeeded (\`H-35\`). The file is removed first, so that one left by
-# a transaction that never reached its %posttrans cannot speak for this one.
+# a transaction that never reached its %posttrans cannot speak for this one. **And which of this
+# package's units it left enabled, whatever its exit status** (\`H-40\`'s second review): ms-setup
+# enables them before anything in it can refuse — its configuration check, its restart — so a
+# setup that failed has enabled them too, and a swap's erase of the outgoing package, after this,
+# disables ms-probe.service, which both packages ship. A failed setup still fails this scriptlet,
+# which rpm reports and goes on from.
 rm -f /run/ms-rpm-setup.outcome
-/opt/ms/libexec/ms-setup --components $(IFS=,; echo "${services[*]}") --outcome /run/ms-rpm-setup.outcome
+ms_status=0
+/opt/ms/libexec/ms-setup --components $(IFS=,; echo "${services[*]}") --outcome /run/ms-rpm-setup.outcome || ms_status=\$?
+{
+$(for svc in "${services[@]}"; do
+  printf '  if systemctl is-enabled "ms-%s.service" >/dev/null 2>&1; then echo "ms-%s.service"; fi\n' "${svc}" "${svc}"
+done)
+} >/run/ms-rpm-setup.enabled 2>/dev/null || :
+exit "\${ms_status}"
 
 %preun
 # **\$1 is how many versions will remain afterwards.** On an upgrade that is 1 and this must do
@@ -232,17 +244,18 @@ fi
 # this release's, or rc.1's or rc.2's, which are the same — stops and disables ms-probe.service,
 # which both packages ship: the swap ended with the incoming package's probe stopped and disabled.
 # %posttrans runs once the whole transaction is done, whatever the outgoing package was. So each
-# service is enabled again where ms-setup ran to the end, as it enables them whatever its word,
-# and started again only where the word is \`started\`: not after a first installation, which
-# starts nothing, nor under MS_SETUP_NO_START. A run that failed wrote no word, and nothing is
-# done for it. On a plain install or upgrade all of this is already so, and asking changes nothing.
+# unit %post found enabled once ms-setup was done is enabled again — all of them after a setup that
+# ran to the end, which enables them whatever its word, and after one that failed, those it or the
+# installation before it had enabled (\`H-40\`'s second review) — and started again only where the
+# word is \`started\`: not after a first installation, which starts nothing, nor under
+# MS_SETUP_NO_START, nor after a setup that failed. On a plain install or upgrade all of this is
+# already so, and asking changes nothing.
 ms_outcome="\$(cat /run/ms-rpm-setup.outcome 2>/dev/null || :)"
-rm -f /run/ms-rpm-setup.outcome
-if [ -n "\${ms_outcome}" ]; then
-$(for svc in "${services[@]}"; do
-  printf '  systemctl enable "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
-done)
-fi
+ms_enabled="\$(cat /run/ms-rpm-setup.enabled 2>/dev/null || :)"
+rm -f /run/ms-rpm-setup.outcome /run/ms-rpm-setup.enabled
+for ms_unit in \${ms_enabled}; do
+  systemctl enable "\${ms_unit}" >/dev/null 2>&1 || :
+done
 if [ "\${ms_outcome}" = started ]; then
 $(for svc in "${services[@]}"; do
   printf '  systemctl start "ms-%s.service" >/dev/null 2>&1 \\\n' "${svc}"

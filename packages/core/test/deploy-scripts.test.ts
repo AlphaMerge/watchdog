@@ -1419,8 +1419,9 @@ describe('who shows a passing check’s warnings (`H-27`)', () => {
       ['scripts/package-deb.sh', /configure\)\n\s+\/opt\/ms\/libexec\/ms-setup --components /],
       [
         'scripts/package-rpm.sh',
-        // After the word an earlier transaction left is removed (`H-40`).
-        /%post\n(?:#.*\n)*rm -f \/run\/ms-rpm-setup\.outcome\n\/opt\/ms\/libexec\/ms-setup --components /,
+        // After the word an earlier transaction left is removed (`H-40`), with its exit status
+        // kept for the scriptlet's own (`H-40`'s second review).
+        /%post\n(?:#.*\n)*rm -f \/run\/ms-rpm-setup\.outcome\nms_status=0\n\/opt\/ms\/libexec\/ms-setup --components /,
       ],
     ] as const) {
       const text = read(packager);
@@ -2443,16 +2444,23 @@ describe(
   'the services across an rpm transaction: an erase, an upgrade, a swap (`H-40`)',
   { skip: linux ? false : 'Linux only' },
   () => {
-    /** Where the scriptlets look for an installed ms or ms-probe, and where %post leaves its word. */
+    /**
+     * Where the scriptlets look for an installed ms or ms-probe, and where %post leaves its word
+     * and the units ms-setup left enabled.
+     */
     const SETUP = '/opt/ms/libexec/ms-setup';
     const OUTCOME = '/run/ms-rpm-setup.outcome';
+    const ENABLED = '/run/ms-rpm-setup.enabled';
 
     /**
-     * What rc.1's and rc.2's %preun and %postun run, as their packager expanded them, comments
-     * aside (`git show v1.0.0-rc.2:scripts/package-rpm.sh`; rc.1's are the same). The outgoing
-     * package of a swap from either is one of these.
+     * What rc.1's and rc.2's %preun and %postun run, comments aside, transcribed from
+     * `git show v1.0.0-rc.2:scripts/package-rpm.sh` (blob 84f28cac; rc.1's, eb0760cd, has the
+     * same scriptlets). The outgoing package of a swap from either is one of these. **Released
+     * text, frozen** (`H-40`'s second review): never edit these to follow this release. If this
+     * release's %preun changes on purpose, the test that compares it with RC2_PREUN changes, and so
+     * do its title, the %posttrans comment in package-rpm.sh and `H-45`.
      */
-    const RC_PREUN = (services: readonly string[]): string =>
+    const RC2_PREUN = (services: readonly string[]): string =>
       [
         'if [ "$1" -eq 0 ]; then',
         ...services.flatMap((svc) => [
@@ -2462,7 +2470,7 @@ describe(
         'fi',
         '',
       ].join('\n');
-    const RC_POSTUN = [
+    const RC2_POSTUN = [
       'if [ "$1" -eq 0 ]; then',
       '  systemctl daemon-reload >/dev/null 2>&1 || :',
       '  echo "note: /etc/ms and /var/lib/ms-* were left in place." >&2',
@@ -2495,6 +2503,8 @@ exit "\${STUB_SETUP_STATUS:-0}"
       readonly setup: string;
       /** And /run/ms-rpm-setup.outcome. */
       readonly outcome: string;
+      /** And /run/ms-rpm-setup.enabled. */
+      readonly enabled: string;
     }
     /** A host with an installation's ms-setup in place, or none. */
     function host(installed: boolean): Host {
@@ -2503,6 +2513,7 @@ exit "\${STUB_SETUP_STATUS:-0}"
         box,
         setup: join(box.dir, 'opt-ms-libexec-ms-setup'),
         outcome: join(box.dir, 'run-ms-rpm-setup.outcome'),
+        enabled: join(box.dir, 'run-ms-rpm-setup.enabled'),
       };
       if (installed) writeFileSync(at.setup, STUB_SETUP, { mode: 0o755 });
       return at;
@@ -2519,7 +2530,10 @@ exit "\${STUB_SETUP_STATUS:-0}"
       remaining: number,
       env: NodeJS.ProcessEnv = {},
     ): SpawnSyncReturns<string> {
-      const moved = body.replaceAll(SETUP, at.setup).replaceAll(OUTCOME, at.outcome);
+      const moved = body
+        .replaceAll(SETUP, at.setup)
+        .replaceAll(OUTCOME, at.outcome)
+        .replaceAll(ENABLED, at.enabled);
       for (const path of ['/opt/', '/run/', '/etc/systemd/system']) {
         assert.ok(!code(moved).includes(path), `the scriptlet would reach this machine’s ${path}`);
       }
@@ -2535,13 +2549,18 @@ exit "\${STUB_SETUP_STATUS:-0}"
      * `dnf swap OUT IN`, and `rpm -U` from one version to the next, in rpm's order: the incoming
      * package's %pre, its files, its %post; then the outgoing package's %preun, its files away and
      * its %postun; then the incoming package's %posttrans, once the transaction is done. The two
-     * ship ms-setup at the same path, so it is there throughout.
+     * ship ms-setup at the same path, so it is there throughout. With `setupFails`, ms-setup
+     * exits 1 and writes no word, and the %post fails with it, which rpm reports and goes on from.
      */
     function transaction(
       at: Host,
       incoming: Record<string, string>,
       outgoing: { preun: string; postun: string },
-      { word, upgrade = false }: { word: string; upgrade?: boolean },
+      {
+        word,
+        upgrade = false,
+        setupFails = false,
+      }: { word: string; upgrade?: boolean; setupFails?: boolean },
     ): void {
       for (const [step, body, remaining] of [
         ['the incoming %pre', incoming['pre'] ?? '', upgrade ? 2 : 1],
@@ -2550,18 +2569,37 @@ exit "\${STUB_SETUP_STATUS:-0}"
         ['the outgoing %postun', outgoing.postun, upgrade ? 1 : 0],
         ['the incoming %posttrans', incoming['posttrans'] ?? '', 0],
       ] as const) {
-        const result = run(at, body, remaining, { STUB_WORD: word });
-        assert.equal(result.status, 0, `${step}: ${result.stderr}`);
+        const failing = setupFails && step === 'the incoming %post';
+        const result = run(
+          at,
+          body,
+          remaining,
+          failing ? { STUB_SETUP_STATUS: '1' } : { STUB_WORD: word },
+        );
+        if (failing) {
+          assert.notEqual(result.status, 0, 'the %post did not fail with its ms-setup');
+        } else {
+          assert.equal(result.status, 0, `${step}: ${result.stderr}`);
+        }
       }
       assert.ok(!existsSync(at.outcome), '%posttrans left the word behind');
+      assert.ok(!existsSync(at.enabled), '%posttrans left the list of enabled units behind');
     }
+    /** What %post asks once ms-setup is done: which of the package's units are enabled. */
+    const asked = (services: readonly string[]): string[] =>
+      services.map((svc) => `systemctl is-enabled ms-${svc}.service`);
     const units = (verb: string, services: readonly string[]): string[] =>
       services.map((svc) => `systemctl ${verb} ms-${svc}.service`);
 
     it('is rc.1’s and rc.2’s at an erase, and nothing at an upgrade', () => {
       for (const services of [['core', 'probe'], ['probe']]) {
         const { preun = '', postun = '' } = rpmScriptlets(services);
-        assert.equal(code(preun), RC_PREUN(services), `${services.join(',')} %preun`);
+        assert.equal(
+          code(preun),
+          RC2_PREUN(services),
+          `${services.join(',')}: this release's %preun is no longer rc.2's. Do not edit ` +
+            'RC2_PREUN, which is a released package’s; give this release its own expectation',
+        );
         // Stopped while the files are all there, and disabled while the unit file is.
         const erased = host(true);
         for (const body of [preun, postun]) {
@@ -2602,7 +2640,7 @@ exit "\${STUB_SETUP_STATUS:-0}"
         const ours = rpmScriptlets(outgoing);
         for (const [release, preun, postun] of [
           ['this release', ours['preun'] ?? '', ours['postun'] ?? ''],
-          ['rc.1 or rc.2', RC_PREUN(outgoing), RC_POSTUN],
+          ['rc.1 or rc.2', RC2_PREUN(outgoing), RC2_POSTUN],
         ] as const) {
           const why = `${swap}, from ${release}`;
           const at = host(true);
@@ -2614,6 +2652,7 @@ exit "\${STUB_SETUP_STATUS:-0}"
               'systemctl stop ms-core.service',
               'systemctl stop ms-probe.service',
               `ms-setup --components ${incoming.join(',')} --outcome ${at.outcome}`,
+              ...asked(incoming),
               ...outgoing.flatMap((svc) => [
                 `systemctl stop ms-${svc}.service`,
                 `systemctl disable ms-${svc}.service`,
@@ -2657,6 +2696,7 @@ exit "\${STUB_SETUP_STATUS:-0}"
         }
         assert.deepEqual(logLines(at), [
           `ms-setup --components ${services.join(',')} --outcome ${at.outcome}`,
+          ...asked(services),
           ...units('enable', services),
         ]);
       }
@@ -2678,6 +2718,7 @@ exit "\${STUB_SETUP_STATUS:-0}"
             'systemctl stop ms-core.service',
             'systemctl stop ms-probe.service',
             `ms-setup --components ${services.join(',')} --outcome ${at.outcome}`,
+            ...asked(services),
             ...units('enable', services),
             ...units('start', services),
           ],
@@ -2686,18 +2727,67 @@ exit "\${STUB_SETUP_STATUS:-0}"
       }
     });
 
-    it('does nothing after a setup that failed, whatever an earlier transaction left', () => {
+    it('starts nothing after a setup that failed, and leaves enabled what it enabled', () => {
       // A transaction that never reached its %posttrans left `started`; this one's ms-setup
-      // failed, and wrote nothing. rpm only warns of a %post that failed, and goes on.
+      // failed, and wrote nothing. rpm only warns of a %post that failed, and goes on. ms-setup
+      // enables the units before anything in it can refuse, so each one it left enabled is
+      // enabled again, and one it did not reach — the probe's, here — is left as it is.
       const at = host(true);
       writeFileSync(at.outcome, 'started\n');
       const { post = '', posttrans = '' } = rpmScriptlets(['core', 'probe']);
-      const failed = run(at, post, 1, { STUB_SETUP_STATUS: '1' });
+      const failed = run(at, post, 1, { STUB_SETUP_STATUS: '1', ENABLED_ms_probe: 'disabled' });
       assert.notEqual(failed.status, 0, 'the %post did not fail with its ms-setup');
       const result = run(at, posttrans, 0);
       assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(logLines(at), [`ms-setup --components core,probe --outcome ${at.outcome}`]);
+      assert.deepEqual(logLines(at), [
+        `ms-setup --components core,probe --outcome ${at.outcome}`,
+        ...asked(['core', 'probe']),
+        'systemctl enable ms-core.service',
+      ]);
       assert.ok(!existsSync(at.outcome));
+      assert.ok(!existsSync(at.enabled));
+    });
+
+    it('ends a swap whose setup failed with its units enabled and nothing started (`H-40`’s second review)', () => {
+      // `dnf swap` with a configuration ms-setup refuses: its %post fails, rpm goes on, and the
+      // outgoing package's erase disables ms-probe.service, which both packages ship. The
+      // transaction ends as ms-setup left the units — enabled — and starts nothing, whichever
+      // release the outgoing package is.
+      for (const [swap, incoming, outgoing] of [
+        ['ms to ms-probe', ['probe'], ['core', 'probe']],
+        ['ms-probe to ms', ['core', 'probe'], ['probe']],
+      ] as const) {
+        const ours = rpmScriptlets(outgoing);
+        for (const [release, preun, postun] of [
+          ['this release', ours['preun'] ?? '', ours['postun'] ?? ''],
+          ['rc.1 or rc.2', RC2_PREUN(outgoing), RC2_POSTUN],
+        ] as const) {
+          const why = `${swap}, from ${release}`;
+          const at = host(true);
+          // What an earlier transaction that never reached its %posttrans left.
+          writeFileSync(at.outcome, 'started\n');
+          transaction(
+            at,
+            rpmScriptlets(incoming),
+            { preun, postun },
+            { word: 'started', setupFails: true },
+          );
+          const log = logLines(at);
+          assert.deepEqual(
+            log.slice(-(outgoing.length * 2 + 1 + incoming.length)),
+            [
+              ...outgoing.flatMap((svc) => [
+                `systemctl stop ms-${svc}.service`,
+                `systemctl disable ms-${svc}.service`,
+              ]),
+              'systemctl daemon-reload',
+              ...units('enable', incoming),
+            ],
+            why,
+          );
+          assert.ok(!log.some((line) => /^systemctl (start|restart) /u.test(line)), why);
+        }
+      }
     });
 
     it('never fails a scriptlet when systemctl does, and says which service did not start', () => {
@@ -2711,12 +2801,14 @@ exit "\${STUB_SETUP_STATUS:-0}"
       const failing = { PATH: `${bin}:${at.box.env['PATH'] ?? ''}` };
       const {
         pre = '',
+        post = '',
         preun = '',
         postun = '',
         posttrans = '',
       } = rpmScriptlets(['core', 'probe']);
       for (const [step, body, remaining] of [
         ['%pre', pre, 2],
+        ['%post', post, 2],
         ['%preun', preun, 0],
         ['%postun', postun, 0],
       ] as const) {
@@ -2724,6 +2816,7 @@ exit "\${STUB_SETUP_STATUS:-0}"
         assert.equal(result.status, 0, `${step} would have failed:\n${result.stderr}`);
       }
       writeFileSync(at.outcome, 'started\n');
+      writeFileSync(at.enabled, 'ms-core.service\nms-probe.service\n');
       const result = run(at, posttrans, 0, failing);
       assert.equal(result.status, 0, `%posttrans would have failed:\n${result.stderr}`);
       for (const svc of ['core', 'probe']) {

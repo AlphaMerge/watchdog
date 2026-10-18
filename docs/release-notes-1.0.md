@@ -326,8 +326,11 @@ also says what taking back 064 and 073 does).
   - `dnf swap` between `ms` and `ms-probe`, either way, leaves the new package's services enabled
     and started as its setup says, between this release's packages (`H-40`). From an `.rpm` of
     rc.2 or older it should end the same, but has not been run from one (`H-45`): afterwards,
-    check `systemctl is-active ms-probe`, and run `systemctl enable --now ms-probe` if it is not
-    running ([installation.md §2](installation.md#2-the-application)).
+    `systemctl is-enabled ms-probe` should say `enabled` (`systemctl enable ms-probe` if not),
+    and the probe should be running only where the setup said it started the services. A swap
+    from `ms-probe` to `ms` on a probe's host is the core's first installation, which starts
+    nothing, the probe included, until the core has a database password; then start both
+    ([installation.md §2](installation.md#2-the-application)).
   - The two ways of watching the core from outside have run against a packaged core, but on the
     core's own host against 127.0.0.1, not from another machine (`H-25`;
     [watching the core from outside](administration.md#watching-the-core-from-outside)).

@@ -37398,6 +37398,30 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         the link itself, and back, *dnf swap -y ms-probe /pkg/ms-1.0.0~rc.2-1.aarch64.rpm: ms-probe
         gone, the probe inactive (MS_SETUP_NO_START), ms-core and ms-probe enabled*. `H-28`'s
         upgrade and `H-41`'s root probe passed on both boxes, as did every earlier assertion.
+      - **Second review.** **A swap whose setup failed ended with the probe disabled**: `ms-setup`
+        enables the units before anything in it can refuse, the outgoing package's erase then
+        disabled `ms-probe.service`, and `%posttrans` enabled nothing without a word. `%post` now
+        writes down which of the package's units are enabled once `ms-setup` is done, whatever
+        its exit status (`/run/ms-rpm-setup.enabled`), and exits with that status; `%posttrans`
+        enables each of them again and starts the services only where the word is `started`. So
+        a swap ends with the units as `ms-setup` left them — after a failed setup too — and
+        nothing started that it did not start. `smoke-packages.sh` asks `dpkg-query` for `ii` after
+        the swap back (`dpkg -s` answers for `rc` too), and its comment says what the box can and
+        cannot show: how the transaction ends, not that `%pre` stopped the probe before the
+        unpack, which only the scriptlets' log shows. `installation.md` §2 and the release notes:
+        the swap back on a probe's host is the core's first installation, which starts nothing,
+        the probe included, until the core has a database password (`H-30`); from rc.2, check
+        `systemctl is-enabled ms-probe`, and start it only where the setup said it started the
+        services. rc.2's `%preun` and `%postun` are `RC2_PREUN` and `RC2_POSTUN` now, said to be
+        released text that is never edited to follow this release.
+        Tests: `deploy-scripts.test.ts`, one more and one rewritten — a swap whose setup failed,
+        each way, from this release and from rc.2's scriptlets, ends with the outgoing stop and
+        disable, the reload and the incoming enables, and no start; a failed setup with a stale
+        `started` starts nothing and enables only what `ms-setup` left enabled. The transaction's
+        logs now have `%post`'s `is-enabled` questions, and a failing `systemctl` fails no
+        `%post` either. **Mutations 6/6**: `%post` writing down no enabled unit, exiting 0 after
+        a failed setup, or stopping at it; `%posttrans` enabling nothing, enabling only after a
+        word, or leaving the list. Each restored by copy, `utime` and a byte compare.
 
 - [x] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
       · Found 2026-10-07 in `P-276`. Since `P-276` a root probe with scripts and no
@@ -37486,7 +37510,7 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `installation.md` §2 and the release notes say the swap from rc.2 or older has not been
       run. **Done when** a Rocky 9 box (arm64) has the `v1.0.0-rc.2` `ms` rpm with its probe
       running swapped for this release's `ms-probe`, and an rc.2 `ms-probe` for this release's
-      `ms`, ending with the probe enabled and running as the setup left it, recorded in
+      `ms`, ending with the probe enabled, and running where the setup started it, recorded in
       `docs/findings/`; then those two sentences come out.
 
 ---

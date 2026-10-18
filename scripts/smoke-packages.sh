@@ -682,10 +682,14 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   # **The other way: a probe's host made the core's.** dnf installs `ms` first, over the tree the
   # running probe was started from, and erases `ms-probe` after it, so `ms`'s %pre has to stop the
   # probe before its files go in; apt removes `ms-probe` first. Under MS_SETUP_NO_START, as every
-  # step after the first install, so nothing starts the probe again and what is asserted is the
-  # stop and the enable: the probe stopped, and both units enabled once the transaction is done —
-  # `ms-probe`'s erase disables ms-probe.service, which both packages ship, and `ms`'s %posttrans
-  # enables it again.
+  # step after the first install, so nothing starts the probe again, and **what is asserted is how
+  # the transaction ends**: `ms` installed, `ms-probe` gone, the probe stopped, and both units
+  # enabled — `ms-probe`'s erase disables ms-probe.service, which both packages ship, and `ms`'s
+  # %posttrans enables it again. It cannot show that `ms`'s %pre stopped the probe before the
+  # unpack: the outgoing package's %preun (rpm) or prerm (deb) stops it later either way. That
+  # order is `deploy-scripts.test.ts`'s, which runs the scriptlets and asserts their exact log
+  # (`H-40`'s second review). This box has a core.json from the first install; a probe's host with
+  # none would make this the core's first installation, which starts nothing (`H-30`).
   echo "==> swapping ms-probe back for ms with the probe running (H-40 review)"
   ${fresh} bash -c "${install_cmd/PKG/${probe_name}}" >"${probe_log}" 2>&1 \
     || { sed 's/^/      /' "${probe_log}" >&2; fail "could not install ${probe_name} again for the swap back"; }
@@ -697,12 +701,17 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
     sed 's/^/      /' "${probe_log}" >&2
     fail "${core_swap_cmd/PKG/${pkg_name}} exited ${back_status}"
   fi
-  ${in} bash -c "${query_cmd}" >/dev/null 2>&1 || fail "ms is not installed after the swap back"
   if [ "${format}" = deb ]; then
+    # `ii`, not `dpkg -s`: `ms` has been `rc` since the swap above, and `dpkg -s` answers for that
+    # too (`H-40`'s second review).
+    # shellcheck disable=SC2016 # dpkg-query's own field syntax, for dpkg-query to expand
+    status="$(${in} dpkg-query -W -f='${db:Status-Abbrev}' ms 2>/dev/null | tr -d ' ' || true)"
+    [ "${status}" = ii ] || fail "dpkg says '${status}' for ms after the swap back, not ii"
     # shellcheck disable=SC2016 # dpkg-query's own field syntax, for dpkg-query to expand
     status="$(${in} dpkg-query -W -f='${db:Status-Abbrev}' ms-probe 2>/dev/null | tr -d ' ' || true)"
     [ "${status}" = rc ] || fail "dpkg says '${status}' for ms-probe after the swap back, not rc"
   else
+    ${in} bash -c "${query_cmd}" >/dev/null 2>&1 || fail "ms is not installed after the swap back"
     ! ${in} rpm -q ms-probe >/dev/null 2>&1 || fail "ms-probe is still installed after the swap back"
   fi
   probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"

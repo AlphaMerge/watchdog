@@ -167,11 +167,16 @@ either contains a core or it does not:
   probe it ends with runs from the new package, enabled (`H-40`). Back the other way —
   `sudo apt install ./ms_<version>_<arch>.deb`, or
   `sudo dnf swap ms-probe ./ms-<version>.<arch>.rpm` — the probe is stopped before the core's
-  package goes in, and set up again by it. Both ways are tested between packages of this
-  release. From an `.rpm` of 1.0.0-rc.2 or older the swap should end the same — the old
-  package's erase runs the same commands, and the new one starts the probe after it — but has
-  not been run against one (`H-45`): check `systemctl is-active ms-probe` afterwards, and
-  `sudo systemctl enable --now ms-probe` if it is not running.
+  package goes in, and the core's setup runs for both. **On a probe's host that is the core's
+  first installation**: there is no `/etc/ms/core.json` yet, so the setup writes one and starts
+  nothing, the probe included, until the core has a database password (`H-30`; §3). Then
+  `sudo systemctl start ms-core ms-probe`. Both ways are tested between packages of this
+  release, and either way the units end enabled, and running where the setup started them. From
+  an `.rpm` of 1.0.0-rc.2 or older the swap should end the same — the old package's erase runs
+  the same commands, and the new one enables the units again after it — but has not been run
+  against one (`H-45`): afterwards, `systemctl is-enabled ms-probe` should say `enabled`
+  (`sudo systemctl enable ms-probe` if not), and the probe should be running only where the
+  setup said it started the services.
 - `--core-only` where the probe is somewhere else entirely.
 - `--no-start` to stage a machine that is not meant to come up yet. `MS_SETUP_NO_START=1` does
   the same for a package install, which is what baking a golden image wants.
