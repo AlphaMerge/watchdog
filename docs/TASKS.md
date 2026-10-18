@@ -13174,7 +13174,8 @@ because each is a decision rather than a defect:
           busy and checks queued, and one zone A's checks at the restart past their 2 s bound,
           one with the main thread not taking the lookup ("the probe is overloaded") and the
           other measured at 3.4 s on its 2 s timer. The hosts-edit case passed 12 times and
-          failed only waiting for its workers. Not yet re-taken on a quiet VM.
+          failed only waiting for its workers. Re-taken in the fourth quiet window (2026-10-19,
+          `0e3d6ce9`): 20 of 20 runs passed, 5 of 5 each.
         - Protocol and Probe Health: `capabilities.test.ts` (65), `probe-health-report.test.ts`
           (48), core `probe-health.test.ts` (130) and `metrics.test.ts` (38),
           `health-types.test.ts` (24).
@@ -13287,6 +13288,16 @@ because each is a decision rather than a defect:
           MS_DNS_ARMS=zone,zonefile MS_DNS_COLD_MINUTES=7 node --test --test-concurrency=1
           packages/probe/dist/test/perf/name-lookups.test.js'"`. Read `zone` and `zonefile`
           against the third window's 2,251 given up and 31 s.
+        - **Measured** (2026-10-19, the fourth quiet window, at `0e3d6ce9`;
+          `docs/findings/2026-10-19-name-lookups-answer-file-and-lanes.md`), at 0.22 load per CPU
+          and 1.29x the reference machine's CPU:
+          - `zone`: the answering zone answered 31,500 of 31,500 and gave up **none**, against
+            the third window's 2,251; its 450 names were kept by p50 5,062 ms and the last at
+            28,225 ms, against 31,041 and 31,047 ms. The 3,500 given up are the silent zone's,
+            every check from the first scan. Nothing refused, deferred or timed out.
+          - `zonefile`: all 500 answers loaded before the wheel started; the answering zone
+            31,500 of 31,500; the silent zone's checks before their grace 2,478 of 2,478 served
+            from the file; past the grace 984 of 984 given up, as they should be.
         - **Expected**: `zone` improves on the third window. The silent zone, never answered,
           holds 3 lanes from the first tick and the answering zone is asked on the fourth, its
           names answering at once in the model, so its given-up checks fall from 2,251 towards
