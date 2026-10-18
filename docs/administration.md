@@ -1117,8 +1117,10 @@ program on the machine.
   `bin/ms-probe` and `ms-probe.service` set (and the Windows service's configuration). The other
   2 are left for the probe's own connection to the core. One of the 6 is kept for asking held
   names again, one for refreshing kept answers and one for names with nothing kept (a new
-  device, or one whose kept answer ran out between its scans), so a zone that stops answering
-  cannot hold the lanes the rest of the probe's names are asked on. The probe logs the thread
+  device, or one whose kept answer ran out between its scans). A zone that stops answering can
+  hold the four lanes refreshes may use, and on a running probe that costs nothing, since every
+  check is served its name's kept answer meanwhile; it cannot hold the lane kept for names with
+  nothing kept, or the one kept for held names. The probe logs the thread
   pool's size at start, and warns when it is less than 16: set it in the environment the probe
   starts in.
 - **A lane goes first to a domain that answers.** Of the lookups waiting for a lane, the probe
@@ -1135,7 +1137,11 @@ program on the machine.
 once, and the silent zone's names hold a lane each until their lookups end, after which the
 silent zone's names wait behind the answering ones. Until then, while more silent names are being
 asked than the four lanes first lookups may use, the answering names' first scans fail too; how
-long that takes is in `docs/findings/2026-10-17-name-lookups-a-scan.md` and its successor.
+long that takes is measured in `docs/findings/2026-10-18-name-lookups-through-the-resolver.md`:
+with one zone in ten silent and its lookups taking 30 s, about half the answering devices'
+sensors fail one scan, going Warning once, and every answering name is kept by 31 s. It is as
+long as `getaddrinfo` takes to give up on a silent name, which `/etc/resolv.conf`'s `timeout`
+and `attempts` bound.
 
 **A listener sensor's sender is resolved by it too** (`P-425`): an SNMP trap, syslog or flow
 sensor counting only its own device's, on a device given by name, asks this resolver for the

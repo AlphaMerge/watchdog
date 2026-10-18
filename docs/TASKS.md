@@ -12493,6 +12493,10 @@ because each is a decision rather than a defect:
           is still queued when its grace ends fails at once behind the four stuck refresh lanes.
           First lookups, and so the cold arms, are as before.
 
+      - **Measured** (2026-10-18, third quiet window, at `5b6bbd2a`):
+        - Both failures `A-66` measured are gone. A 100 ms resolver answered all 5,000 checks, and a warm probe with one zone in ten silent lost none of the answering zone's 36,000.
+        - A probe restarted during that outage gave up 2,251 of the answering zone's 31,500 checks in its first 31 s, and none after.
+        - `docs/findings/2026-10-18-name-lookups-through-the-resolver.md`. `P-438` and `P-432` follow from it, both decided for 1.0.
 - [ ] **P-427 — a superseded session's close marks its probe lost after the newer one found it**
       · S · P-416, R-05 · Found 2026-10-17 in `P-416`'s review. When a probe reconnects while its
       old connection is still open, the endpoint destroys the old connection. Its `#handleClose`
@@ -12600,6 +12604,13 @@ because each is a decision rather than a defect:
       back without touching a reading's words; or the type guide says a build cannot take a name
       or a unit away from existing sensors, and why.
 
+- [ ] **P-441 — Probe Health does not flag a resolver that is not keeping up** · S · P-426, A-66 ·
+      Found 2026-10-18 in `P-426`'s quiet window
+      (`docs/findings/2026-10-18-name-lookups-through-the-resolver.md`).
+      - **What Probe Health showed.** `lookupsInFlight` reached 449 to 483 in both zone arms, and `lookupsGivenUp` counted every check that failed for want of an answer. Neither channel has a limit, so Probe Health stayed Up through a restart that put about 2,250 sensors on healthy devices into Warning. The resolver was named only in those sensors' messages and in the probe's log.
+      - **The counter can hide the burst.** `lookupsGivenUp` is stored as a rate and a counter that falls reads as a reset, so the burst after a restart can hide behind the first record.
+      - **Done when** Probe Health goes Warning while the resolver is giving checks up, and says so in a message that names the resolver and the domains not answering. Judge the defaults against this finding's arms: Warning in the cold zone arm and the every-name-silent arm, not in the warm zone arm's answering zone, and not on the slow arm's first scan.
+      - **Done when, also:** a restart's given-up checks are not lost to the counter reset, with a test for each.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
