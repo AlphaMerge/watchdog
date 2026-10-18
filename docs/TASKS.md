@@ -12611,7 +12611,7 @@ because each is a decision rather than a defect:
       - **The counter can hide the burst.** `lookupsGivenUp` is stored as a rate and a counter that falls reads as a reset, so the burst after a restart can hide behind the first record.
       - **Done when** Probe Health goes Warning while the resolver is giving checks up, and says so in a message that names the resolver and the domains not answering. Judge the defaults against this finding's arms: Warning in the cold zone arm and the every-name-silent arm, not in the warm zone arm's answering zone, and not on the slow arm's first scan.
       - **Done when, also:** a restart's given-up checks are not lost to the counter reset, with a test for each.
-- [ ] **P-442 — a TLS identity test reads no server name under load and says nothing about why** · XS ·
+- [x] **P-442 — a TLS identity test reads no server name under load and says nothing about why** · XS ·
       A-71 · Found 2026-10-18 in `S4`'s second full suite, on a host at a load near 270. In
       `packages/sensors/test/tls-address-identity.test.ts`, 'tls.security on a device given by
       name still asks for it by name' failed at `assert.deepEqual(certificate.named,
@@ -12622,7 +12622,13 @@ because each is a decision rather than a defect:
       or never resolved `localhost`. **Done when** the test asserts the execution's outcome with
       `execution.message` before it reads `named`, so the next failure names its cause, and that
       cause is either fixed or filed.
-- [ ] **P-443 — the resolver client's late-answer test gives the ack 40 ms and reads busy under load** · XS ·
+
+      **P-442 outcome.** Not load but a port: `localhost` answers `::1` first, neither TLS sensor
+      asks for the device's `v4`, and `127.0.0.1:0` can be handed a port this file still holds on
+      `::1`, so the handshake went to another TLS server (a decoy there gives the `[]` found); the
+      case answers its own lookup with `127.0.0.1` and asserts each outcome, with its message,
+      before the names.
+- [x] **P-443 — the resolver client's late-answer test gives the ack 40 ms and reads busy under load** · XS ·
       P-426 · Found 2026-10-18 in `S4`'s fourth full suite, run beside an rpm smoke. In
       `packages/probe/test/resolve-client.test.ts`, 'ends its own wait at its bound and a little
       slack, and drops the late answer by its id' asks with `waitMs: 60`, so the ack bound
@@ -12632,6 +12638,10 @@ because each is a decision rather than a defect:
       changed no probe code. **Done when** the test sets its ack bound apart from its wait (the
       client takes `ackWithinMs`), so it tests the late path and not the scheduler, with a mutant
       showing it still fails when the late timer is removed.
+
+      **P-443 outcome.** The late case's ack bound is 10 s, past its wait and slack, so only the
+      late timer can end it (a mutant without that timer fails it); the ack-50 ms case had the
+      same race and now answers on a port with no channel between.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the

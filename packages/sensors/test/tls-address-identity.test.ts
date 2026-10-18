@@ -16,6 +16,7 @@ import { mailSmtp } from '../src/types/mail-smtp.js';
 import { tlsCertificate } from '../src/types/tls-certificate.js';
 import { tlsSecurity } from '../src/types/tls-security.js';
 import type { CheckExecution, SensorType } from '../src/contract.js';
+import type { ResolvedAddress, ResolveHost } from '../src/support/pinned-target.js';
 
 /**
  * A device given by address, over TLS, under a certificate that lists the address (`A-67`).
@@ -195,10 +196,11 @@ function run(
   host: string,
   params: Record<string, unknown>,
   ipVersion: 'auto' | 'v4' = 'auto',
+  resolve?: ResolveHost,
 ): Promise<CheckExecution> {
   return type.execute({
     sensorId: 67,
-    target: { host, ipVersion },
+    target: { host, ipVersion, ...(resolve === undefined ? {} : { resolve }) },
     params: { timeoutMs: 5_000, ...params },
     credentials: { mail: { username: 'ops', password: 'hunter2' } },
     // A check that is still running after this is a hang, and says so instead of the file's
@@ -534,15 +536,37 @@ describe('tls.certificate and tls.security on a device given by address', () => 
   it('tls.security on a device given by name still asks for it by name', async (t) => {
     const certificates = ready(t, false);
     if (certificates === null) return;
+    // **`localhost` is answered with the address the server is at, and nothing else** (`P-442`).
+    // The system's resolver answers `::1` first, and neither TLS sensor asks it for the device's
+    // IP version (the `v4` this case passed changed nothing), so each handshake tried `[::1]` at
+    // the server's port before `127.0.0.1`. In a full suite a TLS server was there: a port
+    // handed out on `127.0.0.1` can be one held on `::1`, and this file's own `::1` servers stay
+    // open until it ends. That server was asked for `localhost`, and this one was asked nothing.
+    // What this case is about is the name, so the lookup is the test's.
+    const resolve = (): Promise<ResolvedAddress[]> =>
+      Promise.resolve([{ address: '127.0.0.1', family: 4 }]);
     const server = await handshakes(certificates.forLocalhost, '127.0.0.1');
-    await run(tlsSecurity, 'localhost', { port: server.port }, 'v4');
-    assert.ok(server.named.length > 0, 'no handshake carried a server name');
-    assert.deepEqual([...new Set(server.named)], ['localhost']);
+    const scan = await run(tlsSecurity, 'localhost', { port: server.port }, 'auto', resolve);
+    // What the scan saw first, so that a server name missing below says where the scan got to.
+    assert.equal(valueOf(scan, 'tls12'), 1, scan.message);
+    assert.equal(valueOf(scan, 'tls13'), 1, scan.message);
+    assert.ok(
+      server.named.length > 0,
+      `no handshake carried a server name; the scan said: ${scan.message ?? 'nothing'}`,
+    );
+    assert.deepEqual([...new Set(server.named)], ['localhost'], scan.message);
     const certificate = await handshakes(certificates.forLocalhost, '127.0.0.1');
-    const execution = await run(tlsCertificate, 'localhost', { port: certificate.port }, 'v4');
-    assert.deepEqual(certificate.named, ['localhost']);
-    assert.equal(valueOf(execution, 'hostMatches'), 1);
+    const execution = await run(
+      tlsCertificate,
+      'localhost',
+      { port: certificate.port },
+      'auto',
+      resolve,
+    );
+    // A handshake with any other server reads as another certificate, and says whose.
     assert.equal(valueOf(execution, 'trusted'), 1, execution.message);
+    assert.equal(valueOf(execution, 'hostMatches'), 1, execution.message);
+    assert.deepEqual(certificate.named, ['localhost'], execution.message);
   });
 });
 

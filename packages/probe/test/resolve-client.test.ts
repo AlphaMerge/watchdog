@@ -15,6 +15,7 @@ import {
   ackWithinMs,
   PoolResolveClient,
   SETTLE_SLACK_MS,
+  type ResolvePort,
 } from '../src/runner/resolve-client.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -52,7 +53,41 @@ function channel(options: ConstructorParameters<typeof PoolResolveClient>[1] = {
     if (request === undefined) throw new Error('no resolve request');
     return request;
   };
-  return { client, main: port2, next };
+  /** Once the worker's end has read a message of this type: after the client, which listens first. */
+  const read = (type: string): Promise<void> =>
+    new Promise((resolve) => {
+      const heard = (message: { type?: unknown }): void => {
+        if (message.type !== type) return;
+        port1.off('message', heard);
+        resolve();
+      };
+      port1.on('message', heard);
+    });
+  return { client, main: port2, next, read };
+}
+
+/**
+ * A client on a port the test answers itself, with no channel between (`P-443`): what the test
+ * says reaches the client before the test's next line, not when the event loop next reads a
+ * channel. For a case whose bound the answer must beat, so that it does not race the host.
+ */
+function direct(options: ConstructorParameters<typeof PoolResolveClient>[1] = {}) {
+  const requests: ResolveRequest[] = [];
+  let listener: ((message: unknown) => void) | undefined;
+  const port: ResolvePort = {
+    postMessage: (request) => {
+      requests.push(request);
+    },
+    on: (_event, heard) => {
+      listener = heard;
+    },
+  };
+  const client = new PoolResolveClient(port, options);
+  const say = (message: unknown): void => {
+    assert.ok(listener !== undefined, 'the client listens on its port');
+    listener(message);
+  };
+  return { client, requests, say };
 }
 
 const codeOf = (error: unknown): unknown => (error as { code?: unknown }).code;
@@ -117,29 +152,48 @@ describe('a worker’s client of the probe’s resolver (P-426)', () => {
   });
 
   it('waits for the answer once the main thread has taken the lookup', async () => {
-    const { client, main, next } = channel({ ackWithinMs: 50 });
+    // The ack reaches the client before the event loop runs again (`P-443`). Over a channel it
+    // had 50 ms to cross, and a loaded host can take longer than that to read a channel: the ack
+    // timer then ended the request first, which is the busy path and not this one. Here the 50 ms
+    // bound is the thing the case waits past, and nothing races it.
+    const { client, requests, say } = direct({ ackWithinMs: 50 });
     const asked = client.resolve('slow.test', 4, { waitMs: 2_000 });
-    const { id } = await next();
-    main.postMessage({ type: 'resolve-ack', id });
+    const id = requests[0]?.id;
+    assert.ok(id !== undefined, 'the request was posted at once');
+    say({ type: 'resolve-ack', id });
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(client.pending, 1, 'still waiting, past the bound for the ack');
-    main.postMessage({ type: 'resolved', id, ok: true, addresses: A });
+    say({ type: 'resolved', id, ok: true, addresses: A });
     assert.deepEqual(await asked, A);
   });
 
   it('ends its own wait at its bound and a little slack, and drops the late answer by its id', async () => {
-    const { client, main, next } = channel({ slackMs: 20 });
+    // **The ack's bound is set apart from the wait** (`P-443`). Left to `ackWithinMs(60)` it was
+    // 40 ms, which the test's own `next()` and the ack's crossing had to beat, and on a loaded host
+    // did not: the client ended the request as busy (`ERESOLVERBUSY`). Past the wait and its
+    // slack, the ack timer cannot fire first whether the ack arrives in time or not, so what ends
+    // the request is the late timer and nothing else.
+    const { client, main, next, read } = channel({ slackMs: 20, ackWithinMs: 10_000 });
     const asked = client.resolve('late.test', 4, { waitMs: 60 });
+    // Held before the test waits for anything, so that a late timer that fires while `next()` is
+    // still out ends a promise somebody is holding.
+    const ended = assert.rejects(
+      within(1_000, 'the client to end its own wait', asked),
+      (error: Error) => {
+        assert.equal(codeOf(error), RESOLVER_LATE, error.message);
+        assert.match(error.message, /had not answered late\.test within 60 ms/u);
+        return true;
+      },
+    );
     const { id } = await next();
     main.postMessage({ type: 'resolve-ack', id });
-    await assert.rejects(within(1_000, 'the client to end its own wait', asked), (error: Error) => {
-      assert.equal(codeOf(error), RESOLVER_LATE);
-      assert.match(error.message, /had not answered late\.test within 60 ms/u);
-      return true;
-    });
+    await ended;
     assert.equal(client.pending, 0, 'nothing left waiting');
+    // The late answer read at the worker's end before anything is asked of the client, and not a
+    // pause that a loaded host can end before the answer has crossed.
+    const answered = read('resolved');
     main.postMessage({ type: 'resolved', id, ok: true, addresses: A });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await within(1_000, 'the late answer at the worker’s end', answered);
     assert.equal(client.pending, 0);
   });
 
