@@ -276,6 +276,14 @@ class Server {
     [];
   /** TCP questions waiting out a slow upstream's delay. */
   readonly #tcpTimers = new Set<NodeJS.Timeout>();
+  /**
+   * Answers `answer` gave as TC, by client address and question, with how many TCP retries are
+   * still owed one: the retry is given that answer, not held again.
+   */
+  readonly #retries = new Map<
+    string,
+    { readonly upstream: Extract<Upstream, { kind: 'reply' }>; left: number }
+  >();
 
   constructor(spec: DnsServerSpec) {
     this.name = spec.name;
@@ -405,6 +413,10 @@ class Server {
     socket.on('error', () => undefined);
     socket.on('close', () => {
       this.#connections.delete(socket);
+      // A held question whose connection has gone has no one to answer (L4).
+      for (let at = this.#tcpHeld.length - 1; at >= 0; at -= 1) {
+        if (this.#tcpHeld[at]?.waiter.via === via) this.#tcpHeld.splice(at, 1);
+      }
     });
   }
 
@@ -567,7 +579,7 @@ class Server {
     }
     if (opt && behaviour?.onOpt === 'formerr') {
       this.#outcome(waiter, 'local');
-      this.#answer(waiter, DNS_RCODES.FORMERR, [], false);
+      this.#answer(waiter, DNS_RCODES.FORMERR, [], { opt: false });
       return;
     }
     const qkey = `${name}|${String(question.type)}`;
@@ -592,7 +604,7 @@ class Server {
     const cached = this.#cacheOn ? this.#cached(qkey) : undefined;
     if (cached !== undefined) {
       this.#outcome(waiter, 'cache');
-      this.#answer(waiter, cached.rcode, cached.answers);
+      this.#answer(waiter, cached.rcode, cached.answers, { upstream: true });
       return;
     }
     if (via.transport === 'tcp') this.#forwardTcp(waiter, question, qkey);
@@ -765,7 +777,16 @@ class Server {
     const upstream = this.#upstream(question.name, question.type);
     if (upstream.kind === 'silent') return;
     if (upstream.kind === 'held') {
-      this.#tcpHeld.push({ waiter, qkey, qtype: question.type });
+      const key = `${waiter.via.address}|${qkey}`;
+      const retry = this.#retries.get(key);
+      if (retry === undefined) {
+        this.#tcpHeld.push({ waiter, qkey, qtype: question.type });
+        return;
+      }
+      // The retry of an answer `answer` sent truncated: the upstream has answered it already.
+      retry.left -= 1;
+      if (retry.left === 0) this.#retries.delete(key);
+      this.#deliver(qkey, [waiter], retry.upstream);
       return;
     }
     if (upstream.delayMs <= 0) {
@@ -779,42 +800,57 @@ class Server {
     this.#tcpTimers.add(timer);
   }
 
-  #answered(record: Forward, upstream: Extract<Upstream, { kind: 'reply' }>): void {
-    this.#remove(record);
-    this.#deliver(record.qkey, record.waiters, upstream);
+  /** Whether the recursion cache keeps this reply: NOERROR or NXDOMAIN with a TTL, cache on. */
+  #caches(upstream: Extract<Upstream, { kind: 'reply' }>): boolean {
+    const cacheable =
+      upstream.rcode === DNS_RCODES.NOERROR || upstream.rcode === DNS_RCODES.NXDOMAIN;
+    return this.#cacheOn && cacheable && upstream.ttl > 0;
   }
 
-  /** The upstream's reply to everyone waiting on it, cached first when the server caches. */
+  /** Answers a slot's waiters; returns those whose reply went truncated. */
+  #answered(record: Forward, upstream: Extract<Upstream, { kind: 'reply' }>): Waiter[] {
+    this.#remove(record);
+    return this.#deliver(record.qkey, record.waiters, upstream);
+  }
+
+  /**
+   * The upstream's reply to everyone waiting on it, cached first when the server caches. Returns
+   * the waiters whose reply went truncated, so `answer` can owe their TCP retries the reply.
+   */
   #deliver(
     qkey: string,
     waiters: readonly Waiter[],
     upstream: Extract<Upstream, { kind: 'reply' }>,
-  ): void {
-    const cacheable =
-      upstream.rcode === DNS_RCODES.NOERROR || upstream.rcode === DNS_RCODES.NXDOMAIN;
-    if (this.#cacheOn && cacheable && upstream.ttl > 0) {
+  ): Waiter[] {
+    if (this.#caches(upstream)) {
       this.#cache.set(qkey, {
         rcode: upstream.rcode,
         answers: upstream.answers,
         expiresAt: now() + upstream.ttl * 1_000,
       });
     }
-    for (const waiter of waiters) this.#answer(waiter, upstream.rcode, upstream.answers);
+    return waiters.filter((waiter) =>
+      this.#answer(waiter, upstream.rcode, upstream.answers, { upstream: true }),
+    );
   }
 
   /**
-   * Builds and sends one reply. A reply that cannot be built (a CNAME target with a label over 63
-   * bytes) is a fault and goes as SERVFAIL. The reply is counted, and `waitForReplies` woken,
-   * only from the send's callback, once the datagram is with the kernel (F1).
+   * Builds and sends one reply; true when it went truncated. A reply that cannot be built (a
+   * CNAME target with a label over 63 bytes) is a fault and goes as SERVFAIL. The reply is
+   * counted, and `waitForReplies` woken, only from the send's callback, once the datagram is with
+   * the kernel (F1). A behaviour's `truncate` applies only to the upstream's answer (`upstream`):
+   * what the server makes itself (REFUSED, FORMERR, NOTIMP, SERVFAIL, `localhost`) goes without
+   * TC, as dnsmasq's `setup_reply` clears it (L2). Any reply too big for UDP still goes as TC.
    */
   #answer(
     waiter: Waiter,
     rcode: number,
     answers: readonly ReplyAnswer[],
-    opt: boolean = waiter.opt,
-  ): void {
-    if (waiter.answered) return;
+    options: { readonly upstream?: boolean; readonly opt?: boolean } = {},
+  ): boolean {
+    if (waiter.answered) return false;
     waiter.answered = true;
+    const opt = options.opt ?? waiter.opt;
     const udp = waiter.via.transport === 'udp';
     const build = (code: number, kept: readonly ReplyAnswer[], tc: boolean): Buffer =>
       encodeReply({
@@ -829,7 +865,7 @@ class Server {
       });
     let code = rcode;
     let kept = answers;
-    let tc = udp && waiter.truncate;
+    let tc = udp && options.upstream === true && waiter.truncate;
     let reply: Buffer;
     try {
       reply = build(code, kept, tc);
@@ -848,7 +884,7 @@ class Server {
       try {
         reply = build(code, kept, false);
       } catch {
-        return;
+        return false;
       }
     }
     waiter.via.send(reply, () => {
@@ -862,6 +898,7 @@ class Server {
       Atomics.add(repliesSent, 0, 1);
       Atomics.notify(repliesSent, 0);
     });
+    return tc;
   }
 
   #cached(qkey: string): { rcode: number; answers: ReplyAnswer[] } | undefined {
@@ -999,7 +1036,9 @@ class Server {
 
   /**
    * Answers every waiter held on `qname` (of `qtype`, or any type) with `reply`, now: the UDP
-   * slots, silent, held or slow, and the TCP questions held on a `held` reply. Returns how many.
+   * slots, silent, held or slow, and the TCP questions held on a `held` reply whose connection is
+   * open. Returns how many were given a reply. A waiter whose reply went truncated is owed the
+   * same reply for its TCP retry, which would otherwise find the name held again.
    */
   answer(qname: string, reply: DnsReply, qtype: number | undefined): number {
     if (reply.kind === 'silent' || reply.kind === 'held') {
@@ -1035,7 +1074,16 @@ class Server {
     let answered = 0;
     for (const record of records) {
       answered += record.waiters.length;
-      this.#answered(record, upstreamFor(record.qtype));
+      const upstream = upstreamFor(record.qtype);
+      const truncated = this.#answered(record, upstream);
+      // A cached answer serves the retry itself, ahead of the forward.
+      if (this.#caches(upstream)) continue;
+      for (const waiter of truncated) {
+        const key = `${waiter.via.address}|${record.qkey}`;
+        const owed = this.#retries.get(key);
+        if (owed === undefined) this.#retries.set(key, { upstream, left: 1 });
+        else owed.left += 1;
+      }
     }
     for (const held of tcp) {
       this.#tcpHeld.splice(this.#tcpHeld.indexOf(held), 1);
@@ -1093,6 +1141,7 @@ class Server {
       limited: this.#outcomes.get('limited') ?? 0,
       cached,
       faults: this.#faults,
+      tcpHeld: this.#tcpHeld.length,
     };
     if (resetPeak) {
       this.#peak = this.#heldNow();
@@ -1107,6 +1156,7 @@ class Server {
     for (const timer of this.#tcpTimers) clearTimeout(timer);
     this.#tcpTimers.clear();
     this.#tcpHeld.length = 0;
+    this.#retries.clear();
   }
 }
 
@@ -1269,11 +1319,10 @@ async function handle(request: DnsControl): Promise<unknown> {
     case 'startClient': {
       if (clients.has(request.spec.name))
         throw new Error(`a client ${request.spec.name} runs already`);
-      const client = await Background.start(
-        request.spec,
-        serverNamed(request.spec.server),
-        servers.map((server) => server.port),
-      );
+      const client = await Background.start(request.spec, serverNamed(request.spec.server), [
+        ...servers.map((server) => server.port),
+        ...(request.spec.avoid ?? []),
+      ]);
       clients.set(request.spec.name, client);
       return result('startClient', client.port);
     }
@@ -1354,8 +1403,9 @@ control.on('message', (message: { readonly id: number; readonly control: DnsCont
 try {
   const names = new Set(servers.map((server) => server.name));
   if (names.size !== servers.length) throw new Error('two servers have the same name');
+  // Every server binds before any lets go, so no sibling can draw a refused server's port (L1).
+  for (const server of servers) await server.bind(server.fixedPort);
   for (const server of servers) {
-    await server.bind(server.fixedPort);
     // A server that starts refused keeps its port number and binds nothing (ECONNREFUSED).
     if (server.dead === 'refused') await server.unbind();
   }

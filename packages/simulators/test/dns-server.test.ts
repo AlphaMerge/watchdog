@@ -1,17 +1,19 @@
 import { strict as assert } from 'node:assert';
 import { createSocket } from 'node:dgram';
 import { Resolver } from 'node:dns/promises';
-import { createServer } from 'node:net';
+import { once } from 'node:events';
+import { connect, createServer } from 'node:net';
 import { describe, it, type TestContext } from 'node:test';
 import {
+  DnsClient,
   DnsSimulator,
   dnsQuery,
   replies,
-  type DnsClient,
   type DnsQueryRecord,
   type DnsQueryResult,
   type DnsSimulatorOptions,
 } from '../src/dns-server.js';
+import { encodeQuery, frame, typeCode } from '../src/dns-wire.js';
 import { avoidingPorts } from '../src/net.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -722,6 +724,81 @@ describe('the DNS simulator', () => {
       assert.equal((await sim.gauge())[0]?.heldNow, 0);
     });
 
+    it('answers its own REFUSED without TC for a truncate name, so no TCP retry follows (L2)', async (t) => {
+      const sim = await start(t, {
+        forwarder: { forwardMax: 1 },
+        zones: { 'zone-b.test': { reply: replies.held } },
+        names: { 'big.test': { reply: replies.addresses(ZONE_A), truncate: 'tcp' } },
+      });
+      const client = await sim.openClient();
+      t.after(() => client.close());
+      await client.send(sim.target(), 'dev-1.zone-b.test', 'A', { id: 1 });
+      await logged(sim, named('dev-1.zone-b.test'), 'the question holding the one slot');
+      const refused = replied(await ask(sim, 'big.test'));
+      assert.equal(refused.rcode, 'REFUSED');
+      assert.equal(refused.tc, false);
+      assert.equal(refused.transport, 'udp');
+      assert.equal((await logged(sim, named('big.test'), 'the drop')).outcome, 'dropped');
+      assert.deepEqual(
+        (await sim.log()).filter((entry) => entry.transport === 'tcp'),
+        [],
+      );
+    });
+
+    it('gives the TCP retry of a held answer that went truncated the same answer', async (t) => {
+      const sim = await start(t, {
+        names: { 'big.test': { reply: replies.held, truncate: 'tcp' } },
+      });
+      const asking = ask(sim, 'big.test');
+      await pollWithin(
+        ANSWER_BOUND_MS,
+        'the held question',
+        async () => (await sim.held())[0]?.waiters === 1,
+      );
+      assert.equal(await sim.answer('big.test', replies.addresses(ZONE_A)), 1);
+      const answered = replied(await asking);
+      assert.equal(answered.transport, 'tcp');
+      assert.deepEqual(answered.addresses, [ZONE_A]);
+      assert.deepEqual(
+        (await sim.log()).map((entry) => [entry.transport, entry.outcome, entry.reply?.tc]),
+        [
+          ['udp', 'forwarded', true],
+          ['tcp', 'forwarded', false],
+        ],
+      );
+      // Only the retry was owed the answer: a new question over TCP is held again.
+      const again = ask(sim, 'big.test', 'A', { transport: 'tcp' });
+      await pollWithin(
+        ANSWER_BOUND_MS,
+        'the new TCP question held',
+        async () => (await sim.gauge())[0]?.tcpHeld === 1,
+      );
+      assert.equal(await sim.answer('big.test', replies.addresses(ZONE_A)), 1);
+      assert.deepEqual(replied(await again).addresses, [ZONE_A]);
+    });
+
+    it('lets go of a held TCP question whose connection closes, and answers it never (L4)', async (t) => {
+      const sim = await start(t, { names: { 'slow.test': { reply: replies.held } } });
+      const socket = connect(sim.server().port, '127.0.0.1');
+      t.after(() => {
+        socket.destroy();
+      });
+      await within(ANSWER_BOUND_MS, 'the TCP connection', once(socket, 'connect'));
+      socket.write(frame(encodeQuery({ id: 5, name: 'slow.test', type: typeCode('A') })));
+      await pollWithin(
+        ANSWER_BOUND_MS,
+        'the held TCP question',
+        async () => (await sim.gauge())[0]?.tcpHeld === 1,
+      );
+      socket.destroy();
+      await pollWithin(
+        ANSWER_BOUND_MS,
+        'the closed connection let go',
+        async () => (await sim.gauge())[0]?.tcpHeld === 0,
+      );
+      assert.equal(await sim.answer('slow.test', replies.addresses(ZONE_A)), 0);
+    });
+
     it('counts held slots per port class, and a background client’s slots', async (t) => {
       const sim = await start(t, { zones: { 'zone-b.test': { reply: replies.silent } } });
       const gai = await sim.openClient();
@@ -871,7 +948,8 @@ describe('the DNS simulator', () => {
       });
       const first = sim.target('ns1');
       assert.equal(
-        (await dnsQuery(first, 'dev-1.zone-a.test', 'A', { timeoutMs: 300 })).kind,
+        (await dnsQuery(first, 'dev-1.zone-a.test', 'A', { timeoutMs: 300, avoid: sim.ports }))
+          .kind,
         'timeout',
       );
       assert.equal(
@@ -891,6 +969,7 @@ describe('the DNS simulator', () => {
       await sim.setDead('ns1', 'refused');
       const refused = await dnsQuery(first, 'dev-1.zone-a.test', 'A', {
         timeoutMs: ANSWER_BOUND_MS,
+        avoid: sim.ports,
       });
       assert.equal(refused.kind === 'error' ? refused.code : refused.kind, 'ECONNREFUSED');
       const overTcp = await dnsQuery(first, 'dev-1.zone-a.test', 'A', {
@@ -900,7 +979,10 @@ describe('the DNS simulator', () => {
       assert.equal(overTcp.kind === 'error' ? overTcp.code : overTcp.kind, 'ECONNREFUSED');
 
       await sim.setDead('ns1', false);
-      const back = await dnsQuery(first, 'dev-1.zone-a.test', 'A', { timeoutMs: ANSWER_BOUND_MS });
+      const back = await dnsQuery(first, 'dev-1.zone-a.test', 'A', {
+        timeoutMs: ANSWER_BOUND_MS,
+        avoid: sim.ports,
+      });
       assert.deepEqual(replied(back).addresses, [ZONE_A]);
     });
 
@@ -958,6 +1040,46 @@ describe('the DNS simulator', () => {
       const client = await sim.openClient();
       t.after(() => client.close());
       assert.ok(!sim.ports.includes(client.port));
+    });
+
+    it('gives every client’s draw its avoid list, the servers’ ports added (F4)', async (t) => {
+      const sim = await start(t, { servers: [{ name: 'ns1' }, { name: 'gone', dead: 'refused' }] });
+      const gone = sim.server('gone').port;
+      const every = Array.from({ length: 65_535 }, (_, at) => at + 1);
+      // One short of every port: only the servers' own, added by the simulator, make it every one.
+      const others = every.filter((port) => port !== gone);
+      const exhausted = /no ephemeral port outside 65535 avoided ports in 32 tries/u;
+      await assert.rejects(DnsClient.open({ avoid: every }), exhausted);
+      await assert.rejects(sim.openClient({ avoid: others }), exhausted);
+      await assert.rejects(sim.client('ping', 10, ['x.test'], { avoid: others }), exhausted);
+      const asked = await dnsQuery(sim.target('ns1'), 'x.test', 'A', {
+        timeoutMs: ANSWER_BOUND_MS,
+        avoid: every,
+      });
+      assert.match(asked.kind === 'error' ? asked.message : asked.kind, exhausted);
+      assert.deepEqual(await sim.clients(), []);
+    });
+
+    it('binds every server before a refused one lets its port go (L1)', async () => {
+      // A port free now, on 127.0.0.1, for both servers to ask for.
+      const probe = createSocket('udp4');
+      await new Promise<void>((resolve) => {
+        probe.bind(0, '127.0.0.1', resolve);
+      });
+      const { port } = probe.address();
+      await new Promise<void>((resolve) => {
+        probe.close(resolve);
+      });
+      // The refused server still holds its port while the next binds, so the next cannot have it.
+      await assert.rejects(
+        DnsSimulator.start({
+          servers: [
+            { name: 'gone', dead: 'refused', port },
+            { name: 'ns2', port },
+          ],
+        }),
+        new RegExp(`EADDRINUSE 127\\.0\\.0\\.1:${String(port)}`, 'u'),
+      );
     });
   });
 

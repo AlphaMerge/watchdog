@@ -149,7 +149,10 @@ export interface DnsForwarderOptions {
   readonly holdMs?: number;
   /**
    * `question`: an identical question from any client joins the held one (dnsmasq 2.83 on).
-   * `client`: only a client's own retransmission, by (address, port, ID), joins it.
+   * `client`: only a client's own retransmission, by (address, port, ID), joins it, as in
+   * dnsmasq before 2.83. That dnsmasq is also one that goes silent when its table is full, so a
+   * model of it sets `whenFull: 'silent'` too: `whenFull` keeps its own default rather than
+   * follow `merge`, so that each option means one thing.
    */
   readonly merge?: 'question' | 'client';
   /**
@@ -157,7 +160,8 @@ export interface DnsForwarderOptions {
    * later: "table full - flags == 0, return REFUSED" in forward.c, the question echoed, OPT only
    * if the query had one. `silent` is dnsmasq 2.85 and older (RHEL 8 and 9), which stops reading
    * its listener while the table is full; here the question is never answered, where that
-   * dnsmasq reads it late, once a slot frees. Either way it is counted as `dropped`.
+   * dnsmasq reads it late, once a slot frees. Either way it is counted as `dropped`. Every
+   * dnsmasq that merges only per client (`merge: 'client'`, before 2.83) is a `silent` one.
    */
   readonly whenFull?: 'refused' | 'silent';
 }
@@ -313,6 +317,11 @@ export interface DnsGauge {
   readonly cached: number;
   /** Queries the server failed on and answered SERVFAIL, or could not answer at all. */
   readonly faults: number;
+  /**
+   * TCP questions held on a `held` reply now, waiting for `answer`. They take no slot; one whose
+   * connection has closed is let go, since there is no one left to answer.
+   */
+  readonly tcpHeld: number;
 }
 
 export interface DnsLimiterTrip {
@@ -340,6 +349,8 @@ export interface DnsClientSpec {
   /** The source address. Default 127.0.0.1: the probe's, so one limiter counts both. */
   readonly source?: string;
   readonly qtype?: 'A' | 'AAAA' | 'both';
+  /** Ports its socket must not draw, besides every server's, which it never draws (F4). */
+  readonly avoid?: readonly number[];
 }
 
 export interface DnsClientStats {
@@ -424,6 +435,26 @@ export interface DnsWorkerData {
 
 const WORKER = new URL('./dns-server-worker.js', import.meta.url);
 
+/**
+ * No two servers answer at one address and port (L1): a refused server's port is free, and a
+ * sibling that drew it would answer for it. Two servers may share a port number on different
+ * loopbacks, as glibc's nameservers on 53 at 127.0.0.1 and 127.0.0.2 must.
+ */
+function distinctEndpoints(servers: readonly DnsServerInfo[]): void {
+  const owners = new Map<string, string>();
+  for (const server of servers) {
+    const endpoints = [`${server.ipv4}:${String(server.port)}`];
+    if (server.ipv6 !== undefined) endpoints.push(`[${server.ipv6}]:${String(server.port)}`);
+    for (const endpoint of endpoints) {
+      const owner = owners.get(endpoint);
+      if (owner !== undefined) {
+        throw new Error(`the DNS simulator's ${owner} and ${server.name} both bound ${endpoint}`);
+      }
+      owners.set(endpoint, server.name);
+    }
+  }
+}
+
 interface Pending {
   readonly op: string;
   readonly resolve: (value: unknown) => void;
@@ -503,6 +534,7 @@ export class DnsSimulator {
       });
       worker.removeAllListeners('error');
       worker.removeAllListeners('exit');
+      distinctEndpoints(servers);
       return new DnsSimulator(worker, new Int32Array(shared), servers, callTimeoutMs);
     } catch (error) {
       await worker.terminate();
@@ -670,8 +702,10 @@ export class DnsSimulator {
   /**
    * Answers every waiter on the slots held for `qname` (any type unless `qtype` is given, every
    * server unless one is named) with `reply`, now: what a `held` reply waits for, and it frees a
-   * silent or slow slot too. TCP questions held on a `held` reply are answered as well. Resolves
-   * how many waiters were answered; the reply's own `delayMs` is not applied.
+   * silent or slow slot too. TCP questions held on a `held` reply are answered as well, but not
+   * one whose connection has closed. Resolves how many waiters a reply was given to; the reply's
+   * own `delayMs` is not applied. A waiter whose reply goes truncated (`truncate`, or too big for
+   * UDP) asks again over TCP, and that retry is given the same reply rather than held again.
    */
   answer(
     qname: string,
@@ -689,9 +723,12 @@ export class DnsSimulator {
   /**
    * A `DnsClient` whose port is none of the servers' (F4): a server that is dead keeps its port
    * number with nothing bound, and a client holding that number would take its ECONNREFUSED.
+   * `avoid` adds ports to the servers'.
    */
-  openClient(options: { readonly localAddress?: string } = {}): Promise<DnsClient> {
-    return DnsClient.open({ ...options, avoid: this.ports });
+  openClient(
+    options: { readonly localAddress?: string; readonly avoid?: readonly number[] } = {},
+  ): Promise<DnsClient> {
+    return DnsClient.open({ ...options, avoid: [...this.ports, ...(options.avoid ?? [])] });
   }
 
   /** Closes every socket and ends the worker. Safe to call twice. */

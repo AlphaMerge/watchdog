@@ -95,9 +95,9 @@ export async function avoidingPorts<T>(
       if (!avoided.has(portOf(socket))) return socket;
       drawn.push(socket);
     }
-    throw new Error(
-      `no ephemeral port outside ${[...avoided].join(', ')} in ${String(tries)} tries`,
-    );
+    const outside =
+      avoided.size <= 8 ? [...avoided].join(', ') : `${String(avoided.size)} avoided ports`;
+    throw new Error(`no ephemeral port outside ${outside} in ${String(tries)} tries`);
   } finally {
     await Promise.all(drawn.map(close));
   }
