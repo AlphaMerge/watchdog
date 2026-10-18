@@ -46,6 +46,13 @@ The state counts come from `sensor_state`, not from the last sample — so they 
 rollups and gaps ([state-machine.md](state-machine.md)). A sensor reads **Unknown** until its
 first result, and again after a resume; that is a real state, not a placeholder for one.
 
+**The totals are exact at any size** (`U-14`). They are aggregated in the database and only the
+totals cross the wire, so nothing on this page is capped by what fitted in one response. That is
+worth stating because it was once untrue: the page counted the rows of a single tree page, and an
+installation running 5,051 sensors was shown 930 — a number read as a total, which was a lower
+bound. The same totals are available for any object, not only the root, so a group answers "how
+much is under here" the same way.
+
 ### Alarms
 
 The operator's home screen, and the closest thing v1 has to a dashboard.
