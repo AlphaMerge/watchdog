@@ -191,10 +191,12 @@ if [ -n "${out}" ]; then
 
       sudo ./install-probe.sh --enrolment $(basename "${out}")
 
-  and delete it from both machines afterwards. The probe will connect and wait —
-  approve it by name in the web UI or with
+  and delete it from both machines afterwards. The probe will connect and wait.
+  On this host, an administrator finds its gid in GET /api/v1/probes?status=pending
+  under the name '${name}', creates a probe object for it, and approves it onto
+  that object, with no "local" (docs/installation.md, Remote probes):
 
-      curl -X POST http://${core_host}:8080/api/v1/probes/<gid>/approve
+      POST /api/v1/probes/<gid>/approve   {"objectId":<id>}
 
   Its certificate's SHA-256 fingerprint, which the core binds it to:
 

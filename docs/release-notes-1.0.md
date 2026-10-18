@@ -147,6 +147,12 @@ and the protocol between core and probe moves from 28 to 36.
   (`app`, `bin`, `web`, `docs`, `etc`, `deploy`, `libexec`, `previous`), a filesystem's
   `lost+found` or what an interrupted install left
   ([installation.md → Upgrading](installation.md#upgrading)).
+- **A clone of Core Health or Probe Health made before `P-302`** (`H-43`): save the thresholds it
+  copied. The first start after migration 073 replaces them with this release's declaration, or
+  clears them, and nothing keeps them after that. A read-only query lists them, with whether each
+  differs from the type's own thresholds and the sensor it was cloned from where it can tell, and
+  prints the body that sets each back; after the upgrade, send the ones that differ
+  ([installation.md → Thresholds on a cloned health sensor](installation.md#thresholds-on-a-cloned-health-sensor)).
 - **Then let the first start finish.** A migration reports itself every 15 seconds and can take
   minutes on a large installation; do not restart the core to hurry it
   ([a core that is still starting](administration.md#a-core-that-is-still-starting)). Before
@@ -190,11 +196,14 @@ From rc.2 or anything older:
     type declares, and the first 50 sensors holding them. The web UI lists them all under
     **Sensor types** → **Channels without the lookup their type declares**, as does
     `GET /api/v1/channels/without-lookup`. Each stays judged by nothing until you set it.
-  - **Thresholds a fixed type lost at a start cannot be recovered.** A clone of Core Health or
-    Probe Health copied its source's thresholds without marking them as set by hand, so a start
-    replaced them with what the type declares, and 073 lets the next start do the same to any not
-    yet replaced. Set again the ones that were an operator's. (`H-43`: the installation guide does
-    not say this yet.)
+  - **A cloned health sensor's copied thresholds are replaced at the first start.** A clone of
+    Core Health or Probe Health copied its source's thresholds without marking them as set by
+    hand, and 073 lets the first start after it replace them with what the type declares, or
+    clear them, which can raise an alarm or clear one. Set back the ones you saved before
+    upgrading that differ from the type's own (above), each with the body the query printed,
+    sent from a signed-in session. A copy a start of the earlier release had
+    already replaced cannot be recovered from the clone; its source keeps its own
+    ([installation.md → Thresholds on a cloned health sensor](installation.md#thresholds-on-a-cloned-health-sensor)).
 - **A tarball installation has an uninstaller**, `sudo /opt/ms/libexec/ms-uninstall` (`H-39`),
   which removes what a package's purge removes and keeps what it keeps. It removes nothing while
   the `ms` or `ms-probe` package is installed, nor from a prefix holding anything in `bin`,
@@ -226,8 +235,11 @@ From rc.2 or anything older:
   policy (`A-79`): a sensor on it fails its next scan, and `probe.targetPolicy: none` on its probe
   is the way back ([the target policy](administration.md#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not)).
 - **Two probe objects marked local become one** (migration 075, `P-382`): the one with an approved
-  probe keeps the flag, then the one seen most recently, and the others can then be deleted.
-  (`H-44`: no operator document says this yet.)
+  probe keeps the flag, then the one a probe connected to most recently, then the lowest id. Where
+  both had an approved probe, that can be a remote one. The others can then be deleted, and the
+  core stops treating them as the probe beside it. No API route or page shows which one kept it;
+  the database does, so check before deleting any, and moving a wrongly kept flag has no tested
+  path yet (`P-445`) ([installation.md → Upgrading](installation.md#upgrading)).
 - **A probe left on rc.2 keeps working, and its newer channels gap.** Core and probe negotiate down
   to the older version
   ([ADR-001 Decision 13](ADR-001-architecture.md#decision-13--protocol-versions-negotiate-down-they-do-not-gate-admission)).

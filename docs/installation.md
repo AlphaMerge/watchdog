@@ -284,20 +284,47 @@ inbound on the probe host. It presents its certificate and the access key the in
 and then waits: a new probe arrives in **`pending`** and is given no work at all until somebody
 approves it.
 
-Approve it under **Probes** in the UI, or with an API token (`MS_TOKEN`, scope `full`), first
-creating the probe object it will own — a fresh installation has the root object and nothing
-else:
+Approve it through the API, on the core host. The web UI has no page for probes, and no
+`ms-core` command or installer step approves one. It takes an administrator: the session a sign-in
+starts, or an API token issued from that session with scope `full`. The commands here use a token,
+`MS_TOKEN`. The web UI cannot issue one and a token cannot issue another, so sign in with the API,
+keeping its session cookie in a file, and issue the token from there:
+
+```bash
+api=http://127.0.0.1:8080/api/v1
+jar=$(mktemp)
+curl -s -c "$jar" -H 'content-type: application/json' -X POST "$api/auth/login" \
+  --data-binary @- <<'EOF'
+{"login":"admin","password":"<your password>"}
+EOF
+issued=$(curl -s -b "$jar" -H 'content-type: application/json' -X POST "$api/auth/tokens" \
+  -d "{\"name\":\"setup-$(date -u +%Y%m%dT%H%M%SZ)\",\"scope\":\"full\"}")
+token_id=$(printf '%s' "$issued" | sed -n 's/.*"token":{"id":\([0-9]*\).*/\1/p')
+export MS_TOKEN=$(printf '%s' "$issued" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p')
+echo "token ${token_id:-not issued: $issued}"
+```
+
+The sign-in's body is a quoted heredoc, so the shell leaves every character of the password
+alone; JSON does not, so a `"` or `\` in it is written `\"` or `\\`. The answer shows the secret
+once, and nothing can read it back. A name is unique among an account's live tokens, so each run
+names its own. **Keep this shell, and the session in `$jar`, until the probes are approved:** a
+token cannot revoke itself, and the session is what revokes it (below). The cookie would also
+serve in place of the token: `-b "$jar"` instead of the `Authorization` header.
+
+Then create the probe object it will own, since a fresh installation has the root object and
+nothing else, and approve the probe onto it: `POST /api/v1/probes/<gid>/approve` with
+`{"objectId":<id>,"local":true}`.
 
 ```bash
 auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
-curl -s "${auth[@]}" http://127.0.0.1:8080/api/v1/probes?status=pending     # the probe's gid
+curl -s "${auth[@]}" "http://127.0.0.1:8080/api/v1/probes?status=pending"   # the probe's gid
 curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/objects \
   -d '{"kind":"probe","parentId":1,"name":"Local probe"}'                   # → its id
 curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/probes/<gid>/approve \
   -d '{"objectId":<id>,"local":true}'
 ```
 
-Without the token the request is refused `401`, and without the content type `415`. `objectId`
+Without a credential the request is refused `401`, and without the content type `415`. `objectId`
 is the probe object in the tree this identity owns from now on. `"local": true` says
 this is the probe running beside the core — it cannot be deleted, matching PRTG, and it is the
 one that runs checks which have to execute on the core's own host. It is said explicitly rather
@@ -307,6 +334,21 @@ One probe object is local. Replacing the machine beside the core is approving th
 the same probe object. Approving it onto a new object as local is refused `409` while the old
 object's probe is still approved; once that probe is revoked, the new object takes the flag and
 the old one can be deleted (the approval's audit entry names it as `localTakenFrom`).
+
+The token never expires. Once the probes are approved, revoke it from the session it was issued
+from, in the same shell, and end the session. Sent with the token itself, the revoke is refused
+`403`: a token may not change its own account.
+
+```bash
+curl -s -b "$jar" -X DELETE "$api/auth/tokens/$token_id"     # answers nothing: 204
+curl -s -b "$jar" -X POST "$api/auth/logout"; rm -f "$jar"
+```
+
+A `401` from the revoke means the session has ended, after 12 hours without a request by default
+([sessions](administration.md#sessions-and-screens-left-open)). Then, or if the shell is gone,
+sign in again with the first block's `api=`, `jar=` and login lines, find the token's `id` under
+its name with `curl -s -b "$jar" "$api/auth/tokens"`, and revoke that one. Issue another token the
+same way when you next need one.
 
 ---
 
@@ -336,9 +378,27 @@ probe, not the core, the web UI and a flag trusted not to start them.
 The core listens for probes on **23560** by default, separately from the API on 8080. That port
 needs to be reachable from the probe host; nothing needs to be reachable *into* the probe.
 
-The probe appears in the UI as `pending` within a few seconds of starting. Approve it, and give
-it a branch of the tree to monitor. **A leaked bundle is an identity that can knock, not one that
-monitors** — nothing it grants takes effect until a person approves that probe by name.
+The probe appears in `GET /api/v1/probes` as `pending` within a few seconds of starting, under
+the name it was enrolled with, `web-dc2` here. Approve it on the core host, with a token issued as
+in §5 and revoked as §5 does afterwards: check its `certificateFingerprint` against the one
+`ms-enrol` printed (below), create a probe object for it, and approve it onto that object with no
+`"local"`. The branch under that object is what it monitors.
+
+```bash
+auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
+curl -s "${auth[@]}" "http://127.0.0.1:8080/api/v1/probes?status=pending"   # its gid
+curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/objects \
+  -d '{"kind":"probe","parentId":1,"name":"web-dc2"}'                       # → its id
+curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/probes/<gid>/approve \
+  -d '{"objectId":<id>}'
+```
+
+`"local"` is false unless it is sent. Only the probe beside the core is local (§5): a remote
+probe approved as local is refused `409` while the local probe is approved, and otherwise takes
+the flag, after which its object cannot be deleted.
+
+**A leaked bundle is an identity that can knock, not one that monitors** — nothing it grants
+takes effect until a person approves that probe by name.
 
 ### The certificate a probe is bound to
 
@@ -479,6 +539,126 @@ it is started again or upgraded. To find them, list the probes `GET /probes` sho
 `protocolVersion` 0 with `protocolAcceptedAt` `null`, and look in each one's
 `journalctl -u ms-probe` for *core rejected this probe* with the code `protocol-version`.
 
+**From a release before `P-382`**, an installation could have two or more probe objects marked
+local: approving a second probe as local, or approving the machine that replaced the core's own
+onto a new probe object, left the flag on both. Migration 075 keeps it on one: the object with an
+approved probe, then the one a probe connected to most recently, then the one with the lowest id.
+Where two had an approved probe, which is what a second approval as local leaves, the one whose
+probe connected last keeps it, and that can be a remote probe. The others are no longer local, and
+`migrate down` past 075 does not make them local again. The core stops treating them as the probe
+beside it: Core Health's `logDropped` counts the log lines of the one 075 kept and no other's, the
+others' Probe Health sensors read and judge `memoryAvailable` and `logDropped` as any remote
+probe's do, and their clocks count when the core asks whether its own clock is the one behind
+([the core's own clock](administration.md#the-cores-own-clock)). Each of them can be deleted now,
+so find out which one 075 kept before deleting any.
+
+075 logs nothing about it, and no API route or page of the web UI shows which object holds the
+flag: `GET /api/v1/probes` names each probe's object, not whether it is local. Probe Health only
+hints at it: the local probe's `memoryAvailable` and `logDropped` gap while it reports, as an
+older probe's do ([Probe Health](administration.md#probe-health--msprobehealth)). To be sure, ask
+the database. In `psql`, connected to the core's database as in §1, this only reads, and answers
+the probe object that is local, the probe bound to it and when a probe last connected to it, or
+nothing where none is:
+
+```sql
+SELECT o.id, o.name, pc.gid, pc.last_seen_at
+FROM probe_config pc JOIN object o ON o.id = pc.object_id
+WHERE pc.is_local;
+```
+
+Find that `gid` in `GET /api/v1/probes`: its `displayName` and `lastAddress` say which machine it
+is. If it is not the probe beside the core, the flag can move only once the probe holding it is
+revoked, which stops that probe's monitoring until it is approved again, and no tested path moves
+it yet (`P-445`).
+
+### Thresholds on a cloned health sensor
+
+**From a release before `P-302`**, save the thresholds a clone of a Core Health or Probe Health
+sensor copied, before you upgrade. Such a clone copied its source's thresholds, an operator's
+included, and did not mark them as set by hand. These two sensor types declare thresholds, and a
+start writes the declared ones over any of theirs not set by hand. A start of the release you
+upgrade from may already have replaced some copies, and those are gone from the clone. Migration
+073 hands the rest to the type (`limits_source` becomes `declared`), and the first start after it
+replaces them with what this release declares, or clears them where it declares none, which can
+raise an alarm or clear one. Until that start they are still in the database. List them before
+upgrading, in `psql` connected to the core's database as in §1, and keep what it prints; `\x`
+first prints each row's columns one to a line. The query only reads:
+
+```sql
+SELECT c.sensor_id, o.name, c.key,
+       (SELECT bool_or(d.limits = c.limits) FROM channel d
+        JOIN sensor_config dc ON dc.object_id = d.sensor_id
+        WHERE dc.type = sc.type AND d.key = c.key
+          AND d.limits_source = 'declared') AS as_declared,
+       src.id AS source_id, sch.limits_source AS source_owner,
+       jsonb_build_object('limits', c.limits) AS body
+FROM channel c
+JOIN sensor_config sc ON sc.object_id = c.sensor_id
+JOIN object o ON o.id = c.sensor_id
+LEFT JOIN LATERAL (
+  SELECT (a.summary->>'sourceId')::bigint AS id, 1 AS how FROM audit_log a
+  WHERE a.action = 'object.cloned' AND a.object_id = c.sensor_id
+  UNION ALL
+  SELECT s.id, 2 FROM audit_log a
+  JOIN object s ON s.parent_id = (a.summary->>'sourceId')::bigint AND s.name = o.name
+  WHERE a.action = 'object.cloned' AND a.object_id = o.parent_id
+  ORDER BY how LIMIT 1
+) src ON true
+LEFT JOIN channel sch ON sch.sensor_id = src.id AND sch.key = c.key
+WHERE sc.type IN ('ms.core.health', 'ms.probe.health')
+  AND c.limits_source = 'unset' AND c.limits <> '{}'::jsonb
+ORDER BY c.sensor_id, c.key;
+```
+
+Each row is one channel of a clone, and `as_declared` says what to do with it:
+
+- `t`: it copied the type's own threshold, which this release declares unchanged, so the first
+  start writes the same back. Nothing to do.
+- `f`: it differs from the type's own, so it was set by hand, on the source or on a sensor the
+  source was cloned from. Set it back.
+- empty: no sensor of the type holds the type's own threshold on that channel to compare with.
+  Either the type declares none there, so what it copied was set by hand, or every other sensor
+  of the type has its own set by hand there, as an installation's one Core Health can. Compare it
+  with the type's thresholds ([Core Health](administration.md#core-health--mscorehealth),
+  [Probe Health](administration.md#probe-health--msprobehealth)), and set it back where it
+  differs.
+
+`source_id` and `source_owner` say where it came from, and decide nothing. `source_id` is the
+sensor it was cloned from, where the audit log says so: the sensor itself was cloned, or the
+device holding it. A clone made by cloning a group is not traced and has none; the group's
+`object.cloned` entry in the audit log names the group it was copied from. `source_owner` is who
+holds the source's threshold on that channel today, which need not be who held it when the clone
+was made: `operator` where it is set by hand, `declared` where it is the type's, `unset` where the
+source is a clone itself, and empty where the source has been deleted since, though the source's
+`channel.limits.set` entries in the audit log still say what it was set to. `body` is what to send
+back: the channel's whole limits object, its warning and error messages included, and a message
+can hold quotes and semicolons.
+
+After the upgrade, sign in, send each row's `body` to its channel, and sign out. Each body goes in
+a quoted heredoc, so the shell leaves its quotes and semicolons alone: paste it whole on the line
+between the one ending `<<'EOF'` and `EOF`, and repeat that command once for each row.
+
+```bash
+api=http://127.0.0.1:8080/api/v1
+jar=$(mktemp)
+curl -s -c "$jar" -H 'content-type: application/json' -X POST "$api/auth/login" \
+  --data-binary @- <<'EOF'
+{"login":"admin","password":"<your password>"}
+EOF
+curl -s -b "$jar" -H 'content-type: application/json' -X PATCH \
+  "$api/objects/<sensor_id>/channels/<key>" --data-binary @- <<'EOF'
+<body>
+EOF
+curl -s -b "$jar" -X POST "$api/auth/logout"; rm -f "$jar"
+```
+
+The route merges what it is sent into what the channel holds, which by then is this release's
+declaration or nothing: a field left out keeps what is there, and `null` clears one. `body` holds
+every field, so the channel ends as it was saved. It is the operator's from then on, as any
+threshold set through the API is, and no later release's declaration replaces it. A copy an earlier
+start already replaced is not in the list and cannot be recovered from the clone; where its source
+still exists, the source's own thresholds set by hand are still on it.
+
 ### The units are the release's
 
 The systemd units live in `/usr/lib/systemd/system`, and every upgrade replaces them: `ms-core`,
@@ -534,13 +714,15 @@ changes nothing; rename one of the two and run it again.
 **Migration 073 repairs channels, and its rollback keeps the repair.** Until it, a cloned sensor's
 channels lost their lookup and counter width, so a cloned traffic sensor stored the interface's
 cumulative byte count where the rate belongs, and its status channel was judged by nothing. 073
-gives every channel the counter width its sensor type declares where the row has none, labels
-thresholds a clone copied (a health sensor's follow the release's defaults again; any other
-sensor's count as set by hand), and logs how many, by type. The totals already stored stay in the
-history: a graph across the upgrade shows them climbing, a gap of one scan, then rates far below
-them. A threshold written for a rate that the totals held in Down or Warning clears once the rates
-arrive; nothing else changes state. `migrate down` past 073 leaves the repaired rows as they are;
-the release before reads them correctly.
+gives every channel the counter width its sensor type declares where the row has none, marks the
+thresholds a clone copied as set by hand, except on Core Health and Probe Health, and logs how
+many, by type. The totals already stored stay in the history: a graph across the upgrade shows
+them climbing, a gap of one scan, then rates far below them. A threshold written for a rate that
+the totals held in Down or Warning clears once the rates arrive, and the counter repair changes no
+other state. A cloned Core Health or Probe Health sensor's thresholds do change at the first
+start, which can raise an alarm or clear one: save them before you upgrade
+([thresholds on a cloned health sensor](#thresholds-on-a-cloned-health-sensor)). `migrate down`
+past 073 leaves the repaired rows as they are; the release before reads them correctly.
 
 **073 does not give a status channel its lookup back; you do.** An empty lookup may be one that
 somebody cleared on purpose, on the clone or on the sensor it was cloned from, and the upgrade

@@ -37592,7 +37592,7 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       **H-42 outcome.** All three said in `docs/release-notes-1.0.md` → *After the upgrade*,
       pointing at `installation.md` → *Upgrading*, which does not state the third (`H-43`).
 
-- [ ] **H-43 — the installation guide does not say a cloned health sensor's thresholds are
+- [x] **H-43 — the installation guide does not say a cloned health sensor's thresholds are
       lost** · XS · H-42, P-302 · Found 2026-10-17 in `H-42`. `installation.md` → *Upgrading*
       says 073 makes a cloned Core Health or Probe Health sensor's copied thresholds "follow the
       release's defaults again", which reads as a repair. It does not say that those were an
@@ -37601,7 +37601,14 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       that nothing can recover them. The release notes say it. **Done when** the guide's 073
       paragraph says so, and what to do: set them again on the clone.
 
-- [ ] **H-44 — no operator document says migration 075 unflags a second local probe** · XS ·
+      **H-43 outcome.** Said in `installation.md` → *Upgrading* → *Thresholds on a cloned health
+      sensor*, with a read-only query to save the copies before upgrading (whether each matches
+      the type's declaration, its source where the audit log names it, and the body that sets it
+      back) and the commands that send each body from a signed-in session, in a quoted heredoc
+      because declared messages hold apostrophes; the release notes carry it under *Before you
+      upgrade*. Only copies an earlier start replaced are unrecoverable.
+
+- [x] **H-44 — no operator document says migration 075 unflags a second local probe** · XS ·
       P-382 · Found 2026-10-17 in `H-42`'s upgrade-note sweep. Migration 075 keeps one probe
       object marked local where an installation had two or more: the one with an approved probe,
       then the one seen most recently, then the lowest id. The others are no longer local, so
@@ -37611,6 +37618,23 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       existing pair; `GET /api/v1/probes` does not show the flag either. **Done when**
       `installation.md` → *Upgrading* carries a "from a release before `P-382`" paragraph saying
       which object kept the flag and how an operator can tell which one that is.
+
+      **H-44 outcome.** Said in `installation.md` → *Upgrading*, *From a release before `P-382`*:
+      no route or page shows the flag, so the paragraph gives a read-only query, says 075 can
+      keep a remote probe and how to tell from `GET /api/v1/probes`, and points at `P-445`.
+
+- [ ] **P-445 — migration 075 can keep the wrong probe as local, and nothing says how to move the
+      flag** · S · P-382, H-44 · Found 2026-10-18 in `H-44`. Where two objects marked local each
+      had an approved probe (a remote probe approved as local by mistake, beside the one beside
+      the core), 075's order comes down to `last_seen_at`, so the last to connect keeps the flag
+      (`075-one-local-probe.ts:30-38`). Moving it is refused while the holder's probe is
+      approved: the registry's 409 says to revoke that probe first, then approve onto that object
+      or any other (`probes/registry.ts:807-830`). The object that should hold the flag already
+      has its probe approved, so the path is approving that probe again with `local: true`, which
+      `approve` does not refuse (`registry.ts:481-540`) and which no test runs: every move in
+      `probe-registry.test.ts`'s `SECOND_LOCAL` table approves a pending probe, and the
+      re-approval test passes no `local`. **Done when** the guide says how to move the local flag
+      to the right object, backed by a test of that path, or the API gains a way to do it.
 
 - [ ] **H-45 — no box has swapped a real rc.2 `.rpm` for this release's** · S · H-40 · Found
       2026-10-18 in `H-40`'s review. `dnf swap` between `ms` and `ms-probe` ends right because
@@ -37644,6 +37668,20 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         the units run from the prefix says nothing there. Telling would need the prefix written
         into the units or a drop-in.
       **Done when** each is done, or argued away, in this ticket's outcome.
+
+- [x] **H-47 — the guide sends the operator to a Probes page the UI does not have** · XS ·
+      R-01 · Found 2026-10-18 in `H-44`. `installation.md` §5 said "Approve it under **Probes**
+      in the UI", and *Remote probes* that a new probe "appears in the UI as `pending`".
+      `packages/web` has no probes route (`App.tsx`): `R-01` shipped the API without one. **Done
+      when** every place in `docs/` that sends an operator to a probes page says how a probe is
+      approved.
+
+      **H-47 outcome.** §5 approves the local probe through the API, with the commands that sign
+      in, issue a token, and revoke it from the same session, since a token cannot revoke itself
+      (`SELF`); *Remote probes* has its own recipe, with no `"local"`, and
+      `ms-enrol`'s and both `install-probe` scripts' messages point there. The README,
+      `dev-token.sh` and `lib/api-auth.sh` say a token is issued from a signed-in session, not
+      the UI, and `api-auth.sh` no longer prints a refused `MS_TOKEN`.
 
 ---
 

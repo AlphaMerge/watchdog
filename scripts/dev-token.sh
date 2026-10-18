@@ -34,8 +34,10 @@ done
 [ -r "${password_file}" ] || {
   echo "error: no password file at ${password_file}" >&2
   echo "       it is written once, on the first boot that finds no accounts." >&2
-  echo "       if it was deleted after use — as its own text tells you to — issue a token" >&2
-  echo "       from the UI instead and export MS_TOKEN yourself." >&2
+  echo "       if it was deleted after use — as its own text tells you to — put the" >&2
+  echo "       password in a file and run this again with MS_PASSWORD_FILE=<that file>" >&2
+  echo "       (and MS_LOGIN=<login> for an account other than admin), or issue a" >&2
+  echo "       token by hand: docs/installation.md §5." >&2
   exit 1
 }
 
@@ -45,20 +47,33 @@ login="${MS_LOGIN:-$(sed -n "s/.*password for the '\([^']*\)' account.*/\1/p" "$
 login="${login:-admin}"
 
 jar="$(mktemp)"
-trap 'rm -f "${jar}"' EXIT
+reply="$(mktemp)"
+trap 'rm -f "${jar}" "${reply}"' EXIT
 
 body="$(printf '{"login":%s,"password":%s}' \
   "$(printf '%s' "${login}" | node -e 'process.stdout.write(JSON.stringify(require("node:fs").readFileSync(0,"utf8")))')" \
   "$(printf '%s' "${password}" | node -e 'process.stdout.write(JSON.stringify(require("node:fs").readFileSync(0,"utf8")))')")"
 
-code="$(curl -s -o /dev/null -w '%{http_code}' -c "${jar}" \
+code="$(curl -s -o "${reply}" -w '%{http_code}' -c "${jar}" \
   -H 'content-type: application/json' -d "${body}" "${API}/auth/login")"
 
 if [ "${code}" != "200" ]; then
   echo "error: ${API}/auth/login answered ${code} for '${login}'" >&2
   if [ "${code}" = "401" ]; then
-    echo "       the generated password has been changed — which is what it is for." >&2
-    echo "       issue a token from the UI and export MS_TOKEN yourself." >&2
+    # The answer's code says which 401 it is (`routes/auth.ts`): a password, or a second factor.
+    case "$(cat "${reply}")" in
+      *MFA_REQUIRED* | *MFA_CODE_INVALID*)
+        echo "       the account needs a second factor (MFA_REQUIRED or MFA_CODE_INVALID)," >&2
+        echo "       and this script sends none. Issue a token by hand, with the code in" >&2
+        echo "       the login's \"code\" field: docs/installation.md §5." >&2
+        ;;
+      *)
+        echo "       the generated password has been changed — which is what it is for." >&2
+        echo "       put the new one in a file and run this again with" >&2
+        echo "       MS_PASSWORD_FILE=<that file> (and MS_LOGIN=<login> for an account" >&2
+        echo "       other than admin), or issue a token by hand: docs/installation.md §5." >&2
+        ;;
+    esac
   fi
   exit 1
 fi

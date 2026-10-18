@@ -65,18 +65,22 @@ ms_api_probe() {
 # a caller can `ms_api_require "${API}" || exit 1`.
 ms_api_require() {
   local api="$1"
+  # Said, never shown: the value is a credential, and one this API refused may be good elsewhere.
+  local token_state=unset
+  [ -z "${MS_TOKEN:-}" ] || token_state='set but not accepted'
   case "$(ms_api_probe "${api}")" in
     ok) return 0 ;;
     unauthenticated)
-      echo "error: ${api} needs a credential and MS_TOKEN is ${MS_TOKEN:+set but not accepted}${MS_TOKEN:-unset}" >&2
+      echo "error: ${api} needs a credential and MS_TOKEN is ${token_state}" >&2
       echo "       api.requireAuthentication is on — the default since P-154." >&2
       echo "       for the dev stack:  eval \"\$(scripts/dev-token.sh)\"" >&2
-      echo "       elsewhere:          issue a token from the UI and export MS_TOKEN" >&2
+      echo "       elsewhere:          an administrator's token, scope 'full', issued" >&2
+      echo "                           from a signed-in session (docs/installation.md §5)" >&2
       return 1
       ;;
     forbidden)
       echo "error: ${api} accepted the credential in MS_TOKEN and refused the request" >&2
-      echo "       the token's scope is probably too low — this needs at least 'write'" >&2
+      echo "       the soak lists the probes: it needs an administrator's token, scope 'full'" >&2
       return 1
       ;;
     *)

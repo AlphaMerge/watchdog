@@ -236,8 +236,10 @@ shell. `scripts/soak.sh` and the smoke harnesses read the same variable, and
 `scripts/lib/api-auth.sh` is the one place that turns it into a header.
 
 The UI at :5173 asks for that same password, and makes you replace it before it shows you
-anything else (`U-17`). Once you have, `dev-token.sh` cannot log in any more and says so — issue
-a token from the UI instead.
+anything else (`U-17`). Once you have, `dev-token.sh` cannot log in any more and says so. The UI
+cannot issue a token: sign in with the new password through `POST /api/v1/auth/login` and issue
+one with `POST /api/v1/auth/tokens` (`docs/installation.md` §5), or run `dev-token.sh` with
+`MS_PASSWORD_FILE` naming a file that holds the new password.
 
 ### Making it actually scan something
 

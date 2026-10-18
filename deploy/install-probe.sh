@@ -127,6 +127,8 @@ MonitoringSystem probe ${version} installed.
   logs            journalctl -u ms-probe -f
 
 This probe is connecting to ${core_host} and will wait there: a probe that has
-reached the core is not yet a probe that may scan. Approve it by name on the
-core's probes page, and delete the enrolment bundle from both machines.
+reached the core is not yet a probe that may scan. On the core host, an
+administrator approves it by name onto a probe object of its own, with no "local"
+(docs/installation.md, Remote probes). Delete the enrolment bundle from both
+machines.
 SUMMARY
