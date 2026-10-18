@@ -37623,14 +37623,19 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       no route or page shows the flag, so the paragraph gives a read-only query, says 075 can
       keep a remote probe and how to tell from `GET /api/v1/probes`, and points at `P-445`.
 
-- [ ] **H-48 — the 073 lookup block uses a token nothing in its section issues** · XS · H-47 ·
+- [x] **H-48 — the 073 lookup block uses a token nothing in its section issues** · XS · H-47 ·
       Found 2026-10-18 by `H-43`'s second check. `installation.md` → *Going back* builds `auth`
       from `MS_TOKEN`. §5 now issues that token in a session and revokes it once the probes are
       approved, so an operator who reaches *Going back* later has no token, and the block's first
       call answers `401`. **Done when** the block signs in and uses the session cookie as the
       thresholds section does, or issues its own token from a session and revokes it after; and
       the commands are run as written under bash and zsh, as `H-43`'s were.
-- [ ] **P-445 — migration 075 can keep the wrong probe as local, and nothing says how to move the
+
+      **H-48 outcome.** *Going back*'s two blocks sign in, keep the session in a cookie jar, use
+      it for the list and the `PATCH`, and sign out; no token. Run as written, with only the port
+      changed, under bash 3.2 (as a script and pasted into `bash -i`) and zsh against a scratch
+      core of this tree: the list named the sensor, and its lookup was set.
+- [x] **P-445 — migration 075 can keep the wrong probe as local, and nothing says how to move the
       flag** · S · P-382, H-44 · Found 2026-10-18 in `H-44`. Where two objects marked local each
       had an approved probe (a remote probe approved as local by mistake, beside the one beside
       the core), 075's order comes down to `last_seen_at`, so the last to connect keeps the flag
@@ -37642,6 +37647,15 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `probe-registry.test.ts`'s `SECOND_LOCAL` table approves a pending probe, and the
       re-approval test passes no `local`. **Done when** the guide says how to move the local flag
       to the right object, backed by a test of that path, or the API gains a way to do it.
+
+      **P-445 outcome.** The path works with no API change, once the holder's probe is revoked:
+      `probe-registry.test.ts` → *moves the flag to an approved probe approved again as local,
+      once the holder is revoked* holds the 409 while it is approved (nothing moved, recorded or
+      closed), then the move (one object local, `localTakenFrom` naming the old one), the key the
+      re-approval takes (refused once, back on the enrolment key), and the holder approved back
+      onto its object unflagged. A mutant that skips `#takeLocal` for an already approved probe
+      fails only that test, on `probe_config_one_local`. `installation.md`'s 075 paragraph gives
+      the three calls, run as written against a scratch core under bash and zsh.
 
 - [ ] **H-45 — no box has swapped a real rc.2 `.rpm` for this release's** · S · H-40 · Found
       2026-10-18 in `H-40`'s review. `dnf swap` between `ms` and `ms-probe` ends right because

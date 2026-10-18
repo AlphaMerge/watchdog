@@ -862,6 +862,128 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       });
     }
 
+    /**
+     * **Moving the flag to the object that should hold it** (`P-445`). Before `P-382` a second
+     * approval as local left the flag on two objects, and where both had a probe approved,
+     * migration 075 kept it on the one whose probe connected last, which can be a remote probe.
+     * The probe beside the core is approved already, so the move is approving it again as local,
+     * and that is refused while the holder's probe is approved. So: revoke the holder, approve the
+     * right probe again as local, and approve the holder's probe back onto its own object.
+     */
+    it('moves the flag to an approved probe approved again as local, once the holder is revoked (P-445)', async () => {
+      const unique = (): string => String(process.hrtime.bigint());
+      const remoteObject = (
+        await harness.service.create(testActor, {
+          kind: 'probe',
+          parentId: harness.rootId,
+          name: `remote-${unique()}`,
+        })
+      ).id;
+      const localObjects = async (): Promise<number[]> =>
+        (
+          await db.query<{ object_id: string }>(
+            'SELECT object_id::text AS object_id FROM probe_config WHERE is_local ORDER BY 1',
+          )
+        ).map((one) => Number(one.object_id));
+      const approvals = async (gid: string): Promise<Record<string, unknown>[]> =>
+        (
+          await db.query<{ summary: Record<string, unknown> }>(
+            `SELECT summary FROM audit_log
+             WHERE action = 'probe.approved' AND summary->>'gid' = $1 ORDER BY id`,
+            [gid],
+          )
+        ).map((one) => one.summary);
+
+      // The probe beside the core, approved without the flag and holding a key of its own, as
+      // one that has been running does.
+      const beside = await registry.admit(hello({ gid: `beside-${unique()}` }));
+      assert.ok(beside.kind === 'pending');
+      await registry.approve(beside.gid, probeId, testActor);
+      const issuing = await registry.admit(hello({ gid: beside.gid }));
+      assert.ok(issuing.kind === 'approved' && issuing.issuedKey !== undefined);
+      const ownKey = issuing.issuedKey;
+      const using = await registry.admit(hello({ gid: beside.gid, accessKey: ownKey }));
+      assert.equal(using.kind, 'approved');
+      // A remote probe holding the flag: what 075 leaves where that one connected last.
+      const remote = await registry.admit(
+        hello({ gid: `remote-${unique()}`, certificate: CERT_B, remoteAddress: '10.8.0.4' }),
+      );
+      assert.ok(remote.kind === 'pending');
+      await registry.approve(remote.gid, remoteObject, testActor, { local: true });
+      assert.deepEqual(await localObjects(), [remoteObject]);
+
+      const link = recorder();
+      registry.attach(link);
+
+      // Refused while the holder's probe is approved, and nothing moved, recorded or closed.
+      await assert.rejects(
+        registry.approve(beside.gid, probeId, testActor, { local: true }),
+        (error: unknown) =>
+          error instanceof ProbeRegistryError &&
+          error.code === 'PROBE_CONFLICT' &&
+          error.message ===
+            `probe object ${String(remoteObject)} is already this installation's local probe, ` +
+              `held by ${remote.gid}; revoke that probe first, then approve this one onto ` +
+              'that object or any other',
+      );
+      assert.deepEqual(await localObjects(), [remoteObject], 'the flag stays');
+      assert.equal((await approvals(beside.gid)).length, 1, 'no second approval recorded');
+      assert.equal(link.closed.length, 0, 'no connection closed');
+      const untouched = await registry.admit(hello({ gid: beside.gid, accessKey: ownKey }));
+      assert.equal(untouched.kind, 'approved', 'and its key still opens the door');
+
+      await registry.revoke(remote.gid, 'held the local flag', testActor);
+      const moved = await registry.approve(beside.gid, probeId, testActor, { local: true });
+      assert.equal(moved.status, 'approved');
+      assert.equal(moved.objectId, probeId);
+      assert.deepEqual(await localObjects(), [probeId], 'one object local, the right one');
+      const besideApprovals = await approvals(beside.gid);
+      assert.equal(besideApprovals.length, 2);
+      const [, moving] = besideApprovals;
+      assert.ok(moving !== undefined);
+      assert.equal(moving['local'], true);
+      assert.equal(moving['localTakenFrom'], remoteObject);
+
+      // Approving it again takes its key, as every approval does: it is closed once, refused on
+      // the key it held, and admitted on the enrolment key with a new one of its own.
+      assert.deepEqual(
+        link.closed.map((one) => one.gid),
+        [beside.gid],
+      );
+      const stale = await registry.admit(hello({ gid: beside.gid, accessKey: ownKey }));
+      assert.ok(stale.kind === 'refused');
+      assert.equal(stale.code, 'bad-access-key');
+      const back = await registry.admit(hello({ gid: beside.gid }));
+      assert.ok(back.kind === 'approved' && back.issuedKey !== undefined);
+
+      // The remote probe back onto its own branch, and the flag stays where it moved to.
+      const returned = await registry.approve(remote.gid, remoteObject, testActor);
+      assert.equal(returned.status, 'approved');
+      assert.equal(returned.objectId, remoteObject);
+      assert.deepEqual(await localObjects(), [probeId]);
+      const remoteApprovals = await approvals(remote.gid);
+      assert.equal(remoteApprovals.length, 2);
+      const [, rebinding] = remoteApprovals;
+      assert.ok(rebinding !== undefined);
+      assert.equal(rebinding['local'], false);
+      assert.equal(rebinding['localTakenFrom'], undefined);
+      const rebound = await db.query<{ object_id: string }>(
+        'SELECT object_id::text AS object_id FROM probe_config WHERE gid = $1',
+        [remote.gid],
+      );
+      assert.deepEqual(
+        rebound.map((one) => Number(one.object_id)),
+        [remoteObject],
+      );
+
+      // The right object cannot be deleted now, which is what the flag is for.
+      await assert.rejects(
+        () => harness.service.delete(testActor, probeId, { kind: 'leafOnly' }, { kind: 'none' }),
+        (error: unknown) =>
+          error instanceof Error && /local probe and cannot be deleted/.test(error.message),
+      );
+    });
+
     it('is held to one object by the database too (P-382)', async () => {
       const secondObject = (
         await harness.service.create(testActor, {

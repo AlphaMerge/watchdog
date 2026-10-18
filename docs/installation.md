@@ -567,9 +567,36 @@ WHERE pc.is_local;
 ```
 
 Find that `gid` in `GET /api/v1/probes`: its `displayName` and `lastAddress` say which machine it
-is. If it is not the probe beside the core, the flag can move only once the probe holding it is
-revoked, which stops that probe's monitoring until it is approved again, and no tested path moves
-it yet (`P-445`).
+is. If it is not the probe beside the core, move the flag (`P-445`). Approving the probe beside
+the core again as local is refused `409` while the probe holding the flag is approved, so revoke
+that one, approve the probe beside the core again onto its own object with `"local": true`, and
+approve the other back onto the object it held, with no `"local"`. Take each probe's `gid` and
+`objectId` from `GET /api/v1/probes`, and run the three together: the revoked probe stops
+monitoring until it is approved again and has reconnected, a minute or two with the default
+`core.reconnectMaxDelayMs`, and its sensors gap meanwhile. An approval closes that probe's
+connection and takes its key, so each of the two is refused once on the key it held and comes
+back on the enrolment key in its configuration (`core.accessKey`), with a new key of its own; the
+probe beside the core keeps checking meanwhile. From a signed-in session, as in §5:
+
+```bash
+api=http://127.0.0.1:8080/api/v1
+jar=$(mktemp)
+curl -s -c "$jar" -H 'content-type: application/json' -X POST "$api/auth/login" \
+  --data-binary @- <<'EOF'
+{"login":"admin","password":"<your password>"}
+EOF
+curl -s -b "$jar" "$api/probes"                               # each probe's gid and objectId
+curl -s -b "$jar" -H 'content-type: application/json' -X POST "$api/probes/<holder gid>/revoke" \
+  -d '{"note":"held the local flag 075 kept; approved again at once"}'
+curl -s -b "$jar" -H 'content-type: application/json' -X POST "$api/probes/<local gid>/approve" \
+  -d '{"objectId":<its object id>,"local":true}'
+curl -s -b "$jar" -H 'content-type: application/json' -X POST "$api/probes/<holder gid>/approve" \
+  -d '{"objectId":<the object it held>}'
+curl -s -b "$jar" -X POST "$api/auth/logout"; rm -f "$jar"
+```
+
+The approval as local is recorded with the object the flag came from, as `localTakenFrom` in its
+audit entry, and the query above now answers the object of the probe beside the core.
 
 ### Thresholds on a cloned health sensor
 
@@ -730,11 +757,17 @@ cannot tell which: setting it would turn every shut port on every clone Down at 
 So 073 leaves them, and logs a warning naming, for each sensor type, how many channels have no
 lookup although the type declares one, and the first 50 sensors holding them. All of them, with
 the lookup each type declares, are listed in the web UI under **Sensor types** → **Channels
-without the lookup their type declares** (`P-308`), and by the API:
+without the lookup their type declares** (`P-308`), and by the API, from a signed-in session as
+in §5:
 
 ```bash
-auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
-curl -s "${auth[@]}" http://127.0.0.1:8080/api/v1/channels/without-lookup
+api=http://127.0.0.1:8080/api/v1
+jar=$(mktemp)
+curl -s -c "$jar" -H 'content-type: application/json' -X POST "$api/auth/login" \
+  --data-binary @- <<'EOF'
+{"login":"admin","password":"<your password>"}
+EOF
+curl -s -b "$jar" "$api/channels/without-lookup"
 ```
 
 The list names only sensors you can see, the first thousand of them with `total` counting the
@@ -742,11 +775,12 @@ rest, and never fills anything in. Set the ones that should be judged, one chann
 with the lookup the list names (`ms.snmp.if-oper-status` for an interface status). In the web UI,
 open the sensor from the list; in its channel table, under **Judged by**, choose the lookup marked
 as declared by its type and press **Set lookup** (`U-82`). It needs write on the sensor. Or by
-the API:
+the API, in the same shell, signing out after the last:
 
 ```bash
-curl -s "${auth[@]}" -X PATCH http://127.0.0.1:8080/api/v1/objects/<sensor id>/channels/status \
-  -d '{"lookupId": "ms.snmp.if-oper-status"}'
+curl -s -b "$jar" -H 'content-type: application/json' -X PATCH \
+  "$api/objects/<sensor id>/channels/status" -d '{"lookupId": "ms.snmp.if-oper-status"}'
+curl -s -b "$jar" -X POST "$api/auth/logout"; rm -f "$jar"
 ```
 
 It judges the channel from its next reading. A port whose status should stay unjudged needs
