@@ -37176,6 +37176,53 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         it, unless `MS_SMOKE_KEEP=1`: services started, `ms-uninstall` run, *smoke test passed*,
         with */opt/ms, the units, their enable links and the ping drop-in: gone, and said so* and
         */etc/ms, /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
+      - **Review.** Two ways it could remove what was not a release's, and both are refused now.
+        **A prefix a release did not fill**: it trusted any `VERSION`, and `install.sh --prefix
+        /usr/local` leaves one there beside the host's own `bin`, `etc` and `libexec` — the
+        installer took those for a release's, moved them to `previous`, and the next run deleted
+        them. `ms-uninstall` now removes nothing from a prefix without `libexec/ms-setup`, or
+        with, in `bin`, `libexec`, `etc` or `deploy` or the same under `previous`, a name no
+        release has put there (every name since rc.1: the six launchers; `ms-setup ms-uninstall
+        remove-ping-conf.sh`; `core.json probe.json`; `systemd`). `place-release.sh` refuses,
+        before it copies anything, a prefix with something in it and no `VERSION`, unless it is
+        only what an install interrupted before `VERSION` leaves, and any prefix whose four
+        directories hold such a name. **The package guard asked by path as spelled**:
+        `--prefix /opt/ms/` asked dpkg about `/opt/ms//libexec/ms-setup`, which nobody owns, and
+        went on to stop the package's services and delete its units. It asks by name now —
+        `dpkg-query -W -f='${db:Status-Status}'` for `ms` and `ms-probe`, anything but
+        `not-installed` or `config-files` refusing, and `rpm -q --quiet` for each — and the prefix
+        is one spelling first: slashes squeezed, the trailing one dropped, a link followed by
+        `readlink -f` where it can, `/` refused before and after. Also: a failed `daemon-reload`
+        no longer ends it before its summary (`|| true`), `--help` prints the header and no code
+        (`2,19p`), and an edited `ms-core.service` or `ms-probe.service` an earlier release left in
+        `/etc/systemd/system`, which `ms-setup` kept, is named under *Left in place, as yours*.
+        `installation.md` says what the installer and `ms-uninstall` refuse.
+        Tests: `deploy-scripts.test.ts`, eight more and one rewritten — the prefix refused with
+        nothing touched (no `libexec/ms-setup`; a foreign name in `bin`, `previous/bin`, `libexec`,
+        `etc`, `deploy`; a hidden one), either package installed by dpkg (installed,
+        half-configured) or rpm under three spellings, a removed-not-purged package going ahead
+        and both names asked of both tools, the spellings (trailing slash, doubled slashes, a link,
+        and `/` by `//`, `///` or a link, with and without a working `readlink`), the lists the
+        same in both scripts and every launcher `package.sh` stages, a failing reload, the legacy
+        unit (and an operator's link not named), `--help`; and in `place-release.sh`, a non-empty
+        prefix with no release refused unchanged (`ls -laR` before and after), an empty one and an
+        interrupted install filled, and an upgrade over a foreign name in `bin`, `libexec`, `etc`,
+        `deploy`, `previous/bin` and `previous/etc` refused with nothing stopped. With the
+        `H-40` and `H-25` reviews, the file is 116 of 116.
+        **Mutations 25/25**, one only once its test was mended: a link named as a legacy unit
+        survived a link to /dev/null, which `-f` refuses anyway, so the operator's link leads to a
+        regular file now. The rest: no slash squeezing; the trailing slash kept; the link not
+        followed; a link to `/` not refused; `config-files` taken as installed; only `installed`
+        refused; dpkg asked of `ms` only; rpm never asked; no `libexec/ms-setup` check; `bin`,
+        `previous` or hidden names not checked; a foreign name not refused; a list short of a
+        launcher; a failed reload ending it; the legacy unit never named; `--help` printing code;
+        and in `place-release.sh` a prefix with no `VERSION` not refused, its own entries or its
+        directories not checked, an upgrade not checked, `previous` or `deploy` not checked, an
+        interrupted install's `.incoming` refused.
+        **Smoke 2026-10-18**, `smoke-install.sh` (Debian 12, arm64, a tarball built at the review's
+        tree, `f6e4185a`, not dirty): *smoke test passed*, ending with `ms-uninstall`: */opt/ms, the
+        units, their enable links and the ping drop-in: gone, and said so* and */etc/ms,
+        /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
 
 - [x] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
       Found 2026-10-07 in `H-34`. `ms`'s rpm `%preun` with `$1=0` (and the `.deb`'s `prerm` on

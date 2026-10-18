@@ -379,7 +379,11 @@ the new build refuses your configuration differs:
   running. If a setting was renamed or made required, it stops there and says so: **nothing has
   been changed**, and the old version is still installed and still running. Fix the configuration
   and run the installer again. Otherwise it stops the services, moves the new release in, starts
-  them, and keeps the release it replaced at `/opt/ms/previous`.
+  them, and keeps the release it replaced at `/opt/ms/previous`. `bin`, `libexec`, `etc` and
+  `deploy` under the prefix are the release's and are replaced whole, so the installer refuses,
+  before it changes anything, when one of them holds a file no release put there (`H-39`): move
+  it out of the prefix and run it again. It refuses a prefix that has anything in it and no
+  release (`--prefix /usr/local`) the same way.
 - **A package** stops the services before it unpacks, because the package manager replaces the
   files itself and the new build can only be asked afterwards. If it refuses the configuration,
   the new version is installed, **both services are left stopped**, and the message says so. Fix
@@ -556,11 +560,16 @@ sudo /opt/ms/libexec/ms-uninstall
 ```
 
 It stops and disables both services, removes the release from `/opt/ms` with the one it kept at
-`/opt/ms/previous` (anything you put there yourself stays, and is named), removes the units from
-`/usr/lib/systemd/system`, and takes the probe's ping setting away as a purge does (below). It
-refuses an installation that a package owns. An installation from a release before `H-39` has no
-`ms-uninstall`; run `sudo ./deploy/uninstall.sh` from this release's unpacked tarball instead,
-which does the same.
+`/opt/ms/previous` (anything you put beside them yourself stays, and is named), removes the
+units from `/usr/lib/systemd/system`, and takes the probe's ping setting away as a purge does
+(below). It removes nothing, and says why, while the `ms` or `ms-probe` package is installed —
+remove that with `dpkg -P` or `rpm -e` — and where the prefix is not only a release's: one without
+`libexec/ms-setup`, or with a file in `bin`, `libexec`, `etc` or `deploy` (or under `previous`)
+that no release put there (`H-39`). An edited `ms-core.service` or `ms-probe.service` that an
+earlier release left in `/etc/systemd/system`, and the setup kept, is yours: it is named at the
+end and left, for you to remove before `systemctl daemon-reload`. An installation from a release
+before `H-39` has no `ms-uninstall`; run `sudo ./deploy/uninstall.sh` from this release's unpacked
+tarball instead, which does the same.
 
 `/etc/ms`, `/var/lib/ms-*`, the database and your drop-ins under
 `/etc/systemd/system/ms-*.service.d` are left alone deliberately — they hold the

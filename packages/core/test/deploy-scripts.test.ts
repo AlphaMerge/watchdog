@@ -766,6 +766,95 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
     );
     assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '2.0.0\n');
   });
+
+  it('refuses a prefix with something in it and no release, and changes nothing (`H-39` review)', () => {
+    // `--prefix /usr/local`: the first run used to take its bin, etc and libexec for a release's
+    // and move them to `previous`, which the next run deleted.
+    for (const [why, make] of [
+      [
+        'a bin of somebody else’s',
+        (prefix: string) => {
+          writeFileSync(join(prefix, 'bin', 'htop'), '');
+        },
+      ],
+      [
+        'a lib, which no release has',
+        (prefix: string) => {
+          mkdirSync(join(prefix, 'lib'));
+        },
+      ],
+      [
+        'a file of the operator’s',
+        (prefix: string) => {
+          writeFileSync(join(prefix, 'notes.txt'), '');
+        },
+      ],
+    ] as const) {
+      const box = sandbox();
+      const prefix = join(box.dir, 'usr-local');
+      const conf = join(box.dir, 'etc-ms');
+      mkdirSync(join(prefix, 'bin'), { recursive: true });
+      mkdirSync(conf);
+      make(prefix);
+      const from = release(box, '2.0.0');
+      const before = spawnSync('ls', ['-laR', prefix], { encoding: 'utf8' }).stdout;
+      const result = place(box, from, prefix, conf);
+      assert.equal(result.status, 1, `${why}: ${result.stdout}`);
+      assert.match(
+        result.stderr,
+        /is not empty and has no release in it \(no .*\/VERSION\), and .* is not a release's/,
+        why,
+      );
+      assert.equal(spawnSync('ls', ['-laR', prefix], { encoding: 'utf8' }).stdout, before, why);
+      assert.ok(!box.logged().includes('systemctl'), why);
+    }
+  });
+
+  it('fills an empty prefix, and one an install left before it wrote VERSION', () => {
+    for (const [why, make] of [
+      ['empty', () => undefined],
+      [
+        'an interrupted install',
+        (prefix: string) => {
+          mkdirSync(join(prefix, 'app'));
+          writeFileSync(join(prefix, 'app', 'marker'), 'half');
+          writeFileSync(join(prefix, 'bin', 'ms-core'), '');
+          mkdirSync(join(prefix, '.incoming'));
+        },
+      ],
+    ] as const) {
+      const box = sandbox();
+      const prefix = join(box.dir, 'opt-ms');
+      const conf = join(box.dir, 'etc-ms');
+      mkdirSync(join(prefix, 'bin'), { recursive: true });
+      mkdirSync(conf);
+      make(prefix);
+      const result = place(box, release(box, '2.0.0'), prefix, conf);
+      assert.equal(result.status, 0, `${why}: ${result.stderr}`);
+      assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '2.0.0\n', why);
+    }
+  });
+
+  it('refuses an upgrade over a bin, libexec, etc or deploy with something not a release’s in it', () => {
+    // In the release and in the one kept at `previous`, which this run would delete.
+    for (const where of ['bin', 'libexec', 'etc', 'deploy', 'previous/bin', 'previous/etc']) {
+      const box = sandbox();
+      const { prefix, conf } = installed(box);
+      mkdirSync(join(prefix, where), { recursive: true });
+      writeFileSync(join(prefix, where, 'somebody-elses'), 'kept');
+      const result = place(box, release(box, '2.0.0'), prefix, conf);
+      assert.equal(result.status, 1, `${where}: ${result.stdout}`);
+      assert.match(
+        result.stderr,
+        /somebody-elses is not something a release puts there, .*move it out of .* Nothing was changed/,
+        where,
+      );
+      assert.equal(readFileSync(join(prefix, where, 'somebody-elses'), 'utf8'), 'kept', where);
+      assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '1.0.0\n', where);
+      assert.ok(!box.logged().includes('systemctl stop'), where);
+      assert.ok(!existsSync(join(prefix, '.incoming')), where);
+    }
+  });
 });
 
 describe(
@@ -2440,6 +2529,15 @@ describe(
       return found[1].replaceAll('$' + '{probe_gid}', String(gid));
     };
     const RELEASE_ENTRIES = ['app', 'bin', 'web', 'docs', 'etc', 'deploy', 'libexec', 'VERSION'];
+    /** Every launcher a release puts in bin: `package.sh`'s, read below to keep this honest. */
+    const RELEASE_BIN = [
+      'ms-backup',
+      'ms-core',
+      'ms-enrol',
+      'ms-probe',
+      'ms-recover',
+      'ms-restore',
+    ];
 
     /**
      * A tarball installation as `place-release.sh` and `ms-setup` leave one: a release with the
@@ -2459,9 +2557,18 @@ describe(
         mkdirSync(join(prefix, dir), { recursive: true });
       }
       mkdirSync(join(prefix, 'previous', 'app'), { recursive: true });
+      mkdirSync(join(prefix, 'previous', 'bin'), { recursive: true });
       writeFileSync(join(prefix, 'VERSION'), '2.0.0\n');
       writeFileSync(join(prefix, 'app', 'marker'), '2.0.0');
       writeFileSync(join(prefix, 'operators-own-notes.txt'), 'mine');
+      // What a release puts in bin, etc and deploy, as `package.sh` and `place-release.sh` do.
+      for (const name of RELEASE_BIN) {
+        writeFileSync(join(prefix, 'bin', name), '#!/bin/sh\n', { mode: 0o755 });
+      }
+      writeFileSync(join(prefix, 'previous', 'bin', 'ms-core'), '#!/bin/sh\n', { mode: 0o755 });
+      for (const name of ['core.json', 'probe.json'])
+        writeFileSync(join(prefix, 'etc', name), '{}');
+      writeFileSync(join(prefix, 'deploy', 'systemd', 'ms-core.service'), '[Service]\n');
       writeFileSync(join(prefix, 'libexec', 'ms-setup'), '#!/bin/sh\n', { mode: 0o755 });
       writeFileSync(join(prefix, 'libexec', 'ms-uninstall'), readFileSync(script('uninstall.sh')), {
         mode: 0o755,
@@ -2495,7 +2602,11 @@ describe(
         units,
         conf,
         ping,
-        env: { MS_SETUP_UNIT_DIR: units, MS_SETUP_SYSCTL_DIR: sysctl },
+        env: {
+          MS_SETUP_UNIT_DIR: units,
+          MS_SETUP_SYSCTL_DIR: sysctl,
+          MS_SETUP_LEGACY_UNIT_DIR: join(box.dir, 'etc-units'),
+        },
       };
     }
 
@@ -2572,25 +2683,274 @@ describe(
       );
     });
 
-    it('refuses an installation a package owns, and touches nothing', () => {
-      for (const [tool, said, remover] of [
-        ['dpkg-query', 'echo "ms: $2"', 'dpkg -P ms'],
-        ['rpm', 'echo ms-probe', 'rpm -e ms-probe'],
+    /** Each package's state as `dpkg-query -W -f='${db:Status-Status}'` and `rpm -q` give it. */
+    const packageTools = (box: Sandbox, dpkg: Record<string, string>, rpm: string[]): void => {
+      const cases = Object.entries(dpkg)
+        .map(([pkg, status]) => `  ${pkg}) printf '%s' '${status}'; exit 0 ;;`)
+        .join('\n');
+      writeFileSync(
+        join(box.bin, 'dpkg-query'),
+        '#!/usr/bin/env bash\necho "dpkg-query $*" >> "$STUB_LOG"\n' +
+          `case "\${@: -1}" in\n${cases}\nesac\n` +
+          'echo "dpkg-query: no packages found matching ${@: -1}" >&2\nexit 1\n',
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(box.bin, 'rpm'),
+        '#!/usr/bin/env bash\necho "rpm $*" >> "$STUB_LOG"\n' +
+          `case " ${rpm.join(' ')} " in *" \${@: -1} "*) exit 0 ;; esac\nexit 1\n`,
+        { mode: 0o755 },
+      );
+    };
+    /** Nothing removed, nothing stopped. */
+    const untouched = (box: Sandbox, at: ReturnType<typeof tarballInstallation>): void => {
+      for (const entry of RELEASE_ENTRIES) assert.ok(existsSync(join(at.prefix, entry)), entry);
+      assert.ok(existsSync(join(at.prefix, 'previous')));
+      assert.equal(readdirSync(at.units).length, 4);
+      assert.ok(existsSync(at.ping));
+      assert.ok(!box.logged().includes('systemctl'), box.logged());
+    };
+
+    it('refuses while either package is installed, however the prefix is spelled', () => {
+      // By name: a path as spelled, `/opt/ms//libexec/ms-setup` for `--prefix /opt/ms/`, was one
+      // dpkg said nobody owned, and the package's services and units went (`H-39` review).
+      for (const [why, dpkg, rpm, remover] of [
+        ['ms, by dpkg', { ms: 'installed' }, [], 'dpkg -P ms'],
+        ['ms-probe half-configured', { 'ms-probe': 'half-configured' }, [], 'dpkg -P ms-probe'],
+        ['ms-probe, by rpm', {}, ['ms-probe'], 'rpm -e ms-probe'],
+      ] as const) {
+        for (const spelled of ['', '/', '//']) {
+          const box = sandbox();
+          const at = tarballInstallation(box);
+          packageTools(box, dpkg, [...rpm]);
+          const result = box.run(
+            [join(at.prefix, 'libexec', 'ms-uninstall'), '--prefix', `${at.prefix}${spelled}`],
+            at.env,
+          );
+          assert.equal(result.status, 1, `${why} '${spelled}': ${result.stdout}`);
+          assert.match(
+            result.stderr,
+            new RegExp(`package is installed.*; remove it with: ${remover}$`, 'mu'),
+            why,
+          );
+          untouched(box, at);
+        }
+      }
+    });
+
+    it('goes ahead for a package removed and not purged, which owns nothing here', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      packageTools(box, { ms: 'config-files', 'ms-probe': 'not-installed' }, []);
+      const result = uninstall(box, at);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.ok(!existsSync(join(at.prefix, 'app')));
+      // Asked of both names, of each tool.
+      for (const asked of ['ms', 'ms-probe']) {
+        assert.match(box.logged(), new RegExp(`^dpkg-query -W .* ${asked}$`, 'mu'));
+        assert.match(box.logged(), new RegExp(`^rpm -q --quiet ${asked}$`, 'mu'));
+      }
+    });
+
+    it('takes the prefix as one spelling: a trailing slash, doubled slashes, a link', () => {
+      for (const spell of [
+        (prefix: string) => `${prefix}/`,
+        (prefix: string) => prefix.replace('/opt-ms', '//opt-ms//'),
+        (prefix: string, dir: string) => {
+          const link = join(dir, 'link-to-ms');
+          symlinkSync(prefix, link);
+          return link;
+        },
+      ]) {
+        const box = sandbox();
+        const at = tarballInstallation(box);
+        const spelled = spell(at.prefix, box.dir);
+        const result = box.run(
+          [join(at.prefix, 'libexec', 'ms-uninstall'), '--prefix', spelled],
+          at.env,
+        );
+        assert.equal(result.status, 0, `${spelled}: ${result.stdout}${result.stderr}`);
+        assert.ok(!existsSync(join(at.prefix, 'app')), spelled);
+        assert.ok(result.stdout.includes(`was removed from ${at.prefix}.`), result.stdout);
+      }
+      // And `/` however it is reached: by slashes, or by a link.
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      symlinkSync('/', join(box.dir, 'link-to-root'));
+      for (const spelled of ['//', '///', join(box.dir, 'link-to-root')]) {
+        const result = box.run(
+          [join(at.prefix, 'libexec', 'ms-uninstall'), '--prefix', spelled],
+          at.env,
+        );
+        assert.equal(result.status, 1, spelled);
+        assert.match(result.stderr, /refusing to remove '\/'/u, spelled);
+      }
+      untouched(box, at);
+
+      // Where readlink cannot resolve a path (a busybox one, without -f): the slashes alone.
+      const noReadlink = (where: Sandbox): void => {
+        writeFileSync(join(where.bin, 'readlink'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      };
+      noReadlink(box);
+      for (const spelled of ['//', '///']) {
+        const result = box.run(
+          [join(at.prefix, 'libexec', 'ms-uninstall'), '--prefix', spelled],
+          at.env,
+        );
+        assert.equal(result.status, 1, spelled);
+        assert.match(result.stderr, /refusing to remove '\/'/u, `${spelled} without readlink`);
+      }
+      untouched(box, at);
+      const plain = sandbox();
+      const installed = tarballInstallation(plain);
+      noReadlink(plain);
+      const result = plain.run(
+        [
+          join(installed.prefix, 'libexec', 'ms-uninstall'),
+          '--prefix',
+          installed.prefix.replace('/opt-ms', '//opt-ms//'),
+        ],
+        installed.env,
+      );
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.ok(result.stdout.includes(`was removed from ${installed.prefix}.`), result.stdout);
+    });
+
+    it('refuses a prefix a release did not fill, and removes nothing (`H-39` review)', () => {
+      // `install.sh --prefix /usr/local` failed part-way, or an installer before this release
+      // moved what /usr/local had into `previous`: a VERSION is there, and so is the operator's.
+      for (const [why, change, said] of [
+        [
+          'no libexec/ms-setup',
+          (prefix: string) => {
+            rmSync(join(prefix, 'libexec', 'ms-setup'));
+          },
+          /has no libexec\/ms-setup, which every installation has, so nothing was removed/u,
+        ],
+        [
+          'bin',
+          (prefix: string) => {
+            writeFileSync(join(prefix, 'bin', 'htop'), '');
+          },
+          /bin\/htop/u,
+        ],
+        [
+          'previous/bin',
+          (prefix: string) => {
+            writeFileSync(join(prefix, 'previous', 'bin', 'htop'), '');
+          },
+          /previous\/bin\/htop/u,
+        ],
+        [
+          'libexec',
+          (prefix: string) => {
+            mkdirSync(join(prefix, 'libexec', 'git-core'));
+          },
+          /git-core/u,
+        ],
+        [
+          'etc',
+          (prefix: string) => {
+            mkdirSync(join(prefix, 'etc', 'nginx'));
+          },
+          /etc\/nginx/u,
+        ],
+        [
+          'deploy',
+          (prefix: string) => {
+            writeFileSync(join(prefix, 'deploy', 'ansible.yml'), '');
+          },
+          /ansible/u,
+        ],
+        [
+          'a hidden file',
+          (prefix: string) => {
+            writeFileSync(join(prefix, 'bin', '.profile'), '');
+          },
+          /\.profile/u,
+        ],
       ] as const) {
         const box = sandbox();
         const at = tarballInstallation(box);
-        writeFileSync(join(box.bin, tool), `#!/usr/bin/env bash\n${said}\n`, { mode: 0o755 });
+        change(at.prefix);
         const result = uninstall(box, at);
-        assert.equal(result.status, 1, `${tool}: ${result.stdout}`);
-        assert.match(
-          result.stderr,
-          new RegExp(`is the .* package's; remove it with: ${remover}$`, 'mu'),
-        );
-        for (const entry of RELEASE_ENTRIES) assert.ok(existsSync(join(at.prefix, entry)), entry);
-        assert.equal(readdirSync(at.units).length, 4);
-        assert.ok(existsSync(at.ping));
-        assert.ok(!box.logged().includes('systemctl'), box.logged());
+        assert.equal(result.status, 1, `${why}: ${result.stdout}`);
+        assert.match(result.stderr, said, why);
+        if (why !== 'no libexec/ms-setup') {
+          assert.match(
+            result.stderr,
+            /is not something a release puts there, so .* is not only a MonitoringSystem installation; nothing was removed/u,
+            why,
+          );
+        }
+        untouched(box, at);
       }
+    });
+
+    it('lists the names place-release.sh does, and every launcher package.sh puts in bin', () => {
+      const lists = (file: string): string[] =>
+        readFileSync(script(file), 'utf8')
+          .split('\n')
+          .filter((line) => /^RELEASE_(BIN|LIBEXEC|ETC|DEPLOY)=/u.test(line));
+      assert.equal(lists('uninstall.sh').length, 4);
+      assert.deepEqual(lists('uninstall.sh'), lists('place-release.sh'));
+      const packager = readFileSync(join(repoRoot, 'scripts', 'package.sh'), 'utf8');
+      const staged = new Set(
+        [...packager.matchAll(/\$\{stage\}\/bin\/(ms-[a-z]+)"/gu)].map((found) => found[1]),
+      );
+      for (const svc of ['core', 'probe']) staged.add(`ms-${svc}`);
+      assert.deepEqual([...staged].sort(), RELEASE_BIN);
+      assert.ok(lists('uninstall.sh').includes(`RELEASE_BIN='${RELEASE_BIN.join(' ')}'`));
+    });
+
+    it('still says what it removed when the reload fails, and runs the fragment', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      writeFileSync(
+        join(box.bin, 'systemctl'),
+        '#!/usr/bin/env bash\necho "systemctl $*" >> "$STUB_LOG"\n' +
+          '[ "$1" = daemon-reload ] && { echo "Failed to reload daemon" >&2; exit 1; }\nexit 0\n',
+        { mode: 0o755 },
+      );
+      const result = uninstall(box, at);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.ok(!existsSync(at.ping), 'the fragment did not run');
+      assert.match(result.stdout, /MonitoringSystem 2\.0\.0 was removed from/);
+    });
+
+    it('names an edited unit an earlier release left in /etc, and leaves it', () => {
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      const legacy = join(box.dir, 'etc-units', 'ms-probe.service');
+      writeFileSync(legacy, '[Service]\nUser=root\n');
+      // A link of the operator's making is systemd's business, not an earlier release's unit,
+      // even to a unit file of their own.
+      const theirs = join(box.dir, 'srv-ms-core.service');
+      writeFileSync(theirs, '[Service]\n');
+      symlinkSync(theirs, join(box.dir, 'etc-units', 'ms-core.service'));
+      const result = uninstall(box, at);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.equal(readFileSync(legacy, 'utf8'), '[Service]\nUser=root\n');
+      assert.match(
+        result.stdout,
+        /Left in place, as yours:\n {2}.*etc-units\/ms-probe\.service, an edited unit from an earlier release\n {4}that ms-setup kept: remove it yourself, then 'systemctl daemon-reload'\.\n$/u,
+      );
+      assert.doesNotMatch(result.stdout, /ms-core\.service, an edited unit/);
+
+      // And nothing of the kind where there is none.
+      const plain = sandbox();
+      const quiet = uninstall(plain, tarballInstallation(plain));
+      assert.equal(quiet.status, 0);
+      assert.doesNotMatch(quiet.stdout, /as yours/);
+    });
+
+    it('prints its header for --help, and none of its code', () => {
+      const box = sandbox();
+      const result = box.run([script('uninstall.sh'), '--help']);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^Removes a tarball installation/u);
+      assert.match(result.stdout, /this refuses while either package is installed\.\n$/u);
+      assert.doesNotMatch(result.stdout, /set -euo|PREFIX=/u);
     });
 
     it('refuses a prefix with no installation in it, and one that is not absolute', () => {

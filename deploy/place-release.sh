@@ -68,6 +68,62 @@ installed=''
 # operator keeps under /opt/ms is left where it is.
 RELEASE_ENTRIES=(app bin web docs etc deploy libexec VERSION)
 
+# **A prefix is filled only when it is empty or a release's** (`H-39` review). Step 3 moves what
+# the prefix has under these names to `previous`, and the next run deletes `previous`: given
+# `--prefix /usr/local`, the first run took /usr/local/bin, /usr/local/etc and /usr/local/libexec
+# for a release's and the second removed them, and `ms-uninstall` would have removed them too. So
+# a prefix with no VERSION may hold nothing but what a release puts there — which an install
+# interrupted before it wrote VERSION leaves, and is replaced as before — and in any prefix, what
+# a release puts in bin, libexec, etc and deploy has a release's names, in the release and in the
+# one kept at `previous`. `ms-uninstall` asks the same of the same lists. They are every name a
+# release has put there (rc.1 on); one a release stops shipping stays, or the upgrade from a
+# release that had it would be refused.
+RELEASE_BIN='ms-backup ms-core ms-enrol ms-probe ms-recover ms-restore'
+RELEASE_LIBEXEC='ms-setup ms-uninstall remove-ping-conf.sh'
+RELEASE_ETC='core.json probe.json'
+RELEASE_DEPLOY='systemd'
+# The first entry of DIR whose name is not among the ALLOWED, or nothing.
+foreign_in() {
+  local dir="$1" allowed=" $2 " path
+  [ -d "${dir}" ] || return 0
+  for path in "${dir}"/* "${dir}"/.[!.]*; do
+    [ -e "${path}" ] || [ -L "${path}" ] || continue
+    case "${allowed}" in
+      *" ${path##*/} "*) ;;
+      *) printf '%s\n' "${path}"; return 0 ;;
+    esac
+  done
+  return 0
+}
+# The first entry of bin, libexec, etc or deploy, here or under `previous`, a release did not put
+# there, or nothing.
+foreign_in_release() {
+  local under sub allowed found
+  for under in '' previous/; do
+    for sub in bin libexec etc deploy; do
+      case "${sub}" in
+        bin) allowed="${RELEASE_BIN}" ;;
+        libexec) allowed="${RELEASE_LIBEXEC}" ;;
+        etc) allowed="${RELEASE_ETC}" ;;
+        deploy) allowed="${RELEASE_DEPLOY}" ;;
+      esac
+      found="$(foreign_in "${PREFIX}/${under}${sub}" "${allowed}")"
+      [ -z "${found}" ] || { printf '%s\n' "${found}"; return 0; }
+    done
+  done
+  return 0
+}
+if [ -d "${PREFIX}" ] && [ -z "${installed}" ]; then
+  foreign="$(foreign_in "${PREFIX}" "${RELEASE_ENTRIES[*]} previous .incoming")"
+  [ -n "${foreign}" ] || foreign="$(foreign_in_release)"
+  [ -z "${foreign}" ] \
+    || die "${PREFIX} is not empty and has no release in it (no ${PREFIX}/VERSION), and ${foreign} is not a release's; install into an empty directory, or one a release is in. Nothing was changed"
+elif [ -d "${PREFIX}" ]; then
+  foreign="$(foreign_in_release)"
+  [ -z "${foreign}" ] \
+    || die "${foreign} is not something a release puts there, and an upgrade replaces the directory it is in whole; move it out of ${PREFIX} and run this again. Nothing was changed"
+fi
+
 # --- 1. copy -----------------------------------------------------------------------------------
 incoming="${PREFIX}/.incoming"
 install -d -m 0755 "${PREFIX}"
