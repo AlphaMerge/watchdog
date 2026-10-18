@@ -37623,6 +37623,13 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       no route or page shows the flag, so the paragraph gives a read-only query, says 075 can
       keep a remote probe and how to tell from `GET /api/v1/probes`, and points at `P-445`.
 
+- [ ] **H-48 — the 073 lookup block uses a token nothing in its section issues** · XS · H-47 ·
+      Found 2026-10-18 by `H-43`'s second check. `installation.md` → *Going back* builds `auth`
+      from `MS_TOKEN`. §5 now issues that token in a session and revokes it once the probes are
+      approved, so an operator who reaches *Going back* later has no token, and the block's first
+      call answers `401`. **Done when** the block signs in and uses the session cookie as the
+      thresholds section does, or issues its own token from a session and revokes it after; and
+      the commands are run as written under bash and zsh, as `H-43`'s were.
 - [ ] **P-445 — migration 075 can keep the wrong probe as local, and nothing says how to move the
       flag** · S · P-382, H-44 · Found 2026-10-18 in `H-44`. Where two objects marked local each
       had an approved probe (a remote probe approved as local by mistake, beside the one beside
