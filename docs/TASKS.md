@@ -12807,6 +12807,22 @@ because each is a decision rather than a defect:
       **Done when** the API refuses a device whose host is an address of the family its IP
       version rules out, with a refusal naming both, or every connecting check fails naming
       the mismatch (phase `resolve`, the device's host); with tests for each.
+- [ ] **P-446 — four real-worker tests read the host's load: their 5 s bounds include starting workers** · XS ·
+      P-426, A-66, P-263 · Found 2026-10-18, twice: in `P-437`'s full suite at a load near 20 and
+      in the S5 integration's at a load near 12, with two full suites sharing the VM. In
+      `packages/probe/test/`, `pool-resolve.test.ts` 'counts a lookup a check stopped waiting for in
+      flight until it answers, then not' failed both times ("timed out after 5000 ms waiting for the
+      check to give up"); `pool-lookups.test.ts` 'counts a lookup a check is still waiting for as in
+      flight before the check has finished' ("… the pool says undefined") and 'hears an idle worker
+      say a lookup its check gave up on has been answered' failed once each; and `check-pool.test.ts`
+      'terminates a worker still loading at its bound, counts it, and replaces it while the others
+      run checks' failed once at `seen.every((one) => one.result.outcome === 'ok')`. Each took about
+      40 s against 2.5–7 s when it passed, and each passed in the probe package alone straight after.
+      The `within` bounds start before the pool's workers have loaded, so a slow worker start reads
+      as the behaviour under test failing. **Done when** each test waits for its workers to be ready
+      under its own bound before it starts the bound on the behaviour it names, so a failure says
+      which of the two was slow, with a mutant per test showing it still fails when the behaviour is
+      removed.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
