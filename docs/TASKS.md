@@ -12989,6 +12989,32 @@ because each is a decision rather than a defect:
       that takes most of the timeout, so the bug adds well over a second, with the bound between),
       or the case reads the deadline the driver was handed rather than the wall clock; with a
       mutant giving the whole timeout again that still fails it.
+- [ ] **P-448 — four older pool tests time a window or a bound that a loaded host's workers fill** · XS ·
+      P-26, P-206, P-272, P-437 · Found 2026-10-18 and 19 in `P-437`'s twenty-run re-takes of
+      `packages/probe/test/check-pool.test.ts`, each run in a process of its own: 15 of 20 passed
+      at a load of 2–39, and 4 of 7 at 17–58, every failure in a test `P-437` did not change.
+      - 'gives back the workers a lighter load stopped needing' (`P-26`), four times: "the pool
+        gave nothing back in 1200 ms of a load needing ~2 workers". Its idle window is 200 ms,
+        against 60 ms checks every 40 ms, and on a loaded host no worker sits idle a whole window
+        inside the 1,200 ms it watches.
+      - 'gives up after a streak of hangs with no worker ever ready, and answers its queue at
+        once' (`P-272`), twice: "no start after the latch", 2 heartbeats against 3. It counts the
+        hung starts by their threads' heartbeats, and one ended at its 1 s bound before its first
+        beat reached the test is a start the count misses; what it guards is a fourth.
+      - 'never gives up on hangs once a worker of the pool has been ready' (`P-272`), once: "timed
+        out after 180000 ms waiting for five hangs after the ready worker".
+      - 'loads at most SPAWN_CONCURRENCY workers at once, however large the shortfall' (`P-206`),
+        once: "timed out after 10000 ms waiting for the rest to load in turn", 23 workers loading
+        eight at a time with a 400 ms import, inside a bound that includes starting their threads.
+      Two more failed in the same runs and are `P-446`'s kind, a 5 s `within` around workers
+      starting: 'reaches its ceiling even when the drop lands mid-check (P-45)', twice, waiting
+      for workers holding jobs, and 'never lets a cumulative counter fall when a worker goes away'
+      (`P-36`), once, waiting for all three to report. They are in this ticket, so that `P-446`
+      stays the four it names. **Done when** each of the six waits for its workers under a bound
+      of its own before it times the behaviour it names, or reads that behaviour from the pool's
+      counters rather than a window of wall-clock time, so that a failure says which was slow;
+      with a mutant per test that still fails it when the behaviour is removed, and twenty runs
+      of the file in a row at a load near 20 with none of the six failing.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
@@ -12996,7 +13022,7 @@ because each is a decision rather than a defect:
       configuration). A name the change broke then looks recently answered for one cycle and
       wins retry ties against names that really did answer. **Done when** `lastAnsweredAt` is
       set in that branch only when the answer is stored, with a test and a mutant.
-- [ ] **P-437 — a probe's pool fills free memory to the reserve and then churns at it** · S ·
+- [x] **P-437 — a probe's pool fills free memory to the reserve and then churns at it** · S ·
       P-426, P-271 · Found 2026-10-17 on `ms-server`. The dev probe grows its pool whenever a check
       is queued, until the machine's available memory reaches `reserveMb`, and then the memory
       gate holds and releases it every second or two with no hysteresis.
@@ -13018,6 +13044,732 @@ because each is a decision rather than a defect:
       - a test drives available memory around the reserve and asserts at most one hold and one
         release, and a bounded number of grows;
       - `pool-memory-cap.test.ts`'s line count is extended to the toggle case.
+
+      **P-437 outcome. The pool holds at the reserve, with a margin either side, and a straggler
+      waits 200 ms before the pool grows for it.** In `packages/probe/src/runner/pool.ts`.
+      No protocol change and no migration. Revised after four reviews; what changed is listed
+      under "The review", "The second review", "The third review" and "The fourth review".
+      `P-439`, a loading worker counted twice, is fixed here as well.
+      - **The design: hysteresis, and the pool holds its size inside the band.**
+        - The memory gate is a state, `MemoryGate`, either `open` or `holding`. `holding` carries
+          `heldAt`, the size the pool held at once memory refused.
+        - A hold starts when memory refuses a growth that checks were waiting for.
+        - It ends only when a reading has room for one worker past
+          `MEMORY_RELEASE_MARGIN_WORKERS` (1) beyond `heldAt`, or beyond the pool now where that
+          is more: room for two workers above the reserve at the size it held at. A reading taken
+          below `heldAt` needs a worker more for each it was taken short of it, and no reading
+          taken while a worker loads ends a hold (the third review). It does not end when the
+          queue empties: that was the toggle, once a second, because the wheel hands over a
+          second's checks at once.
+        - With an explicit `workerPoolSize`, it ends on room past the pool now only. That pool's
+          `heldAt` is the size it grew to past memory, which memory by definition did not have:
+          measured against it the hold never ended, and the next burst past memory said nothing.
+        - `heldAt` is never past `maxSize`: a ceiling lowered under it brings it down too (the
+          fourth review).
+        - It is looked at on every pump, in `stats()`, and when a retired worker's thread exits,
+          so a pool with nothing to pump still ends it.
+        - While it holds, the pool may grow back to `heldAt`, as far as memory has room, and no
+          further. Workers given back as idle or for a fall are bought again with no line. Past
+          the size a shed for memory left it at, each worker needs room for itself and the shed
+          margin (`shedTo`, the fourth review); idle give-backs are bought back as before.
+        - Workers go back only once memory is `MEMORY_SHED_MARGIN_WORKERS` (1) worker's worth
+          below the reserve, not at the line growth stops at.
+        - So from giving a worker back at `heldAt` to growing past it, both read at that size, is
+          a band three workers wide: 120 MiB at 40 MiB a worker. Between a shed and growing a
+          worker back below `heldAt` it was not: 2e − a, where e is the estimate and a what a
+          worker really holds, 30 MiB at 40 against 50, and since the fourth review 3e − a,
+          70 MiB. This said three workers for both.
+      - **The margins are in workers, because a worker is the gate's unit, and in the estimate's
+        units**: a worker is counted at `WORKER_RESIDENT_MIB`'s 40 MiB, so what the margins are in
+        real memory depends on that figure (`P-440`).
+        - The ±10 MiB of noise this was tested at is a quarter of one worker.
+        - So is the estimate's error per worker, about 10 MiB: 50 measured against 40.
+        - One worker given back as idle does not end a hold, because the release is measured
+          against `heldAt` and not the smaller pool. **Measured against `heldAt` alone, several
+          did.** Each frees what it really held and is counted at the estimate, so with s spare
+          above the reserve at the size the hold started at, k give-backs ended it once
+          s + (actual − estimate) × k ≥ 2 × estimate: eight at `ms-server`'s 8 MiB, twelve from
+          the bottom of the band. Where the next burst wanted no more than two past `heldAt`,
+          the cycle after it came again every quiet stretch (the third review). **Now none
+          does** while a worker costs less than twice the estimate: a reading taken below
+          `heldAt` counts each worker it was taken short of it as one more. The scenario's idle
+          arm, below.
+        - The shed margin lets the probe into its reserve by at most one worker: 79% of a 1 GiB
+          ceiling, under `memoryLimitUsage`'s 80%, and less of any larger one. `P-244`'s eight
+          rows now compute the settle point with the margin, and still hold.
+      - **Why one queued check grew the pool to 61 and more.** Three causes:
+        - **The ceiling.** The derived ceiling never goes below 64 (`P-34`'s `min`), so a probe
+          whose wheel hands over 61 checks in a second may hold 61 workers whatever the checks
+          cost. That is `P-34`'s, and it stays.
+        - **The instant queue.** Growth answered it, so the pool followed the largest burst.
+          Since this, a shortfall under a tenth of the pool (`BURST_FRACTION`) is stragglers. The
+          pool grows for them only once the oldest has waited `GROW_AFTER_MS`, 200 ms, and then
+          for the whole queue in one step. A larger shortfall is a burst and grows the pool at
+          once, as before; one check is a burst for a pool of ten or fewer.
+        - **The gate.** At the reserve, each worker shed for noise was bought back by the next
+          queued check: *from N to N + 1, queued 1*. Gone.
+      - **`GROW_AFTER_MS` is 200 ms, a judgement: a worker's load already fills the dispatch
+        budget, so no wait fits inside it.** The wait adds to a lasting straggler's load; it does
+        not replace it.
+        One worker loading the real catalogue, spawn to ready, twenty spawns a run in the
+        toolchain container (`test/perf/pool-stragglers.test.ts`), on 8 cores with `ms-server`
+        and other suites on the host each time:
+
+        | Run | Load | p50 | p95 |
+        | --- | --- | --- | --- |
+        | 1 | not recorded | — | about 3,700 ms |
+        | 2 | 11.4 | 615 ms | 977 ms |
+        | 3 | 9.9 | 643 ms | 1,303 ms |
+        | 4 | 16.1 | 974 ms | 2,055 ms |
+        | 5, second review | 7.8 | 745 ms | 3,194 ms |
+        | 6, second review | 5.4 | 468 ms | 940 ms |
+        | 7, third review | 19–20 | 3,169 ms | 13,471 ms |
+        | 8, the close | 3.1 | 540 ms | 743 ms |
+
+        500 ms plus any of those p95s is past the 1,000 ms budget, and so is 200 ms: the budget
+        less the p95 leaves 60 ms or less, 23 ms or less in the first four, which is growing on
+        sight. The first review's rule was
+        the budget less the p95, floored at 200 ms, and on these numbers the floor is all of it.
+        So 200 ms is a judgement, not derived from them: longer than most checks, so that a busy
+        worker usually takes a straggler first, and short enough to add little to one that
+        lasts. A straggler that lasts starts at most 200 ms later than it did. The perf test
+        prints the wait plus the p95 against the budget and asserts nothing: its bound was the
+        wait against the budget less the load, floored at the wait itself, which nothing it
+        measured could fail. The unit suite's constant test is what stops the wait being raised,
+        and a test of a pool built with no `growAfterMs` is what makes the probe's pool use it.
+      - **The logs.**
+        - *memory is holding the check pool back* is a warning once per hold, now with `heldAt`,
+          `growsAgainAboveMb` and `givesBackBelowMb`: the first line applies with the pool at
+          `heldAt`, the second at any size (the third review).
+        - *memory has room for more workers again; the check pool may grow* is at info, once per
+          release, with `heldForMs`.
+        - *nothing is waiting for a worker; memory is no longer holding the check pool back* is
+          gone, for both kinds of pool, which the release notes say.
+        - With an explicit `workerPoolSize`, *workerPoolSize allows more workers than memory
+          holds* is once per hold, and once at start where the floor it starts is already past
+          memory, as a fixed size's is (the third review), without the two MB fields: such a
+          pool never stops growing or gives a worker back for memory. Its release line is
+          *memory has room for the workers the check pool holds again*, with `cap` and
+          `maxSize`. That is what is measured, and it can be well under what the setting allows.
+        - *growing the check pool* gains `waitedMs`.
+      - **Probe Health and `/metrics`** have no hold or release count, and none is added.
+        - While the gate holds, `poolCeiling` is `heldAt` as far as memory has room, or the
+          workers held where memory keeps more. With the pool at `heldAt`, it and
+          `poolHeldBack` are steady, and move when memory crosses a margin, not with each
+          reading. Below `heldAt`, after idle give-backs or a fall, they follow what memory
+          allows from reading to reading, since that is what the pool may grow back to.
+        - `poolMemoryCap` stays each reading's own number. It can read at least one under
+          `poolSize` while the pool holds: one inside the shed margin, more while it sheds.
+        - Probe Health's sentence, *memory holds the pool at N workers*, is about the ceiling
+          memory sets, not the gate. It can outlast the release line wherever memory allows
+          fewer than `maxSize`, and appear with no hold at all. `troubleshooting.md` says so.
+      - **The scenario** (`pool-at-the-reserve-scenario.test.ts`) measures the gate, at twelve
+        workers, and nothing else:
+        - The real pool reads the real `MemoryCap`, and memory is a closed loop: 50 MiB a worker,
+          against the 40 MiB the cap assumes.
+        - A 4 GiB ceiling, so a 1,024 MiB reserve.
+        - ±10 MiB of noise, new each simulated second, at 30 ms a second.
+        - Sixteen checks a second, against memory for twelve workers: a burst every second.
+        - Only the memory source's clock is simulated. 200 ms is about seven simulated seconds,
+          and the idle window half an hour. So the straggler rule is kept out, with a wait of a
+          minute, and idle shrink is off, which could not fire inside the run anyway. In the first
+          mutant run, with the shipped wait, the no-straggler mutant failed the ample phase on a
+          loaded host: checks kept past a 30 ms tick left stragglers behind sixteen workers, and
+          growing for them reached the memory line. That was the host's load, not the gate.
+        - Phases: settling; 4 MiB above the reserve; at it; 4 MiB below it; a fall of 200 MiB;
+          recovered; then, past the ten minutes, a fall of 125 MiB with ±20 MiB of noise for 300 s
+          (the fourth review), and 800 MiB more for 90 s. It was 400 MiB until the
+          second review's runs: on a loaded host, checks kept past a tick grew the pool from 16
+          to 20, which at 400 MiB was the memory line, and it held there once. That was the
+          host's load, not the gate's; at 800 MiB the line is about 28. Since the third review
+          the pool's ceiling is 24, under that line: at 64, a loaded host's checks grew it to 28
+          and it held there, twice at a load of 30–40, under mutants that cannot reach it.
+
+        | Ten minutes | Grows | Shrinks | Holds | Releases | Warnings |
+        | --- | --- | --- | --- | --- | --- |
+        | `ms-server` on `5b6bbd2a` (the ticket) | 244 | 256 | 311 | 311 | 311 |
+        | The scenario, on `da857d19`'s pool | 144 | 135 | 565 | 565 | 565 |
+        | The scenario, first round | 18 | 8 | 2 | 1 | 2 |
+        | The scenario, after review | 17 | 7 | 1 | 0 | 1 |
+        | The scenario, after the second review | 17 | 7 | 1 | 0 | 1 |
+        | The scenario, after the third review | 17 | 7 | 1 | 0 | 1 |
+        | The scenario, after the fourth review | 17 | 7 | 1 | 0 | 1 |
+
+        By phase, after review:
+        - **Settling**: 12 grows, 2 shrinks (the estimate's overshoot given back), 1 hold.
+        - **The three stretches at the reserve, 390 s**: nothing at all.
+        - **The fall**: 5 shrinks, 12 workers to 7, and 1 grow back to 8 inside the hold.
+        - **The recovery**: 4 grows back to 12 inside the hold, with no release and no hold. In
+          the first round this was a release, a hold, 6 grows and a shrink.
+        - **Ample memory**: 1 release, 4 grows to 16, no hold. After the second review, at 800 MiB
+          more: 1 release and no hold on both runs, with 6 grows to 18 and 4 to 16; the 18 is a
+          loaded host's checks kept past a tick.
+        - **Waits**: the pool's `waitMs` p95, Probe Health's `queueWaitMs`, was 9.1 and 11.2 ms
+          at the reserve on two runs, a third short of the burst, and 0.0 ms with memory ample.
+          After the second review: 8.8 and 9.7 ms at the reserve, 0.0 ms with memory ample.
+
+        The same counts on both runs of each round, but for the ample phase's above.
+
+        After the fourth review, on four runs, the same counts every time:
+        - **Settling**, **the three stretches** and **the ten minutes**: as above.
+        - **The fall**: 5 shrinks, 12 workers to 7, and none grown back.
+        - **The recovery**: 5 grows back to 12 inside the hold. From seven memory reads room for
+          thirteen, a quarter of a worker more for each worker fewer, so the shed margin past the
+          size the fall left did not bind; from a worker or two more it can stop at 11.
+        - **The fall of 125 MiB with ±20 MiB of noise**: 3 shrinks, 12 to 9, and no grow. With the
+          floor taken out, the mutant below, the same five minutes moved the pool 54 times, 26 of
+          them grows; the reviewer's run of the pool before the fix grew 21 and shrank 23, from a
+          hold at 12, and ended at 10.
+        - **Ample memory**: 1 release and 6 grows, from 9 to 15, and no hold. The sixteenth check
+          of each burst is a straggler behind fifteen, under a tenth of the pool, and waits the
+          scenario's minute for a worker to come free; from 12, as before, it grew to 16.
+        - **Waits**: p95 8.6–9.5 ms at the reserve, 9.6–10.4 ms in the fall of 125 MiB, 7.4–7.9 ms
+          with memory ample.
+
+        Asserted:
+        - nothing moves at the reserve;
+        - the fall sheds at least four, grows back at most one, with no hold or release;
+        - the recovery grows back from where the fall left it, to within a shed margin of 12, with
+          no hold or release (it was at least four grows, back to 12, before the fourth review);
+        - the fall of 125 MiB with ±20 MiB sheds at least one and moves the pool at most four
+          times, with no hold or release (the fourth review);
+        - ample memory brings one release, no hold and at least 15 workers, the burst less its
+          straggler (16 before the fourth review, when the pool came to it from 12);
+        - the wait p95 at the reserve is at least half a check, a floor in that phase. Ample's
+          is printed, not compared with it: the two phases run in turn, under whatever load each
+          meets, and a comparison across them is a `test:perf` question;
+        - 1 hold in the ten minutes, 1 release after them, and a warning only for each hold;
+        - at most 30 grows and 15 shrinks in the ten minutes;
+        - every accepted check is answered.
+
+        The refusal assertion is gone: it compared a counter with itself, and the scenario
+        never refuses.
+      - **The idle arm** (`P-437`'s second and third reviews), in the same file: a hold formed
+        near the line, with the ceiling two workers past it, then quiet and busy in turn, with a
+        real idle window of a second.
+        - Memory for eight workers with 15 MiB spare above the reserve at eight, ±5 MiB of noise
+          so that every reading's whole number of workers is the same, 50 MiB a worker against
+          the 40 the cap counts, a floor of one and a ceiling of ten: the third review's case,
+          `ms-server`'s ceiling of 64 against a hold at 62.
+        - **Ramp**: bursts one larger each second, 1 to 9, grow the pool a worker at a time and
+          hold it at 8. Thirty bursts of ten move nothing.
+        - **Quiet**: idle workers go back one a second, seven to the floor, and the hold goes on.
+          Measured against `heldAt` alone the seventh ended it, since 15 + 10 × 7 ≥ 80.
+        - **Busy again**: bursts of ten grow the pool back to 8 inside the hold, with no line.
+        - **Quiet again**, and **busy a third time**: the same again.
+
+        | Run | Ramp | Quiet | Busy again | Quiet again | Busy a third time |
+        | --- | --- | --- | --- | --- | --- |
+        | 1, third review | 7 grows, a hold at 8 | 7 given back, no release | 7 grows back to 8, nothing said | 7 given back, no release | 7 grows back to 8, nothing said |
+        | 2, the close | the same | the same | the same | the same | the same |
+
+        The second review's arm, with 35 MiB spare, a floor of two and a ceiling of 64, asserted a
+        release after five give-backs and one bounded cycle after it. That was bounded only
+        because the next burst wanted more than two past `heldAt`. The allowance was first
+        counted from the pool now, and the first run of this arm failed it in both busy
+        stretches: the second's reading was taken at the floor, and the growth back to 8 was in
+        `#held` once ordered, so the allowance came to nothing. Each time it released, grew to
+        10, gave 2 back for memory once they had loaded, and held at 8 again with a second
+        warning. Counted from the reading, it passes.
+
+        Asserted: one hold in the ramp, at 8; nothing moves while held; each quiet stretch gives
+        seven back and ends nothing; each busy stretch grows back to 8, seven and one more for
+        any worker given back as idle on the way, with no hold, no release and nothing given back
+        for memory; one hold and one warning in all. Under a mutant that cannot reach it, at a
+        load of 36, a busy stretch gave one idle worker back and grew it again, which the first
+        version of this assertion counted as a failure. It models
+        the estimate at 40 against 50, so when `P-440` sets `WORKER_RESIDENT_MIB` it is re-taken
+        at the new figure; at twice the estimate or more, the allowance would not hold.
+      - **`poolUsage`, the alarm the straggler rule could multiply.** Thirteen checks a burst
+        behind twelve workers, finishing 20–80 ms in.
+        - Its share of samples at 80% or more is in `test/perf/pool-stragglers.test.ts`. First
+          round, in the unit suite: 22.0% grown on sight, 25.0% for the shipped rule. After
+          review, at load 16: 21.3% and 19.7%. The bound is 1.5 times plus 5 points.
+        - It left the unit suite because it raced a 150 ms period: at a host load near 20 it
+          read 18 workers, not 13.
+        - The unit suite now answers each burst in full before the next. A pool that grows on
+          sight buys one worker on the first burst and none after; the shipped rule, with a 2 s
+          wait, buys none.
+      - **Tests.**
+        - `pool-memory-cap.test.ts`, on the gate (`the memory gate’s margins`):
+          - it holds for room of one worker, and grows past the release margin;
+          - it keeps a worker past what memory allows, and sheds only past the shed margin;
+          - while holding, the ceiling is the pool, at readings of 2, 3 and 4;
+          - it releases on a result's pump with nothing queued, and says so once;
+          - it releases where `stats()` reads the gate, with nothing pumped;
+          - it releases when an idle worker's exit is all that happens;
+          - an idle give-back is no release, and the next burst grows back to `heldAt`;
+          - a hold started during a ramp, with workers loading, records each once and releases
+            at the true `heldAt` and the margin (`P-439`);
+          - a hold does not end while its own workers load, nor on a reading kept from while
+            they did, each guard alone in a phase of its own (the third review);
+          - a fixed explicit size past memory warns once it has started, once, and its episode
+            ends as a growing one's does (the third review);
+          - a hold starts at the room the loaded workers leave, not counting one still loading,
+            where a straggler and the check after it grow a pool of eleven by two (the close);
+          - a quiet hold below `heldAt` ends once demand brings the pool back to it with room past
+            it, and on memory alone with room for a worker more for each it is short, and not a
+            worker before (the close);
+          - a worker grown for a check, whose memory fell while it loaded, runs that check and
+            goes back once free (the close);
+          - past where a shed for memory left it, growing back needs room for each worker and the
+            shed margin: held at six and shed to four, room for five grows nothing and Probe
+            Health's ceiling says 4, six grows one, and seven takes it back to six, all inside the
+            hold (the fourth review);
+          - after idle give-backs it grows back to `heldAt` with room for that size alone, as it
+            did: held at three, quiet to one, a burst takes it back to three with memory for three
+            (the fourth review);
+          - a hold the ceiling was lowered under ends on room past the new ceiling, and the next
+            shortage, with the ceiling raised again, is a hold of its own with its warning: held
+            at ten, lowered to six, memory for thirteen, then for three at a ceiling of twenty (the
+            fourth review).
+        - `pool-memory-cap.test.ts`, a fixed explicit size: it warns at start on a reading taken
+          while its workers loaded, four against room for five with three loading (the fourth
+          review).
+        - `pool-memory-cap.test.ts`, `MemoryCap`: a reading says how many workers it counted,
+          and how many were loading, when it was taken, not when it is asked.
+        - `pool-memory-cap.test.ts`, stragglers at the memory line, a pool of twenty at its cap:
+          - one a worker takes before 2 s: no hold, no growth;
+          - one that lasts: exactly one hold through five submits that find growth refused, and
+            twenty results. Before, nothing in the test pumped with a check queued and growth
+            refused, so a hold per refusal passed it.
+        - `pool-memory-cap.test.ts`, existing tests changed:
+          - the episode test, extended to the toggle case;
+          - the explicit-size test: its warning without the MB fields, its release line with
+            `cap` and `maxSize`;
+          - a new explicit-size test: the episode ends once the pool idles under memory, and the
+            next burst past memory warns again;
+          - two shed tests expect the margin;
+          - `P-244`'s eight rows with the margin.
+        - `check-pool.test.ts`, eight on stragglers:
+          - the constant is 200 ms;
+          - a pool built with no `growAfterMs`, as `main.ts` builds the probe's, waits
+            `GROW_AFTER_MS` for a straggler;
+          - no growth for a straggler a worker takes, with a 2 s wait against 100 ms checks;
+          - growth once a straggler has waited, and not before;
+          - one look, 3 to 10 memory reads, and growth after the wait. Five was too few: a timer
+            fires up to a millisecond early against `hrtime` and arms one 1 ms look more, and a
+            late poll adds two;
+          - two stragglers, the wait timed from the oldest, both grown in one step;
+          - a burst behind a large pool grows at once;
+          - one check behind ten grows at once.
+        - `check-pool.test.ts`, two on a thread Node cannot make (the third review): one refused
+          thread is a start that died, with its line, and the retry starts a worker that runs a
+          check; with none made, the pool gives up as on three deaths and answers what it
+          accepted.
+        - `P-263`'s crashed-replacement test sets `growAfterMs: 0` (see the mutants).
+        - **The tests that give memory room and then look once for the release wait for the
+          pool's loads first** (`loaded`, polling `stats()` while memory is still short, until the
+          pool tells its cap that no worker loads): the toggle, nothing-waiting, never-pumps and
+          idle-exit tests. Since F1 a hold does not end while a worker loads, and at a load of
+          17–22 a pool's first worker answered a whole burst while the ones it grew still loaded.
+          Two failed so before the wait: the idle-exit release came from the last worker to say
+          ready, not an exit, and the never-pumps release did not come at its `stats()`. The
+          `P-236` exact-excess test waits the same way for its eight to take checks together,
+          which twice at a load of 40 they could not.
+        - **The straggler describe's pools stop with each test** (`afterEach`), rather than at
+          the file's end (see the counts).
+        - **Every wait in the tests this commit added or changed is bounded and named** (the
+          third review's T4 note): `within` or `pollWithin`, with a message that says what it
+          waited for and what the pool reported then, queued, held, busy and grown, and the pools'
+          starts and stops are bounded too. The one-look test times its wait from before the
+          submit: timed from after it, a loaded host read 298 ms of a 300 ms wait.
+        - Counts on the last runs: `pool-memory-cap` 40 of 40, `check-pool` 80 of 80 (load 19),
+          the scenario file 2 of 2, `pool-lookups` with `pool-resolve` and the name-lookup outage
+          scenario 21 of 21, the perf file 2 of 2. After the second review, on two runs each:
+          `pool-memory-cap` 42 of 42, `check-pool` 81 of 81, the scenario file 3 of 3, and every
+          other probe unit file that builds a `CheckPool` — `pool-lookups` 11, `pool-resolve` 7, the
+          name-lookup outage scenario 3, `listener-lookup` 4, `build-profile` 7, `shutdown-order` 2,
+          `ssh-reset` 1, `ssh-shared-open` 2, `target-policy-env` 19 — all passing, and the perf
+          file 2 of 2, at a load of 5–9 on 8 cores; its load times are runs 5 and 6 above. The
+          straggler hold through refusals failed once in 38 runs of its file, in a mutant run
+          whose change cannot reach it unless a worker crashes. Its waits were already bounded
+          and named, and the mutant runner's summary kept assertion lines only, so the message
+          was dropped there. It passed the same mutant run again, ten repeats on the shipped code
+          after, and the 55 runs of its file since, at loads of 2 to 73; the cause is not known.
+          After the third review, the thirteen files once: `pool-memory-cap` 45 of 45, `check-pool`
+          83 of 83, the scenario file 3 of 3, `pool-lookups` 11, `pool-resolve` 7, the name-lookup
+          outage scenario 3, `listener-lookup` 4, `build-profile` 7, `shutdown-order` 2, `ssh-reset`
+          1, `ssh-shared-open` 2, `target-policy-env` 19, and the perf file 2 of 2, at a load of
+          15–26; its load times are run 7 above. At the close, on `d94ac497` with the four tests
+          above, the thirteen once more: `pool-memory-cap` 49 of 49, the scenario file 3 of 3,
+          `check-pool` 82 of 83, `pool-lookups` 11, `pool-resolve` 7, the name-lookup outage
+          scenario 5, `listener-lookup` 4, `build-profile` 7, `shutdown-order` 2, `ssh-reset` 1,
+          `ssh-shared-open` 2, `target-policy-env` 19, and the perf file 2 of 2, at a load of 3–4;
+          its load times are run 8 above, which `sizing.md` gives. The one failure was the
+          two-stragglers test, by the wall clock: it read the growth 1,198 ms after the first, where
+          the pool had waited its 1,200 ms by `hrtime`, since the VM moves its wall clock on its
+          own. It reads the monotonic clock now: five runs of it alone, `check-pool` 83 of 83, and
+          its mutant still fails it, 1,202 ms after the second. Then twenty runs in a row of each,
+          before the close: `check-pool` 15 of 20 at a load of 2–39, and 4 of 7 in a second twenty
+          stopped at seven, at 17–58, every failure in a test this commit did not change (`P-448`).
+          `pool-memory-cap` 19 of 20, then 18 of 20 at 24–73: a release test that looked while the
+          pool's workers loaded, and the exact-excess test, both fixed with `loaded` above; then 7
+          of 7, and at the close 48 of 48 three times and, with its fourth test, 49 of 49 four
+          times, at 3–8. After the fourth review, on `d94ac497` with the four tests above and the
+          scenario's new phase: the scenario file 3 of 3 and `pool-memory-cap` 53 of 53 three times
+          each at a load of 3–6, then the thirteen once: the scenario file 3 of 3, `pool-memory-cap`
+          53 of 53, `check-pool` 83 of 83, `pool-lookups` 11, `pool-resolve` 7, the name-lookup
+          outage scenario 5, `listener-lookup` 4, `build-profile` 7, `shutdown-order` 2, `ssh-reset`
+          1, `ssh-shared-open` 2, `target-policy-env` 19, and the perf file 2 of 2, at a load of
+          3–10, with no OOM kill; its load times were a p50 of 483 ms and a p95 of 965 ms.
+          Before the third review's changes, on the build that bounded and named the waits,
+          `check-pool` passed 8 of 11 runs in a row and `pool-memory-cap` 10 of 10. One failure
+          was the one-look test's 298 ms, fixed above. Two ended with no test failing and nothing
+          said, after 64 and 76 of 81 tests, in describes this commit did not change: the file's
+          process ended early, which `--test` reports only as *test failed*. They were the VM's OOM
+          killer: the next such run, in a process of its own, exited 137 with the VM's OOM-kill
+          count one up, and the file peaked at 2,482 MiB resident, since the straggler tests'
+          pools held their workers to the file's end. Stopped with each test, it peaks at
+          1,553–1,694 MiB, and none of the 27 runs in a process of its own since was killed.
+      - **Mutants**, each restored with copy, utime and a byte compare, with `dist` rebuilt and
+        checked against the source. Every one fails a test:
+
+        | Mutant | What fails |
+        | --- | --- |
+        | No release margin | Three gate tests: room for one worker grows the pool, the ceiling reads 4, an idle give-back ends the hold |
+        | No hold | Six: the scenario, the explicit-size, toggle and margin tests, both idle-worker tests |
+        | No shed margin | Four: the scenario and three shed tests |
+        | Release when the queue empties | Six: the scenario, the toggle test and four release tests |
+        | No straggler rule | Seven: every straggler test but the two bursts, and the burst-by-burst scenario |
+        | No second look | Four: growth after the wait, one look, two stragglers, one hold at the memory line |
+        | Looked at again at once | The one-look test: more reads before growing |
+        | Ceiling taken from the reading | Three: a reading of 4 reads as the ceiling, a shed, the give-back test |
+        | Release only in growth | Two: the explicit-size release, and the release with nothing queued |
+        | Release on a pump only with checks queued (review) | The release with nothing queued |
+        | Explicit size stopped while held | It never reaches six |
+        | Burst boundary `>` for `>=` | One check behind ten does not grow |
+        | `P-263`'s replacement uncounted | The crashed-replacement test, which sets `growAfterMs: 0` |
+        | No release in `stats()` (review) | The pool that never pumps |
+        | No release after a retire (review) | The release on an idle worker's exit |
+        | Release against the pool now, not `heldAt` (review) | The give-back test, and the scenario's recovery: a release and a hold |
+        | No growing back inside a hold (review) | The give-back test, and the scenario's recovery grows nothing |
+        | `GROW_AFTER_MS` 500 (review) | The constant test. The perf guard caught it only where the host's p95 was past 500 ms, and asserts nothing now |
+        | Memory asked before the wait (review) | Both straggler tests at the memory line |
+        | The wait timed from the newest straggler (review) | The two-stragglers test |
+        | Shed margin of two (review) | `P-244`'s 1,024 MiB row, the shed-margin test, the scenario |
+        | An explicit size's release against `heldAt` (second review) | The explicit size's idle release: no release, so no second warning |
+        | A loading worker counted twice (`P-439`) | The ramp hold, whose warning says 9 held, not 5; and the idle arm, whose quiet stretch then ends nothing |
+        | A pool with no `growAfterMs` grows on sight (second review) | The default-wait test |
+        | A thread Node cannot make, rejected out of the spawn as before (third review) | Both thread tests: the refusal escapes the spawn |
+        | The same, caught and dropped with no start counted (third review) | `check-pool`'s file fails before the thread tests report |
+        | A release on a reading taken while workers load (third review) | The loading-release test: a release while four load |
+        | That guard on the reading's count alone (third review) | The same test, where only the pool's count says they load |
+        | That guard on the pool's count alone (third review) | The same test, on a reading kept from while they loaded |
+        | A hold's size counting the workers still loading (third review) | The close's hold-start test: held at twelve, not eleven |
+        | The release against `heldAt` alone (third review) | The idle arm: the first quiet stretch releases at the seventh give-back, and the busy one after grows to ten, sheds one and holds again |
+        | The shortfall counted from the pool now (third review) | The idle arm: the busy stretch after a quiet one releases, grows to ten, sheds one and holds again |
+        | No warning at start for a fixed explicit size past memory (third review) | The start-warning test |
+        | The over-memory retire takes a slot on its way (third review) | The close's grown-for-a-check test: the worker goes back as it says ready |
+        | The shortfall counted from the floor (the close) | Five, among them the demand release, whose burst's last two never get a worker |
+        | No release on memory alone below `heldAt` (the close) | Three: the memory-alone release, the idle-exit release and the explicit size's idle release |
+        | No shed floor: past where a shed left it, a grow-back with room for one (fourth review) | Two: the shed-floor test, which grows to five, and the scenario's fall of 125 MiB, 54 moves in five minutes, 26 of them grows |
+        | The floor at the size before the shed (fourth review) | The same two: 5, and 53 moves |
+        | Growth without the floor, Probe Health's ceiling with it (fourth review) | The same two: 5, and 54 moves |
+        | Probe Health's ceiling without the floor, growth with it (fourth review) | The shed-floor test: the ceiling reads 5 |
+        | Two shed margins past the floor, not one (fourth review) | The shed-floor test: no fifth worker with room for six |
+        | The floor recorded at every pump inside a hold, a shed or not (fourth review) | The idle grow-back test: the burst buys one back, not two |
+        | The floor recorded for an idle give-back too (fourth review) | The idle grow-back test, the same |
+        | `heldAt` left past a lowered ceiling (fourth review) | The lowered-ceiling test: no release with memory for thirteen |
+        | The start warning reading room high by the workers loading (fourth review) | The start-warning test the fourth review added: no warning, four against room for two |
+
+        Three needed more:
+        - **Looked at again at once**, in the first round: it passed every test, since the wait
+          is checked again at each look. The test that counts memory reads fails it: 240 reads
+          before growing, against 10 or fewer.
+        - **`P-263`'s replacement count removed from `#onWorkerGone`.** With the crash test's
+          `growAfterMs: 0` taken out as well, it passes every test, as in the first round: one
+          check behind 17 is a straggler under the shipped wait, and the test asserts at once.
+          That is why the test sets it.
+        - **Release against the pool now** passed the give-back test once in three runs. The
+          test asserted before the given-back worker's thread had exited, and the exit is where
+          that release comes. It now waits for the exit; the mutant failed it on both runs since.
+
+        After the second review every mutant above was run again on the changed files, with the
+        three new ones; every one fails a test, 24 in all and the pair below. What they fail now,
+        where it changed: *No hold* fails ten tests, among them the idle arm, the explicit idle
+        release, the ramp hold, and the straggler hold through refusals, which it passed before;
+        *Release against the pool now* fails the idle arm at its first give-back; *No release
+        margin* fails the idle arm, the explicit idle release and the ramp hold as well; *Release
+        when the queue empties* fails the idle arm and the explicit idle release too; *No release in
+        `stats()`* fails the ramp hold too; *No straggler rule* and *No second look* fail the
+        default-wait test; the burst boundary fails the idle arm's ramp; *No shed margin* fails the
+        idle arm. The pair is `P-263`'s replacement uncounted with `growAfterMs: 0` taken out of its
+        test: since `#spawn` takes every spawn off `#growing`, the mutant leaves it one short, which
+        at seventeen workers is a burst, and the test fails it either way. The note above on that
+        pair is the first round's.
+
+        In the third round and at the close every mutant above was run again on the changed
+        files, the 24 and the pair, with the twelve the table has since: 37 in all, and every
+        one fails a test. Fourteen ran in the third round, at a load of 20–45. Two of those survived
+        it, a hold's size counting its loading workers and the retire taking a slot on its way,
+        and each fails the test the close added for it. The other 21, those two again and the
+        close's own two ran at the close, at a load of 1–9, with its four tests. Where the
+        close's tests catch more: *No straggler rule* and the double count fail the hold-start
+        test, and the burst boundary fails it and the grown-for-a-check test; *Ceiling taken from
+        the reading*, *No growing back inside a hold*, *Release against the pool now* and the
+        shortfall from the floor fail the demand release; *No release in `stats()`* and
+        *Release against the pool now* fail the memory-alone release; *Shed margin of two* fails
+        the grown-for-a-check test. The thread mutant that swallows the refusal ended
+        `check-pool`'s run with no test's message: the file failed after 26 minutes, before the
+        thread tests had reported.
+
+        In the fourth review the nine new ones ran, and the six whose lines it changed or whose
+        tests it touched again: *Ceiling taken from the reading* fails five, among them the
+        shed-floor test; *No growing back inside a hold* six, among them the shed-floor and idle
+        grow-back tests and the scenario's recovery, which ends at 7; *No warning at start* both
+        start-warning tests; *No shed margin* five, among them the shed-floor test, and the scenario
+        settles at 11; *Shed margin of two* five, among them `P-244`'s 1,024 MiB row and the
+        shed-floor test, and the scenario settles at 13; the retire taking a slot on its way the
+        grown-for-a-check test, as before. All fifteen fail a test, 46 in all with the 37 before.
+        The two floor mutants that record it where there was no shed, at every pump or at an idle
+        give-back, pass the scenario: its idle arm grows back from the floor, where memory reads
+        room past eight, and only the unit test, with memory at exactly three, fails them.
+      - **The review** (17 confirmed findings and 1 disputed, several the same; each fixed once):
+        - A hold could end only in `#pump`, so a pool with nothing to pump kept reporting it, and
+          idle shrinking made the reported shortfall grow. `stats()` and a retired worker's exit
+          now look as well.
+        - One idle give-back could end a hold. The release is measured against `heldAt`, and
+          the pool may grow back to it inside the hold.
+        - The explicit-size release line said more than was measured. It is reworded, with
+          `cap` and `maxSize`, and the explicit warning lost two fields that did not apply. The
+          release notes name both new lines.
+        - `GROW_AFTER_MS` was justified as staying inside the dispatch budget, which held only
+          for stragglers a worker takes. It is 200 ms, from the measurement above.
+        - `P-244`'s rows ignored the shed margin.
+        - The `poolUsage` comparison raced its period in the unit suite, and moved to
+          `test:perf`. The straggler test needed a 100 ms check to finish in 400 ms; it has 2 s.
+        - The release-with-nothing-waiting test released with a check still queued. It now
+          releases on a result's pump.
+        - The scenario's refusal assertion compared a counter with itself. Waits are asserted
+          instead.
+        - No test covered a straggler at the memory line, or two stragglers.
+        - The disputed one, upheld: the pump's comment, a test message and this outcome
+          conflated the gate with Probe Health's sentence. Corrected, and `poolMemoryCap` reads
+          at least one under.
+      - **The second review** (10 confirmed, 2 disputed, 1 refuted; no major):
+        - An explicit size's hold never ended on its own: its release was measured against the
+          size it grew to past memory. Now against the pool now, with a test.
+        - `heldAt` kept the loading workers counted twice (`P-439`), so a hold started during a
+          ramp needed room for as many more again. Fixed here, with a test and a mutant.
+        - The claims that a give-back is not a release held only for one. Corrected here, in the
+          code and in `administration.md`; the scenario has an idle arm that shows the release
+          after several, and the one bounded cycle after it. `P-440` says the margins are in its
+          units.
+        - The ceiling was said to be steady through idle give-backs; it is steady only at
+          `heldAt`, and follows the reading below it. Corrected in the same three places.
+        - The perf guard passed by construction. It prints and asserts nothing, and the claims
+          that it bounded the wait are gone. 200 ms is called a judgement, here, in `pool.ts` and
+          in the constant test; `sizing.md` gives the p95 range and says a straggler that lasts
+          can start outside the budget.
+        - No test used the default wait, which is the probe's. One does now.
+        - The scenario compared waits across two phases: a floor in one phase now. The one-look
+          bound allowed no early timer: 10 now. The hold-once test never pumped with growth
+          refused: it does now. A comment still said half a second.
+        - Refuted: `BURST_FRACTION`'s doc, read as claiming a lasting straggler waits at most
+          `GROW_AFTER_MS` in all.
+      - **The third review** (three minor and four nits, on `2cb60730`; F1 was found major and
+        confirmed minor):
+        - **A thread Node cannot make shut the probe down** (B, from before `P-437`). `new Worker`
+          throws `ERR_WORKER_INIT_FAILED` where the thread cannot be created, under a systemd
+          `TasksMax` or `threads-max`, and the rejection escaped every `void` chain that spawns
+          to the probe's `unhandledRejection` handler. `#spawn` now counts it as a start that
+          died, with that line, the growing delay, and the latch where nothing loads. Tested with
+          a worker factory that throws (`createWorker`, an option for tests); two mutants.
+        - **F1: a reading taken while workers load ended a hold.** A slot is in
+          `#slots`, and so in the reading, from when its thread starts, before most of its memory
+          is in use, so room read high by about the workers loading. No release while any slot
+          loads, or on a reading that says some did: `MemoryCapReading` gains `loading`, and
+          `MemoryCap` keeps the count with the reading it keeps for a second. A test drives each
+          guard alone. The size a new hold starts at leaves the loading workers out of the room it
+          reads, as the finding asked. That guard binds only where growth comes more than a
+          worker at once, past a pool of ten: a straggler under a tenth waits, and the check that
+          makes it a burst grows the pool for both. No test reached it in the third round, and
+          its mutant survived; at the close it has one (decided below).
+        - **F2: the cycle after a release by give-backs was a loop** wherever the next burst
+          wanted no more than `heldAt` + 2, as at `ms-server`'s 64 against 62: a release and a
+          warning every quiet stretch. **Chosen: bound it in code**, not correct the claim. A
+          reading taken below `heldAt` counts each worker it was taken short of it as one more
+          (`MemoryCapReading` gains `held`, the workers it counted), so no number of idle
+          give-backs ends a hold while a worker costs less than twice the estimate. Counted from
+          the reading, not the pool: from the pool, the burst after a quiet stretch still released
+          (the idle arm, above). The cost: a quiet pool keeps its hold until demand brings it back
+          to `heldAt` and memory has room past it, or memory read at its size has room for twice
+          its shortfall and two more, and Probe Health says memory holds it meanwhile. The idle
+          arm shows one hold and one warning over two cycles. Kept, with a test for each way it
+          ends (decided below).
+        - **A**: `#pump`'s over-memory retire loop skips a slot whose spawn has yet to settle,
+          and `P-439`'s outcome says its claim holds while the slot is in `#slots`. Its mutant
+          survived every test in the third round; at the close it has one (decided below).
+        - **F3**: the warning logs `heldAt`, and `administration.md` says which size each line
+          applies at.
+        - **F4**: `sizing.md`'s p95 range includes the 940 ms run, and the seventh, here.
+        - **F5**: a fixed explicit size past memory said so only in `poolMemoryCap`: `start`
+          spawns the floor without asking memory, and a fixed pool never grows. It logs its
+          warning once it has started, with a test and a mutant.
+      - **Decided 2026-10-19 by Claude, under the user's delegation:**
+        - **F1's guard on the size a hold starts at is kept, with a test.** It is reachable:
+          past a pool of ten, a straggler under a tenth waits, the check that makes it a burst
+          grows the pool for both, and a reading taken while a worker loads counts it as
+          resident. 'starts a hold at the room its loaded workers leave, not counting those still
+          loading' has eleven workers, the eleventh loading, two checks behind them and memory
+          that reads room for twelve: the hold starts at eleven and the pool stays there. Its
+          mutant, the room taken as read, now fails it: the hold starts at twelve.
+        - **F2's trade-off is kept: stability over responsiveness**, provided a hold always ends,
+          so that no check waits on one for ever. It ends on either of two things, each with a
+          test and a mutant that fails it:
+          - **demand that brings the pool back to `heldAt`**, where a reading needs only the
+            release margin past it. 'ends a quiet hold once demand brings the pool back to the
+            size it held at, with room past it': held at three and given back to one, memory
+            with room for five is no release while it is quiet, and Probe Health's ceiling stays
+            3; a burst of five grows it back to three inside the hold, the release comes there,
+            and the pool grows to five, every check with a worker. Mutant: the shortfall counted
+            from the floor rather than the reading, so a pool back at `heldAt` still reads short;
+            the burst's last two never get a worker.
+          - **memory alone.** At `heldAt` that is the release margin, as before ('ends a hold when
+            memory has room, with nothing waiting', 'ends a hold on a pool that never pumps').
+            Below it, the margin and a worker more for each the pool is short: 'ends a quiet hold
+            on memory alone, below the size it held at, with room past it for a worker more for
+            each it is short', at one, held at three, where room for six is no release and seven
+            is, at `stats()` with nothing submitted. Mutant: no release on memory alone below
+            `heldAt`; it fails that test and the idle-exit release.
+          Below `heldAt` that is more than memory recovering by the margin at `heldAt`: the pool
+          cannot tell memory its own give-backs freed from memory freed elsewhere, so it counts
+          each at twice the estimate, which is what keeps give-backs from ending a hold. A
+          recovery of the margin alone is seen when demand brings the pool back to `heldAt`, the
+          first case. A check that waits is either under `heldAt`, which the pool grows back to
+          inside the hold, or past it with the pool there. `pool.ts` says so at
+          `MEMORY_RELEASE_MARGIN_WORKERS`.
+        - **A's guard is the other branch no test reached, and has a test by the same rule.** A
+          worker grown for a check, whose memory fell past the shed margin while it loaded, is
+          not given back in the pump its ready runs: it runs that check, and goes back for memory
+          once it is free, as any other (`P-236`). 'lets a worker memory fell under while it
+          loaded run the check it was grown for, then gives it back'. Its mutant, the guard
+          taken out, now fails it: the worker goes back as it says ready, and the check waits
+          behind a minute's check.
+        - **The scenario's ceiling of 24 is accepted.**
+        - **The older load-timing tests in `check-pool.test.ts` are `P-448`**, filed.
+      - **The fourth review** (one medium, one low–medium and one low, on `cdcaf641`), each fixed
+        as decided 2026-10-19 by Claude, under the user's delegation:
+        - **Churn below `heldAt` after a fall** (medium). A worker went back once a reading was a
+          shed margin under room for the pool, and grew back with room for one, so at the size it
+          shed from, spare under −e against spare of e − a: 2e − a, 30 MiB at 40 against 50, and
+          none at twice the estimate. The reviewer's run, held at 12 with 125 MiB taken and
+          ±20 MiB of noise, grew 21 times and shrank 23 in five minutes. **Decided: after a shed
+          for memory inside a hold, the gate records the size it shed to (`shedTo`), and growing
+          back past it needs room for the worker and `MEMORY_SHED_MARGIN_WORKERS`**: 3e − a,
+          70 MiB, and e at twice the estimate. Idle give-backs are unchanged, so the idle arm's
+          regrow to 8 still works, and the shed margin is not widened, which would break
+          `P-244`'s 80% at 1 GiB. In `#holdTarget`, which `#memoryBound` and `#ceiling` both
+          use. The reviewer's run on the fix: no grow and 3 shrinks, ending at 9. Growth of k
+          workers at once is each counted at the estimate, so it lands (k + 2)e − ka above the
+          shed, still e more than before. The docs that said the band was three workers wide, or
+          that a wobble across the line moves nothing, are corrected: `pool.ts` at both margins,
+          `memory-cap.ts` at the line, and `administration.md`'s hold paragraph.
+        - **`setMaxSize` below `heldAt`** (low–medium). Lowered under it, the workers the ceiling
+          took back read as a pool short of `heldAt`, so a release needed room for twice the size
+          it held at less the ceiling: the reviewer's hold at 10, ceiling 6, then memory for 13
+          ended nothing, and with the ceiling back at 20 and memory for 3, the new shortage said
+          nothing. **Decided: clamp `heldAt` to the new ceiling.** The reviewer's run on the fix:
+          the release, then a second hold with its warning. The decision also asked for
+          `min(heldAt, maxSize)` wherever `heldAt` is the target. **Not written, and this is a
+          departure:** with the clamp, `heldAt` is never past `maxSize`, since a hold starts at no
+          more than it (`#grow` returns at `held >= maxSize`, and `start`'s explicit hold is at
+          `minSize`), so each `min` would be a branch no test reaches, and its mutant would
+          survive. A consequence of the clamp: lowered under `heldAt` while memory has room past
+          the new ceiling and the release margin, the hold ends at once, as in the test, where
+          memory read 10 against a ceiling of 6; raised again, memory short of what checks want is
+          a new hold, with its warning.
+        - **The explicit start-up warning ignored `memory.loading`** (low). **Decided: subtract
+          it**, as every other look at memory does, with a test of a fixed pool short by fewer
+          workers than were loading.
+      - **The three probe tests that failed in the coordinator's full suite at load ~20.**
+        - The `poolUsage` one is the race above.
+        - `pool-lookups` 'hears an idle worker say…' and `pool-resolve` 'counts a lookup a check
+          stopped waiting for…' are on no path `P-437` changed. Both pools are fixed at one
+          worker and have no memory cap. `#grow` returns at `held >= maxSize` before the
+          straggler rule, and `#considerRelease` returns with no reading. Their checks go
+          straight to the one ready worker. What they wait on is a 600 ms lookup and the
+          worker's report of it, under the host's load.
+        - Both files, with the name-lookup outage scenario, passed 21 of 21 at load 9.5.
+      - **Docs**:
+        - `administration.md`: the section on a probe held back by memory, its 75% paragraph,
+          the Probe Health row and `workerPoolSize`, and, in the fourth review, a grow-back past
+          where a fall left the pool;
+        - `WORKFLOW.MD` §3: "Pool size over time";
+        - `sizing.md`;
+        - `troubleshooting.md`, with the note that the message and the log are two signals;
+        - `release-notes-1.0.md`, under "After the upgrade".
+      - **Not proven:**
+        - `test:perf`'s demand-driven arm, `P-15` at 5,000 sensors from four workers, was not
+          run under the new rule. On a quiet host, with `ms-server` stopped, in
+          `packages/probe` through `scripts/dev.sh`, with `timeout 3900` inside its quotes:
+          `MS_BENCH_MINUTES=60 node --test --test-concurrency=1 --test-name-pattern="reaches the
+          same jitter starting from four workers" dist/test/perf/scheduler-benchmark.test.js`.
+          Without `MS_BENCH_MINUTES` it runs the 1.5-minute default.
+        - The load times were measured on a busy host but once: at the close, at a load of 3, a
+          p95 of 743 ms, which leaves 257 ms of the budget, more than the wait. One run, and
+          200 ms stays a judgement.
+        - How many grows 200 ms adds against 500 ms on the `P-15` workload, and how long a busy
+          worker takes to pick a straggler up there, beside the demand arm above. Neither is
+          measured; 200 ms is a judgement.
+        - `sizing.md`'s table was not measured again, and says so.
+        - Nothing here ran on `ms-server`, and the ±10 MiB of noise is the brief's, not a
+          measurement of a real machine; nor is the fourth review's ±20 MiB.
+        - Growth of several workers at once after a shed lands nearer the shed than one at a time:
+          (k + 2)e − ka for k at once, e more than before the fourth review, and none at all once
+          k(a − e) reaches 2e, eight workers at 40 against 50. Not seen in a run; the scenario's
+          recovery grew five at once to `heldAt`, where the floor did not bind.
+        - Per-worker memory before and after `P-426`, which this ticket asked for, was not
+          measured (`P-440`).
+        - The quiet re-take of `check-pool` twenty times in a row, and `ms-server`'s pool counts
+          after landing against those before it, are the coordinator's, after the close.
+- [x] **P-439 — a loading worker is counted twice in what the pool holds** · XS · P-437, P-271 ·
+      Found 2026-10-18 by `P-437`, by reading the code; not measured. `#grow`'s `held` is
+      `#slots.length + #growing`. A spawn is in both from the moment `#start` pushes its slot until
+      the worker says ready, which `P-271` already says of `start`'s own. Growth near memory compares
+      `held + unmet` with what memory allows. So a pool growing fast near its reserve can be refused
+      while its loading workers are counted twice, and since `P-437` that starts a hold: one
+      warning, and one release once they have loaded, that memory did not cause. **Done when** a
+      loading worker is counted once, with `P-271`'s tests kept meaningful, a test of a hold during
+      a ramp, and a mutant.
+
+      **P-439 outcome. Each loading worker is counted once, in `P-437`'s commit.** `P-437`'s
+      second review found the double count worse than this ticket said: since `P-437` a hold
+      records what the pool holds as `heldAt`, so one started during a ramp kept the loading
+      workers counted twice for its whole life, and needed room for as many more again before it
+      ended, up to `SPAWN_CONCURRENCY` workers past the line its warning gave.
+      - A slot is marked `onItsWay` from when its thread starts until its spawn settles, and
+        `#held` is `#slots` and `#growing` less those. `#spawn` takes the spawn off `#growing`
+        and clears the mark in one `finally`, so no pump sees a worker counted twice or not at
+        all while the slot is in `#slots`; the callers' own decrements are gone. `#grow`,
+        `#ceiling` and `#considerRelease` use `#held`. `#pump`'s over-memory retire loop skips a
+        slot still on its way (`P-437`'s third review): retired out of `#slots` before its spawn
+        settled, it would be counted on its way with nothing to take it off.
+      - Test: `pool-memory-cap.test.ts`, a hold started with four workers loading a registry
+        that takes 400 ms. Its warning says it held five, and it releases at the true `heldAt`
+        and the margin, not past it. `P-271`'s tests are unchanged and pass.
+      - Mutant: `#held` without the subtraction. It fails the ramp hold, whose warning says 9 held,
+        and, in the second review's idle arm, the ramp, which then held where no quiet stretch ended
+        it. At the close it fails the ramp hold, the loading-release test and the hold-start test;
+        the idle arm, now ramping from one, passes it.
+- [ ] **P-440 — measure what a worker holds resident, against `WORKER_RESIDENT_MIB`'s 40** · S ·
+      P-437, P-426 · Found 2026-10-18 by `P-437`. On `5b6bbd2a`, `ms-server`'s probe held 61–63
+      workers at an RSS of 3.3 GB: about 50 MB each. The cap assumes 40, measured under `P-216b`'s
+      `port.tcp` load. An estimate that is low makes growth and shedding overshoot: in `P-437`'s
+      scenario, settling grew two workers too many and gave them back, and a fall shed one too
+      many and grew it back. `P-437` asked for per-worker memory before and
+      after `P-426`, and nobody has measured it. The memory gate's margins are in this figure's
+      units, so what they are in real memory depends on it: below the measure, each idle
+      give-back counts for less than it frees. Since `P-437`'s third review a reading taken below
+      the size a hold started at counts each worker short of it as a whole one, which keeps any
+      number of give-backs from ending a hold while a worker costs less than twice the estimate
+      (`P-437`'s idle arm in `pool-at-the-reserve-scenario.test.ts`, which models 40 against
+      50). Re-take that arm at the figure this sets, and the allowance with it if the measure
+      is twice the estimate or more. **Done when** a worker's
+      resident memory is measured on the real catalogue, before and after `P-426`, at one worker
+      and at 64, idle and under load; it is recorded in `docs/findings/`; and
+      `WORKER_RESIDENT_MIB` is set from it, or kept with the reason why.
 - [x] **P-438 — a probe restarted during an outage starts with nothing kept** · M · P-426, A-66 ·
       Filed 2026-10-18 by the user's decision, for 1.0 ahead of rc.3. The third quiet window ran
       `test:perf`'s name lookups at full size on `5b6bbd2a`: slow 5,000 of 5,000, the warm zone's

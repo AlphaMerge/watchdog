@@ -168,6 +168,17 @@ in direct proportion — three times the check duration is three times the worke
 times the memory at the same sensor count. The table is the shape for 200 ms checks, not a
 lookup for any workload.
 
+**The top of a burst waits 200 ms before the pool grows for it** (`P-437`). When fewer than a
+tenth of the pool's workers are short, the pool grows only once the oldest waiting check has
+waited 200 ms, since a busy worker usually takes it first; one still waiting then waits for the
+new worker to load as well, which on a loaded host was about a second or more at the p95
+(940–3,700 ms over six runs at loads of 5 to 16, and 13.5 s on a seventh at 20), so a straggler
+that lasts can start outside the dispatch budget. On a quiet one, at a load of 3, it was 743 ms,
+inside the budget with the wait. A larger shortfall
+grows the pool at once, as before. So where checks finish within
+200 ms, a pool can settle up to a tenth below its burst rather than at it. The table was measured
+before this and has not been measured again.
+
 **`workerPoolSize` is a ceiling, not a headcount.** Lowering it caps memory, but never below the
 floor rule 1 sets — under that line the probe stops keeping up rather than merely getting
 slower. A probe watching fifty sensors costs about 120 MB, not the 555 MB its ceiling would
@@ -228,9 +239,12 @@ the formula above holds about 170 workers once settled and about 155 through the
 well short of the 256 auto-sizing may reach. **Since `P-236` the pool stops at what that ceiling
 holds** — the memory left under it, less a reserve, at 40 MiB a worker — and checks past that wait
 and are refused rather than the probe growing until the kernel kills it, which is what it did
-before (`P-216b`). Probe Health's `poolHeldBack` says how many workers memory is holding back;
-raise the ceiling before a workload that needs more, with `systemctl set-property ms-probe
-MemoryMax=…` (`administration.md`, "A probe held back by memory").
+before (`P-216b`). It holds there rather than growing and shrinking around the line: it grows
+past the size it held at only with room for two workers above the reserve, and gives a worker
+back only a worker's worth below it (`P-437`). Probe Health's `poolHeldBack` says how many
+workers memory is holding back; raise the ceiling before a workload that needs more, with
+`systemctl set-property ms-probe MemoryMax=…` (`administration.md`, "A probe held back by
+memory").
 
 **Setting `workerPoolSize` to anything non-zero turns this off** and fixes the ceiling there,
 because the setting is a statement about how much memory the probe may use and a derived number

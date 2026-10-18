@@ -1,23 +1,25 @@
 import { strict as assert } from 'node:assert';
 import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { BroadcastChannel } from 'node:worker_threads';
+import { BroadcastChannel, Worker } from 'node:worker_threads';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, describe, it } from 'node:test';
+import { Writable } from 'node:stream';
+import { after, afterEach, beforeEach, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { availableParallelism } from 'node:os';
 import type { CheckResult, Logger } from '@ms/shared';
 import {
   CheckPool,
   defaultPoolSize,
+  GROW_AFTER_MS,
   SPAWN_CONCURRENCY,
   WORKER_YOUNG_GENERATION_MB,
   type ResultMeta,
 } from '../src/runner/index.js';
 import { MAX_CONSECUTIVE_START_HANGS, typicalOf } from '../src/runner/pool.js';
 import { STARTUP_TIMEOUT_MS } from '../src/runner/process-runner.js';
-import { pollWithin, within } from './support/within.js';
+import { pollWithin, within, type Waited } from './support/within.js';
 import { assertFits } from './support/fits.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
@@ -45,6 +47,7 @@ async function poolOf(
     durationWindowMs?: number;
     abortGraceMs?: number;
     queueMaxLength?: number;
+    growAfterMs?: number;
   } = {},
 ) {
   const seen: Seen[] = [];
@@ -56,6 +59,7 @@ async function poolOf(
     minSize: options.minSize ?? options.size ?? 2,
     registryModule: FIXTURES,
     ...(options.idleShrinkMs === undefined ? {} : { idleShrinkMs: options.idleShrinkMs }),
+    ...(options.growAfterMs === undefined ? {} : { growAfterMs: options.growAfterMs }),
     ...(options.durationWindowMs === undefined
       ? {}
       : { durationWindowMs: options.durationWindowMs }),
@@ -64,13 +68,36 @@ async function poolOf(
     onResult: (result, meta) => seen.push({ result, meta }),
   });
   pools.push(pool);
-  await pool.start();
+  await within(
+    60_000,
+    () => `the pool to start; ${String(pool.size)} workers had started`,
+    pool.start(),
+  );
   return { pool, seen };
 }
 
 /** Waits for a condition, or fails the test rather than hanging the suite. */
-function until(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
+function until(predicate: () => boolean, what: Waited, timeoutMs = 5_000): Promise<void> {
   return pollWithin(timeoutMs, what, predicate, 5);
+}
+
+/**
+ * What a wait was for, and what the pool reported once its bound had passed, so that a failure
+ * names its cause and not only its wait: queued, held, busy and grown, and whatever else the
+ * test counts.
+ */
+function reporting(
+  what: string,
+  pool: CheckPool,
+  more: () => Record<string, unknown> = () => ({}),
+): () => string {
+  return () => {
+    const { queued, size, busy, grown } = pool.stats();
+    const counted = Object.entries({ queued, held: size, busy, grown, ...more() })
+      .map(([key, value]) => `${key} ${String(value)}`)
+      .join(', ');
+    return `${what}; the pool reported ${counted}`;
+  };
 }
 
 const request = (sensorId: number, sensorType: string, extra: Record<string, unknown> = {}) => ({
@@ -677,7 +704,13 @@ describe('a worker that hangs while loading (P-263)', () => {
   }
 
   function stalledPool(
-    options: { size: number; minSize?: number; startupTimeoutMs: number; logger?: Logger },
+    options: {
+      size: number;
+      minSize?: number;
+      startupTimeoutMs: number;
+      logger?: Logger;
+      growAfterMs?: number;
+    },
     seen: Seen[] = [],
   ): CheckPool {
     const pool = new CheckPool({
@@ -685,6 +718,7 @@ describe('a worker that hangs while loading (P-263)', () => {
       size: options.size,
       minSize: options.minSize ?? options.size,
       startupTimeoutMs: options.startupTimeoutMs,
+      ...(options.growAfterMs === undefined ? {} : { growAfterMs: options.growAfterMs }),
       registryModule: STALLED,
       onResult: (result, meta) => seen.push({ result, meta }),
     });
@@ -1079,16 +1113,26 @@ describe('a worker that hangs while loading (P-263)', () => {
     //
     // **Room to grow, and nine checks, since `P-271`.** The hangs are `start`'s own spawns, and
     // those are now counted as on their way until they end, so each of the eight is in `#growing`
-    // and in `#slots` at once. At a ceiling of ten that alone stops `#grow`, and the test passed
-    // with the crash's count removed. At twenty, with the crash counted, the pool holds 9 and has
-    // 9 on their way: nine queued checks are met. Without it, the ninth grows one.
+    // and in `#slots` at once, which counted twice until `P-439`. At a ceiling of ten that alone
+    // stopped `#grow`, and the test passed with the crash's count removed. At twenty, with the
+    // crash counted, nine queued checks are met by nine on their way. Without it, the ninth grows
+    // one.
+    //
+    // **Growing for any check on sight** (`growAfterMs: 0`, `P-437`). One check short of 17 held is
+    // a straggler, which the shipped pool waits `GROW_AFTER_MS` to grow for, and this asserts at once:
+    // with the wait, it passed with the crash's count removed. Since `P-439` that mutant leaves
+    // `#growing` one short, which is a burst, and fails it either way; the setting keeps the test
+    // from depending on that.
     const hangs = await scriptLoads([
       'load',
       'load',
       ...Array.from({ length: 8 }, () => 'hang' as const),
     ]);
     const seen: Seen[] = [];
-    const pool = stalledPool({ size: 20, minSize: 10, startupTimeoutMs: 120_000 }, seen);
+    const pool = stalledPool(
+      { size: 20, minSize: 10, startupTimeoutMs: 120_000, growAfterMs: 0 },
+      seen,
+    );
     try {
       void pool.start();
       await until(
@@ -1105,7 +1149,7 @@ describe('a worker that hangs while loading (P-263)', () => {
       assert.equal(pool.stats().queued, 9);
       assert.equal(pool.stats().grown, 0, 'nothing was grown for the gap the replacement fills');
     } finally {
-      await pool.stop();
+      await within(30_000, 'stop', pool.stop());
       hangs.close();
     }
   });
@@ -1409,6 +1453,328 @@ describe('growing and shrinking with the load', () => {
     await pool.start();
     assert.equal(pool.maxSize, 2);
     assert.equal(pool.size, 2, 'it started more workers than its own ceiling allows');
+  });
+});
+
+/**
+ * Growing for demand that lasts (`P-437`).
+ *
+ * `ms-server`'s probe grew 244 times in ten minutes, nearly every step *from N to N + 1, queued 1*
+ * at 61–63 workers: a check behind busy workers, which the first of them to finish would have
+ * taken. Twelve workers, so one queued check is under a tenth of the pool and two are not.
+ */
+describe('a worker thread that cannot be made (P-437)', () => {
+  // **Node throws from `new Worker` when it cannot create the thread** (`ERR_WORKER_INIT_FAILED`:
+  // a systemd `TasksMax`, `threads-max`, a stack it could not map), and nothing in the pool had a
+  // listener for it yet. The rejection escaped every spawn's `void` chain, and the probe's
+  // `unhandledRejection` handler shut it down (`P-437`'s third review). A start that died, now.
+  const refusing = (refusals: number) => {
+    let left = refusals;
+    return (filename: string, options: ConstructorParameters<typeof Worker>[1]): Worker => {
+      if (left > 0) {
+        left -= 1;
+        throw Object.assign(new Error('Worker initialization failure: EAGAIN'), {
+          code: 'ERR_WORKER_INIT_FAILED',
+        });
+      }
+      return new Worker(filename, options);
+    };
+  };
+
+  it('counts a thread it could not make as a start that died, and tries again', async () => {
+    const lines: Record<string, unknown>[] = [];
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger: pino(
+        { level: 'info' },
+        { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+      ),
+      size: 1,
+      minSize: 1,
+      registryModule: FIXTURES,
+      createWorker: refusing(1),
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    // Resolves, where the throw rejected it: `main.ts` awaits this, and a rejection there was the
+    // probe failing to start.
+    await within(60_000, 'start, with its one thread refused', pool.start());
+    assert.equal(pool.stats().startupFailed, 1);
+    const said = lines.find((line) =>
+      String(line['msg']).startsWith('a check worker failed to start'),
+    );
+    assert.match(String(said?.['reason']), /ERR_WORKER_INIT_FAILED/);
+    await until(
+      () => pool.size === 1,
+      reporting('the retry to start a worker', pool, () => ({
+        startupFailed: pool.stats().startupFailed,
+      })),
+      10_000,
+    );
+    pool.submit(request(2_600, 'test.ok'));
+    await until(
+      () => seen.length === 1,
+      reporting('a check on the worker the retry started', pool),
+      10_000,
+    );
+    assert.equal(seen[0]?.result.outcome, 'ok');
+  });
+
+  it('gives up as on three deaths when no thread can be made, and answers what it accepted', async () => {
+    const seen: Seen[] = [];
+    const pool = new CheckPool({
+      logger: silent,
+      size: 2,
+      minSize: 1,
+      registryModule: FIXTURES,
+      createWorker: refusing(Number.POSITIVE_INFINITY),
+      onResult: (result, meta) => seen.push({ result, meta }),
+    });
+    pools.push(pool);
+    await within(60_000, 'start, with every thread refused', pool.start());
+    pool.submit(request(2_610, 'test.ok'));
+    await until(
+      () => pool.stats().disabled,
+      reporting('the pool to give up', pool, () => ({
+        startupFailed: pool.stats().startupFailed,
+      })),
+      10_000,
+    );
+    assert.equal(pool.stats().startupFailed, 3);
+    assert.equal(seen.length, 1, 'the accepted check is answered');
+    assert.equal(seen[0]?.meta.phase, 'pool-disabled');
+  });
+});
+
+describe('growing for demand that lasts (P-437)', () => {
+  // **Each test's pools stop when it ends** (`P-437`'s third review). These start ten to
+  // twenty-four workers each, and left to the file's `after` they held about a hundred threads
+  // through every test after them: the VM's OOM killer took this file's process in a later
+  // describe, twice in eleven runs in a row and once more in the next twenty.
+  let mark = 0;
+  beforeEach(() => {
+    mark = pools.length;
+  });
+  afterEach(async () => {
+    await within(
+      30_000,
+      'this test’s pools to stop',
+      Promise.all(pools.slice(mark).map((pool) => pool.stop())),
+    );
+  });
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const twelve = (offset: number, delayMs: number) =>
+    Array.from({ length: 12 }, (_, i) => ({
+      ...request(offset + i, 'test.slow', { delayMs }),
+      timeoutMs: 30_000,
+    }));
+
+  it('waits a fixed 200 ms for stragglers, which a lasting one adds to a worker’s load', () => {
+    // A judgement, which the measured load does not set: a worker's load measured 977–3,700 ms at
+    // the p95 on a loaded host, the whole budget or more (`test/perf/pool-stragglers.test.ts`
+    // prints it beside the wait, and asserts nothing about either).
+    assert.equal(GROW_AFTER_MS, 200);
+  });
+
+  it('waits GROW_AFTER_MS for a straggler where nothing says otherwise, as the probe’s pool does', async () => {
+    // `main.ts` builds its pool with no `growAfterMs`. Every other test here sets one, so without
+    // this a default of nothing would pass them all, and the probe would grow on sight again.
+    const { pool } = await poolOf({ size: 20, minSize: 12 });
+    for (const check of twelve(2_500, 5_000)) pool.submit(check);
+    const queuedAt = process.hrtime.bigint();
+    pool.submit({ ...request(2_512, 'test.slow', { delayMs: 50 }), timeoutMs: 30_000 });
+    assert.equal(pool.stats().grown, 0, 'not on sight');
+    let grewAfterMs = 0;
+    await until(
+      () => {
+        if (pool.stats().grown === 0) return false;
+        grewAfterMs = Number(process.hrtime.bigint() - queuedAt) / 1e6;
+        return true;
+      },
+      reporting('the pool to grow for the straggler that lasted', pool),
+    );
+    // Nothing else can move the pool here: every worker holds a check for five seconds.
+    assert.ok(
+      grewAfterMs >= GROW_AFTER_MS - 1,
+      `grew after ${grewAfterMs.toFixed(0)} ms, not ${String(GROW_AFTER_MS)}`,
+    );
+    assert.equal(pool.stats().grown, 1);
+  });
+
+  it('does not grow for a straggler a busy worker takes before it has waited', async () => {
+    // Two seconds against 100 ms checks, so that a loaded host does not make the straggler last:
+    // the first of twelve workers to finish has twenty times its check to take it.
+    const { pool, seen } = await poolOf({ size: 20, minSize: 12, growAfterMs: 2_000 });
+    for (const check of twelve(2_000, 100)) pool.submit(check);
+    pool.submit({ ...request(2_012, 'test.slow', { delayMs: 100 }), timeoutMs: 30_000 });
+    assert.equal(pool.stats().queued, 1, 'one check behind twelve busy workers');
+    assert.equal(pool.stats().grown, 0, 'and nothing grown for it on sight');
+    await until(
+      () => seen.length === 13,
+      reporting('every check, the last on a worker that came free', pool, () => ({
+        answered: seen.length,
+      })),
+    );
+    // A lower bound, so it can only make the test harder to pass: time for a growth to land.
+    await sleep(300);
+    assert.equal(pool.stats().grown, 0, 'a straggler that a worker took is not demand that lasts');
+    assert.equal(pool.size, 12);
+  });
+
+  it('grows for a straggler still waiting once it has waited, and not before', async () => {
+    const { pool, seen } = await poolOf({ size: 20, minSize: 12, growAfterMs: 300 });
+    for (const check of twelve(2_100, 5_000)) pool.submit(check);
+    const queuedAt = process.hrtime.bigint();
+    pool.submit({ ...request(2_112, 'test.slow', { delayMs: 50 }), timeoutMs: 30_000 });
+    assert.equal(pool.stats().grown, 0, 'not on sight');
+    let grewAfterMs = 0;
+    await until(
+      () => {
+        if (pool.stats().grown === 0) return false;
+        grewAfterMs = Number(process.hrtime.bigint() - queuedAt) / 1e6;
+        return true;
+      },
+      reporting('the pool to grow for the straggler that lasted', pool),
+    );
+    // Nothing else can move the pool here: every worker holds a check for five seconds.
+    assert.ok(grewAfterMs >= 300 - 1, `grew after ${grewAfterMs.toFixed(0)} ms, not 300`);
+    assert.equal(pool.stats().grown, 1, 'one worker, for the one check');
+    await until(
+      () => seen.some((one) => one.result.sensorId === 2_112),
+      reporting('the straggler to run on the worker grown for it', pool, () => ({
+        answered: seen.length,
+      })),
+    );
+  });
+
+  it('looks at a straggler again once, when it will have waited, rather than polling', async () => {
+    // Every pump asks the memory cap, so its reads count the pool's looks at the queue. A look
+    // armed for the moment the straggler will have waited is one; a timer that came back at once
+    // and looked again would be hundreds of wake-ups on the probe's own thread.
+    let reads = 0;
+    const pool = new CheckPool({
+      logger: silent,
+      size: 20,
+      minSize: 12,
+      growAfterMs: 300,
+      registryModule: FIXTURES,
+      memoryCap: {
+        read: () => {
+          reads += 1;
+          return undefined;
+        },
+      },
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    await within(60_000, 'the pool to start', pool.start());
+    for (const check of twelve(2_150, 5_000)) pool.submit(check);
+    // Taken before the submit, as the pool takes its own: taken after, the submit's pump was inside
+    // the wait the test measured, and a loaded host read 298 ms of a 300 ms wait.
+    const queuedAt = process.hrtime.bigint();
+    reads = 0;
+    pool.submit({ ...request(2_162, 'test.slow', { delayMs: 50 }), timeoutMs: 30_000 });
+    let readsWhenGrown = 0;
+    let grewAfterMs = 0;
+    // `size` and not `stats()`, which reads the cap too: a worker grown is in the pool at once.
+    await until(
+      () => {
+        if (pool.size === 12) return false;
+        readsWhenGrown = reads;
+        grewAfterMs = Number(process.hrtime.bigint() - queuedAt) / 1e6;
+        return true;
+      },
+      reporting('the pool to grow for the straggler that lasted', pool, () => ({ reads })),
+    );
+    // The submit's pump reads once, and the look's twice, in `#pump` and in `#grow`: three. A timer
+    // can fire up to a millisecond early against `hrtime`, which arms one 1 ms look more and reads
+    // once more; a poll that lands after the new worker said ready also counts that pump and its
+    // spawn's. So six is the most a pool that looked once shows, and ten leaves room under the 240
+    // a pool that looked again at once read. And three the fewest: a pool that grew on sight read
+    // twice, in the submit's pump and its `#grow`, and grew before the wait.
+    assert.ok(readsWhenGrown <= 10, `${String(readsWhenGrown)} reads before it grew, not 3`);
+    assert.ok(readsWhenGrown >= 3, `${String(readsWhenGrown)} reads before it grew, not 3`);
+    assert.ok(grewAfterMs >= 300 - 1, `grew after ${grewAfterMs.toFixed(0)} ms, not 300`);
+  });
+
+  it('measures the wait from the oldest straggler, and grows for every one in one step', async () => {
+    // Two stragglers behind 24 workers, under a tenth of them, the second queued halfway through
+    // the first's wait. The pool grows when the first has waited, for both at once: a pool that
+    // timed the newest would grow half a wait later, and one that grew per check in two steps.
+    const lines: { msg: string; at: number; from?: number; to?: number }[] = [];
+    const stream = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        // Stamped by the monotonic clock as the pool logs it, which is when this runs: pino's
+        // `time` is the wall clock's, which the VM moves on its own. A quiet run read the growth
+        // 1,198 ms after the first, where the pool had waited its 1,200 ms by `hrtime`.
+        const line = JSON.parse(chunk.toString()) as Omit<(typeof lines)[number], 'at'>;
+        lines.push({ ...line, at: performance.now() });
+        done();
+      },
+    });
+    const GROW_AFTER = 1_200;
+    const pool = new CheckPool({
+      logger: pino({ level: 'info' }, stream),
+      size: 40,
+      minSize: 24,
+      growAfterMs: GROW_AFTER,
+      registryModule: FIXTURES,
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    await within(60_000, 'the pool to start', pool.start());
+    for (let i = 0; i < 24; i += 1) {
+      pool.submit({ ...request(2_400 + i, 'test.slow', { delayMs: 10_000 }), timeoutMs: 30_000 });
+    }
+    const growths = (): typeof lines =>
+      lines.filter((line) => line.msg === 'growing the check pool');
+    const firstAt = performance.now();
+    pool.submit({ ...request(2_424, 'test.slow', { delayMs: 50 }), timeoutMs: 30_000 });
+    await sleep(GROW_AFTER / 2);
+    const secondAt = performance.now();
+    pool.submit({ ...request(2_425, 'test.slow', { delayMs: 50 }), timeoutMs: 30_000 });
+    assert.equal(pool.stats().grown, 0, 'two behind 24 are stragglers, so not on sight');
+    await until(
+      () => growths().length > 0,
+      reporting('the pool to grow for the stragglers', pool),
+      10_000,
+    );
+    const [growth] = growths();
+    assert.ok(growth !== undefined);
+    // The pool grows once the first has waited by the monotonic clock, the one `at` is read by, so
+    // the first bound holds on any machine; the second leaves the host half a wait, 600 ms, to be
+    // late in.
+    assert.ok(
+      growth.at - firstAt >= GROW_AFTER - 1,
+      `${String(Math.round(growth.at - firstAt))} ms after the first`,
+    );
+    assert.ok(
+      growth.at - secondAt < GROW_AFTER,
+      `${String(Math.round(growth.at - secondAt))} ms after the second: timed from the oldest, not the newest`,
+    );
+    assert.equal((growth.to ?? 0) - (growth.from ?? 0), 2, 'a worker for each, in one step');
+    // Each worker grown takes a straggler, so nothing is left for a second step.
+    await sleep(300);
+    assert.equal(growths().length, 1);
+    assert.equal(pool.stats().grown, 2);
+  });
+
+  it('still grows at once for a burst behind a large pool', async () => {
+    // A minute's wait, so a burst taken for stragglers could not grow inside the test.
+    const { pool } = await poolOf({ size: 20, minSize: 12, growAfterMs: 60_000 });
+    for (const check of twelve(2_200, 5_000)) pool.submit(check);
+    for (const id of [2_212, 2_213]) {
+      pool.submit({ ...request(id, 'test.slow', { delayMs: 5_000 }), timeoutMs: 30_000 });
+    }
+    assert.equal(pool.stats().grown, 2, 'two behind twelve is a tenth of the pool: a burst');
+  });
+
+  it('still grows at once for one check behind a pool of ten or fewer', async () => {
+    const { pool } = await poolOf({ size: 20, minSize: 10, growAfterMs: 60_000 });
+    for (let i = 0; i < 11; i += 1) {
+      pool.submit({ ...request(2_300 + i, 'test.slow', { delayMs: 5_000 }), timeoutMs: 30_000 });
+    }
+    assert.equal(pool.stats().grown, 1, 'one behind ten is a tenth');
   });
 });
 

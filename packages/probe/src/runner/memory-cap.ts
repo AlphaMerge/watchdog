@@ -28,6 +28,15 @@ import { WORKER_RESIDENT_MIB } from '../measured.js';
  * **It corrects itself.** The per-worker figure is a measured constant, not a live one, but
  * `available` is read again each time, so an estimate that is low shows up as less available on
  * the next reading and the cap stops rising.
+ *
+ * **This is the line; the hysteresis is the pool's** (`P-437`). The pool stops growing here, grows
+ * past the size it held at only with room for two workers past it, and gives a worker back only
+ * once memory is a worker's worth under it (`MEMORY_RELEASE_MARGIN_WORKERS`,
+ * `MEMORY_SHED_MARGIN_WORKERS`), and after a shed grows back past where it shed to only with a
+ * worker's worth more. So a reading that wobbles across the line moves nothing while the wobble is
+ * inside those bands, which are in the estimate's units less its error: 3e − a between a shed and
+ * growing a worker back, where e is the estimate and a what a worker really holds, 70 MiB at 40
+ * and 50, and less by a − e for each more grown at once.
  */
 
 export interface MemoryCapReading {
@@ -39,6 +48,19 @@ export interface MemoryCapReading {
   readonly perWorkerBytes: number;
   /** Where the reading came from: the probe's own cgroup ceiling, or the machine's memory. */
   readonly source: 'limit' | 'machine';
+  /**
+   * Of the workers it counts, those still loading their registry when it was taken (`P-437`'s
+   * third review). Each is counted as resident before most of its memory is in use, so `workers`
+   * is high by about that many until a reading taken after they loaded. Absent is none.
+   */
+  readonly loading?: number;
+  /**
+   * The workers it counted as resident when it was taken, held and exiting (`P-437`'s third
+   * review). `workers` is that count and the estimate's worth of what was available past it, so
+   * the further below a size the reading was taken, the more of its room at that size is the
+   * estimate's and the less was measured. Absent is the pool's now.
+   */
+  readonly held?: number;
 }
 
 const MIB = 1024 * 1024;
@@ -90,6 +112,8 @@ interface Taken {
   readonly source: 'limit' | 'machine';
   /** Workers held when it was taken. */
   readonly held: number;
+  /** Of those, the ones still loading their registry. */
+  readonly loading: number;
 }
 
 export class MemoryCap {
@@ -103,11 +127,15 @@ export class MemoryCap {
     this.#perWorkerBytes = (options.perWorkerMiB ?? WORKER_RESIDENT_MIB) * MIB;
   }
 
-  /** The cap for a pool holding `held` workers, or `undefined` where memory cannot be read. */
-  read(held: number): MemoryCapReading | undefined {
+  /**
+   * The cap for a pool holding `held` workers, `loading` of them still loading their registry, or
+   * `undefined` where memory cannot be read. A reading kept from earlier in the second says how
+   * many were loading when it was taken, not now.
+   */
+  read(held: number, loading = 0): MemoryCapReading | undefined {
     const now = this.#sources.now();
     if (this.#last === undefined || now - this.#last.at >= MEMORY_CAP_READ_INTERVAL_MS) {
-      this.#last = { at: now, taken: this.#take(held) };
+      this.#last = { at: now, taken: this.#take(held, loading) };
     }
     const taken = this.#last.taken;
     if (taken === null) return undefined;
@@ -125,14 +153,16 @@ export class MemoryCap {
       reserveBytes,
       perWorkerBytes: this.#perWorkerBytes,
       source: taken.source,
+      loading: taken.loading,
+      held: taken.held,
     };
   }
 
-  #take(held: number): Taken | null {
+  #take(held: number, loading: number): Taken | null {
     const limit = this.#sources.limit();
-    if (limit !== null) return { memory: limit, source: 'limit', held };
+    if (limit !== null) return { memory: limit, source: 'limit', held, loading };
     const machine = this.#sources.machine();
-    if (machine !== null) return { memory: machine, source: 'machine', held };
+    if (machine !== null) return { memory: machine, source: 'machine', held, loading };
     return null;
   }
 }

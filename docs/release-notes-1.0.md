@@ -265,6 +265,16 @@ From rc.2 or anything older:
   core stops treating them as the probe beside it. No API route or page shows which one kept it;
   the database does, so check before deleting any, and moving a wrongly kept flag has no tested
   path yet (`P-445`) ([installation.md → Upgrading](installation.md#upgrading)).
+- **A probe whose memory is at its reserve holds its worker pool there** (`P-437`), rather than
+  growing and shrinking it every second or two. Its log says *memory is holding the check pool
+  back* once per hold and *memory has room for more workers again* when it ends. With
+  `workerPoolSize` set, the pair is *workerPoolSize allows more workers than memory holds* and
+  *memory has room for the workers the check pool holds again*. The line that ended a hold
+  before, in both cases, *nothing is waiting for a worker; memory is no longer holding the check
+  pool back*, is gone: match on the new ones if anything watched for it. The pool may sit a
+  worker's worth (40 MiB) inside its reserve before it gives one back, and a few checks behind a
+  large pool wait up to 200 ms before it grows for them
+  ([a probe held back by memory](administration.md#a-probe-held-back-by-memory)).
 - **A probe left on rc.2 keeps working, and its newer channels gap.** Core and probe negotiate down
   to the older version
   ([ADR-001 Decision 13](ADR-001-architecture.md#decision-13--protocol-versions-negotiate-down-they-do-not-gate-admission)).

@@ -1494,7 +1494,7 @@ alarm.
 | `protocolFlap` | **Warns from 2.** How many times the probe's protocol version changed in a flap, 0 when it is in none (`A-72`). A flap is a second change inside an hour of the one before, in the version **the probe advertises**: a probe rolled back and forward, or two builds taking turns at its identity. Upgrading or rolling back the core changes no probe's count, so a warning here is always about the probe named. While it lasts the sensors whose credentials the version decides hold where the lowest version of the flap put them, so the reconnects page nothing and recover nothing, and this warning is the one alarm for it; the message names the version, that floor, how long it has gone on and how long it must hold. Cleared when the version has held for an hour, and the held sensors are let go then. Find which build is connecting under the probe's identity (its `agentVersion` in the probe list moves with it) and stop the one that should not be. A gap where the core cannot say, which is only a test harness. See [the state machine](state-machine.md) |
 | `schedulerLag` | Checks starting later than scheduled. Warns at 1 s, errors at 5 s — this is the first sign of an overloaded probe |
 | `poolUsage` | Worker pool saturation, sampled at the heartbeat rather than averaged — on a bursty workload it under-reads badly (4.7% measured while every worker was saturated once a second, `findings/2026-09-04-live-probe-check.md`), so do not size down from a low reading. Warns at 80%. Since `P-34` the probe raises its own ceiling from the checks it was assigned, so sustained saturation means either `workerPoolSize` is pinned or the workload outgrew what a probe derives for itself — see the troubleshooting runbook, and note that a pool below its floor accumulates rather than refusing |
-| `poolCeiling`, `poolMemoryCap`, `poolHeldBack` | How far the worker pool may grow, and whether memory is what stops it (`P-236`). `poolCeiling` is the ceiling in force; `poolMemoryCap` is how many workers the memory the probe may use can hold; `poolHeldBack` is how many the ceiling would allow and memory does not. No limits: memory holding the pool back is not an outage by itself, and when it costs checks, `poolUsage` and `refused` are the alarm. Read these to see that the remedy is memory rather than `workerPoolSize` — see [a probe held back by memory](#a-probe-held-back-by-memory). A gap for a probe older than protocol 19, and `poolMemoryCap` also where memory cannot be read |
+| `poolCeiling`, `poolMemoryCap`, `poolHeldBack` | How far the worker pool may grow, and whether memory is what stops it (`P-236`). `poolCeiling` is the ceiling in force; `poolMemoryCap` is how many workers the memory the probe may use can hold; `poolHeldBack` is how many the ceiling would allow and memory does not. While memory holds the pool at the size it held at, `poolCeiling` is that size, and moves when memory crosses a margin, not with each reading; below that size, after idle workers given back or a fall, it follows what memory allows from reading to reading, since that is what the pool may grow back to. `poolMemoryCap` is each reading's own number, and can read at least one under `poolSize` then: one inside the shed margin, since the pool gives a worker back only once memory is a worker's worth below its reserve, and more while it is giving workers back (`P-437`). `poolHeldBack`, and the message's *memory holds the pool at N workers*, are about this ceiling, not the hold the log reports: they can outlast *memory has room for more workers again* wherever memory still allows fewer workers than the ceiling, and appear with no hold at all. No limits: memory holding the pool back is not an outage by itself, and when it costs checks, `poolUsage` and `refused` are the alarm. Read these to see that the remedy is memory rather than `workerPoolSize` — see [a probe held back by memory](#a-probe-held-back-by-memory). A gap for a probe older than protocol 19, and `poolMemoryCap` also where memory cannot be read |
 | `deferred` | Checks the pool could not start. **Backpressure is counted, never silent** |
 | `workerStartupFailed` | Check workers the pool could not start (`P-263`): still loading the probe's sensor types 30 s after they were started, so the pool terminated each and started another after a delay that doubles from 250 ms to 30 s, or dead while loading them (those are in `workerCrashes` as well). No check is lost to it — checks go only to workers that have loaded — but a worker that hung held one of the eight turns the pool loads workers in. A load takes well under two seconds on a healthy probe, so a climbing count is a machine short of CPU or memory, or a broken install. A hang is retried, since it may be the machine, with one exception (`P-272`): 30 hangs in a row in a pool where no worker has ever loaded disable the pool as three deaths do, until the probe restarts. Every check the pool had accepted is then answered at once as never started (`pool-disabled`), so its sensors are held Unknown behind Probe Health's one alarm (`P-265`), rather than waiting in the queue until it filled. The error line says `gaveUpOn: "hangs"`. A pool that has had a worker loaded never gives up on hangs, however long they go on. No limits; `checkWait` and `refused` say when it costs checks. A gap for a probe or a core older than protocol 30 |
 | `childStartupFailed`, `childStartup` | The EXE/Script checks whose own process never got as far as running them, and the p95 of how long such a process takes to start: from its spawn to having loaded the probe's sensor types (`P-260`). A check's timeout starts once its process has started, so a probe short of CPU no longer reports its scripts as having exceeded their timeouts; a process still loading after 30 s is ended, and its sensor reads Unknown with *the probe took N ms to start the check and gave up*, held behind `sensorsNotStarted` below (`P-265`). Also counted here: a process that could not load the sensor types, or exited or was killed while loading them; each sensor's message says which, with the exit code or signal. Counted here, not in `childTimedOut` or `childCrashes`, which are for checks that ran. A start takes tens of milliseconds on a quiet machine; seconds here is a probe that needs CPU or fewer neighbours. No limits, since `sensorsNotStarted` is the alarm for the sensors whose checks never started, and a second here would be two for one event. A gap for a probe or a core older than protocol 29, and `childStartup` also until a check has run in a process |
@@ -1888,12 +1888,46 @@ The pool now stops at what memory holds: the memory left under the probe's ceili
 of a quarter of the ceiling or 256 MiB, whichever is larger, divided by 40 MiB a worker. Past that,
 checks wait in the queue and are refused and counted when it is full, and the probe stays up.
 Probe Health says so in its message — *memory holds the pool at 77 workers, 179 short of its
-ceiling* — and the probe logs *memory is holding the check pool back* once per episode, with the
-numbers it used. If memory runs short while the pool is large, workers are given up as they finish
-their checks, never in the middle of one.
+ceiling* — and the probe logs *memory is holding the check pool back* once, when the hold starts,
+with the numbers it used, the size it holds at (`heldAt`), and the two lines of available memory
+that would change it. Above `growsAgainAboveMb`, read with the pool at `heldAt`, the hold ends;
+below `givesBackBelowMb`, at any size, the pool gives a worker back. If memory runs short while
+the pool is large, workers are given up as they finish their checks, never in the middle of one.
+
+**The hold has margins either side of the reserve** (`P-437`), so that memory sitting at the line
+moves nothing. The pool holds its size until memory has room for two workers above the reserve
+past the size it held at, read with no worker still loading, and then logs *memory has room for
+more workers again* once and may grow. A loading worker is counted from the moment its thread
+starts, before most of its memory is in use, so a reading taken then has room that is not there. While it holds, workers it gave back, as idle or for a fall, it may buy back up to that size
+as far as memory has room, with no line, since that is not a release; past the size a fall left
+it at, only with room for a worker more as well. It gives a worker back for memory only once
+memory is a worker's worth (40 MiB) below the reserve. Without the margins, the line the pool
+filled to was the line it gave workers back at, and the line a fall left it at was the line it
+grew back at: held at 12 with 125 MiB taken and ±20 MiB of noise, it grew 21 times and shrank 23
+in five minutes. One probe at 1,992 MiB available
+against a reserve of 1,984 grew 244 times and shrank 256 in ten minutes, and logged the warning
+311 times, a few MiB of noise each time. While memory holds the pool at the size it held at,
+`poolCeiling` on Probe Health is that size, so it moves when memory crosses a margin, not with each
+reading. Below that size, after idle workers given back or a fall, it follows what memory allows
+from reading to reading, a worker less past the size a fall left it at, since that is what the
+pool may grow back to.
+
+**The margins are counted in the estimate's 40 MiB a worker**, and a worker given back frees what
+it really used, about 50 MiB on that probe, so each one leaves a reading 10 MiB richer than the
+estimate says. Measured against the size it held at alone, enough of them ended a hold: at that
+probe's 8 MiB spare, eight idle workers given back, about eight quiet minutes. Where the next
+burst then wanted no more than two workers past that size, as at a ceiling of 64 held at 62, it
+grew there with no hold, gave back what memory did not have, and held at the same size again,
+with the same warning: a release and a warning every quiet stretch. So memory read with the
+pool below the size it held at ends a hold only with room past that size and a worker more for
+each the pool was short of it when memory was read, and no number of idle workers given back
+ends one while a worker costs less than twice the estimate. The pool grows back to that size inside the hold, with no line, and a pool that stays
+quiet keeps the hold until demand brings it back to that size and memory has room past it. How
+far the estimate is from the measure is what `P-440` settles.
 
 **A quarter, so that a full pool stays clear of the memory warnings** (`P-244`). A saturated,
-capped probe sits at 75% of its ceiling or a little under, below the 80% at which
+capped probe sits at 75% of its ceiling or a little under, and at most a worker's worth more while
+memory holds it: 79% of a 1 GiB ceiling, less of a larger one. That is below the 80% at which
 `memoryLimitUsage` warns, and on a probe measuring the machine above the 20% at which
 `memoryAvailable` does. The saturation is one alarm, the pool's, and it clears when the
 saturation does, even though the workers stay until the pool shrinks. The warnings keep their
@@ -1919,9 +1953,13 @@ whose `MemoryMax` was removed, and Windows, where WinSW sets no limit. **On Linu
 is its own.
 
 **`workerPoolSize` set to anything non-zero is obeyed, not capped.** It is your statement of how
-much memory the probe may use. If it is more than memory holds, the probe logs *workerPoolSize
-allows more workers than memory holds* once per episode and grows past it anyway, and
-`poolMemoryCap` shows the number it would have stopped at.
+much memory the probe may use. If it is more than memory holds, the probe grows past what memory
+holds anyway, and logs *workerPoolSize allows more workers than memory holds* once per hold, when
+it starts — at start-up, where the floor it starts with is already past memory, as with a fixed
+size — and *memory has room for the workers the check pool holds again* once memory has room
+for the workers it then holds and the same margin past them. That second line is about the
+workers held, not the setting: its `cap` against `maxSize` says how far memory still is from what
+`workerPoolSize` allows. `poolMemoryCap` shows the number the pool would have stopped at.
 
 ### A journal that is not keeping up
 

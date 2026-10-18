@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Worker } from 'node:worker_threads';
+import { Worker, type WorkerOptions } from 'node:worker_threads';
 import { describeError, fitResult, type CheckResult, type Logger } from '@ms/shared';
 import type { MemoryCapReading } from './memory-cap.js';
 import { failureField } from './failure.js';
@@ -92,6 +92,109 @@ const MIN_DURATION_SAMPLES = 8;
  * them, and the next sweep finds that out too.
  */
 const OVER_CEILING_RETRY_MS = 250;
+
+/**
+ * How long a check must have waited for a worker before the pool grows for a shortfall too small
+ * to be a burst (`P-437`).
+ *
+ * **A straggler is not demand that lasts.** A check queued behind busy workers is taken by the
+ * first of them to finish, and growing for it on sight is how `ms-server`'s probe logged 244
+ * growth steps in ten minutes, nearly every one *from N to N + 1, queued 1*, at 61–63 workers. The
+ * worker bought costs 40–50 MiB for at least the idle window, and it is not ready at once either:
+ * a turn of eight took 0.76 s on 8 cores (`P-206`), and one load 0.45–14.8 s beside two suites
+ * (`P-258`). So a straggler a busy worker takes within the wait is usually running before the
+ * worker bought for it could have taken it, and costs nothing. One still waiting is demand that
+ * lasts, and the pool grows for it then, and for the whole queue behind it, in one step as before.
+ *
+ * **The wait adds to a worker's load; it does not replace it.** A straggler that lasts waits this
+ * long and then for the worker grown for it to load, so the two together are how late it starts,
+ * where before it was the load alone. Measured in the toolchain container, one worker loading the
+ * real catalogue from spawn to ready, twenty spawns a run (`test/perf/pool-stragglers.test.ts`): a
+ * p95 of 977–3,700 ms over four runs at a load of 10–16 on 8 cores, beside `ms-server` and other
+ * suites. That is the whole dispatch budget (`DISPATCH_BUDGET_MS`, `WORKFLOW.MD` §3, ±1 s) or more
+ * by itself, so on a loaded host a straggler that lasts starts outside the budget, wait or none.
+ *
+ * **200 ms is a judgement, not derived.** The budget less those p95s leaves 23 ms or less, which is
+ * growing on sight. A wait longer than most checks keeps the pool from buying a worker for a
+ * straggler a busy worker is about to take, and adds at most 200 ms to one that lasts. Neither half
+ * is measured: how long a busy worker takes to pick a straggler up on the `P-15` workload, nor how
+ * many grows 200 ms adds there against 500 ms. The perf test prints the wait and the load against
+ * the budget, and asserts nothing about them.
+ */
+export const GROW_AFTER_MS = 200;
+
+/**
+ * A shortfall of at least this fraction of the pool is a burst, and grows the pool at once
+ * (`P-437`); one check is a burst for a pool of ten or fewer. Below it are stragglers, which wait
+ * `GROW_AFTER_MS` first.
+ *
+ * **A tenth, the share the sizer already calls a twitch** (`P-40`'s deadband). The wheel hands over
+ * a second's checks at once (`P-15`), so a pool short of a whole tranche is a burst, and it still
+ * grows in one step the moment it is seen: 83 checks against 4 workers go to the ceiling as they
+ * did. What waits is the top of the burst, at most a tenth of the pool, for at most `GROW_AFTER_MS`.
+ */
+const BURST_FRACTION = 0.1;
+
+/**
+ * How far below the reserve memory must fall, in workers, before the pool gives one back
+ * (`P-437`).
+ *
+ * **The gate had no hysteresis.** The pool grew while a worker's worth was spare above the
+ * reserve and gave workers back the moment there was less than the reserve, so the line it filled
+ * to was the line it shed at. `ms-server` sat at 1,992 MiB available against a reserve of 1,984:
+ * noise of a few MiB took it under, a worker went, its memory came back, the next queued check
+ * bought it again — 256 shrinks and 244 grows in ten minutes. So a worker goes back only once a
+ * reading is this margin under room for the pool. It lets the probe into the reserve by at most
+ * one worker: 79% of a 1 GiB ceiling, under `memoryLimitUsage`'s 80%, and less of a larger one, so
+ * it is not widened.
+ *
+ * **It is not the band between a shed and growing back** (`P-437`'s fourth review). A worker given
+ * back frees what it really held, about 50 MiB, and is counted at the estimate's 40, so at the size
+ * it shed from, a grow-back with room for one worker came at spare of e − a, where e is the
+ * estimate and a the measure: 2e − a above the shed's −e, 30 MiB, under ±20 MiB of noise. So
+ * inside a hold the pool grows back past the size a shed left it at only with this margin's more
+ * room (`#holdTarget`): 3e − a, 70 MiB, and still e where a worker costs twice the estimate. That
+ * is a worker at a time; k grown at once are each counted at the estimate, so they land
+ * (k + 2)e − ka above the shed, which is still e more than before.
+ */
+export const MEMORY_SHED_MARGIN_WORKERS = 1;
+
+/**
+ * How much more than room for one worker memory must have, in workers, before a pool memory is
+ * holding grows past the size it held at (`P-437`).
+ *
+ * The pool holds once growth is refused, with less than a worker's worth spare above the reserve,
+ * and grows past that size only with room for two: so noise of a few MiB is not a release.
+ * Together with the shed margin it makes a band three workers wide, 120 MiB at 40 MiB a worker,
+ * between giving a worker back at `heldAt` and growing past it, both read at that size. It is not
+ * the band between a shed and growing back below `heldAt`, where a worker given back frees more
+ * than it is counted at, which has one of its own (`#holdTarget`, `P-437`'s fourth review). **The
+ * margins are in the estimate's units** (`WORKER_RESIDENT_MIB`), so how much real memory they are
+ * depends on that figure (`P-440`).
+ *
+ * **Room past the size the hold started at, not past the pool now** (`MemoryGate`'s `heldAt`). A
+ * worker given back as idle frees its memory, and measured against the smaller pool that was room
+ * past the margin whenever memory already had room for one more: a release, then a hold at the
+ * next burst, from one give-back. So the pool may grow back to the size it held at, as far as
+ * memory has room, without a release, and a release needs room past that size.
+ *
+ * **No number of idle give-backs is a release** (`P-437`'s third review), while a worker costs
+ * less than twice the estimate. Each is counted at the estimate and frees what the worker really
+ * held, about 50 MiB against 40, so measured against `heldAt` alone k give-backs ended a hold once
+ * s + (actual − estimate) × k ≥ 2 × estimate, with s spare at `heldAt`: eight at `ms-server`'s
+ * 8 MiB. Where the next burst then wanted no more than two past `heldAt`, it grew there with no
+ * hold, gave back what it overshot, and held at the same size again, so every quiet stretch
+ * logged a release and a warning. So a reading taken below `heldAt` releases only with room past
+ * it and one worker more for each the reading was taken short of it (`#considerRelease`), and the
+ * pool grows back to it with no line (`pool-at-the-reserve-scenario.test.ts`, the idle arm).
+ *
+ * **Stability over responsiveness, and no hold for ever** (decided at `P-437`'s close). A quiet
+ * pool given back below `heldAt` stays held, and either of two things ends it: demand that brings
+ * it back to `heldAt`, where a reading needs only this margin past it, or memory alone, which below
+ * `heldAt` needs a worker more for each the pool is short of it. A check that waits is either
+ * under `heldAt`, which the pool grows back to inside the hold, or past it with the pool there.
+ */
+export const MEMORY_RELEASE_MARGIN_WORKERS = 1;
 
 /**
  * How often an idle worker tells the pool its session pools changed (`P-256`).
@@ -261,10 +364,11 @@ export interface CheckPoolOptions {
   /**
    * Workers to start with, and never to drop below (`P-18`).
    *
-   * **The asymmetry is the design.** Growth happens the instant a check has nowhere to go —
+   * **The asymmetry is the design.** A burst grows the pool the instant it has nowhere to go —
    * every worker busy and something queued — because a delayed check is a measurement taken
    * late, and `P-15` measured what an undersized pool costs: 21% of checks refused and the rest
-   * delayed by a p95 of 15.8 seconds. Shrinking waits for a whole quiet minute and gives up one
+   * delayed by a p95 of 15.8 seconds. (A few stragglers behind a large pool wait 200 ms first,
+   * `GROW_AFTER_MS`, since `P-437`.) Shrinking waits for a whole quiet minute and gives up one
    * worker at a time, because the only thing it buys is memory, and buying memory back at the
    * cost of a re-spawn during the next spike is a bad trade.
    *
@@ -280,6 +384,12 @@ export interface CheckPoolOptions {
    * about to re-spawn.
    */
   idleShrinkMs?: number;
+  /**
+   * How long a shortfall smaller than a burst must last before the pool grows for it (`P-437`).
+   * `GROW_AFTER_MS` unless a test sets it; 0 grows for any check the moment it has nowhere to go,
+   * as the pool did before.
+   */
+  growAfterMs?: number;
   /**
    * How much recent history the sizing estimate sees, in milliseconds (`P-46`).
    *
@@ -319,18 +429,25 @@ export interface CheckPoolOptions {
   /**
    * How many workers memory allows (`P-236`). Absent means no memory bound, as before it.
    *
-   * Asked with the number of workers already started, and answers with an absolute count that
-   * includes them. `MemoryCap` is the real one.
+   * Asked with the number of workers already started, and of those how many are still loading
+   * their registry, and answers with an absolute count that includes them. `MemoryCap` is the real
+   * one.
    */
-  memoryCap?: { read: (held: number) => MemoryCapReading | undefined };
+  memoryCap?: { read: (held: number, loading: number) => MemoryCapReading | undefined };
   /**
    * Whether the pool obeys `memoryCap` or only reports it. Default true.
    *
    * False where `workerPoolSize` was set: a non-zero setting is the operator's statement of how
    * much memory the probe may use (`P-34`), and a derived number must not overrule it. The pool
-   * still says, once per episode, when that setting is more than memory holds.
+   * still says, once per hold (`P-437`), when that setting is more than memory holds: when it grows
+   * past memory, and when its floor is already past it once started.
    */
   enforceMemoryCap?: boolean;
+  /**
+   * How a worker's thread is made: `new Worker`, which a test replaces with one that throws, as
+   * Node's does when the thread cannot be created (`ERR_WORKER_INIT_FAILED`, `P-437`).
+   */
+  createWorker?: (filename: string, options: WorkerOptions) => Worker;
   /**
    * The probe's resolver (`P-426`). Given, this pool's workers ask it for every name a check
    * resolves to check it, over their port, and it answers here. Absent, each worker resolves for
@@ -399,7 +516,45 @@ interface Slot {
    * been spare, which is what the pool is being asked to give back.
    */
   idleSince: bigint;
+  /**
+   * Set from the moment this worker's thread starts until its spawn settles (`P-439`): while it
+   * is in `#slots` and its spawn is still in `#growing`, so `#held` counts it once.
+   */
+  onItsWay: boolean;
 }
+
+/**
+ * Whether memory lets the pool grow (`P-437`).
+ *
+ * **A state, so that a hold is one event and not one per reading.** `holding` starts when memory
+ * refuses a growth checks were waiting for, and ends only when a reading has room for one worker
+ * past `MEMORY_RELEASE_MARGIN_WORKERS` beyond the size the hold started at: not when the queue
+ * empties, which on a probe whose wheel hands over a second's checks at once is every second. That
+ * was the 311 holds and 311 releases `ms-server` logged in ten minutes. While it holds, the pool
+ * grows no further than that size, and only as far as memory has room for; it gives workers back
+ * for memory only once memory falls past `MEMORY_SHED_MARGIN_WORKERS`.
+ */
+type MemoryGate =
+  | { readonly state: 'open' }
+  | {
+      readonly state: 'holding';
+      /** Monotonic: when memory refused the growth that started the hold. */
+      readonly since: bigint;
+      /**
+       * The workers the pool held once memory refused, those loading among them: what it may grow
+       * back to without a release, after giving workers back as idle or for a fall, and what a
+       * release must have room past.
+       */
+      readonly heldAt: number;
+      /**
+       * The size the pool last gave workers back to for memory inside this hold, if it has
+       * (`P-437`'s fourth review): past it, growing back needs a shed margin's more room
+       * (`#holdTarget`).
+       */
+      readonly shedTo?: number;
+    };
+
+type HoldingGate = Extract<MemoryGate, { state: 'holding' }>;
 
 /**
  * The bounded worker pool that runs checks (ADR-001 Decision 3).
@@ -506,6 +661,7 @@ export class CheckPool {
   #maxSize: number;
   readonly #minSize: number;
   readonly #idleShrinkMs: number;
+  readonly #growAfterMs: number;
   readonly #durationWindowMs: number;
   readonly #queueMax: number;
   readonly #abortGraceMs: number;
@@ -563,7 +719,8 @@ export class CheckPool {
    * **Every spawn is in it until it settles** (`P-263`, `P-271`): `start`'s own, a growth step's, a
    * failed start's retry while it waits out its delay, a crash's replacement and a recycle's. Each
    * can wait out of `#slots` — for a loading turn, a delay or a terminate — and one left out of
-   * this as well is a gap `#grow` buys a second worker for.
+   * this as well is a gap `#grow` buys a second worker for. The caller counts it; `#spawn` takes it
+   * off. While it loads it is in `#slots` too, which `#held` allows for (`P-439`).
    */
   #growing = 0;
   /** Workers loading their registry right now, bounded by `SPAWN_CONCURRENCY` (`P-206`). */
@@ -577,15 +734,19 @@ export class CheckPool {
   readonly #retryTimers = new Set<NodeJS.Timeout>();
   /** Set only while the pool is above its ceiling and still has workers to give back (`P-45`). */
   #overCeilingTimer: NodeJS.Timeout | undefined;
-  readonly #memoryCap: { read: (held: number) => MemoryCapReading | undefined } | undefined;
+  readonly #memoryCap:
+    { read: (held: number, loading: number) => MemoryCapReading | undefined } | undefined;
+  readonly #createWorker: (filename: string, options: WorkerOptions) => Worker;
   readonly #enforceMemoryCap: boolean;
   /**
-   * Set while memory is holding the pool back, so the log says so once per episode (`P-236`).
+   * Whether memory is holding the pool (`P-437`), so the log says so once per hold (`P-236`).
    *
-   * An episode ends when nothing is waiting any more. Once per growth attempt would be once per
-   * submit on a saturated probe, which is the refusal flood `P-216` was about.
+   * Once per growth attempt would be once per submit on a saturated probe, which is the refusal
+   * flood `P-216` was about; once per emptied queue was once a second (`MemoryGate`).
    */
-  #memoryBinding = false;
+  #gate: MemoryGate = { state: 'open' };
+  /** Set while stragglers wait out `GROW_AFTER_MS`, to look at them again then (`P-437`). */
+  #growTimer: NodeJS.Timeout | undefined;
   /**
    * Workers given up whose threads have not exited yet (`P-236`).
    *
@@ -636,6 +797,7 @@ export class CheckPool {
     // every later decision arithmetic on a number that was already wrong.
     this.#minSize = Math.max(1, Math.min(options.minSize ?? this.#maxSize, this.#maxSize));
     this.#idleShrinkMs = options.idleShrinkMs ?? 60_000;
+    this.#growAfterMs = Math.max(0, options.growAfterMs ?? GROW_AFTER_MS);
     this.#durationWindowMs = options.durationWindowMs ?? DURATION_WINDOW_MS;
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
@@ -648,6 +810,8 @@ export class CheckPool {
     this.#freshLookups = options.freshLookups ?? false;
     this.#onResult = options.onResult;
     this.#memoryCap = options.memoryCap;
+    this.#createWorker =
+      options.createWorker ?? ((filename, workerOptions) => new Worker(filename, workerOptions));
     this.#enforceMemoryCap = options.enforceMemoryCap ?? true;
     this.#refusals = new RefusalLog(this.#logger, 'check queue is full, refusing a check', {
       ...(options.refusalSummaryMs === undefined ? {} : { summaryMs: options.refusalSummaryMs }),
@@ -689,6 +853,14 @@ export class CheckPool {
     if (clamped === this.#maxSize || !Number.isFinite(clamped) || clamped < 1) return;
     const previous = this.#maxSize;
     this.#maxSize = clamped;
+    // **A hold's size is never past the ceiling** (`P-437`'s fourth review). Lowered under it, the
+    // workers the ceiling takes back read as the pool short of `heldAt`, and a release needed room
+    // for twice the size it held at less the ceiling: memory's recovery ended nothing, and the next
+    // shortage said nothing either. Raised again, the hold may grow back to this size, no further.
+    // Clamped here, `heldAt` is at most `maxSize` everywhere: a hold starts at no more than it.
+    if (this.#gate.state === 'holding' && this.#gate.heldAt > clamped) {
+      this.#gate = { ...this.#gate, heldAt: clamped };
+    }
     this.#logger.info({ from: previous, to: clamped, held: this.#slots.length }, 'pool ceiling');
     if (clamped > previous) this.#pump();
     // Lowering it acts now rather than at the next window, for the same reason the pass above
@@ -804,8 +976,8 @@ export class CheckPool {
     this.#growing += this.#minSize;
     await Promise.all(
       Array.from({ length: this.#minSize }, () =>
+        // `#spawn` takes each off `#growing` as it settles (`P-439`).
         this.#spawn().finally(() => {
-          this.#growing -= 1;
           this.#pump();
         }),
       ),
@@ -823,6 +995,22 @@ export class CheckPool {
       { size: this.#slots.length, max: this.#maxSize, registry: this.#registryModule },
       'check pool started',
     );
+    // **A floor the operator set past memory is said too** (`P-437`'s third review). `start`
+    // spawns `minSize` without asking memory, and a fixed pool (`workerPoolMinSize` at
+    // `workerPoolSize`) never grows, so `#memoryBound`, where the warning is, was never reached:
+    // a hundred workers against memory for sixty said nothing but `poolMemoryCap`.
+    if (!this.#enforceMemoryCap && this.#gate.state === 'open') {
+      const memory = this.#readMemory();
+      // Less the workers it counted as loading (`P-437`'s fourth review), as every other look at
+      // memory does: a reading kept from while start's workers loaded reads room high by them.
+      if (
+        memory !== undefined &&
+        memory.workers - this.#terminating - (memory.loading ?? 0) < this.#minSize
+      ) {
+        const held = this.#held();
+        this.#startHold(held, Math.max(held, this.#minSize), this.#minSize, memory);
+      }
+    }
   }
 
   /**
@@ -844,6 +1032,8 @@ export class CheckPool {
     this.#shrinkTimer = undefined;
     if (this.#overCeilingTimer !== undefined) clearTimeout(this.#overCeilingTimer);
     this.#overCeilingTimer = undefined;
+    if (this.#growTimer !== undefined) clearTimeout(this.#growTimer);
+    this.#growTimer = undefined;
     // Each was counted in `#growing` while it waited; none will spawn now.
     this.#growing -= this.#retryTimers.size;
     for (const timer of this.#retryTimers) clearTimeout(timer);
@@ -965,6 +1155,10 @@ export class CheckPool {
       maxSize: this.#maxSize,
       ...(() => {
         const memory = this.#readMemory();
+        // Where the gate is read, and with the same reading (`P-437`): a pool that never pumps,
+        // on a probe whose sensors are all paused, still ends a hold once memory has room, so
+        // Probe Health is not left reading a hold that memory no longer imposes.
+        this.#considerRelease(memory);
         const ceiling = this.#ceiling(memory);
         return {
           ceiling,
@@ -1006,13 +1200,29 @@ export class CheckPool {
     // has none: each hands its slot to the next queued check the moment it finishes. So memory
     // taken by something else would never be given back while the probe is busy, which is exactly
     // when it matters. Only a ready worker holding nothing is taken, as `P-26` requires.
-    const over = this.#overMemory();
+    const memory = this.#readMemory();
+    // Every pump, not only one with checks waiting (`P-437`): a hold ends when memory has room,
+    // whether or not anything wants a worker at that moment, so the release line comes when memory
+    // has room and not with the next burst. `stats` and a retired worker's exit look as well. What
+    // Probe Health says of memory is a different thing: `poolHeldBack` is the ceiling memory sets,
+    // not the gate, so it can outlast a release wherever memory still allows fewer than `maxSize`.
+    this.#considerRelease(memory);
+    const over = this.#overMemory(memory);
     let retired = 0;
     for (const slot of [...this.#slots]) {
       if (retired >= over) break;
-      if (!slot.ready || slot.job !== undefined || slot.retired) continue;
+      // Not one whose spawn has yet to settle (`P-437`'s third review): its `ready` pumps before
+      // the spawn takes it off `#growing`, and out of `#slots` then it would be counted on its way
+      // with nothing to take it off `#held`. The spawn's own pump comes a few microtasks later, so
+      // a worker grown for a check runs it first, and goes back for memory once it is free.
+      if (!slot.ready || slot.onItsWay || slot.job !== undefined || slot.retired) continue;
       this.#retire(slot, { overMemory: over - retired });
       retired += 1;
+    }
+    // Where memory left it, inside a hold (`P-437`'s fourth review): growing back past this size
+    // needs a shed margin's more room, so a reading that wobbles at the shed line moves nothing.
+    if (retired > 0 && this.#gate.state === 'holding') {
+      this.#gate = { ...this.#gate, shedTo: this.#slots.length };
     }
     for (const slot of this.#slots) {
       if (this.#queue.length === 0) break;
@@ -1046,14 +1256,20 @@ export class CheckPool {
    *
    * Bounded twice over: by the configured maximum, and by what is actually queued — forty
    * workers for three waiting checks is memory bought for work that does not exist.
+   *
+   * **And by demand that lasts** (`P-437`). A shortfall under a tenth of the pool is stragglers,
+   * which a busy worker usually takes before a new one could; the pool grows for them only once
+   * the oldest has waited `GROW_AFTER_MS`, and then for the whole queue in one step.
    */
   #grow(): void {
     if (this.#stopped || this.#disabled) return;
     if (this.#queue.length === 0) {
-      this.#endMemoryEpisode();
+      // Nothing to look at again: whatever the stragglers were, a worker took them.
+      if (this.#growTimer !== undefined) clearTimeout(this.#growTimer);
+      this.#growTimer = undefined;
       return;
     }
-    const held = this.#slots.length + this.#growing;
+    const held = this.#held();
     if (held >= this.#maxSize) return;
 
     // **The queue that pending spawns will absorb must not also justify more spawns.** `held`
@@ -1068,6 +1284,10 @@ export class CheckPool {
     // checks arriving against 4 workers now goes straight to the ceiling in a single step rather
     // than in a handful of rounds.
     const unmet = Math.max(0, this.#queue.length - this.#growing);
+    // Met by the spawns already on their way; and nothing wanted is nothing memory refused.
+    if (unmet === 0) return;
+    const waitedMs = this.#lasting(unmet, held);
+    if (waitedMs === undefined) return;
     const wanted = Math.min(this.#maxSize, held + unmet);
     // **Memory is the last word on growth** (`P-236`), read at every step rather than folded into
     // the sizer's ceiling, because growth is immediate and the sizer runs every thirty seconds:
@@ -1079,15 +1299,57 @@ export class CheckPool {
     this.#grown += add;
     this.#growing += add;
     this.#logger.info(
-      { from: held, to: want, queued: this.#queue.length },
+      { from: held, to: want, queued: this.#queue.length, waitedMs: Math.round(waitedMs) },
       'growing the check pool',
     );
     for (let i = 0; i < add; i += 1) {
       void this.#spawn().finally(() => {
-        this.#growing -= 1;
         this.#pump();
       });
     }
+  }
+
+  /**
+   * The workers held and those on their way, each once (`P-439`).
+   *
+   * **A worker loading its registry is in both `#slots` and `#growing`**: its slot is pushed when
+   * its thread starts, and its spawn stays counted until it settles, which is after the worker
+   * says ready. Summed, it counted twice, up to `SPAWN_CONCURRENCY` of them during a ramp, and
+   * since `P-437` that number is what a hold records as the size it held at: a hold started
+   * mid-ramp needed room for as many more workers again before it would end.
+   */
+  #held(): number {
+    let onItsWay = 0;
+    for (const slot of this.#slots) if (slot.onItsWay) onItsWay += 1;
+    return this.#slots.length + this.#growing - onItsWay;
+  }
+
+  /**
+   * How long the oldest queued check has waited, when the shortfall is demand that lasts: a burst,
+   * or stragglers that have waited `GROW_AFTER_MS` (`P-437`). `undefined` for stragglers that have
+   * not, after arming a look at them for when they will have. The queue is not empty here.
+   */
+  #lasting(unmet: number, held: number): number | undefined {
+    const oldest = this.#queue[0];
+    /* c8 ignore next -- `#grow` returns on an empty queue before asking */
+    if (oldest === undefined) return undefined;
+    const waitedMs = Number(process.hrtime.bigint() - oldest.queuedAt) / 1e6;
+    if (unmet >= Math.max(1, held * BURST_FRACTION)) return waitedMs;
+    if (waitedMs >= this.#growAfterMs) return waitedMs;
+    // One look at a time: the oldest only gets younger as checks leave the queue, so a look armed
+    // for it is never later than the next one that could be due.
+    if (this.#growTimer === undefined) {
+      this.#growTimer = setTimeout(
+        () => {
+          this.#growTimer = undefined;
+          this.#pump();
+        },
+        Math.max(1, Math.ceil(this.#growAfterMs - waitedMs)),
+      );
+      // Waiting to see whether stragglers last must never be what keeps the process alive.
+      this.#growTimer.unref();
+    }
+    return undefined;
   }
 
   /**
@@ -1155,69 +1417,209 @@ export class CheckPool {
    * Growing counts them, because until they exit their memory is not free to spend.
    */
   #readMemory(): MemoryCapReading | undefined {
-    return this.#memoryCap?.read(this.#slots.length + this.#terminating);
-  }
-
-  /** The ceiling in force given a memory reading: `maxSize`, or less where memory binds. */
-  #ceiling(memory: MemoryCapReading | undefined): number {
-    if (memory === undefined || !this.#enforceMemoryCap) return this.#maxSize;
-    // Never under the floor: `minSize` is a number an operator set, and the pool starts that many
-    // whatever memory says. The floor is also what `start` spawned, so a cap below it would retire
-    // workers the pool is about to need again.
-    return Math.max(this.#minSize, Math.min(this.#maxSize, memory.workers));
-  }
-
-  /** Workers held beyond what memory allows, for `#pump` to give up as they come free. */
-  #overMemory(): number {
-    if (!this.#enforceMemoryCap || this.#stopped) return 0;
-    const memory = this.#readMemory();
-    if (memory === undefined) return 0;
-    return Math.max(0, this.#slots.length - this.#ceiling(memory));
+    return this.#memoryCap?.read(this.#slots.length + this.#terminating, this.#loadingSlots());
   }
 
   /**
-   * How far growth may go, given what memory allows; logs the first time in an episode that it
-   * binds.
+   * Workers in `#slots` still loading their registry (`P-437`'s third review). A slot is pushed when
+   * its thread starts, so a reading counts it as resident from then, before most of its memory is
+   * in use: what memory allows reads high by about that many workers until they have loaded.
+   */
+  #loadingSlots(): number {
+    let loading = 0;
+    for (const slot of this.#slots) if (!slot.ready) loading += 1;
+    return loading;
+  }
+
+  /**
+   * The ceiling in force given a memory reading: `maxSize`, or less where memory binds.
+   *
+   * **While memory holds the pool, it is what the hold lets the pool be** (`P-437`): the size it
+   * held at, as far as memory still has room for it, or the workers held where memory keeps more,
+   * or fewer where memory has fallen past the shed margin and the pool is giving them back. **With
+   * the pool at the size it held at, it is steady**: not the reading's own number, which moves with
+   * every reading's noise, so `poolCeiling` and `poolHeldBack` on Probe Health stay put until
+   * memory moves past a margin. **Below that size**, after idle give-backs or a fall, it follows
+   * what memory allows from reading to reading, because that is what the pool may grow back to; a
+   * number held steady there would say more than memory has room for. Open, it is what memory
+   * allows, or the workers held where those are inside the shed margin and stay.
+   */
+  #ceiling(memory: MemoryCapReading | undefined): number {
+    if (memory === undefined || !this.#enforceMemoryCap) return this.#maxSize;
+    const kept = Math.min(this.#held(), memory.workers + MEMORY_SHED_MARGIN_WORKERS);
+    const allowed =
+      this.#gate.state === 'holding'
+        ? Math.max(
+            kept,
+            this.#holdTarget(this.#gate, this.#gate.heldAt, memory.workers - this.#terminating),
+          )
+        : Math.max(memory.workers, kept);
+    // Never under the floor: `minSize` is a number an operator set, and the pool starts that many
+    // whatever memory says. The floor is also what `start` spawned, so a cap below it would retire
+    // workers the pool is about to need again.
+    return Math.max(this.#minSize, Math.min(this.#maxSize, allowed));
+  }
+
+  /**
+   * Workers held beyond what memory lets the pool keep, for `#pump` to give up as they come free.
+   *
+   * **Past the shed margin, not past the line growth stops at** (`P-437`): memory a worker's worth
+   * under the reserve. Shedding at the line itself was half of the churn, a worker given up for a
+   * few MiB of noise and bought again by the next check.
+   */
+  #overMemory(memory: MemoryCapReading | undefined): number {
+    if (!this.#enforceMemoryCap || this.#stopped || memory === undefined) return 0;
+    const keep = Math.max(
+      this.#minSize,
+      Math.min(this.#maxSize, memory.workers + MEMORY_SHED_MARGIN_WORKERS),
+    );
+    return Math.max(0, this.#slots.length - keep);
+  }
+
+  /**
+   * How far growth may go, given what memory allows; starts a hold, and logs it, when memory
+   * refuses what checks are waiting for (`P-437`). While it holds, nothing grows past the size the
+   * hold started at.
    */
   #memoryBound(wanted: number, held: number, memory: MemoryCapReading | undefined): number {
     if (memory === undefined) return wanted;
     // Workers still exiting hold memory growth cannot spend yet (`#readMemory`).
     const room = Math.max(this.#minSize, memory.workers - this.#terminating);
-    if (wanted <= room) return wanted;
-    if (!this.#memoryBinding) {
-      this.#memoryBinding = true;
-      const fields = {
-        held,
-        wanted,
-        cap: memory.workers,
-        maxSize: this.#maxSize,
-        queued: this.#queue.length,
-        availableMb: Math.round(memory.availableBytes / 2 ** 20),
-        reserveMb: Math.round(memory.reserveBytes / 2 ** 20),
-        perWorkerMb: Math.round(memory.perWorkerBytes / 2 ** 20),
-        source: memory.source,
-      };
-      if (this.#enforceMemoryCap) {
-        this.#logger.warn(
-          fields,
-          'memory is holding the check pool back; checks will wait and be refused rather than the probe run out',
-        );
-      } else {
-        this.#logger.warn(
-          fields,
-          "workerPoolSize allows more workers than memory holds; growing past it on the operator's setting",
-        );
-      }
+    if (this.#gate.state === 'holding') {
+      // An explicit `workerPoolSize` is obeyed all the same (`P-236`).
+      if (!this.#enforceMemoryCap) return wanted;
+      // Back to the size it held at, as far as memory has room, and no further until a release,
+      // which `#considerRelease` watches: what idle shrinking or a fall gave back is bought again
+      // without a release and a hold for it.
+      return Math.max(held, this.#holdTarget(this.#gate, wanted, room));
     }
-    return this.#enforceMemoryCap ? Math.max(held, Math.min(this.#maxSize, room)) : wanted;
+    if (wanted <= room) return wanted;
+    // **Not past what the workers still loading will take** (`P-437`'s third review): the reading
+    // counts each as resident before most of its memory is, so the size the hold starts at leaves
+    // them out of the room it reads. It binds where growth comes more than a worker at once: past
+    // a pool of ten, a straggler waits, and the check that makes it a burst grows for both.
+    const settled = Math.max(this.#minSize, room - (memory.loading ?? 0));
+    const to = this.#enforceMemoryCap ? Math.max(held, Math.min(this.#maxSize, settled)) : wanted;
+    this.#startHold(held, wanted, to, memory);
+    return to;
   }
 
-  #endMemoryEpisode(): void {
-    if (!this.#memoryBinding) return;
-    this.#memoryBinding = false;
+  /**
+   * How far a hold lets the pool grow back towards `wanted`, given room for `room` workers
+   * (`P-437`): to `heldAt`, as far as memory has room, and past the size a shed for memory left it
+   * at only with `MEMORY_SHED_MARGIN_WORKERS` more (the fourth review).
+   *
+   * **The shed and the grow-back had a band of less than a worker between them.** A worker goes
+   * back once a reading is a shed margin under room for the pool, and grew back with room for one:
+   * at the size it shed from, spare under −e against spare of e − a, where e is the estimate and a
+   * what a worker really holds. That is 2e − a, 30 MiB at 40 against 50, and none at all if a
+   * worker costs twice the estimate. With a hold at 12, a fall of 125 MiB and ±20 MiB of noise,
+   * the pool grew 21 times and shrank 23 in five minutes. With the margin it is 3e − a, 70 MiB, and
+   * still e at twice the estimate; for k workers grown at once, each counted at the estimate,
+   * (k + 2)e − ka, e more than it was. With the same fall it shed three and grew none. Idle
+   * give-backs are not sheds for memory, and grow back as they did; nor is the shed margin wider,
+   * which would let the probe further into its reserve (`P-244`'s 80% at a 1 GiB ceiling).
+   */
+  #holdTarget(gate: HoldingGate, wanted: number, room: number): number {
+    const plain = Math.min(wanted, gate.heldAt, room);
+    const shedTo = gate.shedTo;
+    if (shedTo === undefined || plain <= shedTo) return plain;
+    // Never under `shedTo`: past it, `room` is too.
+    return Math.min(plain, room - MEMORY_SHED_MARGIN_WORKERS);
+  }
+
+  /** Starts a hold at `to` and says so once (`P-437`): the warning, with what would change it. */
+  #startHold(held: number, wanted: number, to: number, memory: MemoryCapReading): void {
+    this.#gate = { state: 'holding', since: process.hrtime.bigint(), heldAt: to };
+    const reserveMb = Math.round(memory.reserveBytes / 2 ** 20);
+    const perWorkerMb = Math.round(memory.perWorkerBytes / 2 ** 20);
+    const fields = {
+      held,
+      wanted,
+      cap: memory.workers,
+      maxSize: this.#maxSize,
+      queued: this.#queue.length,
+      availableMb: Math.round(memory.availableBytes / 2 ** 20),
+      reserveMb,
+      perWorkerMb,
+      source: memory.source,
+    };
+    if (this.#enforceMemoryCap) {
+      this.#logger.warn(
+        {
+          ...fields,
+          // The size it holds at, and the two lines that would change it there (`P-437`'s third
+          // review): the hold ends above the first with the pool at `heldAt`, and a worker goes
+          // back below the second at any size. Below `heldAt` the pool grows back to it with no
+          // line, and the hold ends only with room past it (`#considerRelease`).
+          heldAt: to,
+          growsAgainAboveMb: reserveMb + (1 + MEMORY_RELEASE_MARGIN_WORKERS) * perWorkerMb,
+          givesBackBelowMb: reserveMb - MEMORY_SHED_MARGIN_WORKERS * perWorkerMb,
+        },
+        'memory is holding the check pool back; checks will wait and be refused rather than the probe run out',
+      );
+    } else {
+      // Neither line applies to a size the operator set: this pool grows past memory and never
+      // gives a worker back for it.
+      this.#logger.warn(
+        fields,
+        "workerPoolSize allows more workers than memory holds; growing past it on the operator's setting",
+      );
+    }
+  }
+
+  /**
+   * Ends a hold once a reading has room for one worker past the release margin, beyond the size
+   * the hold started at or the pool now where that is more (`P-437`), and says so once. Not when
+   * the queue empties: that was a release a second. Not on a reading taken while a worker loads,
+   * and one taken below the size the hold started at needs a worker more for each it was taken
+   * short of it (`P-437`'s third review).
+   */
+  #considerRelease(memory: MemoryCapReading | undefined): void {
+    if (this.#stopped || this.#gate.state !== 'holding' || memory === undefined) return;
+    // **Not on a reading that counts workers still loading** (`P-437`'s third review), nor while
+    // any is: each is in the reading as resident before most of its memory is in use, so room
+    // reads high by about that many workers, and one such reading ended a hold that the next,
+    // taken once they had loaded, would have started again. A reading is kept for a second, so
+    // the one taken while they loaded is refused by its own count, not only by the pool's now.
+    if ((memory.loading ?? 0) > 0 || this.#loadingSlots() > 0) return;
+    const held = this.#held();
+    const room = memory.workers - this.#terminating;
+    // Enforced, past `heldAt` and, for a reading taken below it, by one worker more for each the
+    // reading was taken short of it (`P-437`'s third review). The reading's room past the workers
+    // it counted is the estimate's, and a worker given back frees what it really held, so each
+    // one the reading was taken below `heldAt` makes its room there high by the estimate's error,
+    // about a quarter of a worker at 50 MiB against 40. Counting it at a whole worker keeps any
+    // number of idle give-backs from ending a hold while a worker costs less than twice the
+    // estimate. Measured against `heldAt` alone, enough of them did: and where the next burst
+    // wanted no more than two past it, it grew there with no hold, gave back what it overshot,
+    // and held at the same size, with the same warning, every quiet stretch. Counted from the
+    // pool now, the burst after a quiet stretch still did it: the growth back to `heldAt` is in
+    // `#held` once it is ordered, and the reading of the second, taken at the floor, is not.
+    //
+    // For a size the operator set, past the pool now: its `heldAt` is the size it grew to past
+    // memory, which memory by definition did not have, and a release measured against it never
+    // came (`P-437`'s second review).
+    const readAt = memory.held ?? this.#slots.length + this.#terminating;
+    const short = Math.max(0, this.#gate.heldAt - readAt);
+    const basis = this.#enforceMemoryCap ? Math.max(held, this.#gate.heldAt + short) : held;
+    if (room - MEMORY_RELEASE_MARGIN_WORKERS <= basis) return;
+    const heldForMs = Math.round(Number(process.hrtime.bigint() - this.#gate.since) / 1e6);
+    this.#gate = { state: 'open' };
     this.#logger.info(
-      { size: this.#slots.length, maxSize: this.#maxSize },
-      'nothing is waiting for a worker; memory is no longer holding the check pool back',
+      {
+        size: this.#slots.length,
+        maxSize: this.#maxSize,
+        cap: memory.workers,
+        availableMb: Math.round(memory.availableBytes / 2 ** 20),
+        reserveMb: Math.round(memory.reserveBytes / 2 ** 20),
+        heldForMs,
+      },
+      // What was measured, for a size the operator set: room again for the workers it holds, which
+      // can be well under what `workerPoolSize` allows (`cap` against `maxSize`).
+      this.#enforceMemoryCap
+        ? 'memory has room for more workers again; the check pool may grow'
+        : 'memory has room for the workers the check pool holds again',
     );
   }
 
@@ -1250,6 +1652,11 @@ export class CheckPool {
     this.#terminating += 1;
     void slot.worker.terminate().finally(() => {
       this.#terminating -= 1;
+      // Its memory is free now, and a hold may have been waiting on it with nothing left to pump:
+      // idle workers given back on a probe with nothing to run (`P-437`).
+      if (!this.#stopped && this.#gate.state === 'holding') {
+        this.#considerRelease(this.#readMemory());
+      }
     });
   }
 
@@ -1485,7 +1892,6 @@ export class CheckPool {
     // in that time `#grow` started a second worker for the same gap.
     this.#growing += 1;
     void this.#spawn().finally(() => {
-      this.#growing -= 1;
       this.#pump();
     });
   }
@@ -1615,7 +2021,6 @@ export class CheckPool {
     const timer = setTimeout(() => {
       this.#retryTimers.delete(timer);
       void this.#spawn().finally(() => {
-        this.#growing -= 1;
         this.#pump();
       });
     }, delayMs);
@@ -1644,6 +2049,8 @@ export class CheckPool {
     slot.job = undefined;
     slot.idleSince = process.hrtime.bigint();
     this.#growing += 1;
+    /** Once `#spawn` has it, the spawn takes it off `#growing` (`P-439`). */
+    let spawning = false;
     try {
       this.#terminating += 1;
       try {
@@ -1652,23 +2059,53 @@ export class CheckPool {
         this.#terminating -= 1;
       }
       if (this.#stopped) return;
+      spawning = true;
       await this.#spawn();
     } finally {
-      this.#growing -= 1;
+      if (!spawning) this.#growing -= 1;
     }
     this.#pump();
   }
 
+  /**
+   * Starts one worker its caller has counted in `#growing`, and takes it off when the start
+   * settles (`P-439`).
+   *
+   * **Here, and in the same step as the slot stops being on its way**, so that every pump counts
+   * the worker once: in `#growing` and in `#slots` marked `onItsWay`, which `#held` takes off, or
+   * in `#slots` alone. The caller's own `finally` ran a few microtasks later, and a pump between
+   * the two saw a ready worker in both.
+   */
   async #spawn(): Promise<void> {
-    if (this.#stopped || this.#disabled) return;
-    await this.#loadingTurn();
+    let slot: Slot | undefined;
+    let refused: { error: unknown } | undefined;
     try {
-      // Checked again: the pool can have stopped, or latched, while this spawn waited its turn.
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- both are set by stop() and #onWorkerGone during the await above; the checker narrows across it
       if (this.#stopped || this.#disabled) return;
-      await this.#start();
+      await this.#loadingTurn();
+      try {
+        // Checked again: the pool can have stopped, or latched, while this spawn waited its turn.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- both are set by stop() and #onWorkerGone during the await above; the checker narrows across it
+        if (this.#stopped || this.#disabled) return;
+        slot = await this.#start();
+      } catch (error) {
+        refused = { error };
+      } finally {
+        this.#endLoadingTurn();
+      }
     } finally {
-      this.#endLoadingTurn();
+      this.#growing -= 1;
+      if (slot !== undefined) slot.onItsWay = false;
+    }
+    // **A thread that could not be made is a start that died** (`P-437`'s third review). Node
+    // throws from `new Worker` when it cannot create the thread (`ERR_WORKER_INIT_FAILED`: a
+    // systemd `TasksMax`, `threads-max`, a stack it could not map), and no slot or listener exists
+    // to see it. Thrown on, it rejected every `void` chain that spawns and the probe's
+    // `unhandledRejection` handler shut the probe down. Counted here, it has the growing delay and,
+    // where nothing works, the latch.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- set in the catch above, across an await
+    if (refused !== undefined && !this.#stopped) {
+      const { message, code } = describeError(refused.error);
+      this.#startFailed(code === undefined ? message : `${code}: ${message}`, { hung: false });
     }
   }
 
@@ -1698,8 +2135,8 @@ export class CheckPool {
   }
 
   /**
-   * Starts one worker and resolves when it has said ready, died trying, or missed its start-up
-   * bound.
+   * Starts one worker and resolves with its slot when it has said ready, died trying, or missed
+   * its start-up bound.
    *
    * **The bound is `STARTUP_TIMEOUT_MS`, the check process's** (`P-260`), because it bounds the
    * same work: booting a runtime and importing `catalogue-registry.js`. `P-258` measured that import
@@ -1709,9 +2146,9 @@ export class CheckPool {
    * a false positive costs here is small — a slow worker started again, not a check failed and not
    * the pool latched — so there is no case for more.
    */
-  async #start(): Promise<void> {
+  async #start(): Promise<Slot> {
     this.#nextWorkerId += 1;
-    const worker = new Worker(join(import.meta.dirname, 'check-worker.js'), {
+    const worker = this.#createWorker(join(import.meta.dirname, 'check-worker.js'), {
       workerData: {
         registryModule: pathToFileURL(this.#registryModule).href,
         sessionReportMs: this.#sessionReportMs,
@@ -1731,6 +2168,7 @@ export class CheckPool {
       job: undefined,
       retired: false,
       gone: false,
+      onItsWay: true,
     };
     this.#slots.push(slot);
 
@@ -1772,6 +2210,7 @@ export class CheckPool {
       worker.once('error', settle);
       worker.once('exit', settle);
     });
+    return slot;
   }
 
   #settle(job: Job, phase: CheckPhase, message: string): void {

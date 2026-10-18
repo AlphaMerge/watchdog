@@ -2,6 +2,9 @@ export {
   autoPoolCeilingMax,
   CheckPool,
   defaultPoolSize,
+  GROW_AFTER_MS,
+  MEMORY_RELEASE_MARGIN_WORKERS,
+  MEMORY_SHED_MARGIN_WORKERS,
   SPAWN_CONCURRENCY,
   WORKER_YOUNG_GENERATION_MB,
 } from './pool.js';

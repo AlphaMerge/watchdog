@@ -130,6 +130,12 @@ Design constraints:
 - **Backpressure.** When the pool saturates, deferred checks are counted and surfaced on
   Probe Health rather than silently queued forever. A check whose next execution is due
   before the previous one finished is skipped, not stacked.
+- **Pool size over time.** The pool grows the moment a burst has nowhere to go, waits 200 ms
+  before growing for a few stragglers behind a large pool, and gives a worker back after a quiet
+  minute. Memory bounds it with hysteresis: growth stops at the reserve and goes past the size it
+  held at only with room for two workers above it, workers go back only once memory is a
+  worker's worth below it, never in the middle of a check, and each hold is logged once
+  (`P-236`, `P-437`).
 - **Down means no data.** In PRTG a Down sensor records no channel values. Preserve that:
   the gap is meaningful, and averaging must not interpolate across it.
 
