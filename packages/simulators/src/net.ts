@@ -1,3 +1,4 @@
+import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import type { Server as NetServer } from 'node:net';
 
 /**
@@ -34,4 +35,70 @@ export async function close(server: NetServer | undefined): Promise<void> {
       resolve();
     });
   });
+}
+
+/**
+ * A UDP socket bound to `address:port` (0 for an ephemeral port). `exclusive` so a worker
+ * thread's socket is its own, not shared through the primary as cluster workers share them, and
+ * `ipv6Only` on IPv6, so `::1` never stands for an IPv4 address too.
+ */
+export function bindUdp(type: 'udp4' | 'udp6', address: string, port: number): Promise<UdpSocket> {
+  const socket = createSocket({ type, ipv6Only: type === 'udp6' });
+  return new Promise((resolve, reject) => {
+    socket.once('error', (error) => {
+      try {
+        socket.close();
+      } catch {
+        // Already closed by the failed bind.
+      }
+      reject(error);
+    });
+    socket.bind({ port, address, exclusive: true }, () => {
+      socket.removeAllListeners('error');
+      resolve(socket);
+    });
+  });
+}
+
+/** Closes a UDP socket and waits for it, tolerating one that is closed already. */
+export function closeUdp(socket: UdpSocket): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      socket.close(() => {
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+/**
+ * Opens a socket whose ephemeral port is not one of `avoid` (`P-432` S5, F4): a simulated DNS
+ * server that is dead keeps its port number with nothing bound to it, and a client the kernel
+ * handed that number would take the queries meant to get ECONNREFUSED, and later stop the
+ * server binding its port again. A socket that drew an avoided port is held until a good one is
+ * open, so the next draw cannot repeat it, then closed.
+ */
+export async function avoidingPorts<T>(
+  open: () => Promise<T>,
+  portOf: (socket: T) => number,
+  close: (socket: T) => Promise<void>,
+  avoid: Iterable<number>,
+  tries = 32,
+): Promise<T> {
+  const avoided = new Set(avoid);
+  const drawn: T[] = [];
+  try {
+    for (let attempt = 0; attempt < tries; attempt += 1) {
+      const socket = await open();
+      if (!avoided.has(portOf(socket))) return socket;
+      drawn.push(socket);
+    }
+    throw new Error(
+      `no ephemeral port outside ${[...avoided].join(', ')} in ${String(tries)} tries`,
+    );
+  } finally {
+    await Promise.all(drawn.map(close));
+  }
 }
