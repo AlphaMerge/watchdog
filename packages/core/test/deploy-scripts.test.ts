@@ -1309,7 +1309,11 @@ describe('who shows a passing check’s warnings (`H-27`)', () => {
   it('is all a package runs: once from the .deb’s postinst and once from the .rpm’s %post', () => {
     for (const [packager, scriptlet] of [
       ['scripts/package-deb.sh', /configure\)\n\s+\/opt\/ms\/libexec\/ms-setup --components /],
-      ['scripts/package-rpm.sh', /%post\n(?:#.*\n)*\/opt\/ms\/libexec\/ms-setup --components /],
+      [
+        'scripts/package-rpm.sh',
+        // After the word an earlier transaction left is removed (`H-40`).
+        /%post\n(?:#.*\n)*rm -f \/run\/ms-rpm-setup\.outcome\n\/opt\/ms\/libexec\/ms-setup --components /,
+      ],
     ] as const) {
       const text = read(packager);
       assert.match(text, scriptlet, packager);
@@ -2284,9 +2288,8 @@ describe(
         ['scripts/package-deb.sh', 'if [ "\\$1" = purge ]; then\n'],
         [
           'scripts/package-rpm.sh',
-          // After the probe's unit (`H-40`) and the reload.
-          'if [ "\\$1" -eq 0 ]; then\n$(cat "$' +
-            '{repo_root}/deploy/stop-probe-unit.sh")\n  systemctl daemon-reload >/dev/null 2>&1 || :\n',
+          // After the reload.
+          'if [ "\\$1" -eq 0 ]; then\n  systemctl daemon-reload >/dev/null 2>&1 || :\n',
         ],
       ] as const) {
         const source = readFileSync(join(repoRoot, packager), 'utf8');
@@ -2317,7 +2320,7 @@ function rpmScriptlets(services: readonly string[]): Record<string, string> {
   const scriptlets: Record<string, string> = {};
   let name = '';
   for (const line of expanded.stdout.split('\n')) {
-    const header = /^%(pre|post|preun|postun)$/u.exec(line)?.[1];
+    const header = /^%(pre|post|preun|postun|posttrans)$/u.exec(line)?.[1];
     if (header !== undefined) {
       name = header;
       scriptlets[name] = '';
@@ -2329,187 +2332,299 @@ function rpmScriptlets(services: readonly string[]): Record<string, string> {
 }
 
 describe(
-  'the probe’s unit when a package that ran it is erased (`H-40`)',
+  'the services across an rpm transaction: an erase, an upgrade, a swap (`H-40`)',
   { skip: linux ? false : 'Linux only' },
   () => {
-    /** The line in `stop-probe-unit.sh` that says where an installed probe's tree would be. */
-    const PROBE_SETUP_LINE = 'ms_probe_setup=/opt/ms/libexec/ms-setup\n';
-    /** And the one that says where the enable links are. */
-    const PROBE_LINKS_LINE = 'ms_probe_links=/etc/systemd/system\n';
-    /** Where the sandbox keeps them instead. */
-    const links = (box: Sandbox): string => join(box.dir, 'etc-systemd-system');
+    /** Where the scriptlets look for an installed ms or ms-probe, and where %post leaves its word. */
+    const SETUP = '/opt/ms/libexec/ms-setup';
+    const OUTCOME = '/run/ms-rpm-setup.outcome';
 
     /**
-     * One rpm scriptlet run as rpm runs it, `/bin/sh` with the count of what will remain as `$1`,
-     * here under `-e` as well, against the sandbox's stub `systemctl`. Where both fragments look
-     * for an installed ms or ms-probe is moved into the sandbox, and `sibling` puts one there:
-     * the other package of a swap, already in. So are the enable links, always: a scriptlet run
-     * here must not reach the machine's own.
+     * What rc.1's and rc.2's %preun and %postun run, as their packager expanded them, comments
+     * aside (`git show v1.0.0-rc.2:scripts/package-rpm.sh`; rc.1's are the same). The outgoing
+     * package of a swap from either is one of these.
      */
-    function scriptlet(
-      box: Sandbox,
+    const RC_PREUN = (services: readonly string[]): string =>
+      [
+        'if [ "$1" -eq 0 ]; then',
+        ...services.flatMap((svc) => [
+          `  systemctl stop "ms-${svc}.service" >/dev/null 2>&1 || :`,
+          `  systemctl disable "ms-${svc}.service" >/dev/null 2>&1 || :`,
+        ]),
+        'fi',
+        '',
+      ].join('\n');
+    const RC_POSTUN = [
+      'if [ "$1" -eq 0 ]; then',
+      '  systemctl daemon-reload >/dev/null 2>&1 || :',
+      '  echo "note: /etc/ms and /var/lib/ms-* were left in place." >&2',
+      'fi',
+      '',
+    ].join('\n');
+    /** A scriptlet's commands, without its comments and blank lines. */
+    const code = (body: string): string =>
+      body
+        .split('\n')
+        .filter((line) => line.trim() !== '' && !line.trimStart().startsWith('#'))
+        .map((line) => `${line}\n`)
+        .join('');
+
+    /** `ms-setup` as far as a scriptlet sees it: the word it writes, and its exit status. */
+    const STUB_SETUP = `#!/bin/sh
+echo "ms-setup $*" >> "$STUB_LOG"
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --outcome ]; then out="$2"; fi
+  shift
+done
+if [ -n "\${STUB_WORD:-}" ]; then printf '%s\\n' "$STUB_WORD" > "$out"; fi
+exit "\${STUB_SETUP_STATUS:-0}"
+`;
+
+    interface Host {
+      readonly box: Sandbox;
+      /** Where /opt/ms/libexec/ms-setup is, for this host. */
+      readonly setup: string;
+      /** And /run/ms-rpm-setup.outcome. */
+      readonly outcome: string;
+    }
+    /** A host with an installation's ms-setup in place, or none. */
+    function host(installed: boolean): Host {
+      const box = sandbox();
+      const at = {
+        box,
+        setup: join(box.dir, 'opt-ms-libexec-ms-setup'),
+        outcome: join(box.dir, 'run-ms-rpm-setup.outcome'),
+      };
+      if (installed) writeFileSync(at.setup, STUB_SETUP, { mode: 0o755 });
+      return at;
+    }
+
+    /**
+     * One scriptlet run as rpm runs it, `/bin/sh` with the count of what will remain as `$1` —
+     * here under `-e` as well — against the sandbox's stub `systemctl`, with every path on this
+     * machine that it names moved into the sandbox.
+     */
+    function run(
+      at: Host,
       body: string,
       remaining: number,
-      { sibling = false, bin }: { sibling?: boolean; bin?: string } = {},
+      env: NodeJS.ProcessEnv = {},
     ): SpawnSyncReturns<string> {
-      const setupPath = join(box.dir, 'opt-ms-libexec-ms-setup');
-      if (sibling) writeFileSync(setupPath, '#!/bin/sh\n', { mode: 0o755 });
-      const moved = body
-        .replace(PROBE_SETUP_LINE, `ms_probe_setup=${setupPath}\n`)
-        .replace(PROBE_LINKS_LINE, `ms_probe_links=${links(box)}\n`)
-        .replace(PING_SETUP_LINE, `ms_ping_setup=${setupPath}\n`);
-      assert.ok(!moved.includes('/etc/systemd/system'), 'the scriptlet would reach this machine');
+      const moved = body.replaceAll(SETUP, at.setup).replaceAll(OUTCOME, at.outcome);
+      for (const path of ['/opt/', '/run/', '/etc/systemd/system']) {
+        assert.ok(!code(moved).includes(path), `the scriptlet would reach this machine’s ${path}`);
+      }
       return spawnSync('sh', ['-e', '-c', moved, 'scriptlet', String(remaining)], {
-        env: {
-          ...box.env,
-          PATH: bin === undefined ? box.env['PATH'] : `${bin}:${box.env['PATH'] ?? ''}`,
-          MS_SETUP_SYSCTL_DIR: box.dir,
-        },
+        env: { ...at.box.env, MS_SETUP_SYSCTL_DIR: at.box.dir, ...env },
         encoding: 'utf8',
         timeout: 10_000,
       });
     }
+    const logLines = (at: Host): string[] => at.box.logged().split('\n').filter(Boolean);
 
-    const PROBE_UNIT = /ms-probe\.service/u;
-
-    it('is the one fragment, carried by both rpm packages’ erase and by nothing else', () => {
-      const fragment = readFileSync(script('stop-probe-unit.sh'), 'utf8');
-      assert.ok(!fragment.includes('%'), 'rpm reads a percent sign in a scriptlet as a macro');
-      assert.equal(count(fragment, PROBE_SETUP_LINE), 1, 'the fragment does not name /opt/ms once');
-      assert.equal(count(fragment, PROBE_LINKS_LINE), 1, 'nor its links once');
-      const embed = '$(cat "$' + '{repo_root}/deploy/stop-probe-unit.sh")';
-      const rpm = readFileSync(join(repoRoot, 'scripts', 'package-rpm.sh'), 'utf8');
-      assert.equal(count(rpm, embed), 1);
-      assert.ok(rpm.includes(`%postun\n`), 'package-rpm.sh has no %postun');
-      for (const services of [['core', 'probe'], ['probe']]) {
-        const postun = rpmScriptlets(services)['postun'] ?? '';
-        assert.equal(count(postun, fragment), 1, `${services.join(',')}: not in %postun once`);
+    /**
+     * `dnf swap OUT IN`, and `rpm -U` from one version to the next, in rpm's order: the incoming
+     * package's %pre, its files, its %post; then the outgoing package's %preun, its files away and
+     * its %postun; then the incoming package's %posttrans, once the transaction is done. The two
+     * ship ms-setup at the same path, so it is there throughout.
+     */
+    function transaction(
+      at: Host,
+      incoming: Record<string, string>,
+      outgoing: { preun: string; postun: string },
+      { word, upgrade = false }: { word: string; upgrade?: boolean },
+    ): void {
+      for (const [step, body, remaining] of [
+        ['the incoming %pre', incoming['pre'] ?? '', upgrade ? 2 : 1],
+        ['the incoming %post', incoming['post'] ?? '', upgrade ? 2 : 1],
+        ['the outgoing %preun', outgoing.preun, upgrade ? 1 : 0],
+        ['the outgoing %postun', outgoing.postun, upgrade ? 1 : 0],
+        ['the incoming %posttrans', incoming['posttrans'] ?? '', 0],
+      ] as const) {
+        const result = run(at, body, remaining, { STUB_WORD: word });
+        assert.equal(result.status, 0, `${step}: ${result.stderr}`);
       }
-      // The .deb's prerm keeps stopping it: apt removes the conflicting package first.
-      const deb = readFileSync(join(repoRoot, 'scripts', 'package-deb.sh'), 'utf8');
-      assert.equal(count(deb, 'stop-probe-unit.sh'), 0);
-    });
+      assert.ok(!existsSync(at.outcome), '%posttrans left the word behind');
+    }
+    const units = (verb: string, services: readonly string[]): string[] =>
+      services.map((svc) => `systemctl ${verb} ms-${svc}.service`);
 
-    it('is left to %postun: neither package’s %preun touches it, an upgrade nothing', () => {
+    it('is rc.1’s and rc.2’s at an erase, and nothing at an upgrade', () => {
       for (const services of [['core', 'probe'], ['probe']]) {
         const { preun = '', postun = '' } = rpmScriptlets(services);
-        for (const sibling of [false, true]) {
-          const box = sandbox();
-          const result = scriptlet(box, preun, 0, { sibling });
+        assert.equal(code(preun), RC_PREUN(services), `${services.join(',')} %preun`);
+        // Stopped while the files are all there, and disabled while the unit file is.
+        const erased = host(true);
+        for (const body of [preun, postun]) {
+          const result = run(erased, body, 0);
           assert.equal(result.status, 0, result.stderr);
-          assert.doesNotMatch(box.logged(), PROBE_UNIT, `${services.join(',')} %preun`);
         }
-        if (services.includes('core')) {
-          const box = sandbox();
-          scriptlet(box, preun, 0);
-          assert.equal(
-            box.logged(),
-            'systemctl stop ms-core.service\nsystemctl disable ms-core.service\n',
-          );
-        }
+        assert.deepEqual(
+          logLines(erased),
+          [
+            ...services.flatMap((svc) => [
+              `systemctl stop ms-${svc}.service`,
+              `systemctl disable ms-${svc}.service`,
+            ]),
+            'systemctl daemon-reload',
+          ],
+          services.join(','),
+        );
         // An upgrade ($1 = 1): rpm erases the old package after the new one is in.
         for (const body of [preun, postun]) {
-          const box = sandbox();
-          const result = scriptlet(box, body, 1);
+          const upgraded = host(true);
+          const result = run(upgraded, body, 1);
           assert.equal(result.status, 0, result.stderr);
-          assert.equal(box.logged(), '', `${services.join(',')}: an upgrade asked systemctl`);
+          assert.equal(
+            upgraded.box.logged(),
+            '',
+            `${services.join(',')}: an upgrade asked systemctl`,
+          );
           assert.equal(result.stderr, '');
         }
       }
     });
 
-    it('stops and disables it at an erase that leaves nothing to run it, before the reload', () => {
+    it('ends a swap with the incoming package’s services enabled and running: dnf swap ms ms-probe, and back', () => {
+      for (const [swap, incoming, outgoing] of [
+        ['ms to ms-probe', ['probe'], ['core', 'probe']],
+        ['ms-probe to ms', ['core', 'probe'], ['probe']],
+      ] as const) {
+        const ours = rpmScriptlets(outgoing);
+        for (const [release, preun, postun] of [
+          ['this release', ours['preun'] ?? '', ours['postun'] ?? ''],
+          ['rc.1 or rc.2', RC_PREUN(outgoing), RC_POSTUN],
+        ] as const) {
+          const why = `${swap}, from ${release}`;
+          const at = host(true);
+          transaction(at, rpmScriptlets(incoming), { preun, postun }, { word: 'started' });
+          assert.deepEqual(
+            logLines(at),
+            [
+              // Both, before the incoming files go in: they run from the same tree.
+              'systemctl stop ms-core.service',
+              'systemctl stop ms-probe.service',
+              `ms-setup --components ${incoming.join(',')} --outcome ${at.outcome}`,
+              ...outgoing.flatMap((svc) => [
+                `systemctl stop ms-${svc}.service`,
+                `systemctl disable ms-${svc}.service`,
+              ]),
+              'systemctl daemon-reload',
+              ...units('enable', incoming),
+              ...units('start', incoming),
+            ],
+            why,
+          );
+        }
+      }
+    });
+
+    it('starts nothing that ms-setup did not: a first installation, MS_SETUP_NO_START', () => {
+      for (const word of ['first-install', 'not-started']) {
+        // A swap under MS_SETUP_NO_START, as `smoke-packages.sh` runs one.
+        const swapped = host(true);
+        const ours = rpmScriptlets(['probe']);
+        transaction(
+          swapped,
+          rpmScriptlets(['core', 'probe']),
+          { preun: ours['preun'] ?? '', postun: ours['postun'] ?? '' },
+          { word },
+        );
+        assert.deepEqual(logLines(swapped).slice(-2), units('enable', ['core', 'probe']), word);
+        assert.doesNotMatch(swapped.box.logged(), /^systemctl (start|restart) /mu, word);
+      }
+      // A first installation: nothing to stop, before or after. ms-setup's files are in at %post.
       for (const services of [['core', 'probe'], ['probe']]) {
-        const box = sandbox();
-        const result = scriptlet(box, rpmScriptlets(services)['postun'] ?? '', 0);
-        assert.equal(result.status, 0, result.stderr);
+        const at = host(false);
+        const scriptlets = rpmScriptlets(services);
+        assert.equal(run(at, scriptlets['pre'] ?? '', 1).status, 0);
+        assert.equal(at.box.logged(), '', `${services.join(',')}: %pre stopped something`);
+        writeFileSync(at.setup, STUB_SETUP, { mode: 0o755 });
+        for (const step of ['post', 'posttrans']) {
+          const result = run(at, scriptlets[step] ?? '', step === 'post' ? 1 : 0, {
+            STUB_WORD: 'first-install',
+          });
+          assert.equal(result.status, 0, `${step}: ${result.stderr}`);
+        }
+        assert.deepEqual(logLines(at), [
+          `ms-setup --components ${services.join(',')} --outcome ${at.outcome}`,
+          ...units('enable', services),
+        ]);
+      }
+    });
+
+    it('stops both services before an upgrade’s files go in, and starts them again after', () => {
+      for (const services of [['core', 'probe'], ['probe']]) {
+        const at = host(true);
+        const ours = rpmScriptlets(services);
+        transaction(
+          at,
+          ours,
+          { preun: ours['preun'] ?? '', postun: ours['postun'] ?? '' },
+          { word: 'started', upgrade: true },
+        );
         assert.deepEqual(
-          box.logged().split('\n').filter(Boolean),
+          logLines(at),
           [
+            'systemctl stop ms-core.service',
             'systemctl stop ms-probe.service',
-            'systemctl disable ms-probe.service',
-            'systemctl daemon-reload',
+            `ms-setup --components ${services.join(',')} --outcome ${at.outcome}`,
+            ...units('enable', services),
+            ...units('start', services),
           ],
           services.join(','),
         );
-        assert.doesNotMatch(result.stderr, /left as it is/);
       }
     });
 
-    it('leaves the probe a swap just started: dnf swap ms ms-probe, and back', () => {
-      // dnf installs the incoming package — its %post starts the probe — and only then erases
-      // the outgoing one, whose /opt/ms/libexec/ms-setup is the incoming one's as well.
-      for (const services of [['core', 'probe'], ['probe']]) {
-        const { preun = '', postun = '' } = rpmScriptlets(services);
-        const box = sandbox();
-        for (const body of [preun, postun]) {
-          const result = scriptlet(box, body, 0, { sibling: true });
-          assert.equal(result.status, 0, result.stderr);
-          if (body === postun) {
-            assert.match(
-              result.stderr,
-              /^note: ms-probe\.service was left as it is: .*ms-setup is still installed$/mu,
-            );
-            assert.match(result.stderr, /\(ms or ms-probe\), and the probe it sets up runs from/);
-          }
-        }
-        assert.doesNotMatch(box.logged(), PROBE_UNIT, services.join(','));
-        assert.match(box.logged(), /^systemctl daemon-reload$/mu);
-      }
-    });
-
-    it('takes away an enable link the erase left pointing nowhere, and only that', () => {
-      // What systemd 252 leaves when the unit file has gone before `disable` (`smoke-packages.sh`).
-      const make = (box: Sandbox): { dangling: string; toACopy: string; notOurs: string } => {
-        const kept = join(box.dir, 'etc-ms-probe.service');
-        writeFileSync(kept, '[Service]\n');
-        const at = {
-          dangling: join(links(box), 'multi-user.target.wants', 'ms-probe.service'),
-          toACopy: join(links(box), 'graphical.target.wants', 'ms-probe.service'),
-          notOurs: join(links(box), 'multi-user.target.wants', 'ms-core.service'),
-        };
-        for (const link of Object.values(at)) mkdirSync(join(link, '..'), { recursive: true });
-        symlinkSync('/usr/lib/systemd/system/ms-probe.service.gone', at.dangling);
-        symlinkSync(kept, at.toACopy);
-        symlinkSync('/usr/lib/systemd/system/ms-core.service.gone', at.notOurs);
-        return at;
-      };
-      const exists = (path: string): boolean => {
-        try {
-          lstatSync(path);
-          return true;
-        } catch {
-          return false;
-        }
-      };
-      const postun = rpmScriptlets(['probe'])['postun'] ?? '';
-
-      const box = sandbox();
-      const at = make(box);
-      const result = scriptlet(box, postun, 0);
+    it('does nothing after a setup that failed, whatever an earlier transaction left', () => {
+      // A transaction that never reached its %posttrans left `started`; this one's ms-setup
+      // failed, and wrote nothing. rpm only warns of a %post that failed, and goes on.
+      const at = host(true);
+      writeFileSync(at.outcome, 'started\n');
+      const { post = '', posttrans = '' } = rpmScriptlets(['core', 'probe']);
+      const failed = run(at, post, 1, { STUB_SETUP_STATUS: '1' });
+      assert.notEqual(failed.status, 0, 'the %post did not fail with its ms-setup');
+      const result = run(at, posttrans, 0);
       assert.equal(result.status, 0, result.stderr);
-      assert.ok(!exists(at.dangling), 'the link to the erased unit was left');
-      assert.ok(exists(at.toACopy), 'a link to a unit file that is there was taken');
-      assert.ok(exists(at.notOurs), 'another unit’s link was taken');
-
-      // A swap leaves them all: the probe still runs from that unit.
-      const swapped = sandbox();
-      const left = make(swapped);
-      assert.equal(scriptlet(swapped, postun, 0, { sibling: true }).status, 0);
-      for (const link of Object.values(left)) assert.ok(exists(link), link);
+      assert.deepEqual(logLines(at), [`ms-setup --components core,probe --outcome ${at.outcome}`]);
+      assert.ok(!existsSync(at.outcome));
     });
 
-    it('never fails the scriptlet when systemctl does', () => {
+    it('never fails a scriptlet when systemctl does, and says which service did not start', () => {
       const bin = mkdtempSync(join(tmpdir(), 'ms-stub-systemctl-'));
       writeFileSync(
         join(bin, 'systemctl'),
         '#!/bin/sh\necho "systemctl $*" >> "$STUB_LOG"\necho "Failed to $1 unit" >&2\nexit 1\n',
         { mode: 0o755 },
       );
-      const box = sandbox();
-      const result = scriptlet(box, rpmScriptlets(['probe'])['postun'] ?? '', 0, { bin });
-      assert.equal(result.status, 0, `the erase would have failed:\n${result.stderr}`);
-      assert.match(box.logged(), /^systemctl disable ms-probe\.service$/mu);
+      const at = host(true);
+      const failing = { PATH: `${bin}:${at.box.env['PATH'] ?? ''}` };
+      const {
+        pre = '',
+        preun = '',
+        postun = '',
+        posttrans = '',
+      } = rpmScriptlets(['core', 'probe']);
+      for (const [step, body, remaining] of [
+        ['%pre', pre, 2],
+        ['%preun', preun, 0],
+        ['%postun', postun, 0],
+      ] as const) {
+        const result = run(at, body, remaining, failing);
+        assert.equal(result.status, 0, `${step} would have failed:\n${result.stderr}`);
+      }
+      writeFileSync(at.outcome, 'started\n');
+      const result = run(at, posttrans, 0, failing);
+      assert.equal(result.status, 0, `%posttrans would have failed:\n${result.stderr}`);
+      for (const svc of ['core', 'probe']) {
+        assert.match(
+          result.stderr,
+          new RegExp(`^warning: ms-${svc} did not start; see systemctl status ms-${svc}$`, 'mu'),
+        );
+      }
+      assert.match(at.box.logged(), /^systemctl start ms-probe\.service$/mu);
     });
   },
 );

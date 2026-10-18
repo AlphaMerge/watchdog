@@ -175,34 +175,41 @@ $(for svc in "${services[@]}"; do printf '/usr/lib/systemd/system/ms-%s.service\
 /usr/lib/systemd/system/ms-recover@.service
 
 %pre
-# **Stopped before the new files go in, on an upgrade** (\$1 = 2) (\`H-21\`). rpm renames each new
-# file into place and then erases what the old package had that this one does not, so the old
-# processes used to run over a mixed and then a new tree — and a %post that failed is only a
-# warning to rpm, so the transaction went on and they stayed there. %post starts them again.
-if [ "\$1" -gt 1 ]; then
-$(for svc in "${services[@]}"; do
-  printf '  systemctl stop "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
-done)
+# **Stopped before the new files go in** (\`H-21\`): on an upgrade (\$1 = 2), and on an install over
+# another installation's tree (\`H-40\` review), which \`dnf swap ms ms-probe\` and back are. rpm
+# renames each new file into place and then erases what the old package had that this one does
+# not, so the old processes used to run over a mixed and then a new tree — and a %post that
+# failed is only a warning to rpm, so the transaction went on and they stayed there. A swap
+# erases the outgoing package only after this one is in, so its processes ran over this
+# package's files the same way. Both units, whichever this package runs: they run from one tree.
+# %post starts again what it should, and %posttrans makes sure of it.
+if [ "\$1" -gt 1 ] || [ -e /opt/ms/libexec/ms-setup ]; then
+  systemctl stop ms-core.service >/dev/null 2>&1 || :
+  systemctl stop ms-probe.service >/dev/null 2>&1 || :
 fi
 
 %post
 # Runs on install (\$1 = 1) and on upgrade (\$1 = 2). \`ms-setup\` is idempotent for exactly this
 # reason: the CA it issued the first time must survive, and so must an edited configuration.
-/opt/ms/libexec/ms-setup --components $(IFS=,; echo "${services[*]}")
+# **What it did is written down for %posttrans** (\`H-40\` review): one word, which ms-setup writes
+# only at the end of a run that succeeded (\`H-35\`). The file is removed first, so that one left by
+# a transaction that never reached its %posttrans cannot speak for this one.
+rm -f /run/ms-rpm-setup.outcome
+/opt/ms/libexec/ms-setup --components $(IFS=,; echo "${services[*]}") --outcome /run/ms-rpm-setup.outcome
 
 %preun
 # **\$1 is how many versions will remain afterwards.** On an upgrade that is 1 and this must do
 # nothing: rpm installs the new package and only then removes the old one, so stopping here
 # would stop the service that %post has already restarted, and leave the host down silently.
-# **The core only** (\`H-40\`): the probe's unit is %postun's, which can tell whether \`ms\` or
-# \`ms-probe\` is being swapped in for this package and runs it now (deploy/stop-probe-unit.sh).
+# On an erase, stopped while the files are all still there and disabled while the unit file is:
+# systemd 252 does not take the enable link of a unit it has no file for. In a swap this stops
+# the probe the incoming package has just started, as rc.1 and rc.2 do too, and the incoming
+# package's %posttrans starts it again (\`H-40\` review).
 if [ "\$1" -eq 0 ]; then
 $(for svc in "${services[@]}"; do
-  [ "${svc}" = probe ] && continue
   printf '  systemctl stop "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
   printf '  systemctl disable "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
 done)
-  :
 fi
 
 %postun
@@ -213,13 +220,34 @@ fi
 # operator's drop-ins are theirs, and stay. The probe's ping drop-in is a setting for this
 # package, not data, and goes with an erase while it is still as ms-setup wrote it (\`H-34\`): rpm
 # has no purge, so the erase is the end. The text is deploy/remove-ping-conf.sh, as in the .deb.
-# The probe's unit is stopped and disabled first, before the reload, unless the package replacing
-# this one runs it now (\`H-40\`).
 if [ "\$1" -eq 0 ]; then
-$(cat "${repo_root}/deploy/stop-probe-unit.sh")
   systemctl daemon-reload >/dev/null 2>&1 || :
 $(cat "${repo_root}/deploy/remove-ping-conf.sh")
   echo "note: /etc/ms and /var/lib/ms-* were left in place." >&2
+fi
+
+%posttrans
+# **The services end the transaction as ms-setup left them** (\`H-40\` review). In \`dnf swap ms
+# ms-probe\`, or back, the outgoing package is erased after this one's %post, and its %preun —
+# this release's, or rc.1's or rc.2's, which are the same — stops and disables ms-probe.service,
+# which both packages ship: the swap ended with the incoming package's probe stopped and disabled.
+# %posttrans runs once the whole transaction is done, whatever the outgoing package was. So each
+# service is enabled again where ms-setup ran to the end, as it enables them whatever its word,
+# and started again only where the word is \`started\`: not after a first installation, which
+# starts nothing, nor under MS_SETUP_NO_START. A run that failed wrote no word, and nothing is
+# done for it. On a plain install or upgrade all of this is already so, and asking changes nothing.
+ms_outcome="\$(cat /run/ms-rpm-setup.outcome 2>/dev/null || :)"
+rm -f /run/ms-rpm-setup.outcome
+if [ -n "\${ms_outcome}" ]; then
+$(for svc in "${services[@]}"; do
+  printf '  systemctl enable "ms-%s.service" >/dev/null 2>&1 || :\n' "${svc}"
+done)
+fi
+if [ "\${ms_outcome}" = started ]; then
+$(for svc in "${services[@]}"; do
+  printf '  systemctl start "ms-%s.service" >/dev/null 2>&1 \\\n' "${svc}"
+  printf '    || echo "warning: ms-%s did not start; see systemctl status ms-%s" >&2\n' "${svc}" "${svc}"
+done)
 fi
 SPEC
 

@@ -164,7 +164,14 @@ either contains a core or it does not:
   packaged form of this, and it conflicts with `ms` so a host cannot end up with both. A host
   moves from `ms` to `ms-probe` in one step — `sudo apt install ./ms-probe_<version>_<arch>.deb`,
   which removes `ms` for it, or `sudo dnf swap ms ./ms-probe-<version>.<arch>.rpm` — and the
-  probe it ends with runs from the new package, enabled (`H-40`).
+  probe it ends with runs from the new package, enabled (`H-40`). Back the other way —
+  `sudo apt install ./ms_<version>_<arch>.deb`, or
+  `sudo dnf swap ms-probe ./ms-<version>.<arch>.rpm` — the probe is stopped before the core's
+  package goes in, and set up again by it. Both ways are tested between packages of this
+  release. From an `.rpm` of 1.0.0-rc.2 or older the swap should end the same — the old
+  package's erase runs the same commands, and the new one starts the probe after it — but has
+  not been run against one (`H-45`): check `systemctl is-active ms-probe` afterwards, and
+  `sudo systemctl enable --now ms-probe` if it is not running.
 - `--core-only` where the probe is somewhere else entirely.
 - `--no-start` to stage a machine that is not meant to come up yet. `MS_SETUP_NO_START=1` does
   the same for a package install, which is what baking a golden image wants.

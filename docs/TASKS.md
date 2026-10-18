@@ -37276,6 +37276,51 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         /pkg/ms-probe-1.0.0~rc.2-1.aarch64.rpm: ms gone, ms-probe active and enabled*, with the
         note from `ms`'s `%postun`, and *rpm -e ms-probe: ms-probe inactive, and no enable link
         left*; each box's earlier assertions as before.
+      - **Review. The design above is replaced.** It depended on the outgoing package's
+        scriptlets: rc.1's and rc.2's `ms` `%preun` stops and disables `ms-probe.service` at any
+        erase, so a swap from either still ended with the probe stopped and disabled whatever
+        this release did; a plain `rpm -e` left the probe running while its files went; and
+        `dnf swap ms-probe ms` left the outgoing probe running over `ms`'s tree. Now, in both
+        `.rpm`s: `%preun` stops and disables each of the package's services at an erase, as rc.1
+        and rc.2 do, while the unit file is there, so systemd 252 takes the enable link itself —
+        `deploy/stop-probe-unit.sh` and the hand removal of a dangling link are gone. `%pre` stops
+        both services on an upgrade and on an install over another installation's tree
+        (`/opt/ms/libexec/ms-setup` there), which a swap either way is. `%post` gives `ms-setup`
+        `--outcome /run/ms-rpm-setup.outcome`, after removing any word a transaction that never
+        reached its end left. A new `%posttrans`, which rpm runs once the whole transaction is
+        done, whatever the outgoing package was, enables the package's services where `ms-setup`
+        wrote a word, starts them where the word is `started` — not after a first installation,
+        nor under `MS_SETUP_NO_START` — and removes the file. On a plain install or upgrade that is
+        already so. The `.deb` is unchanged. `installation.md` §2 gives both directions, and says
+        a swap from an `.rpm` of rc.2 or older has not been run (`H-45`).
+        **Not done: a swap from a real rc.2 `.rpm`.** Building one means building the rc.2 tree
+        in the shared toolchain; instead the tests run rc.2's `%preun` and `%postun` commands, as
+        its packager expanded them, in the outgoing role, and assert this release's `%preun` runs
+        the same commands. `H-45` is the run.
+        Tests: `deploy-scripts.test.ts`, the six `H-40` tests replaced by six on the transaction,
+        each scriptlet run by `sh -e` with rpm's `$1` against stub `systemctl` and a stub `ms-setup`
+        that writes the word: `%preun` is rc.1's and rc.2's and an erase stops, disables and
+        reloads, an upgrade asks nothing; a swap either way, from this release or from rc.2's
+        scriptlets, logs exactly both stops, `ms-setup`, the outgoing stop and disable, the reload,
+        then the incoming enable and start, with the file gone; `first-install` and `not-started`
+        enable only, and a first install's `%pre` stops nothing; an upgrade stops both before and
+        starts after; a failed `ms-setup` with a stale `started` left starts nothing; a failing
+        `systemctl` fails no scriptlet and the warning names each service. `H-27`'s and `H-34`'s
+        tests follow the new `%post` and `%postun`. **Mutations 10/10**: a swap stopping nothing
+        in `%pre`; the core left running there; an earlier word kept; no word asked for; no
+        disable in `%preun`; an upgrade stopping too; `%posttrans` never enabling, starting
+        whatever the word, leaving the word, or saying nothing of a failed start.
+        **Smoke 2026-10-18**, `smoke-packages.sh` with `MS_SMOKE_REBUILD=1` (arm64, packages built
+        at `f6e4185a`): *package smoke test passed*. Debian 12: *apt-get install -y -q
+        /pkg/ms-probe_1.0.0~rc.2_arm64.deb: ms gone, ms-probe active and enabled*, *dpkg -P
+        ms-probe: ms-probe inactive, and no enable link left*, and back, *apt-get install -y -q
+        /pkg/ms_1.0.0~rc.2_arm64.deb: ms-probe gone, the probe inactive (MS_SETUP_NO_START), ms-core
+        and ms-probe enabled*. Rocky 9: *dnf swap -y ms /pkg/ms-probe-1.0.0~rc.2-1.aarch64.rpm: ms
+        gone, ms-probe active and enabled* — stopped by the outgoing `%preun` and started again by
+        `%posttrans` — *rpm -e ms-probe: ms-probe inactive, and no enable link left*, systemd taking
+        the link itself, and back, *dnf swap -y ms-probe /pkg/ms-1.0.0~rc.2-1.aarch64.rpm: ms-probe
+        gone, the probe inactive (MS_SETUP_NO_START), ms-core and ms-probe enabled*. `H-28`'s
+        upgrade and `H-41`'s root probe passed on both boxes, as did every earlier assertion.
 
 - [x] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
       · Found 2026-10-07 in `P-276`. Since `P-276` a root probe with scripts and no

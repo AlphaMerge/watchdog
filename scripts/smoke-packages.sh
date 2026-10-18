@@ -111,7 +111,7 @@ fi
 one_format() {
   local format="$1" image container pkg install_cmd upgrade_cmd remove_cmd query_cmd
   local unping_cmd requires_cmd ping_pkg_cmd reinstall_cmd
-  local probe_pkg probe_upgrade_cmd probe_remove_cmd probe_query_cmd probe_swap_cmd
+  local probe_pkg probe_upgrade_cmd probe_remove_cmd probe_query_cmd probe_swap_cmd core_swap_cmd
   case "${format}" in
     deb)
       image=ms-smoke:bookworm
@@ -126,6 +126,8 @@ one_format() {
       probe_query_cmd='dpkg -s ms-probe'
       # apt removes `ms` for it, the two conflicting, before it unpacks `ms-probe` (`H-40`).
       probe_swap_cmd='DEBIAN_FRONTEND=noninteractive apt-get install -y -q /pkg/PKG'
+      # And back: `ms-probe` removed for `ms` the same way (`H-40` review).
+      core_swap_cmd='DEBIAN_FRONTEND=noninteractive apt-get install -y -q /pkg/PKG'
       # **Through apt, as `installation.md` §2 says to** (`H-31`): the package depends on
       # `iputils-ping`, which `dpkg -i` would refuse to resolve, and the box has had it removed
       # below so that the dependency, not the image, is what brings `ping`.
@@ -153,6 +155,7 @@ one_format() {
       probe_query_cmd='rpm -q ms-probe'
       # One transaction, which installs `ms-probe` and erases `ms` after it (`H-40`).
       probe_swap_cmd='dnf swap -y ms /pkg/PKG'
+      core_swap_cmd='dnf swap -y ms-probe /pkg/PKG'
       # Through dnf, which resolves `Requires: iputils`; the image has no `ping` of its own.
       install_cmd='dnf install -y /pkg/PKG'
       unping_cmd='! rpm -q iputils >/dev/null'
@@ -590,8 +593,10 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   #
   # **The swap an operator makes when the core moves to another host**: `ms` out and `ms-probe`
   # in, in one transaction. dnf installs `ms-probe` first and erases `ms` after it, so `ms`'s erase
-  # used to stop and disable the probe that `ms-probe` had just set up and started. apt removes
-  # `ms` first, because the two conflict, and `ms-probe`'s postinst starts the probe after that.
+  # stops and disables the probe that `ms-probe` has just set up and started — every release's
+  # does — and `ms-probe`'s %posttrans, once the erase is done, enables and starts it again
+  # (`H-40` review). apt removes `ms` first, because the two conflict, and `ms-probe`'s postinst
+  # starts the probe after that.
   echo "==> swapping ms for ms-probe with the probe running (H-40)"
   ${in} bash -c "${install_cmd/PKG/${pkg_name}}" >"${probe_log}" 2>&1 \
     || { cat "${probe_log}" >&2; fail "could not install ${pkg_name} for the swap"; }
@@ -620,7 +625,6 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   fi
   ${in} test ! -e /usr/lib/systemd/system/ms-core.service || fail "the core's unit survived the swap"
   echo "    ${probe_swap_cmd/PKG/${probe_name}}: ms gone, ms-probe active and enabled"
-  grep -F 'ms-probe.service was left as it is' "${probe_log}" | sed 's/^/      /' || true
 
   # --- a probe the unit runs as root, said before the restart (H-41) ---------------------------
   #
@@ -672,6 +676,44 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   links="$(${in} find /etc/systemd/system -name ms-probe.service -path '*.wants/*' 2>/dev/null || true)"
   [ -z "${links}" ] || fail "the erase left ms-probe enabled: ${links}"
   echo "    ${probe_remove_cmd}: ms-probe ${probe_state}, and no enable link left"
+
+  # --- ms-probe swapped back for ms, with the probe running (H-40 review) ----------------------
+  #
+  # **The other way: a probe's host made the core's.** dnf installs `ms` first, over the tree the
+  # running probe was started from, and erases `ms-probe` after it, so `ms`'s %pre has to stop the
+  # probe before its files go in; apt removes `ms-probe` first. Under MS_SETUP_NO_START, as every
+  # step after the first install, so nothing starts the probe again and what is asserted is the
+  # stop and the enable: the probe stopped, and both units enabled once the transaction is done —
+  # `ms-probe`'s erase disables ms-probe.service, which both packages ship, and `ms`'s %posttrans
+  # enables it again.
+  echo "==> swapping ms-probe back for ms with the probe running (H-40 review)"
+  ${fresh} bash -c "${install_cmd/PKG/${probe_name}}" >"${probe_log}" 2>&1 \
+    || { sed 's/^/      /' "${probe_log}" >&2; fail "could not install ${probe_name} again for the swap back"; }
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  [ "${probe_state}" = active ] || fail "ms-probe is ${probe_state} before the swap back, not active"
+  local back_status=0 core_enabled
+  ${in} bash -c "${core_swap_cmd/PKG/${pkg_name}}" >"${probe_log}" 2>&1 || back_status=$?
+  if [ "${back_status}" -ne 0 ]; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "${core_swap_cmd/PKG/${pkg_name}} exited ${back_status}"
+  fi
+  ${in} bash -c "${query_cmd}" >/dev/null 2>&1 || fail "ms is not installed after the swap back"
+  if [ "${format}" = deb ]; then
+    # shellcheck disable=SC2016 # dpkg-query's own field syntax, for dpkg-query to expand
+    status="$(${in} dpkg-query -W -f='${db:Status-Abbrev}' ms-probe 2>/dev/null | tr -d ' ' || true)"
+    [ "${status}" = rc ] || fail "dpkg says '${status}' for ms-probe after the swap back, not rc"
+  else
+    ! ${in} rpm -q ms-probe >/dev/null 2>&1 || fail "ms-probe is still installed after the swap back"
+  fi
+  probe_state="$(${in} systemctl is-active ms-probe.service 2>/dev/null || true)"
+  enabled="$(${in} systemctl is-enabled ms-probe.service 2>/dev/null || true)"
+  core_enabled="$(${in} systemctl is-enabled ms-core.service 2>/dev/null || true)"
+  if [ "${probe_state}" = active ] || [ "${enabled}" != enabled ] \
+    || [ "${core_enabled}" != enabled ]; then
+    sed 's/^/      /' "${probe_log}" >&2
+    fail "the swap back left ms-probe ${probe_state:-unknown} and ${enabled:-unknown}, and ms-core ${core_enabled:-unknown}: not stopped, with both enabled"
+  fi
+  echo "    ${core_swap_cmd/PKG/${pkg_name}}: ms-probe gone, the probe ${probe_state} (MS_SETUP_NO_START), ms-core and ms-probe enabled"
 
   rm -f "${probe_log}"
 
