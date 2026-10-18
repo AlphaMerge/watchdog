@@ -1,6 +1,12 @@
 import { isIP, type LookupFunction } from 'node:net';
 import { isCredentialsWithheld, type PinnedAddress } from '../pinned-target.js';
-import { TargetRefusedError } from '../checked-target.js';
+import {
+  anAddressOf,
+  furthestAttempt,
+  socketUnresolved,
+  TargetRefusedError,
+  type ConnectAttempt,
+} from '../checked-target.js';
 
 /**
  * What a database sensor needs from an engine, and nothing else (`T-18`).
@@ -46,6 +52,16 @@ export interface DbConnectOptions {
   readonly lookup?: LookupFunction;
   /** The address a credential set pinned, when one did: the far end must be it. */
   readonly pinned?: PinnedAddress;
+  /**
+   * The device's IP version, for a device set to one (`A-85`). With `lookup` it says only how a
+   * name that did not resolve is worded: the checked addresses are of this family already. With
+   * none (the `none` policy), a device given by name is connected through a socket whose lookup
+   * asks the system for this family alone (`familyLookup`), where the driver would have connected
+   * by the name itself; and a server SQL Server routes the login to, where nothing checks it,
+   * is reached over it too, whether the device was given by name or as an address. Absent, the
+   * driver connects as it always has.
+   */
+  readonly family?: 4 | 6;
   /**
    * What the connect has left of `connectTimeoutMs` once the lookup has been taken out: the two
    * share the one timeout. Absent, all of it. `connectTimeoutMs` stays what a message quotes.
@@ -175,15 +191,29 @@ const TDS_REDIRECTED = /^Failed to connect to (\S+) \(redirected from /;
 
 /**
  * A name a login was routed to that did not resolve, as the redirect's own lookup found
- * (`runDbCheck`): the guard's words for it are about "the device's host name", which this
- * is not.
+ * (`runDbCheck`), or the socket's where nothing checked it (`describeDbError`): the guard's
+ * words for it are about "the device's host name", which this is not. Still the connect, and
+ * the device's: its own name resolved, and the device is where the login was routed from.
+ *
+ * **Of the device's family, where it names one** (`A-85`): the login goes on over the path the
+ * device is reached by, so a routed name with only the other family's records says that, and is
+ * not read as a name that does not exist. **And `EAI_AGAIN` is the resolver not answering**,
+ * said as the guard says it (`P-426`), not as a name with no record.
  */
 export class DbRoutedUnresolvedError extends DbError {
-  constructor(where: string, routedTo: string, code: string) {
+  constructor(where: string, routedTo: string, code: string, family?: 4 | 6, host?: string) {
     super(
-      `${where} routed the login to ${routedTo}, a host name that did not resolve` +
-        (code === '' ? '' : ` (${code})`),
+      code === 'EAI_AGAIN'
+        ? `${where} routed the login to ${routedTo}, a host name that did not resolve — the ` +
+            'probe’s resolver is not answering (EAI_AGAIN)'
+        : `${where} routed the login to ${routedTo}, a host name that did not resolve` +
+            (family === undefined
+              ? ''
+              : ` to ${anAddressOf(family)} — the device is set to IPv${String(family)}, and the ` +
+                'login goes on over it') +
+            (code === '' ? '' : ` (${code})`),
       'connect',
+      host,
     );
     this.name = 'DbRoutedUnresolvedError';
   }
@@ -254,26 +284,7 @@ const WRAPPERS = new Set(['', 'ESOCKET']);
 /** A certificate or TLS failure's code: Node's and OpenSSL's, or `mysql2`'s for all of them. */
 const TLS_CODE = /^(?:HANDSHAKE_SSL_ERROR$|CERT_|UNABLE_TO_|ERR_TLS_|ERR_SSL_)/;
 
-/**
- * How far a connect got, furthest first: a refusal is a host that answered, a timeout is one
- * that may be there, and the rest never left this machine (`A-74`). What a name with several
- * addresses is diagnosed by, whichever order they were tried in. A code not here comes last.
- */
-const REACHED = [
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'ESOCKETTIMEDOUT',
-  'EHOSTUNREACH',
-  'ENETUNREACH',
-  'EADDRNOTAVAIL',
-  'EAFNOSUPPORT',
-];
-
-interface Attempt {
-  readonly address: string;
-  readonly code: string;
-}
+type Attempt = ConnectAttempt;
 
 /**
  * One failure per address `tedious` tried, from the `AggregateError` it gathers them in
@@ -294,13 +305,12 @@ function attemptsOf(chain: readonly unknown[]): Attempt[] {
   return [];
 }
 
-/** The code of the attempt that got furthest. */
+/**
+ * The code of the attempt that got furthest, by how far a connect got (`REACHED` in
+ * `checked-target.ts`, which every transport reads a failed walk by).
+ */
 function furthest(attempts: readonly Attempt[]): string {
-  const rank = (code: string): number => {
-    const at = REACHED.indexOf(code);
-    return at < 0 ? REACHED.length : at;
-  };
-  return [...attempts].sort((a, b) => rank(a.code) - rank(b.code))[0]?.code ?? '';
+  return furthestAttempt(attempts)?.code ?? '';
 }
 
 /**
@@ -388,17 +398,21 @@ function describeOne(
       host,
     );
   }
-  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    // The device's own name, or a name it routed to, which is still the connect: the device's
-    // name resolved, as `DbRoutedUnresolvedError` says of the guard's lookup.
-    return new DbError(
-      routedTo === undefined
-        ? `the device’s host name did not resolve, connecting to ${where}`
-        : `${where} routed the login to ${routedTo}, a host name that did not resolve`,
-      routedTo === undefined ? 'resolve' : 'connect',
+  // A name it routed to, which is still the connect: the device's name resolved, as
+  // `DbRoutedUnresolvedError` says of the guard's lookup, and over the device's family (`A-85`).
+  if (routedTo !== undefined && (code === 'ENOTFOUND' || code === 'EAI_AGAIN')) {
+    return new DbRoutedUnresolvedError(
+      where,
+      routedTo,
+      code === 'EAI_AGAIN' ? code : '',
+      options.family,
       host,
     );
   }
+  // The device's own name, as the socket's lookup found it, in the guard's words (`A-85`): of
+  // the device's family where it names one, and `EAI_AGAIN` as the resolver not answering.
+  const unresolved = socketUnresolved(code, options.family, `connecting to ${where}`);
+  if (unresolved !== undefined) return new DbError(unresolved, 'resolve', host);
   const socketTimedOut = code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT';
   // **A socket that times out mid-query was connected** (`A-70`): the same code, in the other
   // phase, is a server that stopped answering, and "accepted no connection" would be false.

@@ -12,6 +12,7 @@ import { restrictionOf } from '../credentials/index.js';
 import {
   checkedTarget,
   DEFAULT_TARGET_POLICY,
+  familyOf,
   guardOf,
   lookupFor,
   refuseLocalSocket,
@@ -315,8 +316,13 @@ export async function runDbCheck(
   const spentMs = (): number => Number(process.hrtime.bigint() - startedAt) / 1e6;
   // **Resolved once and checked against the probe's target policy** (`A-62`), every answer of
   // it. The driver is then handed a socket whose lookup answers with the checked addresses, and
-  // the name is not resolved again. Whichever family the name has, as the drivers always
-  // connected. A device given as an address is checked as it stands and resolves nothing.
+  // the name is not resolved again. A device given as an address is checked as it stands and
+  // resolves nothing.
+  // **Over the device's IP version** (`A-85`), where the drivers always took whichever family
+  // the name had: `auto` still does, and `v4` or `v6` asks the guard for that family alone and
+  // connects over it, under `none` too, where the driver is handed a socket whose lookup asks
+  // the system for that family alone, and walks every address of it.
+  const family = familyOf(context.target.ipVersion);
   const pinned = context.target.pinned;
   // **A PostgreSQL host that begins with `/` is a Unix socket directory on the probe's own
   // machine** (`A-70`). `pg` connects to the socket inside it (`lib/client.js`: a host whose
@@ -345,6 +351,7 @@ export async function runDbCheck(
     ? null
     : await checkedTarget({
         ...guardOf(context.target),
+        family,
         timeoutMs: connectTimeoutMs,
         signal: context.signal,
         verb: 'connect to',
@@ -377,18 +384,28 @@ export async function runDbCheck(
     if (targets.length > 0 && targetVerdict(other, targets) !== 'inside') {
       throw new DbRedirectRefusedError(host, other);
     }
-    // And the probe's target policy, on a lookup of the routed name's own.
+    // And the probe's target policy, on a lookup of the routed name's own, over the device's
+    // family (`A-85`): the login goes on over the path the device is reached by.
     const onward = await checkedTarget({
       ...guardOf(context.target),
       host: other,
+      family,
       timeoutMs: Math.max(1, connectTimeoutMs - spentMs()),
       signal: context.signal,
       verb: 'follow a redirect to',
       doing: `following a redirect from ${host} to ${other}`,
       unresolved: (error) =>
-        new DbRoutedUnresolvedError(`${host}:${String(port)}`, other, codeOf(error ?? {})),
+        new DbRoutedUnresolvedError(
+          `${host}:${String(port)}`,
+          other,
+          codeOf(error ?? {}),
+          family === 0 ? undefined : family,
+          host,
+        ),
     });
-    return lookupFor(other, onward).lookup;
+    // Under `none`, which a set's bounds still ask this of, nothing was checked: the routed name
+    // is resolved by the socket, over the device's family alone.
+    return lookupFor(other, onward, family).lookup;
   };
 
   const options: DbConnectOptions = {
@@ -416,6 +433,11 @@ export async function runDbCheck(
     // bounds.
     ...(!local && (guarded || targets.length > 0 || pinned !== undefined) ? { redirect } : {}),
     ...(pinned === undefined ? {} : { pinned }),
+    // **The device's family** (`A-85`): where nothing above answers the socket's lookup
+    // (`none`), the driver is handed a socket that resolves the name for it alone, and SQL
+    // Server's routed server is reached over it, a device given as an address included, whose
+    // own connect is to that address as it stands. Not for a socket path, which has no family.
+    ...(family === 0 || local ? {} : { family }),
   };
 
   const connection = await driver.connect(options, context.signal);

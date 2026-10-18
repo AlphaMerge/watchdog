@@ -1,4 +1,5 @@
-import { connect as netConnect, Socket, type LookupFunction } from 'node:net';
+import { connect as netConnect, isIP, Socket, type LookupFunction } from 'node:net';
+import { familyLookup } from '../checked-target.js';
 import { pinnedPeerRefusal, type PinnedAddress } from '../pinned-target.js';
 import { DbEncryptionRefusedError, type DbConnectOptions } from './driver.js';
 
@@ -35,16 +36,30 @@ export function connectBudgetMs(options: DbConnectOptions): number {
   return options.connectWithinMs ?? options.connectTimeoutMs;
 }
 
+/** Where a socket of ours connects: the name, through the lookup `deviceLookup` gave it. */
 interface Destination {
-  host: string;
-  port: number;
-  lookup: LookupFunction;
+  readonly host: string;
+  readonly port: number;
+  readonly lookup: LookupFunction;
 }
 
-const destination = (
-  to: { readonly host: string; readonly port: number },
-  lookup: LookupFunction,
-): Destination => ({ host: to.host, port: to.port, lookup });
+/**
+ * What a socket of ours resolves the device's name through: the lookup that answers with the
+ * checked addresses, or, where nothing was checked and the device names a family, the system's
+ * for that family alone (`familyLookup`, `A-85`). Undefined where the driver connects as it
+ * always has: nothing was checked and the device names no family, or the device is an address,
+ * which is connected to as it stands.
+ *
+ * **A lookup, and never the family**: a socket told a family asks its lookup for one address and
+ * connects to that alone, where one given a lookup asks for all and walks them, passing a first
+ * address that is dead, as the drivers did by themselves.
+ */
+function deviceLookup(options: DbConnectOptions): LookupFunction | undefined {
+  if (options.lookup !== undefined) return options.lookup;
+  return options.family === undefined || isIP(options.host) !== 0
+    ? undefined
+    : familyLookup(options.family);
+}
 
 /**
  * Ends a connection whose far end is not the address a credential set was checked against
@@ -76,12 +91,15 @@ class CheckedSocket extends Socket {
   }
 }
 
-/** For `pg`'s `stream`: not yet connecting. Undefined when the driver connects as it always has. */
+/**
+ * For `pg`'s `stream`: not yet connecting. Undefined when the driver connects as it always has:
+ * nothing was checked, and the device names no family (`A-85`).
+ */
 export function unconnectedSocket(options: DbConnectOptions): (() => Socket) | undefined {
-  const lookup = options.lookup;
+  const lookup = deviceLookup(options);
   if (lookup === undefined) return undefined;
   return () => {
-    const socket = new CheckedSocket(destination(options, lookup));
+    const socket = new CheckedSocket({ host: options.host, port: options.port, lookup });
     holdToPin(socket, options.host, options.pinned);
     return socket;
   };
@@ -89,10 +107,10 @@ export function unconnectedSocket(options: DbConnectOptions): (() => Socket) | u
 
 /** For `mysql2`'s `stream`: already connecting, as the one it makes itself is. */
 export function connectingSocket(options: DbConnectOptions): (() => Socket) | undefined {
-  const lookup = options.lookup;
+  const lookup = deviceLookup(options);
   if (lookup === undefined) return undefined;
   return () => {
-    const socket = netConnect(destination(options, lookup));
+    const socket = netConnect({ host: options.host, port: options.port, lookup });
     holdToPin(socket, options.host, options.pinned);
     // What `mysql2` sets on a socket of its own, and not on one it is handed.
     socket.setNoDelay(true);
@@ -274,25 +292,41 @@ export function tdsConnector(
   // `tedious` would resolve the server it is routed to and connect there unchecked.
   // And whenever encryption is required: the socket is the one place a server that says it
   // has none can be refused before the login is written to it (`holdToEncryption`).
-  const lookup = options.lookup;
+  // And whenever the device names a family (`A-85`): left to itself, `tedious` connects to a
+  // name, the device's or one it routes the login to, over whichever family the name answers
+  // first. A device given as an address is handed over for the server it routes to.
+  const lookup = deviceLookup(options);
   const required = options.encrypt === 'require';
-  if (lookup === undefined && options.redirect === undefined && !required) return undefined;
+  if (
+    lookup === undefined &&
+    options.redirect === undefined &&
+    !required &&
+    options.family === undefined
+  ) {
+    return undefined;
+  }
   return async (...asked) => {
     const to = asked[0] as { host?: unknown; port?: unknown } | undefined;
     const signal = asked[2] instanceof AbortSignal ? asked[2] : undefined;
     const host = typeof to?.host === 'string' && to.host !== '' ? to.host : options.host;
     const port = typeof to?.port === 'number' ? to.port : options.port;
     const elsewhere = nameOf(host) !== nameOf(options.host);
-    // Handed over for the encryption check alone, with nothing checked (`none`, no bounds),
-    // a redirect is followed as the driver itself would have: unresolved, by the socket.
-    const unchecked = lookup === undefined && options.redirect === undefined;
-    const through = elsewhere && !unchecked ? await redirected(options, host) : lookup;
+    // Handed over with nothing checked (`none`, no bounds), a redirect is followed as the driver
+    // itself would have, resolved by the socket: over the device's family where it names one
+    // (`A-85`), since the login goes on over the path the device is reached by.
+    const unchecked = options.lookup === undefined && options.redirect === undefined;
+    const through = !elsewhere
+      ? lookup
+      : unchecked
+        ? options.family === undefined
+          ? undefined
+          : familyLookup(options.family)
+        : await redirected(options, host);
 
     return new Promise<Socket>((resolve, reject) => {
-      const socket =
-        through === undefined
-          ? netConnect({ host, port })
-          : netConnect(destination({ host, port }, through));
+      const socket = netConnect(
+        through === undefined ? { host, port } : { host, port, lookup: through },
+      );
       const settle = (outcome: () => void): void => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);

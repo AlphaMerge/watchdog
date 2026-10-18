@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import { checkedTarget, familyOf, guardOf, lookupFor } from '../support/checked-target.js';
 import type { TlsPhase } from '../support/tls/handshake.js';
 
 /**
@@ -88,18 +88,29 @@ export const tlsSecurity: SensorType = {
     const servername =
       typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : host;
     const timeoutMs = Number(context.params['timeoutMs'] ?? 8_000);
+    // Over the device's IP version only (`A-85`), for the guard and for every handshake: the
+    // versions of one scan are all asked over the one family.
+    const family = familyOf(context.target.ipVersion);
     // Resolved once and checked against the probe's target policy; every handshake of this
     // check then goes to an address that lookup answered with (`A-57`). The first handshake
     // shares its timeout with the lookup, as each did when each socket made its own.
     let startedAt: bigint | undefined = process.hrtime.bigint();
     const checked = await checkedTarget({
       ...guardOf(context.target),
+      family,
       timeoutMs,
       signal: context.signal,
       verb: 'connect to',
       doing: `connecting to ${host}:${String(port)}`,
     });
-    const target = { host, port, servername, timeoutMs, ...lookupFor(host, checked) };
+    const target = {
+      host,
+      port,
+      servername,
+      timeoutMs,
+      ...(family === 0 ? {} : { family }),
+      ...lookupFor(host, checked, family),
+    };
 
     const accepted = new Map<string, boolean>();
     let cipher: string | null = null;
@@ -107,6 +118,10 @@ export const tlsSecurity: SensorType = {
     let lastFailure = '';
     // Where the last attempt failed (`P-406`): a refused connection, or a refused handshake.
     let lastPhase: TlsPhase = 'handshake';
+    // The last failure itself, and whether every one was the device's name not resolving: then
+    // that is the whole diagnosis (`A-85`), and not a guess about TLS on the port.
+    let lastError: unknown;
+    let unresolvedEach = true;
 
     for (const version of VERSIONS) {
       if (context.signal.aborted) throw new Error(`the check was cancelled while probing ${host}`);
@@ -128,12 +143,15 @@ export const tlsSecurity: SensorType = {
         accepted.set(version.id, false);
         lastFailure = error instanceof Error ? error.message : String(error);
         if (error instanceof TlsError) lastPhase = error.phase;
+        lastError = error;
+        if (!(error instanceof TlsError) || error.phase !== 'resolve') unresolvedEach = false;
         // A refused *version* is the reading. A refused connection is a broken check, and the
         // two look different: one leaves the others succeeding.
       }
     }
 
     if (!anyReachable) {
+      if (unresolvedEach && lastError instanceof TlsError) throw lastError;
       throw new TlsError(
         `${host}:${String(port)} accepted no TLS version at all — either it does not speak TLS ` +
           `on this port, or it is unreachable. The last attempt said: ${lastFailure}`,

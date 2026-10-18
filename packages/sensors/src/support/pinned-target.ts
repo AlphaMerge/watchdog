@@ -1,6 +1,6 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
-import { targetVerdict } from '@ms/shared';
+import { targetVerdict, unmapped } from '@ms/shared';
 import { restrictionOf } from '../credentials/index.js';
 import {
   nameLookups,
@@ -303,8 +303,11 @@ export async function pinTarget(
 
   // Of the device's family only. A resolver asked for one family answers with that family; one
   // that answers with more is not believed about the rest, and they are never connected to.
+  // **An IPv4-mapped address is of the IPv4 family** (`A-85`'s second check): macOS answers a
+  // lookup for IPv6 alone with them for a name with only A records, and a connection to one goes
+  // over IPv4. It is kept as spelled, as `checkedTarget` keeps it.
   const candidates = answers.filter((answer) => {
-    const version = isIP(answer.address);
+    const version = isIP(unmapped(answer.address));
     return version !== 0 && (family === 0 || version === family);
   });
   if (candidates.length === 0) {

@@ -929,7 +929,7 @@ as it stands and nothing is resolved, on every one of them.
 | SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: each scan resolves the name once, checks every address, and asks the agent at a checked address. The session it has is kept while its address is still among the answers, so a name whose answers rotate keeps one session; it is replaced only when the name no longer has that address. Over IPv4 unless the device is set to IPv6, as before. |
 | TCP: `port.tcp`, `port.range` | Yes | The socket's lookup is answered with the checked addresses. A range is resolved once for all its ports. |
 | TLS: `tls.certificate`, `tls.security` | Yes | As TCP. Every handshake of a security check goes to the same checked addresses. |
-| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). Whichever address family the name has, as before. **A PostgreSQL host that begins with `/`** is a Unix socket directory on the probe's own machine: nothing is resolved, and it is refused wherever the policy refuses `127.0.0.1` (`private`) and handed to `pg` as it stands wherever it does not (`A-70`). **`db.mssql` under `require`** reads the server's PRELOGIN answer on the socket and ends the connection, before any login, when it says the server will not encrypt (`A-70`). **TLS for a device given as an address** (`A-70`): with verification on, the certificate is checked against the address, and must list it as an address. `pg` is handed the same identity check the other TLS clients use, so both families work. `mysql2` takes no check of ours, and its upgrade is checked by that same check before it can log in (`A-74`), so both families work. `tedious` takes none either and offers nowhere to put one: IPv4 works, and an IPv6 address is refused whatever the certificate lists. **A PostgreSQL socket path under a bounded set** is judged as the probe's own machine: inside where the targets cover `127.0.0.1`, `::1` or `localhost`, outside otherwise (`A-74`); a path that begins with `//` or holds a `\` is not, and a probe on Windows refuses every socket path, where Node would open it as a named pipe. |
+| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). **Over the device's IP version** (`A-85`), the routed server included, where they used to take whichever family the name had: see [A device's IP version](#a-devices-ip-version). **A PostgreSQL host that begins with `/`** is a Unix socket directory on the probe's own machine: nothing is resolved, and it is refused wherever the policy refuses `127.0.0.1` (`private`) and handed to `pg` as it stands wherever it does not (`A-70`). **`db.mssql` under `require`** reads the server's PRELOGIN answer on the socket and ends the connection, before any login, when it says the server will not encrypt (`A-70`). **TLS for a device given as an address** (`A-70`): with verification on, the certificate is checked against the address, and must list it as an address. `pg` is handed the same identity check the other TLS clients use, so both families work. `mysql2` takes no check of ours, and its upgrade is checked by that same check before it can log in (`A-74`), so both families work. `tedious` takes none either and offers nowhere to put one: IPv4 works, and an IPv6 address is refused whatever the certificate lists. **A PostgreSQL socket path under a bounded set** is judged as the probe's own machine: inside where the targets cover `127.0.0.1`, `::1` or `localhost`, outside otherwise (`A-74`); a path that begins with `//` or holds a `\` is not, and a probe on Windows refuses every socket path, where Node would open it as a named pipe. |
 | Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | **An address only: a name is outside the policy** | A device given as a refused address is refused, and the sensor's own `host` parameter is checked as the device's is. **A name is not resolved or checked.** The probe starts PowerShell and hands it the name; PowerShell's `New-CimSession -ComputerName` resolves it inside that process, WinRM takes no address in its place without breaking Kerberos, which authenticates the *name*, and there is no socket or lookup the probe can hand a child process. A check made here would be of an answer the connection never uses. If a Windows device must not be able to point a probe at a link-local address, give the device its address. |
 | ICMP: `icmp.ping`, `icmp.jitter` | No | An echo carries no credential and brings back no content, so the guard would buy nothing. `ping` resolves the name in its own process, as before. Resolving it in the probe instead would put the largest sensor population on the probe's shared lookup threads, where a lookup cannot be cancelled and abandoned ones pile up uncounted while a resolver is down, and it would lose `ping`'s own choice of address family. |
 | DNS: `dns.record`, `dns.blocklist` | No | They ask a resolver about a name and connect to no device. The resolver is the probe's own or an address in the sensor's parameters, and on a cloud machine the provider's resolver is itself link-local. |
@@ -1154,8 +1154,48 @@ the probe stops it.
 **What still resolves for itself**, outside this resolver and its numbers on Probe Health:
 **ping** and **jitter** (the `ping` binary resolves the name), **script sensors** and the
 **PowerShell** (Windows) sensors (their own processes do), every device by name under
-**`probe.targetPolicy: none`** (the transport's socket does, as before the policy), and the
-probe's own connection to the core. Each of those asks `getaddrinfo` itself, every time.
+**`probe.targetPolicy: none`** (the transport's socket does, as before the policy, for the
+device's IP version), and the probe's own connection to the core. Each of those asks
+`getaddrinfo` itself, every time.
+
+### A device's IP version
+
+**A device's IP version decides which of its name's addresses its sensors may use** (`A-85`).
+It is `auto`, `v4` or `v6`, on the device. Set to `v4` or `v6`, every sensor that connects to
+the device resolves the name for that family alone and connects over it, whatever the name
+also has:
+
+- **The other family's addresses are never asked for, judged or used.** A `v4` device whose name
+  also has a link-local AAAA (or a ULA under `probe.targetPolicy: private`) is not refused over
+  it, and a host with global IPv6 does not quietly measure the path over IPv6.
+- **A name with no address of the family fails**, saying `the device’s host name did not resolve
+  to an IPv6 address` (or IPv4), in the `resolve` phase, and is not connected to over the other.
+  Every sensor in the first row below says it so, under every policy, `port.range` under
+  `probe.targetPolicy: none` included: it resolves the name once for the scan, and a name that
+  does not resolve fails it rather than reading as every port closed.
+- **An IPv4-mapped answer (`::ffff:a.b.c.d`) is IPv4.** macOS answers a lookup for IPv6 alone
+  with mapped addresses for a name that has only A records, and a connection to one goes over
+  IPv4: a `v6` device on a macOS probe fails as above, and is not reached over IPv4.
+- **A resolver that does not answer says so** (`the probe’s resolver is not answering`, or
+  `EAI_AGAIN`), under every policy, and is not read as a name with no record of the family.
+- **Under `probe.targetPolicy: none`** nothing is resolved by the probe, and the connection's own
+  lookup asks for that family alone, and for every address of it.
+- **Every address of the family is tried, under every policy**: a name whose first address of it
+  does not answer is passed for the next, as on `auto`. A credential set's pin is one address,
+  and is the exception.
+- **A device given as an address** connects to that address, whatever its IP version says.
+
+`auto` uses both, in the order the resolver answers, as every sensor always has: a name whose
+first address does not answer is passed for the next.
+
+| Sensors | `v4` or `v6` | `auto` |
+| --- | --- | --- |
+| `port.tcp`, `port.range`, the mail sensors, `tls.certificate`, `tls.security`, the HTTP sensors, the SSH sensors, the database sensors | That family alone, as above (`A-85` for TLS, HTTP, SSH and the databases). An SSH connection is kept for one IP version, so a `v4` device never rides one opened over IPv6. A server SQL Server routes the login to is resolved for the device's family too, under every policy, a device given as an address included, and one with no address of it says so. | Both families |
+| The SNMP query sensors | That family alone | **IPv4**, as SNMP always has |
+| `icmp.ping`, `icmp.jitter` | `ping -4` or `ping -6` | `ping`'s own choice |
+| A device whose name a credential set's targets pin (`A-41c`) | One address of that family | One address, IPv4 where the name has one |
+| Listeners (`snmp.trap`, `syslog.receiver`, `flow.netflow`) | Not used: a device's traffic from either of its addresses counts | |
+| `windows.*`, `dns.*`, scripts, `core.factory`, the health sensors | Not used: PowerShell resolves the name itself, and the others connect to no device | |
 
 ---
 

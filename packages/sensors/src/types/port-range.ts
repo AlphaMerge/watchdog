@@ -1,6 +1,13 @@
 import type { connect as netConnect, LookupFunction } from 'node:net';
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import {
+  checkedLookup,
+  checkedTarget,
+  familyOf,
+  guardOf,
+  lookupFor,
+  resolvedUnchecked,
+} from '../support/checked-target.js';
 
 /**
  * How many of a set of ports are open (`T-22`).
@@ -136,7 +143,7 @@ export const portRange: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
-    const { connect } = await import('node:net');
+    const { connect, isIP } = await import('node:net');
 
     const host = context.target.host;
     if (host === '') throw new Error('the device has no host to connect to');
@@ -144,24 +151,45 @@ export const portRange: SensorType = {
     const ports = parsePorts(typeof spec === 'string' ? spec : '');
     const timeoutMs = Number(context.params['timeoutMs'] ?? 3_000);
     const concurrency = Math.max(1, Number(context.params['concurrency'] ?? 8));
-    const family =
-      context.target.ipVersion === 'v6' ? 6 : context.target.ipVersion === 'v4' ? 4 : 0;
+    // Over the device's IP version (`A-85`): the guard is asked for that family alone, and no
+    // socket is told it, so that each still walks every address of it (`lookupFor`).
+    const family = familyOf(context.target.ipVersion);
 
     // **Resolved once for the whole scan and checked against the probe's target policy**
     // (`A-57`). Every port's socket is answered with the checked addresses: a name that
     // resolved differently for each port would be a different device for each.
     const lookupStarted = process.hrtime.bigint();
-    const { lookup } = lookupFor(
-      host,
-      await checkedTarget({
-        ...guardOf(context.target),
-        family,
-        timeoutMs,
-        signal: context.signal,
-        verb: 'scan',
-        doing: `scanning ${host}`,
-      }),
-    );
+    const checked = await checkedTarget({
+      ...guardOf(context.target),
+      family,
+      timeoutMs,
+      signal: context.signal,
+      verb: 'scan',
+      doing: `scanning ${host}`,
+    });
+    // **And under `none`, where nothing checks it, resolved once too** (`A-85`'s second check),
+    // by the system's lookup, for the device's family alone: each port's socket resolved the name
+    // for itself, so a name with no address of it read as every port closed, "0 of N open", a
+    // measurement of nothing, and a resolver that flapped changed the count. It fails the check
+    // now, in the `resolve` phase, as it does under every other policy. An address resolves
+    // nothing.
+    const { lookup } =
+      checked === null && isIP(host) === 0
+        ? {
+            lookup: checkedLookup(
+              host,
+              await resolvedUnchecked({
+                host,
+                family,
+                // All of a port's timeout, as each socket's own lookup had: below, what it took
+                // is taken from the first port each worker tries.
+                withinMs: timeoutMs,
+                signal: context.signal,
+                doing: `scanning ${host}`,
+              }),
+            ),
+          }
+        : lookupFor(host, checked, family);
 
     // **The lookup shares a port's timeout, as it did when each socket made its own.** What
     // it took is taken from the first port each worker tries, the ones that would have waited
@@ -179,7 +207,7 @@ export const portRange: SensorType = {
         if (context.signal.aborted) {
           throw new Error(`the check was cancelled while scanning ${host}`);
         }
-        if (await isOpen(connect, host, port, family, within, context.signal, lookup)) {
+        if (await isOpen(connect, host, port, within, context.signal, lookup)) {
           open.push(port);
         }
         within = timeoutMs;
@@ -211,18 +239,12 @@ function isOpen(
   connect: typeof netConnect,
   host: string,
   port: number,
-  family: number,
   timeoutMs: number,
   signal: AbortSignal,
   lookup: LookupFunction | undefined,
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const socket = connect({
-      host,
-      port,
-      ...(family === 0 ? {} : { family }),
-      ...(lookup === undefined ? {} : { lookup }),
-    });
+    const socket = connect({ host, port, ...(lookup === undefined ? {} : { lookup }) });
     let settled = false;
 
     const finish = (opened: boolean): void => {

@@ -1,5 +1,5 @@
 import type { CheckContext } from '../../contract.js';
-import { checkedTarget, guardOf } from '../checked-target.js';
+import { checkedTarget, familyOf, guardOf } from '../checked-target.js';
 import { readCredentials } from './credentials.js';
 import { withSsh } from './pool.js';
 import { describeVerdict } from './host-key.js';
@@ -43,6 +43,8 @@ export async function sshCheck<T>(
     {
       host,
       port,
+      // The family every connection to it is made over (`A-85`), and part of the pool's key.
+      ipVersion: context.target.ipVersion,
       ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
       // What the guard below excepts (`A-64`), so that a connection is keyed by it.
       ...(context.target.policyException === undefined
@@ -61,6 +63,8 @@ export async function sshCheck<T>(
       guard: async (opening) => {
         const checked = await checkedTarget({
           ...guardOf(context.target),
+          // Of the device's family only (`A-85`): the other is never connected to.
+          family: familyOf(context.target.ipVersion),
           timeoutMs: connectTimeoutMs,
           signal: opening ?? context.signal,
           verb: 'connect to',

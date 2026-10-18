@@ -1,10 +1,20 @@
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs, IncomingHttpHeaders } from 'node:http';
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import { serverIdentity, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
-import { checkedTarget, type CheckedTarget } from '../checked-target.js';
+import {
+  attemptsOf,
+  checkedTarget,
+  connectFailure,
+  familyLookup,
+  familyOf,
+  noAddressSaid,
+  socketUnresolved,
+  type CheckedTarget,
+  type ConnectAttempt,
+} from '../checked-target.js';
 import { PhasedError } from '../phased-error.js';
 import {
   isCredentialsWithheld,
@@ -113,6 +123,15 @@ export interface HttpRequestOptions {
    */
   readonly resolve?: ResolveHost;
   /**
+   * The device's IP version, where it names one (`CheckTarget.ipVersion`, `A-85`): the guard
+   * asks the resolver for this family and judges only its answers, and every connection of the
+   * request, redirects included, is made over it. Under the `none` policy, where nothing is
+   * checked, the socket's lookup asks for this family alone (`familyLookup`), and it walks every
+   * address of it. Absent for `auto`, which connects over whichever family the name has, as it
+   * always did.
+   */
+  readonly family?: 4 | 6;
+  /**
    * How the socket is made, for a test that needs a connection that never completes. Plain
    * HTTP only. Absent in production, where Node makes it and `lookup` decides where it goes.
    */
@@ -195,6 +214,9 @@ function checkedForRequest(
   const where = `${options.scheme}://${options.host}:${String(options.port)}${options.path}`;
   return checkedTarget({
     host: options.host,
+    // Of the device's family only (`A-85`): an address of the other is never connected to, so
+    // it is not asked for, and cannot refuse the request.
+    family: options.family ?? 0,
     ...(options.pinned === undefined ? {} : { pinned: options.pinned }),
     ...(options.targetPolicy === undefined ? {} : { policy: options.targetPolicy }),
     ...(options.targetPolicyException === undefined
@@ -210,7 +232,7 @@ function checkedForRequest(
     // words the request has always used for it.
     unresolved: (error) =>
       error === undefined
-        ? new HttpError(`the device’s host name did not resolve, requesting ${where}`, {
+        ? new HttpError(noAddressSaid(options.family, `requesting ${where}`), {
             phase: 'resolve',
             host: options.host,
           })
@@ -274,7 +296,15 @@ export async function fetchHttp(
             // **The checked address, answered to the socket's own lookup** (`A-41c`, `A-54`).
             // `host` above stays the name, so it is what `Host` carries, what SNI sends and what
             // the certificate is checked against; only where the bytes go comes from the pin.
-            ...(pinned === undefined ? {} : { lookup: pinnedLookup(options.host, pinned) }),
+            // **Or, where nothing was checked, the device's family** (`A-85`): under `none` the
+            // socket resolves the name, through a lookup that asks for that family alone and
+            // for all of it, so a dead first address is passed. A checked address is of that
+            // family already.
+            ...(pinned !== undefined
+              ? { lookup: pinnedLookup(options.host, pinned) }
+              : options.family === undefined
+                ? {}
+                : { lookup: familyLookup(options.family) }),
             // No agent, for any request: a pooled connection is one made for another check, to
             // wherever that check's lookup answered, and this request would ride it unchecked.
             // (A test that makes the socket itself gets an agent of its own for this one
@@ -398,6 +428,9 @@ export async function fetchHttp(
     const hopStarted = process.hrtime.bigint();
     const count = checked?.addresses.length ?? 1;
     const connectMs = connectAttemptMs(options.timeoutMs, count);
+    // Each address this hop tried and what it failed with, for the failure to name every one
+    // (`A-85`'s second check): the last one's error alone says nothing of the others.
+    const tried: ConnectAttempt[] = [];
     for (;;) {
       const spentMs = Number(process.hrtime.bigint() - hopStarted) / 1e6;
       try {
@@ -411,6 +444,7 @@ export async function fetchHttp(
         // Nothing was sent, and the name has another address that was checked: the socket would
         // have tried it, when it was the one resolving. Never an address that was not checked.
         const never = failure instanceof NeverConnected;
+        if (never) tried.push(...attemptsFor(failure.reason, checked?.addresses[at]?.address));
         if (never && checked !== null && at + 1 < checked.addresses.length && !signal.aborted) {
           at += 1;
           continue;
@@ -422,6 +456,7 @@ export async function fetchHttp(
           path,
           checked?.byGuard === true,
           never ? 'connect' : reached,
+          never ? tried : undefined,
         );
       }
     }
@@ -551,7 +586,7 @@ export function resolveRedirect(
     // what every browser does with one.
     return `/${target}`;
   }
-  if (url.hostname.toLowerCase() !== host.toLowerCase()) return null;
+  if (!sameHost(url.hostname, host)) return null;
   // A scheme or port change is still this device, but it is not this *sensor* — it would be
   // measuring a different listener, so it is reported rather than followed.
   if (url.protocol !== `${scheme}:`) return null;
@@ -561,16 +596,57 @@ export function resolveRedirect(
 }
 
 /**
+ * Whether a URL's host is the device's (`A-85`'s review). A URL writes an IPv6 address in
+ * brackets, and the device is given one without, so the brackets come off first. Two addresses
+ * are the same address however each is spelled, as a `BlockList` matches them; a name matches
+ * a name, whatever its case.
+ */
+function sameHost(hostname: string, host: string): boolean {
+  const unbracketed = (name: string): string =>
+    name.startsWith('[') && name.endsWith(']') ? name.slice(1, -1) : name;
+  const bare = unbracketed(hostname);
+  const given = unbracketed(host.trim());
+  const version = isIP(bare);
+  if (version === 0 || isIP(given) !== version) return bare.toLowerCase() === given.toLowerCase();
+  const list = new BlockList();
+  list.addAddress(given, version === 6 ? 'ipv6' : 'ipv4');
+  return list.check(bare, version === 6 ? 'ipv6' : 'ipv4');
+}
+
+/**
  * Turns a socket or TLS failure into something that names the cause, and where it was (`P-406`):
  * `phase` is where the request had got to, `connect` before its connection was made and
  * `request` on it, and a failure that says its own phase or names a cause of one says that.
  */
+/**
+ * What one address's connection that was never made failed with: each address of Node's own
+ * walk, where the socket resolved the name, or the one it was answered with. A connection this
+ * module gave up on is a timeout, whether to try the next address or because the request's own
+ * time ran out before it was made (`unanswered`, `A-85`'s third check): each is named with
+ * the code, and not as an address that "failed".
+ */
+function attemptsFor(reason: unknown, address: string | undefined): ConnectAttempt[] {
+  const walked = attemptsOf(reason);
+  if (walked.length > 0) return walked;
+  const code = (reason as { code?: unknown } | null)?.code;
+  const timedOut =
+    code === CONNECT_SLOW || (reason instanceof HttpError && reason.phase === 'connect');
+  return [
+    {
+      address: address ?? '',
+      code: timedOut ? 'ETIMEDOUT' : typeof code === 'string' ? code : '',
+    },
+  ];
+}
+
 function describeFailure(
   error: unknown,
   options: HttpRequestOptions,
   path: string,
   byGuard = false,
   phase: HttpPhase = 'request',
+  /** Every address the connection tried, where it was never made. Absent, the error's own. */
+  attempts?: readonly ConnectAttempt[],
 ): Error {
   const where = `${options.scheme}://${options.host}:${String(options.port)}${path}`;
   const at = (named: HttpPhase): { phase: HttpPhase; host: string } => ({
@@ -591,8 +667,9 @@ function describeFailure(
         )
       : error;
   }
-  const code = (error as NodeJS.ErrnoException).code ?? '';
-  const message = error instanceof Error ? error.message : String(error);
+  // A connection whose every address failed is read by the one that got furthest, and names
+  // each (`connectFailure`): the error Node ends a walk with says nothing at all.
+  const { code, message, tried } = connectFailure(error, attempts ?? attemptsOf(error));
   // A timeout this module raised already knows which side of the connection it fell on.
   const here = error instanceof HttpError ? error.phase : phase;
 
@@ -600,15 +677,12 @@ function describeFailure(
     return new HttpError(`the check was cancelled while requesting ${where}`, at(here), error);
   }
   if (code === 'ECONNREFUSED') {
-    return new HttpError(`nothing is listening at ${where}`, at('connect'), error);
+    return new HttpError(`nothing is listening at ${where}${tried}`, at('connect'), error);
   }
-  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return new HttpError(
-      `the device’s host name did not resolve, requesting ${where}`,
-      at('resolve'),
-      error,
-    );
-  }
+  // In the guard's words (`A-85`): no address of the device's family, or a resolver that is not
+  // answering, each said as what it is.
+  const unresolved = socketUnresolved(code, options.family, `requesting ${where}`);
+  if (unresolved !== undefined) return new HttpError(unresolved, at('resolve'), error);
   if (code === 'CERT_HAS_EXPIRED') {
     return new HttpError(`the certificate at ${where} has expired`, at('handshake'), error);
   }
@@ -634,7 +708,7 @@ function describeFailure(
       error,
     );
   }
-  return new HttpError(`requesting ${where} failed: ${message}`, at(here), error);
+  return new HttpError(`requesting ${where} failed: ${message}${tried}`, at(here), error);
 }
 
 /** The parameters every HTTP sensor shares, so the three forms cannot drift apart. */
@@ -643,6 +717,7 @@ export function readCommon(
   target: CheckTarget,
 ): Omit<HttpRequestOptions, 'headers' | 'body' | 'method' | 'maxBodyBytes'> {
   const host = target.host;
+  const family = familyOf(target.ipVersion);
   const text = (key: string, fallback = ''): string => {
     const value = params[key];
     return typeof value === 'string' ? value : fallback;
@@ -665,6 +740,8 @@ export function readCommon(
     // (`A-41c`): the pinned address goes wherever the host goes.
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
     ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
+    // And its IP version (`A-85`), which the guard and every connection are held to.
+    ...(family === 0 ? {} : { family }),
     ...(target.policy === undefined ? {} : { targetPolicy: target.policy }),
     ...(target.policyException === undefined
       ? {}

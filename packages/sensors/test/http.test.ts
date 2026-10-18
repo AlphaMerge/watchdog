@@ -344,6 +344,20 @@ describe('deciding whether a redirect stays on this device', () => {
     assert.equal(resolveRedirect('https://elsewhere.com/x', 'example.com', 'https', 443), null);
   });
 
+  it('follows the same host on a device given as an IPv6 address, however it is written', () => {
+    // A URL writes the address in brackets, and the device is given one without (`A-85`'s
+    // review): compared as they stand, no same-host redirect on such a device was followed.
+    assert.equal(resolveRedirect('http://[2001:db8::1]/next', '2001:db8::1', 'http', 80), '/next');
+    assert.equal(resolveRedirect('http://[::1]:8080/next', '::1', 'http', 8080), '/next');
+    assert.equal(
+      resolveRedirect('http://[2001:DB8:0::1]/next', '2001:0db8:0:0:0:0:0:1', 'http', 80),
+      '/next',
+    );
+    assert.equal(resolveRedirect('http://[2001:db8::2]/next', '2001:db8::1', 'http', 80), null);
+    assert.equal(resolveRedirect('http://127.0.0.1/next', '::1', 'http', 80), null);
+    assert.equal(resolveRedirect('http://127.0.0.1/next', '127.0.0.1', 'http', 80), '/next');
+  });
+
   it('refuses a scheme or port change, which is a different listener', () => {
     assert.equal(resolveRedirect('http://example.com/x', 'example.com', 'https', 443), null);
     assert.equal(resolveRedirect('https://example.com:8443/x', 'example.com', 'https', 443), null);

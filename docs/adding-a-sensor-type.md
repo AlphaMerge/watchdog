@@ -576,18 +576,37 @@ Four rules follow from how the redactor works:
   `checkedTarget` (`support/checked-target.ts`) before it connects:
 
   ```ts
+  const family = familyOf(context.target.ipVersion); // 4, 6, or 0 for `auto`
   const checked = await checkedTarget({
     ...guardOf(context.target), // the host, with the pin, the policy, its exception, the resolver
+    family,
     timeoutMs,
     signal: context.signal,
     verb: 'connect to',
     doing: `connecting to ${host}:${String(port)}`,
   });
-  const socket = connect({ host, port, ...lookupFor(host, checked) });
+  const socket = connect({ host, port, ...lookupFor(host, checked, family) });
   ```
 
   `lookupFor` answers the socket's lookup with the checked addresses, so the name is never
-  resolved again and TLS still names the server. A transport that takes an address and no
+  resolved again and TLS still names the server. **Ask for the device's IP version, and connect
+  over it** (`A-85`). `ctx.target.ipVersion` is `auto`, `v4` or `v6`, and `familyOf` turns it
+  into the family `checkedTarget` asks the resolver for: only answers of that family are judged
+  and handed back, so an address the device rules out can neither refuse the check nor be
+  connected to, and a name with none of that family fails as `did not resolve to an IPv6
+  address`, in the guard's words. Where `checkedTarget` returns null, under `probe.targetPolicy`
+  `none`, the socket resolves the name itself, and `lookupFor` given the family hands it
+  `familyLookup`: the system's lookup, asked for that family alone. **Never tell the socket the
+  family** (`family: 6`), with a lookup of ours or without one: a socket told a family asks its
+  lookup for one address and connects to that alone, so a name whose first address is dead
+  fails, where one told nothing asks for all of them and walks them. A failure of the socket's
+  own lookup is said in the guard's words too, with `socketUnresolved`: `ENOTFOUND` as no
+  address of the family, `EAI_AGAIN` as the resolver not answering, both in the `resolve`
+  phase. `auto` keeps whichever the name answers first. A device given as an address connects
+  to that address whatever it says. A driver that resolves the name itself is handed a socket
+  for it under `none` too, as `support/db/socket.ts` does, and a transport that keeps
+  connections between checks keys them by `ipVersion`, as the SSH pool does. SNMP alone reads
+  `auto` as IPv4. A transport that takes an address and no
   lookup connects to one of `checked.addresses`. **A driver that resolves the name itself
   usually still takes the connection** (`A-62`): read its source for an option that accepts a
   socket and hand it one made with that lookup, as `support/db/socket.ts` does for `pg`

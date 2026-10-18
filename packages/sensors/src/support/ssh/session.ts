@@ -2,8 +2,14 @@
 // exports through it at runtime even though TypeScript resolves them. Same as `net-snmp`.
 import ssh2 from 'ssh2';
 import type { Client, ClientChannel } from 'ssh2';
-import { connect as netConnect, type Socket } from 'node:net';
-import { checkedLookup } from '../checked-target.js';
+import { connect as netConnect, isIP, type LookupFunction, type Socket } from 'node:net';
+import {
+  checkedLookup,
+  connectFailure,
+  familyLookup,
+  familyOf,
+  socketUnresolved,
+} from '../checked-target.js';
 import type { PinnedAddress } from '../pinned-target.js';
 import { describeCredentials, type SshCredentials } from './credentials.js';
 import { describeVerdict, verifyHostKey, type HostKeyVerdict } from './host-key.js';
@@ -29,11 +35,22 @@ import { describeVerdict, verifyHostKey, type HostKeyVerdict } from './host-key.
  * flight on it — the same rule the SNMP session follows for the same reason.
  */
 
-export type SshPhase = 'connect' | 'authenticate' | 'host-key' | 'exec';
+/**
+ * Where a connection or a command failed. `resolve` is the device's name having no address the
+ * connection would use (`A-85`): one of its family, where it names one, or none at all.
+ */
+export type SshPhase = 'resolve' | 'connect' | 'authenticate' | 'host-key' | 'exec';
 
 export interface SshTarget {
   readonly host: string;
   readonly port?: number;
+  /**
+   * The device's IP version (`CheckTarget.ipVersion`, `A-85`). A name is connected to over this
+   * family only, on a socket of this session's own making, whether or not the target policy
+   * checked it: `checked` then holds only addresses of it, and under `none` the socket resolves
+   * the name for it alone. In the pool's key. Absent, or `auto`, as it always connected.
+   */
+  readonly ipVersion?: 'auto' | 'v4' | 'v6';
   /**
    * The address to connect to in place of resolving `host` (`A-41c`): the one checked against
    * the credential set's targets. The server is still identified by its host key, and `host`
@@ -214,6 +231,11 @@ export class SshSession {
       maxOutputBytes: options.maxOutputBytes ?? DEFAULTS.maxOutputBytes,
     };
 
+    const port = target.port ?? 22;
+    // The family a name is connected over (`A-85`), and the words a name that has no address of
+    // it fails in: the guard's, whether or not the guard asked.
+    const family = familyOf(target.ipVersion ?? 'auto');
+
     return new Promise<SshSession>((resolve, reject) => {
       const client = new ssh2.Client();
       let settled = false;
@@ -253,17 +275,33 @@ export class SshSession {
         resolve(new SshSession(client, host, resolved, verdict));
       });
 
-      client.on('error', (error: Error & { level?: string }) => {
+      client.on('error', (error: Error & { level?: string; code?: unknown }) => {
         // ssh2 reports an authentication failure as an ordinary error with a level, so the
         // phase — and therefore the message an operator reads — comes from that.
         const authentication = error.level === 'client-authentication';
+        // A name whose every address failed is read by the one that got furthest, and names
+        // each (`connectFailure`): the error Node ends the socket with says nothing at all.
+        const failure = connectFailure(error);
+        // A name the socket's lookup found no address for (`A-85`), where nothing checked it: under
+        // `none`, of the device's family alone. Said as the guard says it, in its phase.
+        const unresolved = authentication
+          ? undefined
+          : socketUnresolved(
+              failure.code,
+              family,
+              `connecting to ${host}:${String(port)} over SSH`,
+            );
+        if (unresolved !== undefined) {
+          fail(new SshError(unresolved, { host, phase: 'resolve', cause: error }));
+          return;
+        }
         fail(
           new SshError(
             authentication
               ? `${host} refused the credentials for ${describeCredentials(credentials)} — the ` +
                   'user name, the password or the key is wrong, or the server does not allow this ' +
                   'method for that user'
-              : `could not connect to ${host}: ${error.message}`,
+              : `could not connect to ${host}: ${failure.message}${failure.tried}`,
             {
               host,
               phase: authentication ? 'authenticate' : 'connect',
@@ -277,16 +315,27 @@ export class SshSession {
       // (`A-57`). `ssh2` takes no `lookup`, and connecting by name would resolve it a second
       // time. The socket is still told the name, so Node walks the checked addresses as it
       // would have walked the name's, and a first address that is dead is passed.
+      // **And for a name nothing checked, where the device names a family** (`A-85`): under
+      // `none`, `ssh2` connecting by name would take whichever family the name answers first.
+      // Its `forceIPv4`/`forceIPv6` would have it make a lookup of its own, a second way of
+      // connecting beside the checked one; a socket of ours is the one way, checked or not.
+      // It is given `familyLookup`, never the family itself: a socket told the family asks for
+      // one address and connects to that alone, where one given a lookup asks for all of that
+      // family and walks them, passing a first that is dead.
       const sock =
-        target.pinned === undefined && target.checked !== undefined
-          ? checkedSocket(host, target.port ?? 22, target.checked)
-          : undefined;
+        target.pinned !== undefined
+          ? undefined
+          : target.checked !== undefined
+            ? ownSocket(host, port, checkedLookup(host, target.checked))
+            : family !== 0 && isIP(host) === 0
+              ? ownSocket(host, port, familyLookup(family))
+              : undefined;
 
       const config = {
         // **The checked address, never the name, when there is one** (`A-41c`): `ssh2` resolves a
         // name when it connects, and that second answer is the one nobody checked.
         host: target.pinned?.address ?? host,
-        port: target.port ?? 22,
+        port,
         username: credentials.username,
         ...(sock === undefined ? {} : { sock }),
         readyTimeout: resolved.connectTimeoutMs,
@@ -547,11 +596,15 @@ function describe(error: unknown): string {
 }
 
 /**
- * A socket connecting to `host` at one of the addresses the target policy checked (`A-57`).
- * Made on the tick `ssh2` is handed it, so every event of it is `ssh2`'s to hear.
+ * A socket connecting to `host` through `lookup`: the addresses the target policy checked
+ * (`A-57`), or, where nothing checked the name, the system's of the device's family alone
+ * (`A-85`). Made on the tick `ssh2` is handed it, so every event of it is `ssh2`'s to hear.
+ *
+ * **A lookup, and never a family.** A socket told a family asks its lookup for one address,
+ * where without one it asks for all and walks them, passing a first address that is dead.
  */
-function checkedSocket(host: string, port: number, addresses: readonly PinnedAddress[]): Socket {
-  const socket = netConnect({ host, port, lookup: checkedLookup(host, addresses) });
+function ownSocket(host: string, port: number, lookup: LookupFunction): Socket {
+  const socket = netConnect({ host, port, lookup });
   // What `ssh2` does to a socket it makes itself, and not to one it is handed.
   socket.setMaxListeners(0);
   return socket;

@@ -41,6 +41,7 @@ Root
 | Root → Probe → Group → Device → Sensor → Channel hierarchy | Nestable groups; every object has an ID, name, tags, priority, comments                                                                           | `[V1]` |
 | Setting inheritance down the tree                          | Any inheritable setting resolves to the nearest ancestor that defines it; child may override, and reverting to "inherit" discards the local value | `[V1]` |
 | Same host as multiple Device objects                       | Deliberately allowed, so one host can carry several credential sets / sensor sets                                                                 | `[V1]` |
+| Device IP version: auto, IPv4 only, IPv6 only              | Every sensor that connects resolves the name for that family and connects over it alone (`A-85`); auto takes either, SNMP IPv4                     | `[V1]` |
 | Tags + inherited parent tags                               | Free-form labels, case-insensitive, used for filtering and library rules                                                                          | `[V1]` |
 | Priority (1–5 stars)                                       | Sorts objects in lists; 5-star maps appear in the Home menu                                                                                       | `[V1]` |
 | Object comments                                            | Free-text note per object, available as a notification placeholder                                                                                | `[V1]` |

@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import { checkedTarget, familyOf, guardOf, lookupFor } from '../support/checked-target.js';
 
 /**
  * The certificate a device presents, and how long it has left (`T-11`).
@@ -76,11 +76,15 @@ export const tlsCertificate: SensorType = {
     const servername =
       typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : host;
     const timeoutMs = Number(context.params['timeoutMs'] ?? 10_000);
+    // Over the device's IP version only (`A-85`): asked of the guard, so an address of the other
+    // family is neither judged nor connected to, and of the socket's lookup under `none`.
+    const family = familyOf(context.target.ipVersion);
     // Resolved once and checked against the probe's target policy; every handshake of this
     // check then goes to an address that lookup answered with (`A-57`).
     const startedAt = process.hrtime.bigint();
     const checked = await checkedTarget({
       ...guardOf(context.target),
+      family,
       timeoutMs,
       signal: context.signal,
       verb: 'connect to',
@@ -88,7 +92,15 @@ export const tlsCertificate: SensorType = {
     });
 
     const result = await handshake(
-      { host, port, servername, timeoutMs, startedAt, ...lookupFor(host, checked) },
+      {
+        host,
+        port,
+        servername,
+        timeoutMs,
+        startedAt,
+        ...(family === 0 ? {} : { family }),
+        ...lookupFor(host, checked, family),
+      },
       context.signal,
     );
     const leaf = result.certificate;

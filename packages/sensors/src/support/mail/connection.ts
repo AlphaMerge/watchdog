@@ -1,7 +1,13 @@
 import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { serverIdentity, type TargetPolicy } from '@ms/shared';
-import { checkedTarget, lookupFor } from '../checked-target.js';
+import {
+  checkedTarget,
+  connectFailure,
+  familyOf,
+  lookupFor,
+  socketUnresolved,
+} from '../checked-target.js';
 import { PhasedError } from '../phased-error.js';
 import {
   isCredentialsWithheld,
@@ -132,7 +138,9 @@ export class MailConnection {
   }
 
   static async open(options: MailConnectionOptions, signal: AbortSignal): Promise<MailConnection> {
-    const family = options.ipVersion === 'v6' ? 6 : options.ipVersion === 'v4' ? 4 : 0;
+    // Over the device's IP version (`A-85`): the guard is asked for that family alone, and the
+    // socket is never told it, so that it still walks every address of it (`lookupFor`).
+    const family = familyOf(options.ipVersion);
     const pinned = options.pinned;
     const began = process.hrtime.bigint();
     // **Before the socket is made** (`A-57`): the probe's target policy, over the pinned address
@@ -153,10 +161,11 @@ export class MailConnection {
       doing: `connecting to ${options.host}:${String(options.port)}`,
     });
     // The checked address, whatever the socket asks its lookup for (`A-41c`); or, where no
-    // credential set pinned one, the addresses the policy checked.
+    // credential set pinned one, the addresses the policy checked, or under `none` the system's
+    // of the device's family alone.
     const pin =
       pinned === undefined
-        ? lookupFor(options.host, checked)
+        ? lookupFor(options.host, checked, family)
         : { lookup: pinnedLookup(options.host, pinned) };
     const socket = await new Promise<Socket | TLSSocket>((resolve, reject) => {
       // Made once the TCP connection is (`P-406`): over implicit TLS, what fails after it is the
@@ -211,15 +220,9 @@ export class MailConnection {
               // Who the certificate has to be for: the check every TLS client here shares,
               // which can answer for an IPv6 address where Node's own cannot (`A-67`).
               checkServerIdentity: serverIdentity,
-              ...(family === 0 ? {} : { family }),
               ...pin,
             })
-          : netConnect({
-              host: options.host,
-              port: options.port,
-              ...(family === 0 ? {} : { family }),
-              ...pin,
-            });
+          : netConnect({ host: options.host, port: options.port, ...pin });
       if (options.security === 'tls') {
         made.once('connect', () => {
           connected = true;
@@ -404,23 +407,21 @@ function describe(
   // the sensor read Unknown rather than Down.
   if (isCredentialsWithheld(error)) return error;
   const where = `${options.host}:${String(options.port)}`;
-  const code = (error as NodeJS.ErrnoException).code ?? '';
-  const message = error instanceof Error ? error.message : String(error);
+  // A name whose every address failed is diagnosed by the one that got furthest, and names each
+  // (`connectFailure`, `A-85`'s second check): the error Node ends the socket with says nothing.
+  const { code, message, tried } = connectFailure(error);
   const at = (named: MailPhase): { phase: MailPhase; host: string } => ({
     phase: named,
     host: options.host,
   });
 
   if (code === 'ECONNREFUSED') {
-    return new MailError(`nothing is listening at ${where}`, at('connect'), error);
+    return new MailError(`nothing is listening at ${where}${tried}`, at('connect'), error);
   }
-  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return new MailError(
-      `the device’s host name did not resolve, connecting to ${where}`,
-      at('resolve'),
-      error,
-    );
-  }
+  // The socket's own lookup, where nothing checked the name (`none`), in the guard's words
+  // (`A-85`): of the device's family where it names one, and `EAI_AGAIN` as the resolver.
+  const unresolved = socketUnresolved(code, familyOf(options.ipVersion), `connecting to ${where}`);
+  if (unresolved !== undefined) return new MailError(unresolved, at('resolve'), error);
   if (code === 'CERT_HAS_EXPIRED') {
     return new MailError(`the certificate at ${where} has expired`, at('handshake'), error);
   }
@@ -439,5 +440,5 @@ function describe(
       error,
     );
   }
-  return new MailError(`connecting to ${where} failed: ${message}`, at(phase), error);
+  return new MailError(`connecting to ${where} failed: ${message}${tried}`, at(phase), error);
 }

@@ -12642,6 +12642,171 @@ because each is a decision rather than a defect:
       **P-443 outcome.** The late case's ack bound is 10 s, past its wait and slack, so only the
       late timer can end it (a mutant without that timer fails it); the ack-50 ms case had the
       same race and now answers on a port with no channel between.
+- [x] **A-85 — HTTP, TLS, SSH and database checks ignore the device's IP version** · S · A-57 ·
+      Found 2026-10-18 while fixing `P-442`, then audited type by type against `04411fff`
+      (every claim re-checked by a second reader, none refuted).
+      - **Honoured** on the lookup and the connect: `port.*`, `mail.*`, `snmp.*` (`auto` is IPv4 by design), and `icmp.*`, which passes `-4`/`-6` to the ping binary. A credential set that pins a device to one address is also honoured, since `pinTarget` takes the family.
+      - **Not honoured:**
+        - `tls.certificate` and `tls.security`: `guardOf` (`checked-target.ts:116`) carries no family, and `handshake()` gives `tls.connect` none.
+        - The five HTTP types: `readCommon` (`http/request.ts:641`) never reads `ipVersion`, and `checkedForRequest` asks for family 0.
+        - The four `ssh.*` types: `ssh/check.ts:62` and `ssh/session.ts:553`. ssh2 is not given `forceIPv4`/`forceIPv6` under policy `none`.
+        - The three `db.*` types: family 0 on purpose (`db-shared.ts:318`), "as the drivers always connected", which the device's setting contradicts.
+      - **What it does to a `v4` device** whose name has an A and an AAAA:
+        - The guard judges the AAAA too, so a link-local AAAA (or a ULA under `private`) refuses the check, and the device reads Down over an address it would never use.
+        - Otherwise Node's address selection tries the resolver's first family. On a host with global IPv6 that is IPv6, with IPv4 only as a fallback after 250 ms. The check then measures the path the operator ruled out.
+        - A `v6` device is the mirror image: a name with only an A record connects over IPv4 rather than failing as `port.*` and `mail.*` do.
+      - **Harmless:** the listener types (`snmp.trap`, `syslog.receiver`, `flow.netflow`) resolve with family 0 only to recognise a sender. `windows.*` is withheld from v1.
+      - **Side finding, dev only:** on darwin `icmp.*` passes `-4`/`-6`, which macOS `ping` does not take.
+      **Done when** each of the eleven types (and `db.*`, or a stated reason it stays family 0) asks the guard for the device's family and connects only over it, under every policy including `none`. Proof is a test per transport against a simulator listening on `127.0.0.1` and `::1` at once, for a `v4`, a `v6` and an `auto` device; and `CAPABILITIES.MD`/the type guide say what `ipVersion` does.
+
+      **A-85 outcome.** All eleven types and `db.*` ask the guard for the device's family and
+      connect only over it, under every policy; `auto` is family 0 as before, and nothing stays
+      family 0 on purpose. `port.*` and `mail.*` keep the family and now walk it too.
+      `checked-target.ts` has `familyOf`, `anAddressOf`, `noAddressSaid`, `socketUnresolved`,
+      `familyLookup`, `familyOfAnswer`, `connectFailure` and `resolvedUnchecked`, and `lookupFor`
+      takes the family.
+      - **No socket is told the family.** One told `family: 4|6` asks its lookup for one
+        address and connects to that alone, so a name whose first address of the family is dead
+        fails. Under the guarded policies the socket gets `checkedLookup`, as before. Under
+        `none` it gets `familyLookup`, which is `dns.lookup` forced to the family, keeping
+        `all: true`, so Node still walks every address of it (`autoSelectFamily`).
+      - **TLS:** both types pass the family to the guard and to `lookupFor`. `handshake()` reads
+        it only for its wording. `tls.security` rethrows the name's failure when every handshake
+        failed to resolve, in place of "accepted no TLS version".
+      - **HTTP:** `readCommon` reads `ipVersion`, `checkedForRequest` asks for it, and a request
+        with no checked address (`none`) gets `familyLookup`. `resolveRedirect` strips a URL's
+        IPv6 brackets and compares addresses as a `BlockList` matches them. Before this, a
+        same-host redirect on a device given as an IPv6 address was never followed.
+      - **SSH:** the guard asks for the family. Under `none` a `v4`/`v6` name is connected on the
+        session's own socket through `familyLookup`, not by `ssh2`, whose `forceIPv4`/`forceIPv6`
+        would be a second lookup path. A pinned target still wins and resolves nothing.
+        `SshPhase` gains `resolve`: a socket's `ENOTFOUND`/`EAI_AGAIN` fails there, in the guard's
+        words. `SshTarget.ipVersion` is in the pool key.
+      - **Databases:** the device's guard and SQL Server's redirect guard ask for the family.
+        Under `none`, a named `v4`/`v6` device's driver is handed a socket through
+        `familyLookup` (`pg` and `mysql2` a `stream`, `tedious` a `connector`). A device given as
+        an address keeps the family for its routed server, which `tedious`'s connector resolves
+        over it when nothing checks it. A routed name with no address of the family says so
+        (`DbRoutedUnresolvedError` takes the family and the device's host).
+      - **`port.tcp`, `port.range`, `mail.*`:** they passed `family` beside the checked lookup,
+        so they tried the first address alone under every policy. They now pass it to
+        `lookupFor`. `port.tcp` drops its own `unresolved` and says the guard's sentence, phase
+        `resolve`, and so does its socket under `none`. The mail sensors name the family too.
+        `port.range` under `none` resolves the name once for the scan (`resolvedUnchecked`) and
+        fails one that does not resolve, phase `resolve`, where it read every port closed.
+      - **Wording, every transport, every policy:** a name with no address of the family fails
+        `did not resolve to an IPv6 address` (or IPv4), phase `resolve`, in the guard's words.
+        `EAI_AGAIN` says the probe's resolver is not answering, never that a record is missing.
+      - **Review** (18 confirmed, all minor or nit): fixed in the same commit. The walk under
+        `none` (A85-1, DRV-1, ERR-5, T1), the walk for `port.*`/`mail.*`, SSH's resolve phase
+        (A85-3, DRV-2, ERR-1, T3), `EAI_AGAIN` (ERR-2), the routed family (A85-2, A85-4, DRV-3,
+        ERR-3, T4), IPv6 redirect brackets (A85-5), `port.tcp`/mail wording (ERR-4),
+        `tls.security`'s diagnosis (ERR-6), the SSH pin (T2). A literal of the other family is
+        `A-87`.
+      - **Second check** (three minor, two small), fixed in the same commit. **A85-B1:** an
+        IPv4-mapped answer (`::ffff:a.b.c.d`) is IPv4 (`familyOfAnswer`, with `unmapped`) in the
+        guard's filter, `pinTarget`'s candidates, `familyLookup` (which now filters, and answers
+        `ENOTFOUND` when nothing of the family is left) and `resolvedUnchecked`. macOS answers an
+        IPv6 lookup with them for a name with only A records, and a `v6` device on a macOS probe was
+        reached over IPv4. The answer keeps its spelling, which the policy's refusal names and the
+        socket connects to. **A85R2-ERR-1:** a name whose every address fails ends in Node's
+        `AggregateError`, with an empty message and the first attempt's code. `connectFailure` reads
+        the attempt that got furthest (`REACHED`, which `describeDbError` now shares) and names
+        every address tried with its code; `port.tcp`, mail, SSH, TLS and HTTP use it, HTTP with the
+        addresses it tried one at a time. `port.tcp`'s connect failures are `PhasedError`s in
+        `connect`, and TLS words a failed connect as one, not as a handshake. **A85R2-ERR-2:**
+        `port.range` under `none`, above. **T-1:** `auto` devices under `none` whose name does not
+        resolve, on every transport. **Release notes:** they quote what `port.tcp` says under each
+        policy.
+      - **Third check** (one minor regression, four small), fixed in the same commit. **R3-1:**
+        `port.range`'s one lookup under `none` had the guard's bound, half a port's timeout, where
+        each socket's own lookup had all of it: a resolver slower than that failed the scan. It has
+        the port's whole timeout (`withinMs`), still taken from each worker's first port.
+        **R3-3:** a `port.tcp` socket error after the connect (a reset before the banner) is no
+        longer `could not connect`, in `connect`: it says the connection was accepted and then
+        failed, in no phase. **R3-4:** `resolvedUnchecked` adds `ADDRCONFIG` as `net.js` does, off
+        Windows only. **R3-2:** an HTTP address whose connect the request's own time ran out on
+        (`unanswered('connect')`) is named `ETIMEDOUT`, not `failed`. **R3-5:** the release notes
+        say TLS now reads `could not connect to …`, and what `port.tcp` says of the reset.
+      - **Tests:** `packages/sensors/test/ip-version.test.ts`, 260 cases. Every server is two
+        listeners at one port, on `127.0.0.1` and `::1`. Each name is answered with the ruled-out
+        family first, through the check's own resolver, or through `dns.lookup` under `none`. Nine
+        types are covered, one for each way of connecting: TLS (both types), HTTP, SSH, the three
+        drivers, `port.tcp` and `mail.smtp`. Each runs `v4`, `v6` and `auto` under `link-local`,
+        `private` (both loopbacks excepted) and `none`, plus:
+        - a link-local AAAA and A, and a ULA and an RFC 1918 address, beside loopback;
+        - A-only and AAAA-only names, under `link-local` and `none`, with the exact sentence and
+          the phase, and an `auto` name with no address under `none`;
+        - an IPv4-mapped answer for a `v6` device, under both, and for an `auto` one;
+        - a dead first address (`127.0.0.9`) under both policies, with every lookup asking for
+          all;
+        - every address refusing, the message naming a cause and both addresses, phase `connect`;
+        - `EAI_AGAIN` under `none`, for `v6` and `auto`.
+        Also covered: every HTTP type under `none`; `port.range` under both policies, and under
+        `none` an A-only, an AAAA-only, a mapped, an `auto` and an `EAI_AGAIN` name, each resolved
+        once for three ports, a scan read when the resolver answers after 650 ms of a 1,000 ms port
+        timeout, and the `ADDRCONFIG` hint by platform; the SSH pin for `v4` and `v6`, and a mapped
+        answer not pinned; the SSH pool key; what a driver and a redirect are handed; and
+        `tedious`'s connector for a routed server under `none`. `db-checked-target.test.ts` adds a
+        `db.mssql` redirect under `none` from an address against the TDS fake. `http.test.ts` adds
+        IPv6 redirects; `pinned-transports.test.ts` an address that timed out beside one that
+        refused; `port-dns.test.ts` a reset before the banner. The 21 files that touch these
+        transports and lookups (`pinned-target.test.ts` now among them) pass, 1,478 of 1,479, with
+        the one skip as before (the dev PostgreSQL offers no TLS).
+      - **Mutants:** 34 for the first round, each failing the cases of its own rule. The old
+        sixteen, on the code as it now is, the TLS connect now two: the family taken from each guard
+        call (`tls.certificate` 9 failed, `tls.security` 9, HTTP 19, SSH 9, databases 28, the
+        redirect 2), from each connect (`lookupFor` in the two TLS types 5 each, HTTP's
+        `familyLookup` 20, SSH's own socket 5, `db-shared`'s options 16, the device socket's lookup
+        15, `pg` 5, `mysql2` 5, `tedious`'s connector 4), from `readCommon` (29) and from the SSH
+        pool's key (1). One per new rule: HTTP's lookup replaced by a bare `family` (6);
+        `familyLookup` with `all` dropped (39) or answering the first address alone (16);
+        `port.tcp`, `port.range` and mail given the bare family again (2 each); SSH's resolve phase
+        as `connect` (3); `EAI_AGAIN` worded as a missing record (9); the routed server under `none`
+        with no family lookup (2), the routed family left out of the guard's failure (1) and the
+        socket's (1), an address device with no family for its routed server (2, with the TDS fake);
+        IPv6 brackets kept in the redirect compare (1, `http.test.ts`); `tls.security` not
+        rethrowing (3); the SSH pin losing to the family (2); `port.tcp`'s socket failure in
+        `connect` (3); mail naming no family (2). `tls.security`'s first survived: the sentence was
+        matched anywhere in the message, and "accepted no TLS version at all … The last attempt
+        said:" in front of it passed. It is now anchored, a transaction's step the one thing allowed
+        before it.
+        And 13 for the second check: a mapped answer read by `isIP` alone in the guard (9 failed)
+        and in `pinTarget` (1); `familyLookup` not filtering one (10); `connectFailure` reading the
+        error as it stands (12); the addresses left out of `port.tcp` (2), SSH (2), TLS (4), mail
+        (2), and HTTP's own attempts not kept (2); `port.tcp`'s connect failure with no phase (2);
+        `port.range` under `none` resolving per socket again (5); SSH mapping a name that did not
+        resolve only on a socket of its own (2), and `port.tcp` only for a family (2). A fourteenth,
+        the mapped filter in `resolvedUnchecked`, survived: `familyLookup` had already filtered, so
+        the second filter could never differ. It is removed, and the port.range case now fails with
+        `familyLookup`'s.
+        And 4 for the third check, each failing its own case alone: the up-front lookup bounded by
+        `resolveBoundMs` again (1 of 260), an error after the connect said as a failed connect (1 of
+        19, `port-dns.test.ts`), `ADDRCONFIG` on Windows too (1 of 260), and the request's own
+        connect timeout named `failed` (1 of 56, `pinned-transports.test.ts`).
+      - **Docs:** `CAPABILITIES.MD` §1; `administration.md` (A device's IP version, and the
+        database row); the type guide, whose snippet is now `...lookupFor(host, checked, family)`
+        and says never to tell the socket the family; and the release notes.
+- [ ] **A-86 — on macOS, `icmp.*` hands `ping` options it does not take** · XS · A-85 ·
+      Found 2026-10-18 by `A-85`'s audit. `pingCommand` (`support/ping.ts:109`) passes `-4` for
+      a `v4` device and `-6` for a `v6` one on every platform, the darwin branch (`:130`)
+      included. macOS `ping` takes neither: on macOS 26.3 it answers `ping: invalid option -- 4`
+      with its usage, and IPv6 is `ping6`. So on a macOS dev probe a `v4` or `v6` device's ping
+      and jitter sensors fail with a usage error. Dev only: production is Linux, and Windows
+      from 1.1, where both take them. **Done when** the darwin branch gives a `v4` device no flag
+      (macOS `ping` is IPv4 only) and runs `ping6` for a `v6` one, with a test of the command
+      each builds.
+- [ ] **A-87 — a device given as an address of the other family is connected to anyway** ·
+      XS–S · A-85 · Found 2026-10-18 by `A-85`'s review. A device whose host is an IPv4 address and
+      whose IP version is `v6`, or an IPv6 address and `v4`, is connected to at that address on
+      every transport: `checkedTarget` judges a literal against the policy and returns null, no
+      lookup is asked for one (Node does not look an address up), and nothing compares the host
+      with `ipVersion`. A SQL Server redirect to an address of the other family is followed the
+      same way. The setting then reads as a promise the check does not keep, and `A-85`'s docs
+      say only that an address "connects to that address, whatever its IP version says".
+      **Done when** the API refuses a device whose host is an address of the family its IP
+      version rules out, with a refusal naming both, or every connecting check fails naming
+      the mismatch (phase `resolve`, the device's host); with tests for each.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the

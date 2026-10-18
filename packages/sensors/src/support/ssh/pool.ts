@@ -446,6 +446,9 @@ function keyOf(target: SshTarget, credentials: SshCredentials, options: SshSessi
   return [
     target.host,
     String(target.port ?? 22),
+    // A connection is over the family it was opened with (`A-85`): a device set to IPv4 never
+    // rides one a device of the same name set to IPv6, or on `auto`, opened over IPv6.
+    target.ipVersion ?? 'auto',
     // A connection is to the address it was opened with (`A-41c`). A name that now resolves
     // elsewhere, still inside the targets, is another connection; one no longer pinned is too.
     target.pinned?.address ?? '',

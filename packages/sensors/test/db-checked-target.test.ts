@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import systemDns from 'node:dns';
 import { after, before, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -2333,6 +2334,100 @@ describe('a routed server that fails is named, and not the device that routed to
     }
   });
 
+  it('db.mssql under none, from a device given as an address set to IPv6, is routed on over IPv6 alone (A-85)', async (t) => {
+    // The routed server listens on ::1, and something on 127.0.0.1 at its port writes down
+    // whether it was reached. The routed name answers 127.0.0.1 first, so a connect that was
+    // not held to the family reaches that.
+    const six = await new Promise<boolean>((resolve) => {
+      const probe = createServer();
+      probe.once('error', () => {
+        resolve(false);
+      });
+      probe.listen(0, '::1', () => {
+        probe.close(() => {
+          resolve(true);
+        });
+      });
+    });
+    if (!six) {
+      t.skip('::1 cannot be listened on here');
+      return;
+    }
+    const routed = await tdsServer({ login: true, address: '::1' });
+    let reachedFour = 0;
+    const four = createServer((socket) => {
+      reachedFour += 1;
+      socket.destroy();
+    });
+    const taken = await new Promise<boolean>((resolve) => {
+      four.once('error', () => {
+        resolve(false);
+      });
+      four.listen(routed.port, '127.0.0.1', () => {
+        resolve(true);
+      });
+    });
+    if (!taken) {
+      await routed.close();
+      t.skip('the routed server’s port is taken on 127.0.0.1');
+      return;
+    }
+    const device = await tdsServer({ route: { server: OTHER, port: routed.port } });
+    // The system's lookup, for the routed name alone: under `none` nothing else resolves it.
+    const asked: number[] = [];
+    const original = systemDns.lookup as (...args: unknown[]) => void;
+    t.mock.method(systemDns, 'lookup', (hostname: string, ...rest: unknown[]): void => {
+      if (hostname !== OTHER) {
+        original.apply(systemDns, [hostname, ...rest]);
+        return;
+      }
+      const callback = rest[rest.length - 1] as (
+        error: Error | null,
+        address: string | ResolvedAddress[],
+        family?: number,
+      ) => void;
+      const given = rest.length > 1 ? rest[0] : undefined;
+      const options = (typeof given === 'object' && given !== null ? given : {}) as {
+        family?: unknown;
+        all?: unknown;
+      };
+      const family = typeof given === 'number' ? given : Number(options.family ?? 0);
+      asked.push(family);
+      const answers = [...v4('127.0.0.1'), { address: '::1', family: 6 } as const].filter(
+        (one) => family === 0 || one.family === family,
+      );
+      process.nextTick(() => {
+        if (options.all === true) callback(null, answers);
+        else callback(null, answers[0]?.address ?? '', answers[0]?.family);
+      });
+    });
+    try {
+      await failure(
+        execute(dbMssql, rebinding(), {
+          host: '127.0.0.1',
+          port: device.port,
+          policy: 'none',
+          ipVersion: 'v6',
+        }),
+      );
+      assert.deepEqual(device.said, ['packet 0x12', 'login7']);
+      assert.ok(
+        routed.said.includes('login7'),
+        `the routed server heard ${routed.said.join(', ')}`,
+      );
+      assert.equal(reachedFour, 0, 'the routed name’s IPv4 address was connected to');
+      assert.ok(asked.length > 0 && asked.every((family) => family === 6), String(asked));
+    } finally {
+      await device.close();
+      await routed.close();
+      await new Promise<void>((resolve) => {
+        four.close(() => {
+          resolve();
+        });
+      });
+    }
+  });
+
   it('the connector says which server it was routed to, whatever went wrong there', async () => {
     const closed = await closedPort();
     const base: DbConnectOptions = {
@@ -2402,13 +2497,16 @@ describe('a routed server that fails is named, and not the device that routed to
         read(from('ECONNREFUSED')),
         `${HERE} routed the login to ${ROUTED}, where nothing is listening`,
       );
-      for (const code of ['ENOTFOUND', 'EAI_AGAIN']) {
-        assert.equal(
-          read(from(code)),
-          `${HERE} routed the login to ${ROUTED}, a host name that did not resolve`,
-          code,
-        );
-      }
+      assert.equal(
+        read(from('ENOTFOUND')),
+        `${HERE} routed the login to ${ROUTED}, a host name that did not resolve`,
+      );
+      // A resolver that does not answer is not a name with no record (`A-85`'s review).
+      assert.equal(
+        read(from('EAI_AGAIN')),
+        `${HERE} routed the login to ${ROUTED}, a host name that did not resolve — the probe’s ` +
+          'resolver is not answering (EAI_AGAIN)',
+      );
     }
     assert.equal(read(plain('ECONNREFUSED')), `nothing is listening at ${HERE}`);
     assert.equal(

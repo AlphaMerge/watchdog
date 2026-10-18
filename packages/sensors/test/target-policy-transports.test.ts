@@ -754,7 +754,9 @@ describe('SNMP', () => {
   });
 
   it('a device set to IPv6 is resolved for IPv6', async () => {
-    const dns = rebinding([{ address: '::ffff:a9fe:a9fe', family: 6 }]);
+    // A link-local IPv6 answer, refused. A mapped one would be IPv4, and not this device's to
+    // judge (`A-85`'s second check).
+    const dns = rebinding([{ address: 'fe80::a9fe:a9fe', family: 6 }]);
     await refused(
       execute(snmpUptime, dns, {
         params: params(),
@@ -1222,7 +1224,7 @@ describe('TCP port', () => {
     assert.deepEqual(dns.calls, [{ host: NAME, family: 4 }]);
   });
 
-  it('says a name did not resolve in the words it always has, from the one lookup', async () => {
+  it('says a name did not resolve in the guard’s words, as every transport does, from the one lookup', async () => {
     const failing: Rebinding = {
       calls: [],
       resolve: (host, family) => {
@@ -1230,12 +1232,16 @@ describe('TCP port', () => {
         return Promise.reject(Object.assign(new Error('nope'), { code: 'ENOTFOUND' }));
       },
     };
-    await assert.rejects(
-      () => execute(portTcp, failing, { params: params() }),
+    // In the `resolve` phase, at the device (`A-85`'s review), where it was a bare sentence.
+    const error = await rejectionOf(() => execute(portTcp, failing, { params: params() }));
+    assert.match(
+      String(error),
       new RegExp(
-        `^Error: could not connect to ${NAME}:\\d+ — the device’s host name did not resolve$`,
+        `^Error: the device’s host name did not resolve to an address, connecting to ` +
+          `${NAME}:\\d+ \\(ENOTFOUND\\)$`,
       ),
     );
+    assert.deepEqual(failedIn(error), { phase: 'resolve', target: NAME });
     assert.equal(failing.calls.length, 1);
   });
 

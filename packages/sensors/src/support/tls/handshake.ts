@@ -7,6 +7,7 @@ import {
 } from 'node:tls';
 import { isIP, type LookupFunction } from 'node:net';
 import { certificateListsAddress, serverIdentity } from '@ms/shared';
+import { connectFailure, socketUnresolved } from '../checked-target.js';
 import { PhasedError } from '../phased-error.js';
 
 /**
@@ -41,6 +42,12 @@ export interface TlsTarget {
    * a second time. `host` stays the name.
    */
   readonly lookup?: LookupFunction;
+  /**
+   * The device's IP version, where it names one (`A-85`), for what a failure says: a name with
+   * no address of it did not resolve to that family. The connection is held to it by `lookup`
+   * (`lookupFor`), never by telling the socket, which would then try one address alone.
+   */
+  readonly family?: 4 | 6;
   /**
    * When the check began resolving the name, where it did that itself. `elapsedMs` is counted
    * from here, and so is the timeout: the lookup and the handshake share `timeoutMs` and the
@@ -216,13 +223,23 @@ export function handshake(
 function describe(error: NodeJS.ErrnoException, target: TlsTarget, phase: TlsPhase): TlsError {
   const where = `${target.host}:${String(target.port)}`;
   const host = target.host;
-  switch (error.code) {
+  // A name whose every address failed is read by the one that got furthest, and names each
+  // (`connectFailure`, `A-85`'s second check): the error Node ends the socket with says nothing.
+  const { code, message, tried } = connectFailure(error);
+  switch (code) {
     case 'ECONNREFUSED':
-      return new TlsError(`nothing is listening at ${where}`, { phase: 'connect', host }, error);
+      return new TlsError(
+        `nothing is listening at ${where}${tried}`,
+        { phase: 'connect', host },
+        error,
+      );
     case 'ENOTFOUND':
     case 'EAI_AGAIN':
+      // In the guard's words (`A-85`): no address of the device's family, or a resolver that
+      // is not answering, each said as what it is.
       return new TlsError(
-        `the device’s host name did not resolve, connecting to ${where}`,
+        socketUnresolved(code, target.family, `connecting to ${where}`) ??
+          `the device’s host name did not resolve, connecting to ${where}`,
         { phase: 'resolve', host },
         error,
       );
@@ -243,8 +260,11 @@ function describe(error: NodeJS.ErrnoException, target: TlsTarget, phase: TlsPha
         error,
       );
     default:
+      // Before the connection was made, it is the connect that failed, not a handshake.
       return new TlsError(
-        `the TLS handshake with ${where} failed: ${text(error)}`,
+        phase === 'connect'
+          ? `could not connect to ${where}: ${message}${tried}`
+          : `the TLS handshake with ${where} failed: ${text(error)}`,
         { phase, host },
         error,
       );

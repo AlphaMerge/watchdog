@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { globalAgent } from 'node:http';
-import { connect as netConnect, Socket } from 'node:net';
+import { connect as netConnect, createServer, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
@@ -980,6 +980,39 @@ describe('HTTP, held to the address the target policy checked', () => {
       });
       return pending;
     };
+
+  it('names an address whose connection timed out with its code, beside one that refused', async () => {
+    // The last address gets what is left of the request, and its timeout is the request's
+    // own (`unanswered`): named "failed", it read as the one address with no reason (`A-85`'s
+    // third check).
+    const spare = createServer();
+    const closed = await new Promise<number>((resolve) => {
+      spare.listen(0, '127.0.0.1', () => {
+        const at = spare.address();
+        resolve(typeof at === 'object' && at !== null ? at.port : 0);
+      });
+    });
+    await new Promise<void>((resolve) => {
+      spare.close(() => {
+        resolve();
+      });
+    });
+    const dns = rebinding(v4('127.0.0.1', DEAD), v4(METADATA));
+    const attempts: string[] = [];
+    const error = await request(closed, dns, {
+      timeoutMs: 1_000,
+      createConnection: dropping(attempts),
+    }).then(
+      () => assert.fail('the request succeeded'),
+      (thrown: unknown) => thrown,
+    );
+    assert.deepEqual(attempts, ['127.0.0.1', DEAD]);
+    assert.ok(error instanceof Error);
+    assert.match(
+      error.message,
+      /every address it has was tried: 127\.0\.0\.1 ECONNREFUSED, 127\.0\.0\.9 ETIMEDOUT$/,
+    );
+  });
 
   it('moves past an address that never accepts the connection, well inside the timeout', async () => {
     const simulator = await start(ok);

@@ -20,8 +20,10 @@ let banner: Server;
 let silent: Server;
 /** Talks for ever, which is what the output bound is for. */
 let flood: Server;
+/** Accepts, sends half a banner, and resets the connection: a TCP-wrapped service refusing. */
+let resetting: Server;
 
-const ports = { banner: 0, silent: 0, flood: 0, closed: 0 };
+const ports = { banner: 0, silent: 0, flood: 0, resetting: 0, closed: 0 };
 
 function listen(server: Server): Promise<number> {
   return new Promise((resolve) => {
@@ -46,9 +48,17 @@ before(async () => {
     pump();
   });
 
+  resetting = createServer((socket) => {
+    socket.write('SSH-');
+    setTimeout(() => {
+      socket.resetAndDestroy();
+    }, 50);
+  });
+
   ports.banner = await listen(banner);
   ports.silent = await listen(silent);
   ports.flood = await listen(flood);
+  ports.resetting = await listen(resetting);
 
   // A port with nothing on it: bind one, note it, and give it straight back.
   const spare = createServer(() => undefined);
@@ -61,7 +71,7 @@ before(async () => {
 });
 
 after(async () => {
-  for (const server of [banner, silent, flood]) {
+  for (const server of [banner, silent, flood, resetting]) {
     await new Promise<void>((resolve) => {
       server.close(() => {
         resolve();
@@ -133,6 +143,26 @@ describe('port.tcp', () => {
       () => run(portTcp, { port: ports.silent, banner: 'anything', bannerTimeoutMs: 300 }),
       /accepted a connection in [\d.]+ ms but said nothing within 300 ms/,
     );
+  });
+
+  it('a connection reset while the banner is awaited is not a failure to connect', async () => {
+    // The connection was made: "could not connect", in the connect phase, would send the
+    // operator to the network path (`A-85`'s third check).
+    const error = await run(portTcp, {
+      port: ports.resetting,
+      banner: 'SSH-',
+      timeoutMs: 2_000,
+      bannerTimeoutMs: 2_000,
+    }).then(
+      () => assert.fail('the check succeeded'),
+      (thrown: unknown) => thrown,
+    );
+    assert.ok(error instanceof Error);
+    assert.match(
+      error.message,
+      /^127\.0\.0\.1:\d+ accepted the connection and then failed before its banner was read — /,
+    );
+    assert.equal((error as { phase?: unknown }).phase, undefined);
   });
 
   it('says nothing is listening rather than "connection failed"', async () => {

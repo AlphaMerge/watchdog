@@ -231,6 +231,31 @@ From rc.2 or anything older:
   PostgreSQL socket path facing a bounded credential set is decided by the core; a SQL Server
   failure names every address a name was tried at, so its message reads differently
   ([the target policy](administration.md#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not)).
+- **A device set to IPv4 or IPv6 is reached over that family alone** by its TLS, HTTP, SSH and
+  database sensors too (`A-85`), as its port, mail and SNMP sensors always were. One set to `v6`
+  whose name has only an A record now fails, saying `did not resolve to an IPv6 address`, where
+  it connected over IPv4; one set to `v4` is no longer refused over an AAAA record. Set the device
+  to `auto` to use either ([a device's IP version](administration.md#a-devices-ip-version)).
+  Every address of the family is tried, under every policy: `port.tcp`, `port.range` and the
+  mail sensors on a device set to a family tried only the first, and now pass one that does not
+  answer for the next, as on `auto`. `port.tcp` says a name that did not resolve in the words
+  the others use, in the `resolve` phase, in place of `could not connect to … — the device’s
+  host name did not resolve`: `the device’s host name did not resolve to an address,
+  connecting to …` where the probe resolves the name, and `the device’s host name did not
+  resolve, connecting to …` under `none`, where its socket does (`to an IPv6 address` for a
+  device set to a family, under either). The SSH sensors under `none` say the second, in place
+  of `could not connect to …: getaddrinfo ENOTFOUND …`. Under `none` a resolver that does not
+  answer is said to be not answering, where the sensors said the name did not resolve.
+  A connection that fails at every address of a name now names each address with its code,
+  where `port.tcp`, mail, SSH, TLS and HTTP said nothing after the colon; `port.tcp`'s connect
+  failures carry the `connect` phase, and a connection a service resets before its banner is
+  read says `… accepted the connection and then failed before its banner was read`, in no
+  phase, in place of `could not connect to …`. A TLS connect failure, of one address or
+  several, reads `could not connect to …` in place of `the TLS handshake with … failed`.
+  `port.range` under `none` resolves the name once for the scan and fails one that does not
+  resolve, where it read every port closed. On a macOS probe,
+  whose resolver answers an IPv6 lookup with IPv4-mapped addresses (`::ffff:a.b.c.d`) for a
+  name with only A records, a `v6` device fails as above and is no longer reached over IPv4.
 - **`100.100.100.200`, Alibaba Cloud's metadata address, is refused** under the default target
   policy (`A-79`): a sensor on it fails its next scan, and `probe.targetPolicy: none` on its probe
   is the way back ([the target policy](administration.md#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not)).

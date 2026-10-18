@@ -1,5 +1,13 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import {
+  checkedTarget,
+  connectFailure,
+  familyOf,
+  guardOf,
+  lookupFor,
+  socketUnresolved,
+} from '../support/checked-target.js';
+import { PhasedError } from '../support/phased-error.js';
 
 /**
  * A TCP connect, timed (`P-10`).
@@ -104,14 +112,17 @@ export const portTcp: SensorType = {
     const bannerRaw = context.params['banner'];
     const wanted = typeof bannerRaw === 'string' ? bannerRaw.trim() : '';
     const bannerTimeoutMs = Number(context.params['bannerTimeoutMs'] ?? 3_000);
-    const family =
-      context.target.ipVersion === 'v6' ? 6 : context.target.ipVersion === 'v4' ? 4 : 0;
+    // Over the device's IP version (`A-85`): the guard is asked for that family alone, and the
+    // socket is never told it, so that it still walks every address of it (`lookupFor`).
+    const family = familyOf(context.target.ipVersion);
 
     // The clock starts before the name is resolved, as it did when the socket resolved it: the
     // connect time has always included the lookup.
     const started = process.hrtime.bigint();
     // **Resolved once and checked against the probe's target policy** (`A-57`); the socket's
-    // lookup then answers with the checked addresses and the name is not resolved again.
+    // lookup then answers with the checked addresses and the name is not resolved again. A name
+    // that did not resolve is said in the guard's words, as every other transport says it
+    // (`A-85`): of the device's family where it names one, in the `resolve` phase.
     const checked = await checkedTarget({
       ...guardOf(context.target),
       family,
@@ -119,10 +130,6 @@ export const portTcp: SensorType = {
       signal: context.signal,
       verb: 'connect to',
       doing: `connecting to ${host}:${String(port)}`,
-      unresolved: () =>
-        new Error(
-          `could not connect to ${host}:${String(port)} — the device’s host name did not resolve`,
-        ),
     });
 
     return new Promise<CheckExecution>((resolve, reject) => {
@@ -130,12 +137,7 @@ export const portTcp: SensorType = {
       let banner = '';
       let settled = false;
 
-      const socket = connect({
-        host,
-        port,
-        ...(family === 0 ? {} : { family }),
-        ...lookupFor(host, checked),
-      });
+      const socket = connect({ host, port, ...lookupFor(host, checked, family) });
       socket.setNoDelay(true);
 
       const finish = (outcome: () => void): void => {
@@ -148,9 +150,14 @@ export const portTcp: SensorType = {
         outcome();
       };
 
-      const fail = (message: string): void => {
+      /** Fails the check; in `phase`, at the device, where it is the connect's (`P-406`). */
+      const fail = (message: string, phase?: 'connect', cause?: unknown): void => {
         finish(() => {
-          reject(new Error(message));
+          reject(
+            phase === undefined
+              ? new Error(message)
+              : new PhasedError(message, { phase, host }, cause),
+          );
         });
       };
 
@@ -201,6 +208,7 @@ export const portTcp: SensorType = {
             `${host}:${String(port)} did not accept a connection within ${String(timeoutMs)} ms — ` +
               'a port a firewall drops behaves exactly like this, where a closed one is refused ' +
               'immediately',
+            'connect',
           );
         },
         Math.max(1, timeoutMs - spentMs),
@@ -230,14 +238,38 @@ export const portTcp: SensorType = {
 
       socket.on('error', (error: NodeJS.ErrnoException) => {
         // The code is the diagnosis: refused means nothing is listening, and the alternatives
-        // are a filtered port and a name that does not resolve.
+        // are a filtered port and a name that does not resolve. That one is the socket's own
+        // lookup, where nothing checked the name (`none`), and is said as the guard says it.
+        // A name whose every address failed is diagnosed by the one that got furthest, and
+        // names each (`connectFailure`): its own error says nothing.
+        const failure = connectFailure(error);
+        const unresolved = socketUnresolved(
+          failure.code,
+          family,
+          `connecting to ${host}:${String(port)}`,
+        );
+        if (unresolved !== undefined) {
+          finish(() => {
+            reject(new PhasedError(unresolved, { phase: 'resolve', host }, error));
+          });
+          return;
+        }
+        // **Once connected, it is not the connect that failed** (`A-85`'s third check): a reset
+        // while the banner is awaited is said as what it is, and in no phase, as before.
+        if (connectedAt !== null) {
+          fail(
+            `${host}:${String(port)} accepted the connection and then failed before its banner ` +
+              `was read — ${failure.message}`,
+          );
+          return;
+        }
         const reason =
-          error.code === 'ECONNREFUSED'
-            ? 'nothing is listening on that port'
-            : error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN'
-              ? 'the device’s host name did not resolve'
-              : error.message;
-        fail(`could not connect to ${host}:${String(port)} — ${reason}`);
+          failure.code === 'ECONNREFUSED' ? 'nothing is listening on that port' : failure.message;
+        fail(
+          `could not connect to ${host}:${String(port)} — ${reason}${failure.tried}`,
+          'connect',
+          error,
+        );
       });
 
       socket.on('end', () => {
