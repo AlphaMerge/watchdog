@@ -12611,6 +12611,27 @@ because each is a decision rather than a defect:
       - **The counter can hide the burst.** `lookupsGivenUp` is stored as a rate and a counter that falls reads as a reset, so the burst after a restart can hide behind the first record.
       - **Done when** Probe Health goes Warning while the resolver is giving checks up, and says so in a message that names the resolver and the domains not answering. Judge the defaults against this finding's arms: Warning in the cold zone arm and the every-name-silent arm, not in the warm zone arm's answering zone, and not on the slow arm's first scan.
       - **Done when, also:** a restart's given-up checks are not lost to the counter reset, with a test for each.
+- [ ] **P-442 — a TLS identity test reads no server name under load and says nothing about why** · XS ·
+      A-71 · Found 2026-10-18 in `S4`'s second full suite, on a host at a load near 270. In
+      `packages/sensors/test/tls-address-identity.test.ts`, 'tls.security on a device given by
+      name still asks for it by name' failed at `assert.deepEqual(certificate.named,
+      ['localhost'])` with `[]`: the `tls.certificate` run reached no handshake. The `tls.security`
+      half before it passed. The test passed 8 of 8 alone and in the next full suite, and the
+      branch changed nothing in `packages/sensors`. The assertion does not print the
+      execution's message, so the run cannot say whether the check timed out (5 s), was refused
+      or never resolved `localhost`. **Done when** the test asserts the execution's outcome with
+      `execution.message` before it reads `named`, so the next failure names its cause, and that
+      cause is either fixed or filed.
+- [ ] **P-443 — the resolver client's late-answer test gives the ack 40 ms and reads busy under load** · XS ·
+      P-426 · Found 2026-10-18 in `S4`'s fourth full suite, run beside an rpm smoke. In
+      `packages/probe/test/resolve-client.test.ts`, 'ends its own wait at its bound and a little
+      slack, and drops the late answer by its id' asks with `waitMs: 60`, so the ack bound
+      (`waitMs - ACK_LEAD_MS`) is 40 ms. The test's own `await next()` and `postMessage` took
+      longer than that, and the client rejected with `ERESOLVERBUSY` instead of
+      `ERESOLVERLATE`. The probe package passed 756 of 756 alone straight after, and the branch
+      changed no probe code. **Done when** the test sets its ack bound apart from its wait (the
+      client takes `ackWithinMs`), so it tests the late path and not the scheduler, with a mutant
+      showing it still fails when the late timer is removed.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
