@@ -12580,6 +12580,7 @@ because each is a decision rather than a defect:
 
       **Done when** those are met and the full-size arms run again on it, or the decision not to
       build it is written down with the re-measure's numbers.
+      - **S2 landed** 2026-10-18: the lookup helper and its child (`lookup-helper.ts`, `lookup-helper-child.ts`), not yet wired into the resolver.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

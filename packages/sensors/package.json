@@ -37,6 +37,10 @@
     "./pinned-target": {
       "types": "./dist/src/support/pinned-target.d.ts",
       "default": "./dist/src/support/pinned-target.js"
+    },
+    "./system-lookup": {
+      "types": "./dist/src/support/system-lookup.d.ts",
+      "default": "./dist/src/support/system-lookup.js"
     }
   },
   "scripts": {

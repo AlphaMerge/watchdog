@@ -1,4 +1,3 @@
-import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
 import { targetVerdict, unmapped } from '@ms/shared';
 import { restrictionOf } from '../credentials/index.js';
@@ -9,6 +8,7 @@ import {
   tooManyAddresses,
   type LookupCount,
 } from './lookups.js';
+import { systemLookup } from './system-lookup.js';
 
 /**
  * A device named by host name, checked against a credential set's address targets (`A-41c`).
@@ -69,9 +69,10 @@ export type ResolveHost = (
 
 /**
  * `getaddrinfo`, the resolver a socket handed the name would have used, so that the hosts file
- * and the search list mean here what they mean everywhere else on the probe's machine.
+ * and the search list mean here what they mean everywhere else on the probe's machine. The same
+ * call the probe's lookup helper makes (`systemLookup`, `P-432`).
  */
-export const systemResolve: ResolveHost = (host, family) => dnsLookup(host, { all: true, family });
+export const systemResolve: ResolveHost = (host, family) => systemLookup(host, family);
 
 /** Where a refusal happened. */
 export type WithheldPhase = 'check' | 'resolve' | 'connect';
