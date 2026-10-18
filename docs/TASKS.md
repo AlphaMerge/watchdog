@@ -36409,7 +36409,8 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         **Mutations 7/7**: a failed `docker cp` or `chmod` passing; a failed edit or install
         leaving `failed` alone; the drop-in caller's `else` leaving it; the checks caller with no
         `else`; the shipped units' `OnFailure=` asked for membership.
-        **Smoke 2026-10-18**, the same `smoke-install.sh` run (Debian 12, arm64, `f6e4185a`): every
+        **Smoke 2026-10-18**, after the second review, the same `smoke-install.sh` run (Debian 12,
+        arm64, a tarball built at `73adee56`, on main `c0eec719`, not dirty): every
         `runbook_to_box` call succeeded, so both ran — *OnFailure=ms-recover@ms-core.service
         ms-core-failed.service* and its mail at exit 78; *up: both 0, no mail; down: ms-core-check
         mailed each run (2), the variant once; back: the variant mailed once that it was back; a
@@ -37242,10 +37243,11 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         and in `place-release.sh` a prefix with no `VERSION` not refused, its own entries or its
         directories not checked, an upgrade not checked, `previous` or `deploy` not checked, an
         interrupted install's `.incoming` refused.
-        **Smoke 2026-10-18**, `smoke-install.sh` (Debian 12, arm64, a tarball built at the review's
-        tree, `f6e4185a`, not dirty): *smoke test passed*, ending with `ms-uninstall`: */opt/ms, the
-        units, their enable links and the ping drop-in: gone, and said so* and */etc/ms,
-        /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
+        **Smoke 2026-10-18**, after the second review, `smoke-install.sh` (Debian 12, arm64, a
+        tarball built at `73adee56`, on main `c0eec719`, not dirty): *smoke test passed*, ending
+        with `ms-uninstall` over both services started first: */opt/ms, the units, their enable
+        links and the ping drop-in: gone, and said so* and */etc/ms, /var/lib/ms-\*, the service
+        users: kept; ms-core and ms-probe: stopped*.
       - **Second review.** **A release's names were enough without a `VERSION`**: `/srv` with an
         `app`, a `web` or a `docs` of its own passed, the `app` went to `previous` and the next run
         deleted it. `place-release.sh` now fills a prefix with no `VERSION` only when it holds
@@ -37387,8 +37389,10 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         in `%pre`; the core left running there; an earlier word kept; no word asked for; no
         disable in `%preun`; an upgrade stopping too; `%posttrans` never enabling, starting
         whatever the word, leaving the word, or saying nothing of a failed start.
-        **Smoke 2026-10-18**, `smoke-packages.sh` with `MS_SMOKE_REBUILD=1` (arm64, packages built
-        at `f6e4185a`): *package smoke test passed*. Debian 12: *apt-get install -y -q
+        **Smoke 2026-10-18**, after the second review, `smoke-packages.sh` with `MS_SMOKE_REBUILD=1`
+        (arm64, packages built at `73adee56`, on main `c0eec719`, which brings `P-426`'s
+        `UV_THREADPOOL_SIZE` in the probe's unit and launcher): *package smoke test passed*.
+        Debian 12: *apt-get install -y -q
         /pkg/ms-probe_1.0.0~rc.2_arm64.deb: ms gone, ms-probe active and enabled*, *dpkg -P
         ms-probe: ms-probe inactive, and no enable link left*, and back, *apt-get install -y -q
         /pkg/ms_1.0.0~rc.2_arm64.deb: ms-probe gone, the probe inactive (MS_SETUP_NO_START), ms-core
@@ -37512,6 +37516,28 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       running swapped for this release's `ms-probe`, and an rc.2 `ms-probe` for this release's
       `ms`, ending with the probe enabled, and running where the setup started it, recorded in
       `docs/findings/`; then those two sentences come out.
+
+- [ ] **H-46 — what the second review of `H-25`, `H-39` and `H-40` left** · S · H-39, H-40 ·
+      Found 2026-10-18. Each was judged not worth doing before S4 lands, and each is small:
+      - **No box shows `ms`'s `%pre` stopping the probe before the unpack** in a swap back. The
+        outgoing package's `%preun` (or the `.deb`'s `prerm`) stops it later either way, so the
+        smoke's end state passes whether or not `%pre` did; only `deploy-scripts.test.ts`'s log
+        order proves it. On Rocky 9, compare `systemctl show ms-probe -p
+        InactiveEnterTimestampMonotonic` with when the transaction's `%post` ran, or with the
+        change time of a file only `ms` ships.
+      - **rc.2's scriptlets are transcribed**, not read: `RC2_PREUN` and `RC2_POSTUN` are frozen
+        by a comment only. Commit `v1.0.0-rc.2:scripts/package-rpm.sh` as a test fixture, assert
+        its git blob hash (`84f28cac13558238000816f0d0022be2609300b5`), and feed it through
+        `rpmScriptlets()`, given a source path, in the outgoing role.
+      - **A `place-release.sh` run stopped while it set the release aside** — `VERSION` still at
+        the top, some of the release's entries already under `previous` — has the next run
+        delete `previous` with them, so no whole release is left to go back to. Older than the
+        review, found in it; the case the review fixed is the one stopped after `VERSION` went.
+      - **`ms-uninstall` cannot tell a prefix outside `/opt/ms` from the units**: they name
+        `/opt/ms` whatever `--prefix` was, and `ms-setup` does not rewrite them, so its check that
+        the units run from the prefix says nothing there. Telling would need the prefix written
+        into the units or a drop-in.
+      **Done when** each is done, or argued away, in this ticket's outcome.
 
 ---
 
