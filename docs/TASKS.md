@@ -31140,6 +31140,17 @@ because each is a decision rather than a defect:
       for all but the moment each read was out. **Done when** only a 404 (or the gone answer)
       earns that heading, any other first-read failure says the map could not be read and will
       be asked for again, and a test reads both.
+- [x] **U-86 — web tests wait testing-library's default second, which a loaded full run misses** ·
+      XS · U-58, U-71 · Found 2026-10-17. Twice in one day a web test that passes alone failed a
+      full run on the shared VM: `read-failure-region`'s Settings tab ("Loading settings…" still
+      showing) and `readings-held`'s window ("9,001" still a number). Both waited on a whole page
+      to settle within `waitFor`'s default 1,000 ms. **Done when** the default is long enough for
+      a loaded run, set in one place, with a test that pins it.
+      - **U-86 outcome.** `test/setup.ts` sets `asyncUtilTimeout` to 3,000 ms, as the tests that
+        already passed `{ timeout: 3_000 }` did one call at a time. No web test waits for something
+        not to happen (no `waitFor` or `findBy` is expected to reject), so the longer bound only
+        changes how long a real failure takes to report. `setup.test.ts` pins the value and reads
+        it back from testing-library's config.
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
