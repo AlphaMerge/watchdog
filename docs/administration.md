@@ -1103,14 +1103,14 @@ program on the machine.
   up to its own bound, so a resolver that answers in a few seconds still answers it. A held name
   is asked again only when a check needs it, so a device deleted during an outage is not asked
   about for ever.
-- **Editing `/etc/hosts` or `/etc/resolv.conf` takes effect within 5 seconds**, with no restart,
-  and is not a fresh start: the probe compares the files' contents, so one written again unchanged
-  moves nothing. A hosts edit drops the names whose lines it changed, which are asked again at
-  their next check. A change to resolv.conf has every kept answer asked again, and served
-  meanwhile within the same 5 minutes as ever, and lets every hold go; a name that was not
-  answering is asked again where held names are, so a zone still silent cannot take the lanes
-  from the zones that answer. Either is the usual fix for a name that answers wrongly or not at
-  all, and is safe to make in the middle of an outage.
+- **Editing `/etc/hosts`, `/etc/resolv.conf` or `/etc/nsswitch.conf` takes effect within 5
+  seconds**, with no restart, and is not a fresh start: the probe compares the files' contents, so
+  one written again unchanged moves nothing. A hosts edit drops the names whose lines it changed,
+  which are asked again at their next check. A change to resolv.conf or nsswitch.conf has every
+  kept answer asked again, and served meanwhile within the same 5 minutes as ever, and lets every
+  hold go; a name that was not answering is asked again where held names are, so a zone still
+  silent cannot take the lanes from the zones that answer. Either is the usual fix for a name that
+  answers wrongly or not at all, and is safe to make in the middle of an outage.
 - **Check now asks afresh**, whatever is kept, ahead of every lookup waiting for a lane, a held
   name's included: it is how to see that a DNS fix has taken. When the resolver does not answer
   it in time, the check uses the answer kept for the device and says so in its message: `the
@@ -1134,16 +1134,98 @@ program on the machine.
   a large domain with a few names failing, or one of the silent zone's own that answered until
   a moment ago. A name no check has asked about for 6½ minutes no longer counts against its
   domain, so deleting a dead zone's devices leaves nothing behind.
+- **A domain takes all 4 lanes for names with nothing kept only while it is known to answer**
+  (`P-438`): one of its names has answered from DNS within the last 30 s, since the last change to
+  `/etc/resolv.conf` or `/etc/nsswitch.conf`, and it has had no lookup stuck lately: none of its
+  lookups, a first one, a refresh or a held name's retry, has run more than a second without an
+  answer while no lookup of the domain that ran as long has answered since it started, none ended
+  so within the last second, and none has since the last of its names answered. Otherwise it
+  takes at most 3, and the fourth is left to the other domains. A resolver that answers every
+  lookup slowly, as glibc does in 5 s when resolv.conf's first nameserver is down, has every
+  lookup running past the second, and is answering, not silent: its slow answers keep the
+  domain's names asked on every lane, where counting each lookup past the second as silence left
+  most of a one-domain probe's devices unresolved. An answer for a name the hosts file lists, for
+  the family asked, is not one from DNS, whatever nsswitch.conf says, so a silent zone with a
+  device in the hosts file is still held to 3. An answer [loaded at start](#how-a-probe-resolves-its-devices-names) counts
+  until its name is asked again and that lookup ends, and never past its own 5 minutes. A domain
+  is keyed as above, so a sub-zone is a domain of its own. So:
+  - a probe started cold in the middle of a zone's outage gives that zone 3 lanes from its first
+    scan, since none of its names has answered, and the zones that answer are asked on the fourth;
+  - a zone that answers for most of its names, from a recursor's cache or a delegated sub-zone,
+    while others hang is held to 3 for as long as one hangs, and for the second after its hanging
+    lookups end together, by when those asked as they ended are hanging in turn;
+  - a zone that answers is held to 3 only until its first answer, a lookup's time after the
+    probe starts, so a slow resolver answering every domain is as fast as before.
 
-**A restart in the middle of an outage keeps nothing**: the answering names are asked again at
-once, and the silent zone's names hold a lane each until their lookups end, after which the
-silent zone's names wait behind the answering ones. Until then, while more silent names are being
-asked than the four lanes first lookups may use, the answering names' first scans fail too; how
-long that takes is measured in `docs/findings/2026-10-18-name-lookups-through-the-resolver.md`:
-with one zone in ten silent and its lookups taking 30 s, about half the answering devices'
-sensors fail one scan, going Warning once, and every answering name is kept by 31 s. It is as
-long as `getaddrinfo` takes to give up on a silent name, which `/etc/resolv.conf`'s `timeout`
-and `attempts` bound.
+  A lookup held back waits for one of its own domain's to end, or for the second after a stuck
+  end to pass, which the probe times; its check fails at once, as above, when each of those is
+  stuck. **The last lane shared by refreshes and new names** is not taken by
+  a new name of a zone with a lookup stuck lately, counting as taken the lanes the refreshes
+  waiting will take: a warm zone gone silent fills the four refresh lanes, and each time one of
+  its refreshes ended, its new names would otherwise have taken the one left. **Check now** is held
+  to neither, nor is a name the hosts file gives for the family asked when `/etc/nsswitch.conf`'s
+  `hosts` line reads the file before DNS, as most distributions' do and Windows always does:
+  `getaddrinfo` answers it from the file, so a device of a silent zone given its address there is
+  asked at its next scan. The line is read as glibc reads it: the last `hosts` line, with or
+  without its colon, and the file read first when `files` comes before any source that asks DNS
+  with only `myhostname` or `mymachines` ahead of it, or when `resolve` does, since
+  systemd-resolved answers the hosts file's names itself (`hosts: mymachines resolve
+  [!UNAVAIL=return] files myhostname dns` reads it first). A name the file gives only for IPv4 and
+  asked for IPv6, or the other way round, a name asked with a trailing dot that the file writes
+  without one (glibc compares them as written, so `dev-1.example.` is asked of DNS), and any name
+  where the line asks DNS or another network source first or there is no `hosts` line, is asked
+  of DNS and held back as any other. Two zones held to 3 at once can still take the
+  4 between them; a restart in the middle of their outage keeps the zones that answer answered
+  only from the file below.
+
+**A restart keeps the answers** (`P-438`). At stop, and every minute, the probe writes the
+answers it keeps to `name-answers.json` in its spool directory (`probe.spoolDir`,
+`/var/lib/ms-probe/spool` on Linux), and at start it reads them before its first scan. Each is
+served while it is asked again, as an expired answer always is, and for no longer than 5 minutes
+past when it expired, so a restart in the middle of an outage is not a cold start: the zones that
+answer are answered from the first scan, and a silent zone goes Down when it would have without
+the restart. Only answers are kept. A name that was not answering, or did not exist, is asked
+afresh, so a restart after a DNS fix sees the fix at once; a name the hosts file gives is read from
+the file, as it is now. The file holds device names and their addresses, when it was written and,
+on Linux, in which boot, and nothing else, at most 4 MiB of them (the most recently asked when
+there are more), written to a temporary file and renamed, at mode 0600 and owned by the probe's
+user. **A file the probe cannot use is a cold start, never a refusal to start**, said in one log
+line that names why: none yet, cut short, not JSON, of another build's format, larger than 4 MiB,
+a symbolic link or not a regular file (a FIFO is never opened), owned by another user, or readable
+or writable by anyone else. **Nor is a file whose age cannot be told**: one written since the
+system booted is aged by the system's monotonic clock, whatever the wall clock did since; one
+written before it by the wall clock, and not used when the wall clock says it was written less
+long ago than the system booted, which means the clock was put back at the boot; and where no boot
+is known (Windows, macOS) by the wall clock, and not used when it was written in the future. In a
+container that has a boot of its own (systemd-nspawn, or LXC without `lxcfs`, which give it a new
+boot id at each of its boots and leave it the host's uptime), the time since the boot is how long
+its PID 1 has run. Where `/proc/1` cannot be read (`ProtectProc=invisible`), how long ago the boot
+was cannot be told, and a file from before it is aged by the wall clock alone, as where no boot is
+known.
+Probe Health's `answersLoaded` says how many it loaded. Deleting the file is safe: the next start
+is a cold one.
+
+**A system with no clock of its own cannot be told apart.** A single-board computer without a
+battery-backed clock restores its clock at boot from a file (`systemd-timesyncd`'s, or
+`fake-hwclock`'s). When that file was saved after the probe's last write, as it can be at a clean
+shutdown, and the clock has not been set over the network before the probe starts, the answers
+load as about as old as the boot, whatever the time the machine was off. Each name's first check
+then goes to the address it had before the stop while its refresh asks, and for up to 5 minutes
+while DNS does not answer: a device whose address moved while the probe was off is checked at its
+old one, which may by then be another device's. On such a machine, delete
+`name-answers.json` after a long power-off, before the probe starts. Making the probe wait for
+the network's time instead (`systemd-time-wait-sync`) would hold its start for as long as DNS does
+not answer, since time servers are asked for by name.
+
+**A restart with no file keeps nothing**, nor one more than 5½ minutes after the stop, and nor
+does a probe's first start: every name is asked for the first time. A silent zone, none of whose
+names has answered, holds 3 of the lanes for names with nothing kept, and the answering names are
+asked on the fourth from the first scan. Before `P-438` the silent zone took all four in the
+first scan's first ticks, and with one zone in ten silent and its lookups taking 30 s, at 5,000
+sensors, about half the answering devices' sensors failed one scan
+(`docs/findings/2026-10-18-name-lookups-through-the-resolver.md`). What the cap leaves of that is
+to be measured. The silent zone's own sensors, with nothing kept for them, fail from the first
+scan, where with the file they stay Up until their kept answers run out.
 
 **A listener sensor's sender is resolved by it too** (`P-425`): an SNMP trap, syslog or flow
 sensor counting only its own device's, on a device given by name, asks this resolver for the
@@ -1421,6 +1503,7 @@ alarm.
 | `sessionsOpen` | Device sessions held right now. No threshold — how many is a property of your catalogue, not of health. Summed over the probe's check workers, each of which keeps its own: one device can have a session on every worker that has run its checks inside `idleMs`, so the count rises when its checks spread over more workers — while it hangs, or under load — and falls again as the workers it no longer reaches close theirs. A close is reported within five seconds, from an idle worker too (`P-256`); before that a worker reported only when it finished a check, so one that was sent no more checks kept its last count on this channel for good |
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |
 | `lookupsInFlight`, `lookupsGivenUp` | The probe's resolver (`A-66`, `P-426`). A sensor on a device given by host name has it resolved by [the probe's resolver](#how-a-probe-resolves-its-devices-names), to check it against [the target policy](#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not) or a credential set's targets, and waits at most half the transport's timeout, ten seconds at the most. The resolver keeps answers 30 s and runs `getaddrinfo` at most six at a time on a thread pool the whole probe shares, where a lookup cannot be cancelled. `lookupsInFlight` is how many lookups the probe has asked and not had answered, waited for or not: those running, those queued for a lane, and the resolver's own refreshes and retries. `lookupsGivenUp` counts the checks that failed for want of an answer: at their bound, cancelled, or failed at once because `getaddrinfo` said `EAI_AGAIN`, the resolver holds the name, every lane the lookup could use is stuck, or its queue is full; each fails saying `the probe’s resolver is not answering`. A check that fails because the probe's own main thread was too busy to take the lookup says that instead, and is not counted. **No limits**: those sensors already say it, Down or Unknown, and a limit here would be a second alarm for the same outage. A climb in flight that does not fall is the system's resolver not answering. Counted, on a scan and on **Check now** alike: SNMP, SSH (when a connection is opened), HTTP, mail, the port and TLS sensors and the database sensors, under the default `link-local` or `private` policy, and any device whose credential set pins an address; a listener sensor's sender, under any policy; and discovery's identification. Not counted: [what still resolves for itself](#how-a-probe-resolves-its-devices-names). A gap for a probe or a core older than protocol 36 |
+| `answersLoaded` | The answers the probe's resolver loaded at start from [the file it wrote when it last stopped](#how-a-probe-resolves-its-devices-names) (`P-438`), each served while it is asked again: the same all the process's life. **No limits**: zero is a cold start, not an outage, and the checks it cannot answer already say so. It is zero for the first start, a file the probe could not use (its log says why, in one line), or one written more than 5½ minutes before. A gap for a probe or a core older than protocol 37 |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
 | `spoolRejected`, `spoolOversized`, `resultsDiscarded` | **`resultsDiscarded` is an error on any discard in the last five minutes.** Spooled results the drain threw away on their way to the core, each a reading that exists nowhere, as `spoolDropped`'s are (`P-277`, `P-283`). `spoolRejected`: the core refused their batch as invalid, which it answers only to a probe it has not approved — a probe whose approval was withdrawn with results still in its spool. `spoolOversized`: one result alone was larger than a frame can carry; a result this build made is fitted to the wire first and never is, so a count here is a record an earlier build spooled. Both are running totals recorded as rates, with no limit; `resultsDiscarded` is the two over the last five minutes, counted by the core from those totals, so it sees the first record after a restart or a long outage, when a draining spool is likeliest to discard (with the exceptions in the `scriptGroups` row above). The probe logs each discard. Both gap for a probe without a spool drain, and all three for a probe or a core older than protocol 32 |

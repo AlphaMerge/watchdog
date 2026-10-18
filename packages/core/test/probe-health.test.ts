@@ -823,6 +823,22 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(older['lookupsGivenUp'], null);
     });
 
+    it('carries the answers a probe loaded at start, a zero as a zero, and gaps for one that cannot say (`P-438`)', () => {
+      const { reading } = build(() =>
+        connected({ health: { ...FULL, lookupsGivenUp: 1_250, answersLoaded: 450 } }),
+      ).read(probeId);
+      assert.equal(reading['answersLoaded'], 450);
+      assert.equal(reading['lookupsGivenUp'], 1_250);
+      // A probe that found no file started cold, and says so.
+      const { reading: cold } = build(() =>
+        connected({ health: { ...FULL, answersLoaded: 0 } }),
+      ).read(probeId);
+      assert.equal(cold['answersLoaded'], 0);
+      // A probe or a core below 37 does not send it, and it gaps rather than reads zero.
+      const { reading: older } = build(() => connected()).read(probeId);
+      assert.equal(older['answersLoaded'], null);
+    });
+
     /**
      * The stall the probe reports, as a channel an operator can alarm on (`H-01`).
      *

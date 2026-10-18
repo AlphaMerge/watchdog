@@ -67,6 +67,34 @@ import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './p
  * behind every lane its class could take, each held by a lookup past `STUCK_MS`, fails at once
  * rather than waiting out its bound; its lookup stays queued.
  *
+ * **A domain takes all 4 first-lookup lanes only while it is known to answer** (`P-438`): one of
+ * its names has answered from DNS under the current configuration within the last `ANSWER_MS`
+ * (not a name the hosts file lists for the family, which answers for a silent zone too, whatever
+ * nsswitch.conf says; an answer the answer file gave counting until a lookup for its name settles,
+ * and never past its own grace), and it has had no lookup stuck lately: none in flight, a first
+ * lookup, a refresh or a retry, has run past `STUCK_MS` with no lookup of its domain that ran as
+ * long answering since it started, and none ended so, stuck without an answer, within the last
+ * `STUCK_MS` or since the last of its names answered from DNS. A resolver that answers every
+ * lookup slowly, as glibc does in 5 s behind a first nameserver that is down, is answering, not
+ * silent: its lookups past `STUCK_MS` keep answering, and its first lookups are not held for them
+ * (`P-438`'s narrow check). The `STUCK_MS` after an end is timed: when it is over, the queue is
+ * looked at again, as it is when a check asks. Otherwise it takes at most 3 (`P-432` calls it
+ * "unacked: 3"). A domain is keyed as the ranking below keys one, so a sub-zone is a domain of its own. So a
+ * probe started cold in the middle of a zone's outage gives that zone 3 lanes from its first tick,
+ * before any of its lookups is stuck, since none of its names has answered, and the answering
+ * zones are asked on the fourth; a zone answering for some names while others hang is held to 3
+ * while they hang, and through the `STUCK_MS` after its hanging lookups end together, by when
+ * those started as they ended are stuck in turn; and a domain that answers is held to 3 only until
+ * its first answer, a lookup's time after the start. A first lookup held back waits for one of its
+ * own domain's to end, and its check fails at once when each of those is stuck. **And the last
+ * shared lane** is not taken by a first lookup of a domain with a lookup stuck lately, counting as
+ * taken every lane the refreshes running and queued may hold: a warm zone gone silent fills the 4
+ * refresh lanes, and since a lane freed goes to a first lookup before a refresh, its first lookups
+ * would otherwise take the one left each time one of its refreshes ended. "Check now" is held to
+ * neither, nor is a name the hosts file gives for the family asked when nsswitch.conf reads the
+ * file before DNS, as Windows always does: `getaddrinfo` answers it from the file. **Not
+ * reached**: two domains held to 3 at once can take the 4 between them, which `P-432` bounds.
+ *
  * **Which queued lookup a lane takes** (`P-426`'s reviews): "Check now"'s first; then the name whose
  * domain (the name less its first label) has the smallest share of its names failing, the name's
  * own failure left out; among held names' retries, the one with fewer failures in a row, then the
@@ -104,7 +132,7 @@ export const MAX_QUEUED = 10_000;
 export const MAX_ADDRESSES = 64;
 /** Lookups at once: of libuv's 8 at `UV_THREADPOOL_SIZE` 16, leaving 2 for everything else. */
 export const RESOLVER_LANES = 6;
-/** How often the hosts file and resolv.conf are looked at for a change. */
+/** How often the hosts file, resolv.conf and nsswitch.conf are looked at for a change. */
 export const WATCH_EVERY_MS = 5_000;
 /** How long a request that says nothing about its bound is waited for. */
 const DEFAULT_WAIT_MS = 10_000;
@@ -144,8 +172,9 @@ export interface NameResolverOptions {
   /**
    * The files whose change moves what `getaddrinfo` answers, and how often they are looked at. A
    * file named `hosts` is read as a hosts file, and any other as the resolver's configuration
-   * (`checkFiles`). The system's hosts file and resolv.conf every `WATCH_EVERY_MS` unless a test
-   * says otherwise.
+   * (`checkFiles`); one named `nsswitch.conf` also says whether the hosts file is read before DNS
+   * (`hostsGive`). The system's (`systemResolverFiles`) every `WATCH_EVERY_MS` unless a test says
+   * otherwise.
    */
   readonly watch?: { readonly files: readonly string[]; readonly everyMs: number };
 }
@@ -158,6 +187,35 @@ export interface NameResolverStats {
   readonly queued: number;
   /** Names kept. */
   readonly entries: number;
+}
+
+/**
+ * An answer as the probe's answer file keeps it across a restart (`P-438`): its times relative to
+ * the clock when it was read, since the resolver's clock is monotonic and a file's is the wall's.
+ */
+export interface KeptAnswer {
+  readonly host: string;
+  readonly family: Family;
+  readonly addresses: readonly ResolvedAddress[];
+  /** How long ago the resolver answered it. */
+  readonly answeredAgoMs: number;
+  /** How long until it expires: none, or less, once it has. */
+  readonly expiresInMs: number;
+}
+
+/** What `restore` kept of an answer file, and why it kept no more. */
+export interface RestoreCounts {
+  readonly loaded: number;
+  /** Past its grace: expired more than `STALE_MS` ago. */
+  readonly pastGrace: number;
+  /** A name the hosts file gives now, which `getaddrinfo` answers from it at once. */
+  readonly hostsFile: number;
+  /** A name kept already, or given twice. */
+  readonly duplicate: number;
+  /** More names than the resolver keeps. */
+  readonly overCap: number;
+  /** No name, an address for a name, or no address or too many. */
+  readonly invalid: number;
 }
 
 interface Answer {
@@ -215,15 +273,30 @@ interface Pending {
   startedAt: number;
   /** Which configuration it was asked under: `#generation` when it started to run. */
   generation: number;
+  /** `#events` when it started to run: which of its domain's answers came after it started. */
+  startedSeq: number;
   stuck: boolean;
   stuckTimer: NodeJS.Timeout | undefined;
   readonly waiters: Set<Waiter>;
 }
 
-/** How many names of a domain are kept, and how many of them are failing. */
+/**
+ * How many names of a domain are kept, and how many of them are failing; and whether it is known to
+ * answer (`P-438`): when one of its names last answered from DNS under the current configuration,
+ * the names that hold an answer the answer file gave, and when one of its lookups last ended stuck
+ * without an answer. `answeredSeq` and `stuckSeq` order the last answer and that end, which the
+ * clock may not tell apart; `slowSeq` is the last answer from a lookup that had run past
+ * `STUCK_MS` first, which says that a lookup of the domain stuck is one still to answer.
+ */
 interface DomainCount {
   names: number;
   failing: number;
+  answeredAt: number | undefined;
+  answeredSeq: number;
+  slowSeq: number;
+  readonly loaded: Set<Entry>;
+  stuckAt: number | undefined;
+  stuckSeq: number;
 }
 
 /** What a watched file said at the last look. */
@@ -231,6 +304,14 @@ interface Seen {
   readonly digest: string;
   /** A hosts file's names, each with its addresses in the file's order. */
   readonly names: ReadonlyMap<string, string> | undefined;
+  /** An nsswitch.conf's: whether its hosts line asks the hosts file before anything else. */
+  readonly filesFirst: boolean | undefined;
+}
+
+/** What the hosts file gives ahead of DNS: nothing, unless the system reads the file first. */
+interface HostsView {
+  readonly first: boolean;
+  readonly names: ReadonlyMap<string, string>;
 }
 
 type Asked =
@@ -269,31 +350,134 @@ export function resolverLanes(libuvLanes: number): number {
   return Math.max(3, Math.min(RESOLVER_LANES, libuvLanes - 2));
 }
 
-/** The system's hosts file and resolv.conf: what `getaddrinfo` reads that a change would move. */
+/**
+ * The system's hosts file, resolv.conf and nsswitch.conf: what `getaddrinfo` reads that a change
+ * would move. Windows reads its hosts file before DNS and has neither of the others.
+ */
 export function systemResolverFiles(): string[] {
   if (process.platform === 'win32') {
     const root = process.env['SystemRoot'] ?? 'C:\\Windows';
     return [join(root, 'System32', 'drivers', 'etc', 'hosts')];
   }
-  return ['/etc/hosts', '/etc/resolv.conf'];
+  return ['/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf'];
+}
+
+/** Whether a watched file is read as nsswitch.conf: by its name. */
+function isNsswitch(file: string): boolean {
+  return file.split(/[\\/]/u).at(-1)?.toLowerCase() === 'nsswitch.conf';
+}
+
+/** Sources of a `hosts` line that never ask DNS, which glibc passes by for any other name. */
+const LOCAL_SOURCES = new Set(['myhostname', 'mymachines']);
+
+/**
+ * Whether a name the hosts file gives is answered from it before DNS is asked, by nsswitch.conf's
+ * `hosts` line as glibc reads it (`P-438`'s narrow check): the last `hosts` line, its name ended
+ * at a blank or a colon, either way; a `#` ending any line; actions in brackets left out, and a
+ * list that starts with one read as none. The file is read first when `files` comes before any
+ * source that asks DNS, with only `myhostname` or `mymachines` ahead of it, or when `resolve`
+ * does, since systemd-resolved answers the hosts file's names itself. Any other source, `dns`,
+ * `mdns4_minimal` or `nis`, is taken as asking DNS. A file without a `hosts` line, or none at
+ * all, is glibc's default, `dns [!UNAVAIL=return] files`: DNS first.
+ */
+export function hostsFileFirst(text: string): boolean {
+  let list: string | undefined;
+  for (const raw of text.split(/\r?\n/u)) {
+    const match = /^\s*([^\s:]+)[\s:]*(.*)$/u.exec(raw.replace(/#.*$/u, ''));
+    if (match?.[1] === 'hosts') list = match[2] ?? '';
+  }
+  if (list === undefined || list.trimStart().startsWith('[')) return false;
+  for (const source of list
+    .replace(/\[[^\]]*\]/gu, ' ')
+    .trim()
+    .split(/\s+/u)) {
+    if (source === 'files' || source === 'resolve') return true;
+    if (!LOCAL_SOURCES.has(source)) return false;
+  }
+  return false;
+}
+
+/**
+ * What the watched files say the hosts file gives ahead of DNS: their hosts files' names, and
+ * whether nsswitch.conf reads them first. With no nsswitch.conf watched, Windows reads its hosts
+ * file first, and on any other system it is not known, so nothing is taken as the file's.
+ */
+function viewOf(seen: Iterable<readonly [string, Seen]>): HostsView {
+  const names = new Map<string, string>();
+  let first: boolean | undefined;
+  for (const [file, look] of seen) {
+    if (isNsswitch(file)) first = look.filesFirst === true;
+    for (const [name, addresses] of look.names ?? []) {
+      const before = names.get(name);
+      names.set(name, before === undefined ? addresses : `${before} ${addresses}`);
+    }
+  }
+  return { first: first ?? process.platform === 'win32', names };
+}
+
+/** What one watched file says, from its text. */
+function seenOf(file: string, text: string, digest = ''): Seen {
+  return {
+    digest,
+    names: isHostsFile(file) ? hostsNames(text) : undefined,
+    filesFirst: isNsswitch(file) ? hostsFileFirst(text) : undefined,
+  };
+}
+
+/**
+ * Whether the hosts file lists a name for the family asked: an address of that family, or any for
+ * family 0. Whatever nsswitch.conf says, such a name's answer says nothing of whether its domain
+ * answers from DNS (`P-438`'s narrow check: read by the order on the line, a reader's mistake
+ * counted a silent zone as answering).
+ */
+function hostsLists(view: HostsView, host: string, family: Family): boolean {
+  const addresses = view.names.get(hostsKey(host));
+  if (addresses === undefined) return false;
+  return family === 0 || addresses.split(' ').some((address) => isIP(address) === family);
+}
+
+/**
+ * Whether `getaddrinfo` answers a name from the hosts file for the family asked (`P-438`'s
+ * review): the file read first (`hostsFileFirst`), and listing it for that family. A name it lists
+ * only for the other family is asked of DNS.
+ */
+function hostsGive(view: HostsView, host: string, family: Family): boolean {
+  return view.first && hostsLists(view, host, family);
 }
 
 const seconds = (ms: number): string => `${String(Math.max(0, Math.round(ms / 1000)))} s`;
 
-/** A name as it is compared with a hosts file's: lower case, without one trailing dot. */
-function nameOf(host: string): string {
-  const lower = host.trim().toLowerCase();
-  return lower.endsWith('.') ? lower.slice(0, -1) : lower;
+/**
+ * A name as glibc compares it with a hosts file's: lower case, a trailing dot kept, so that
+ * `foo.test.` is not the file's `foo.test`, and is asked of DNS (`P-438`'s narrow check).
+ */
+function hostsKey(host: string): string {
+  return host.trim().toLowerCase();
 }
 
 /**
- * A name's domain: the name less its first label, so `dev-4.zone-b.example` is `zone-b.example`. A
- * name of one label is in the domain `''`, with every other the search list completes.
+ * A name's domain: the name less its first label, so `dev-4.zone-b.example` is `zone-b.example`,
+ * and `dev-4.zone-b.example.` too. A name of one label is in the domain `''`, with every other the
+ * search list completes.
  */
 export function domainOf(host: string): string {
-  const name = nameOf(host);
+  const lower = host.trim().toLowerCase();
+  const name = lower.endsWith('.') ? lower.slice(0, -1) : lower;
   const dot = name.indexOf('.');
   return dot === -1 ? '' : name.slice(dot + 1);
+}
+
+/**
+ * Whether a lookup in flight says its domain is silent: it has run past `STUCK_MS`, and no lookup
+ * of its domain that ran as long has answered since it started (`P-438`'s narrow check). A
+ * resolver that answers every lookup in 5 s, as glibc does behind a first nameserver that is
+ * down, has every lookup past `STUCK_MS`: counted as silent, its one domain's refreshes kept the
+ * last shared lane from its own first lookups, and most of its names never resolved. An answer
+ * that came quickly is no such evidence: a zone answering some names from a cache while others
+ * hang is still held for those (`P-432`'s attack round).
+ */
+function silentSoFar(running: Pending, count: DomainCount | undefined): boolean {
+  return running.stuck && (count === undefined || count.slowSeq <= running.startedSeq);
 }
 
 /** Whether a watched file is read as a hosts file: by its name, on any platform. */
@@ -313,7 +497,7 @@ export function hostsNames(text: string): Map<string, string> {
     const address = fields[0]?.toLowerCase() ?? '';
     if (isIP(address) === 0) continue;
     for (const field of fields.slice(1)) {
-      const name = nameOf(field);
+      const name = hostsKey(field);
       if (name === '') continue;
       const addresses = byName.get(name) ?? [];
       addresses.push(address);
@@ -378,6 +562,11 @@ export class NameResolver implements PoolResolver {
   readonly #sharedCap: number;
   readonly #firstCap: number;
   readonly #refreshCap: number;
+  /**
+   * The first lanes a domain not known to answer, or with a lookup stuck, may hold: one fewer than
+   * all, and never none (`P-438`).
+   */
+  readonly #domainFirstCap: number;
   /** How long a failing name no check asks about counts against its domain. */
   readonly #countFailingMs: number;
   readonly #watch: { readonly files: readonly string[]; readonly everyMs: number };
@@ -398,6 +587,10 @@ export class NameResolver implements PoolResolver {
   #generation = 0;
   /** What each watched file said at the last look. */
   readonly #seen = new Map<string, Seen>();
+  /** What they say the hosts file gives ahead of DNS, at the last look. */
+  #view: HostsView = viewOf([]);
+  /** Orders each domain's last answer and last lookup stuck (`P-438`). */
+  #events = 0;
   readonly #queues: Record<LaneClass, Pending[]> = { first: [], refresh: [], retry: [] };
   readonly #running: Record<LaneClass, Set<Pending>> = {
     first: new Set(),
@@ -405,6 +598,8 @@ export class NameResolver implements PoolResolver {
     retry: new Set(),
   };
   #watchTimer: NodeJS.Timeout | undefined;
+  /** Each pumps the queue when the `STUCK_MS` after a lookup ended stuck is over (`#endedStuck`). */
+  readonly #windowTimers = new Set<NodeJS.Timeout>();
   #watching = false;
   #lastHoldWarn: number | undefined;
   #heldSinceWarn = 0;
@@ -428,6 +623,7 @@ export class NameResolver implements PoolResolver {
     this.#sharedCap = lanes - 1;
     this.#firstCap = lanes - 2;
     this.#refreshCap = lanes - 2;
+    this.#domainFirstCap = Math.max(1, this.#firstCap - 1);
     // Past the longest hold, an answer's life and its grace: a name a scan still checks has been
     // asked within it.
     this.#countFailingMs = this.#holdMaxMs + this.#answerMs + this.#staleMs;
@@ -435,7 +631,8 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
-   * Starts looking at the hosts file and resolv.conf. Its first look is the baseline; a change after
+   * Starts looking at the hosts file, resolv.conf and nsswitch.conf. Its first look is the
+   * baseline; a change after
    * it is acted on by `checkFiles`.
    */
   start(): void {
@@ -448,6 +645,8 @@ export class NameResolver implements PoolResolver {
   stop(): void {
     clearInterval(this.#watchTimer);
     this.#watchTimer = undefined;
+    for (const timer of this.#windowTimers) clearTimeout(timer);
+    this.#windowTimers.clear();
   }
 
   /**
@@ -459,12 +658,13 @@ export class NameResolver implements PoolResolver {
    * still answer for as long as the silent zone's lookups held the lanes.
    * - **The hosts file**: only the names whose lines changed are dropped, so their next check asks
    *   `getaddrinfo`, which reads the file first. Every other name is as it was.
-   * - **resolv.conf**: every kept answer is due now, so it is served while one refresh asks under
-   *   the new configuration, within the same grace as ever; denials and holds are let go. A name's
-   *   failures in a row are kept, so a name that did not answer is asked again on the retry lane,
-   *   and a silent zone cannot fill the lanes the answering ones are asked on. A lookup that ran
-   *   under the old configuration is left to end and answers its own checks; its answer is kept,
-   *   as already due, only for a name the new configuration has said nothing of and is not asking.
+   * - **resolv.conf or nsswitch.conf**: every kept answer is due now, so it is served while one
+   *   refresh asks under the new configuration, within the same grace as ever; denials and holds
+   *   are let go. A name's failures in a row are kept, so a name that did not answer is asked again
+   *   on the retry lane, and a silent zone cannot fill the lanes the answering ones are asked on. A
+   *   lookup that ran under the old configuration is left to end and answers its own checks; its
+   *   answer is kept, as already due, only for a name the new configuration has said nothing of and
+   *   is not asking.
    * - **A rewrite with the same contents** changes nothing: a DHCP client renewing a lease does it.
    */
   async checkFiles(): Promise<boolean> {
@@ -483,21 +683,24 @@ export class NameResolver implements PoolResolver {
         const digest = createHash('sha256').update(text).digest('hex');
         const seen = this.#seen.get(file);
         if (seen?.digest === digest) continue;
-        const hosts = isHostsFile(file);
-        const names = hosts ? hostsNames(text) : undefined;
-        this.#seen.set(file, { digest, names });
+        const now = seenOf(file, text, digest);
+        this.#seen.set(file, now);
         // The first look is the baseline.
         if (seen === undefined) continue;
         changed = true;
-        if (hosts) for (const name of namesChanged(seen.names, names)) hostsChanged.add(name);
-        else configChanged = true;
+        if (isHostsFile(file)) {
+          for (const name of namesChanged(seen.names, now.names)) hostsChanged.add(name);
+        } else {
+          configChanged = true;
+        }
       }
+      this.#view = viewOf(this.#seen);
       if (!changed) return false;
 
       let dropped = 0;
       if (hostsChanged.size > 0) {
         for (const [key, entry] of this.#entries) {
-          if (!hostsChanged.has(nameOf(entry.host))) continue;
+          if (!hostsChanged.has(hostsKey(entry.host))) continue;
           this.#forget(key, entry);
           dropped += 1;
         }
@@ -517,6 +720,17 @@ export class NameResolver implements PoolResolver {
           // but no longer stands for the name: the next check asks under the new one.
           if (entry.pending?.state === 'running') entry.pending = undefined;
         }
+        // What the old configuration answered, or the answer file kept, says nothing of whether
+        // the new one answers a domain (`P-438`): each is held to 3 first lanes until it does.
+        // Nor does what hung under the old one.
+        for (const count of this.#domains.values()) {
+          count.answeredAt = undefined;
+          count.answeredSeq = 0;
+          count.slowSeq = 0;
+          count.loaded.clear();
+          count.stuckAt = undefined;
+          count.stuckSeq = 0;
+        }
       }
       this.#logger.info(
         {
@@ -526,8 +740,10 @@ export class NameResolver implements PoolResolver {
           resolverConfigChanged: configChanged,
           answersDue: due,
         },
-        'the hosts file or resolv.conf changed: the names it moved are asked again',
+        'the hosts file, resolv.conf or nsswitch.conf changed: the names it moved are asked again',
       );
+      // What held a queued lookup back may be gone: a domain's history, or a name not the file's.
+      this.#pump();
       return true;
     } finally {
       this.#watching = false;
@@ -541,6 +757,110 @@ export class NameResolver implements PoolResolver {
     } catch (error: unknown) {
       return codeOf(error) === 'ENOENT' ? '' : undefined;
     }
+  }
+
+  /**
+   * The answers kept, for the probe's answer file (`P-438`): most recently asked first, read a
+   * slice at a time so that saving them never holds the event loop, each slice at the clock when
+   * it is taken. Not a name the hosts file gives for its family (`hostsGive`), which
+   * `getaddrinfo` answers from the file at once and whose file may change before the next start,
+   * and none past its grace.
+   */
+  answersToSave(): { take(count: number): KeptAnswer[] } {
+    const entries = [...this.#entries.values()].reverse();
+    const view = this.#view;
+    let at = 0;
+    return {
+      take: (count) => {
+        const now = this.#now();
+        const taken: KeptAnswer[] = [];
+        while (at < entries.length && taken.length < count) {
+          const entry = entries[at];
+          at += 1;
+          const answer = entry?.answer;
+          // Forgotten since the slice began, or nothing kept for it.
+          if (entry === undefined || answer === undefined) continue;
+          if (this.#entries.get(entry.key) !== entry) continue;
+          if (now >= answer.expiresAt + this.#staleMs) continue;
+          if (hostsGive(view, entry.host, entry.family)) continue;
+          taken.push({
+            host: entry.host,
+            family: entry.family,
+            addresses: answer.addresses,
+            answeredAgoMs: now - answer.answeredAt,
+            expiresInMs: answer.expiresAt - now,
+          });
+        }
+        return taken;
+      },
+    };
+  }
+
+  /**
+   * Answers from the probe's answer file, kept before the first check asks (`P-438`), most
+   * recently asked first as `answersToSave` gives them. Each is kept as expired, whatever was
+   * left of it, so the first check of its name is served it while a refresh asks again, as an
+   * expired answer always is, and never past its grace: what the probe answers after a restart
+   * is asked again, and what it was served meanwhile is what it had. Not kept: a name the hosts
+   * file gives now for its family (`hostsGive`, the files read now, since the first look may not
+   * have been), a name already kept, one past its grace, and any over `maxEntries`. Each one kept
+   * counts its domain as answering until a lookup for its name settles, and never past its own
+   * grace, so the domain may take all 4 first lanes before any of its names is asked again.
+   */
+  async restore(answers: Iterable<KeptAnswer>): Promise<RestoreCounts> {
+    const looked: [string, Seen][] = [];
+    for (const file of this.#watch.files) {
+      if (!isHostsFile(file) && !isNsswitch(file)) continue;
+      looked.push([file, seenOf(file, (await this.#read(file)) ?? '')]);
+    }
+    const view = viewOf(looked);
+    const counts = { loaded: 0, pastGrace: 0, hostsFile: 0, duplicate: 0, overCap: 0, invalid: 0 };
+    const now = this.#now();
+    const taken: { readonly key: string; readonly answer: KeptAnswer }[] = [];
+    const seen = new Set<string>();
+    for (const answer of answers) {
+      const host = answer.host.trim().toLowerCase();
+      const key = `${String(answer.family)}:${host}`;
+      if (
+        host === '' ||
+        isIP(host) !== 0 ||
+        answer.addresses.length === 0 ||
+        answer.addresses.length > this.#maxAddresses
+      ) {
+        counts.invalid += 1;
+      } else if (seen.has(key) || this.#entries.has(key)) {
+        counts.duplicate += 1;
+      } else if (answer.expiresInMs + this.#staleMs <= 0) {
+        counts.pastGrace += 1;
+      } else if (hostsGive(view, host, answer.family)) {
+        counts.hostsFile += 1;
+      } else if (taken.length + this.#entries.size >= this.#maxEntries) {
+        counts.overCap += 1;
+      } else {
+        seen.add(key);
+        taken.push({ key, answer: { ...answer, host } });
+      }
+    }
+    // Least recently asked first, as the entries are kept.
+    for (const { key, answer } of taken.reverse()) {
+      const entry = this.#add(key, answer.host, answer.family);
+      const answeredAt = now - answer.answeredAgoMs;
+      // Expired now at the latest, its grace from its own expiry or from now, whichever is
+      // sooner: never longer than it had.
+      const expiresAt = Math.min(now + answer.expiresInMs, now);
+      entry.answer = {
+        addresses: answer.addresses.map(({ address, family }) => ({ address, family })),
+        answeredAt,
+        expiresAt,
+      };
+      entry.lastAnsweredAt = answeredAt;
+      // Not for a name the hosts file lists for its family, which says nothing of DNS (L1).
+      if (!hostsLists(view, answer.host, answer.family)) {
+        this.#domains.get(entry.domain)?.loaded.add(entry);
+      }
+      counts.loaded += 1;
+    }
+    return counts;
   }
 
   stats(): NameResolverStats {
@@ -671,6 +991,8 @@ export class NameResolver implements PoolResolver {
     const fresh = request.fresh === true;
     if (entry.answer !== undefined && now >= entry.answer.expiresAt + this.#staleMs) {
       entry.answer = undefined;
+      // Past its grace, a loaded answer no longer stands for its domain either (`P-438`).
+      this.#unload(entry);
     }
     if (entry.denial !== undefined && now >= entry.denial.until) entry.denial = undefined;
 
@@ -712,15 +1034,12 @@ export class NameResolver implements PoolResolver {
         ),
       };
     }
-    if (pending.state === 'queued' && this.#lanesStuck(pending.cls)) {
+    // A lookup held back only by time, its domain's `STUCK_MS` window now over, takes a free lane
+    // here, rather than its check failing for lanes it need not wait for (`P-438`'s narrow check).
+    if (pending.state === 'queued') this.#pump();
+    if (pending.state === 'queued' && this.#lanesStuck(pending)) {
       return {
-        now: this.#unanswered(
-          entry,
-          fresh,
-          now,
-          RESOLVER_STUCK,
-          this.#stuckWhy(entry, pending.cls),
-        ),
+        now: this.#unanswered(entry, fresh, now, RESOLVER_STUCK, this.#stuckWhy(pending)),
       };
     }
     return { later: this.#wait(pending, fresh, request.waitMs) };
@@ -738,6 +1057,11 @@ export class NameResolver implements PoolResolver {
       if (existing.failures > 0) this.#count(existing, now);
       return existing;
     }
+    return this.#add(key, host, family);
+  }
+
+  /** A new entry, at the most recently asked end, and in its domain's count. */
+  #add(key: string, host: string, family: Family): Entry {
     const entry: Entry = {
       key,
       host,
@@ -751,7 +1075,16 @@ export class NameResolver implements PoolResolver {
       pending: undefined,
     };
     this.#entries.set(key, entry);
-    const domain = this.#domains.get(entry.domain) ?? { names: 0, failing: 0 };
+    const domain = this.#domains.get(entry.domain) ?? {
+      names: 0,
+      failing: 0,
+      answeredAt: undefined,
+      answeredSeq: 0,
+      slowSeq: 0,
+      loaded: new Set<Entry>(),
+      stuckAt: undefined,
+      stuckSeq: 0,
+    };
     domain.names += 1;
     this.#domains.set(entry.domain, domain);
     if (this.#entries.size > this.#maxEntries) {
@@ -771,11 +1104,112 @@ export class NameResolver implements PoolResolver {
   #forget(key: string, entry: Entry): void {
     if (this.#entries.get(key) !== entry) return;
     this.#uncount(entry);
+    this.#unload(entry);
     this.#entries.delete(key);
     const domain = this.#domains.get(entry.domain);
     if (domain === undefined) return;
     domain.names -= 1;
     if (domain.names <= 0) this.#domains.delete(entry.domain);
+  }
+
+  /**
+   * Why a queued first lookup must wait though its class may run another (`P-438`), or undefined
+   * when it need not. Its domain may hold `#domainFirstCap` first lanes unless it is known to
+   * answer (`#answering`) and has no lookup stuck lately: none ended stuck lately
+   * (`#stuckLately`), and none in flight silent so far (`silentSoFar`): `domain` when it holds
+   * them, and the lookup waits for one of them to end. And `shared` when it has a lookup stuck
+   * lately and this would take the last shared lane, counting as taken every lane the refreshes
+   * running and queued may hold, since a lane freed goes to a first lookup before a refresh:
+   * that lane is left to the other domains. "Check now" waits for neither, nor does a name the
+   * hosts file gives for its family (`hostsGive`): the operator's fix for a device of a silent
+   * zone is asked at its next check.
+   */
+  #heldBack(pending: Pending): 'domain' | 'shared' | undefined {
+    if (pending.cls !== 'first' || pending.urgent) return undefined;
+    const entry = pending.entry;
+    if (hostsGive(this.#view, entry.host, entry.family)) return undefined;
+    const now = this.#now();
+    const count = this.#domains.get(entry.domain);
+    let held = 0;
+    let stuck = count !== undefined && this.#stuckLately(count, now);
+    for (const running of this.#running.first) {
+      if (running.entry.domain !== entry.domain) continue;
+      held += 1;
+      if (silentSoFar(running, count)) stuck = true;
+    }
+    for (const cls of ['refresh', 'retry'] as const) {
+      for (const running of this.#running[cls]) {
+        if (running.entry.domain === entry.domain && silentSoFar(running, count)) stuck = true;
+      }
+    }
+    if (!stuck && count !== undefined && this.#answering(count, now)) return undefined;
+    if (held >= this.#domainFirstCap) return 'domain';
+    if (!stuck) return undefined;
+    const refreshes = Math.min(
+      this.#refreshCap,
+      this.#running.refresh.size + this.#queues.refresh.length,
+    );
+    if (this.#running.first.size + 1 + refreshes >= this.#sharedCap) return 'shared';
+    return undefined;
+  }
+
+  /**
+   * Whether one of a domain's names has answered from DNS under the current configuration within
+   * the last `ANSWER_MS`, or holds an answer the answer file gave that no lookup has settled
+   * since, within that answer's own grace (`P-438`). One past its grace is let go here.
+   */
+  #answering(count: DomainCount, now: number): boolean {
+    if (count.answeredAt !== undefined && now - count.answeredAt < this.#answerMs) return true;
+    for (const entry of count.loaded) {
+      const answer = entry.answer;
+      if (answer !== undefined && now < answer.expiresAt + this.#staleMs) return true;
+      count.loaded.delete(entry);
+    }
+    return false;
+  }
+
+  /**
+   * Whether a domain had a lookup stuck lately (`P-438`'s review): one ended stuck without an
+   * answer within `STUCK_MS`, or since the last of its names answered from DNS; those in flight
+   * are counted apart. A domain's hanging lookups start together and end together, and those
+   * started as they end are not stuck for another `STUCK_MS`: without this, it took every lane
+   * again in between.
+   */
+  #stuckLately(count: DomainCount, now: number): boolean {
+    if (count.stuckSeq > count.answeredSeq) return true;
+    return count.stuckAt !== undefined && now - count.stuckAt < this.#stuckMs;
+  }
+
+  /** A lookup of a domain ended stuck without an answer, under the current configuration. */
+  #endedStuck(entry: Entry, now: number): void {
+    const count = this.#domains.get(entry.domain);
+    if (count === undefined) return;
+    count.stuckAt = now;
+    this.#events += 1;
+    count.stuckSeq = this.#events;
+    // The queue is looked at again when the `STUCK_MS` after it is over (`P-438`'s narrow check):
+    // the one thing that lets a held-back lookup go with no lookup starting or ending, so without
+    // it one no longer held sat queued beside a free lane until one did, and its checks failed. A
+    // timer for each such end: each took a lane past `STUCK_MS`, so there are never more than the
+    // lanes at once.
+    const timer = setTimeout(() => {
+      this.#windowTimers.delete(timer);
+      this.#pump();
+    }, this.#stuckMs);
+    timer.unref();
+    this.#windowTimers.add(timer);
+  }
+
+  /** A loaded answer no longer counting its domain as answering: a lookup for it settled. */
+  #unload(entry: Entry): void {
+    this.#domains.get(entry.domain)?.loaded.delete(entry);
+  }
+
+  /** The first lookups running of a pending lookup's domain: what one held back waits for. */
+  #domainRunning(pending: Pending): Pending[] {
+    return [...this.#running.first].filter(
+      (running) => running.entry.domain === pending.entry.domain,
+    );
   }
 
   /** A name's failures in a row, and whether it counts against its domain. */
@@ -864,14 +1298,24 @@ export class NameResolver implements PoolResolver {
     return failure(code, why);
   }
 
-  /** Why a queued lookup's check fails at once: the lanes its class could take, and theirs. */
-  #stuckWhy(entry: Entry, cls: LaneClass): string {
-    const lanes = this.#blockers(cls)
+  /** Why a queued lookup's check fails at once: the lanes it could take, and theirs. */
+  #stuckWhy(pending: Pending): string {
+    const host = pending.entry.host;
+    const lanes = this.#blockers(pending)
       .slice(0, 3)
-      .map((pending) => pending.entry.host);
+      .map((blocker) => blocker.entry.host);
+    const held = this.#heldBack(pending);
+    const whose =
+      held === 'domain'
+        ? `, its own domain’s, which holds the ${String(this.#domainFirstCap)} first lanes a ` +
+          `domain may while one of its lookups has`
+        : held === 'shared'
+          ? ', and the one lane left is kept for other domains while its own domain has a ' +
+            'lookup stuck lately'
+          : '';
     return (
-      `every lane a lookup for ${entry.host} could use is held by a lookup that has run past ` +
-      `${String(this.#stuckMs)} ms (${lanes.join(', ')}); it stays queued`
+      `every lane a lookup for ${host} could use is held by a lookup that has run past ` +
+      `${String(this.#stuckMs)} ms (${lanes.join(', ')})${whose}; it stays queued`
     );
   }
 
@@ -913,6 +1357,7 @@ export class NameResolver implements PoolResolver {
       state: 'queued',
       startedAt: 0,
       generation: this.#generation,
+      startedSeq: 0,
       stuck: false,
       stuckTimer: undefined,
       waiters: new Set(),
@@ -946,14 +1391,20 @@ export class NameResolver implements PoolResolver {
    * The queued lookup a free lane of this class takes: "Check now"'s first, then the name whose
    * domain has the least of its names failing, its own failure left out, then, among retries, the
    * name with the fewest failures in a row and then the one that answered most recently, then the
-   * oldest. With nothing failing and no "Check now", the oldest.
+   * oldest. With nothing failing and no "Check now", the oldest. Never a first lookup held back
+   * (`P-438`): undefined when every one queued is.
    */
   #takeNext(cls: LaneClass): Pending | undefined {
     const queue = this.#queues[cls];
-    let best = 0;
+    // A first lookup whose domain holds all it may, or that would take the last shared lane from
+    // the other domains, waits (`P-438`).
+    let best = queue.findIndex((pending) => this.#heldBack(pending) === undefined);
+    if (best === -1) return undefined;
     if (queue.length > 1 && (this.#failingNames > 0 || this.#urgentQueued > 0)) {
       let bestRank: number[] | undefined;
       for (const [index, pending] of queue.entries()) {
+        // Those before the first that may run are each held back.
+        if (index < best || (index > best && this.#heldBack(pending) !== undefined)) continue;
         const entry = pending.entry;
         const rank = [
           pending.urgent ? 0 : 1,
@@ -987,38 +1438,32 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
-   * The lookups whose end could give a queued lookup of this class a lane: its own class's when it
-   * holds all it may, and otherwise every shared lane's. Never a lane it could not take.
+   * The lookups whose end could give a queued lookup a lane: its domain's first lookups, when it is
+   * held back to them (`P-438`); its own class's when that holds all it may; and otherwise every
+   * shared lane's, as when it is held back from the last of them. Never a lane it could not take.
    */
-  #blockers(cls: LaneClass): Pending[] {
+  #blockers(pending: Pending): Pending[] {
+    const cls = pending.cls;
     if (cls === 'retry') return [...this.#running.retry];
+    if (this.#heldBack(pending) === 'domain') return this.#domainRunning(pending);
     if (this.#running[cls].size >= this.#capOf(cls)) return [...this.#running[cls]];
     return [...this.#running.first, ...this.#running.refresh];
   }
 
   /**
-   * Whether every lane a queued lookup of this class could take is held by a lookup that has run
-   * past `STUCK_MS`. A check then fails at once rather than waiting out its bound.
+   * Whether every lane a queued lookup could take is held by a lookup that has run past
+   * `STUCK_MS`. A check then fails at once rather than waiting out its bound.
    */
-  #lanesStuck(cls: LaneClass): boolean {
-    const blockers = this.#blockers(cls);
-    return blockers.length > 0 && blockers.every((pending) => pending.stuck);
+  #lanesStuck(pending: Pending): boolean {
+    const blockers = this.#blockers(pending);
+    return blockers.length > 0 && blockers.every((blocker) => blocker.stuck);
   }
 
   #pump(): void {
     for (;;) {
-      const cls: LaneClass | undefined =
-        this.#queues.retry.length > 0 && this.#canRun('retry')
-          ? 'retry'
-          : this.#queues.first.length > 0 && this.#canRun('first')
-            ? 'first'
-            : this.#queues.refresh.length > 0 && this.#canRun('refresh')
-              ? 'refresh'
-              : undefined;
-      if (cls === undefined) return;
-      const next = this.#takeNext(cls);
+      const next = this.#next();
       if (next === undefined) return;
-      // A lookup nobody waits for any more, for a name the hosts file or resolv.conf has since
+      // A lookup nobody waits for any more, for a name the watched files have since
       // replaced, is not worth a lane.
       if (next.waiters.size === 0 && this.#entries.get(next.entry.key) !== next.entry) {
         next.state = 'done';
@@ -1029,9 +1474,24 @@ export class NameResolver implements PoolResolver {
     }
   }
 
+  /**
+   * The queued lookup the next free lane takes: a retry, then a first lookup, then a refresh, each
+   * when its class may run another. A class whose queued lookups are all held back (`P-438`)
+   * leaves the lane to the next.
+   */
+  #next(): Pending | undefined {
+    for (const cls of ['retry', 'first', 'refresh'] as const) {
+      if (this.#queues[cls].length === 0 || !this.#canRun(cls)) continue;
+      const next = this.#takeNext(cls);
+      if (next !== undefined) return next;
+    }
+    return undefined;
+  }
+
   #run(pending: Pending): void {
     pending.state = 'running';
     pending.startedAt = this.#now();
+    pending.startedSeq = this.#events;
     pending.generation = this.#generation;
     this.#running[pending.cls].add(pending);
     pending.stuckTimer = setTimeout(() => {
@@ -1081,8 +1541,8 @@ export class NameResolver implements PoolResolver {
     }
     // And whatever is queued behind lanes that are now every one stuck stops waiting too.
     for (const cls of ['first', 'refresh', 'retry'] as const) {
-      if (!this.#lanesStuck(cls)) continue;
       for (const queued of this.#queues[cls]) {
+        if (queued.waiters.size === 0 || !this.#lanesStuck(queued)) continue;
         for (const waiter of [...queued.waiters]) {
           this.#deliver(
             queued,
@@ -1092,7 +1552,7 @@ export class NameResolver implements PoolResolver {
               waiter.fresh,
               now,
               RESOLVER_STUCK,
-              this.#stuckWhy(queued.entry, cls),
+              this.#stuckWhy(queued),
             ),
           );
         }
@@ -1135,6 +1595,8 @@ export class NameResolver implements PoolResolver {
     clearTimeout(pending.stuckTimer);
     this.#running[pending.cls].delete(pending);
     const entry = pending.entry;
+    // Whatever it said, a loaded answer no longer stands for its domain (`P-438`).
+    this.#unload(entry);
     // Whether the name still stands for this lookup: not once the configuration moved on.
     const current = entry.pending === pending || pending.generation === this.#generation;
     if (entry.pending === pending) entry.pending = undefined;
@@ -1142,6 +1604,8 @@ export class NameResolver implements PoolResolver {
 
     // The same for every waiter, or undefined when each is told by what the entry now holds.
     let outcome: ResolveOutcome | undefined;
+    // An answer under the current configuration: else a lookup stuck stays its domain's history.
+    let answered = false;
     // A failure that says nothing about the name: each waiter is told it, "Check now" given the
     // kept answer, and nothing is kept.
     let passed: { readonly code: string; readonly why: string } | undefined;
@@ -1183,6 +1647,18 @@ export class NameResolver implements PoolResolver {
         entry.denial = undefined;
         entry.hold = undefined;
         this.#setFailures(entry, 0, now);
+        // Its domain answers under this configuration (`P-438`): from DNS, not from the hosts
+        // file, which `getaddrinfo` reads first and which answers for a silent zone too.
+        const domain = this.#domains.get(entry.domain);
+        if (domain !== undefined && !hostsLists(this.#view, entry.host, entry.family)) {
+          domain.answeredAt = now;
+          this.#events += 1;
+          domain.answeredSeq = this.#events;
+          // An answer after `STUCK_MS`: the domain's resolver is slow, not silent (`P-438`'s
+          // narrow check).
+          if (pending.stuck) domain.slowSeq = this.#events;
+        }
+        answered = true;
         outcome = { ok: true, addresses };
       }
     } else {
@@ -1207,6 +1683,11 @@ export class NameResolver implements PoolResolver {
         // trouble, not an answer about the name, so nothing is kept and the kept answer stays.
         passed = { code: code ?? RESOLVER_FAULT, why: message };
       }
+    }
+    // Ended stuck without an answer (`P-438`'s review): its domain counts as stuck for `STUCK_MS`
+    // more, while what started as it ended is not stuck yet.
+    if (pending.stuck && !answered && pending.generation === this.#generation) {
+      this.#endedStuck(entry, now);
     }
 
     for (const waiter of [...pending.waiters]) {

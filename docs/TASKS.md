@@ -12863,6 +12863,464 @@ because each is a decision rather than a defect:
       - a test drives available memory around the reserve and asserts at most one hold and one
         release, and a bounded number of grows;
       - `pool-memory-cap.test.ts`'s line count is extended to the toggle case.
+- [x] **P-438 — a probe restarted during an outage starts with nothing kept** · M · P-426, A-66 ·
+      Filed 2026-10-18 by the user's decision, for 1.0 ahead of rc.3. The third quiet window ran
+      `test:perf`'s name lookups at full size on `5b6bbd2a`: slow 5,000 of 5,000, the warm zone's
+      answering 36,000 of 36,000, everything silent with nothing refused and jitter p95 28 ms. The
+      one case left is the cold one, a probe restarted in the middle of a one-zone outage: 29,249
+      of the answering zone's 31,500 checks answered and 2,251 given up, the last of its 450 names
+      kept 31 s from the wheel's start. The probe's resolver keeps answers in memory only, so a
+      restart is a cold start: the silent zone's first lookups take the lanes, and the answering
+      zone's queue behind them until `getaddrinfo` gives up on each.
+
+      **Done when:**
+      - the probe writes the answers its resolver keeps to a file in its own state directory at
+        stop and periodically: bounded in size, mode 0600, written to a temporary file and renamed,
+        and never holding the event loop the scheduler runs on;
+      - at start it loads that file before the first scan, each answer served as P-426 serves an
+        expired one (while a refresh asks again) and never past its grace, with the file's
+        wall-clock times turned to the monotonic clock and a time in the future or past the grace
+        not used;
+      - a missing, corrupt, truncated, oversized, wrong-version or foreign file is ignored with one
+        log line, never a refusal to start, each with a test;
+      - whether holds, denials and failures in a row survive a restart is decided and argued;
+      - Probe Health shows how many answers were loaded at start;
+      - a scenario: a probe runs warm, stops during a one-zone outage, and a second starts from its
+        file and answers the answering zone from its first scan;
+      - `test:perf` has the restart-during-outage arm with the file loaded, and the command for a
+        quiet window to read it against the third window's 2,251 and 31 s.
+
+      **P-438 outcome. The resolver's answers are kept across a restart; a domain not known to
+      answer leaves a lane to the others.**
+      - **The file.** `probe/src/resolver/answer-file.ts` keeps `name-answers.json` in the probe's
+        spool directory (`probe.spoolDir`, `/var/lib/ms-probe/spool` on Linux), beside
+        `identity.json` and the spool's cursor; the spool reads only its `.ndjson` files and its
+        cursor.
+        - **Format 1**: `format`, `version`, `writtenAt`, on Linux `bootId` and `monotonicAt`
+          (the review's AF-3), and the answers, each its name, family, addresses, and when it was
+          answered and expires on the wall clock, most recently asked first.
+        - **Written** every 60 s and at stop, never two at once, 500 answers a slice with a turn of
+          the event loop between, at most 4 MiB (the least recently asked left out). To a new
+          temporary file at 0600, the mode set again whatever the umask, synced and renamed over
+          the last: a write that fails keeps the file before it and logs one warning.
+        - **Read** before the first scan: `main.ts` loads it, then starts the resolver and the
+          timer. The `name-resolver` shutdown hook (now 2 s) stops the resolver and writes,
+          after the check pool's hook and well inside the ten seconds the spool is left.
+      - **What is loaded** (`NameResolver.restore`): each answer as expired, its expiry the
+        earlier of its own and now, so the first check of its name is served it while a refresh
+        asks again, and never past its own expiry and 5 minutes. The file's wall-clock times
+        become ages at the load, from how long ago it was written as well as that can be known:
+        since this boot, by the monotonic clock, or the wall clock's when it says longer; before
+        it, by the wall clock, and nothing loaded when that says less than the uptime (the clock
+        was put back at the boot); with no boot known, by the wall clock, and nothing loaded from
+        a file written in the future. Not loaded either: an answer past its grace, a name the
+        hosts file gives now for its family, when nsswitch.conf reads the file first, a name
+        given twice or kept already, any over 10,000, and an entry this build could not have
+        written (no name, an address for a name, no address or more than 64, an address of
+        another family, times out of order or kept longer than 30 s).
+      - **A file it cannot use is a cold start, never a refusal to start**, in one line naming
+        why: none (info), a symbolic link, not a regular file (from the `lstat`, before any open,
+        so a FIFO is never opened; opened `O_NONBLOCK` on POSIX for one put there since), larger
+        than 4 MiB, owned by another user or with any group or other mode bit (POSIX), a path it
+        cannot look at, cut short or not JSON, another format, a version but 1 (said in at most
+        40 characters), no `writtenAt`, boot fields the probe does not write, a time it cannot
+        tell the age of, or no list. An unexpected error is a cold start too.
+      - **Decided: answers only.** Holds, denials and failures in a row are not kept. A restart is
+        what an operator does after fixing DNS, and a kept "not answering" or "no such name"
+        would hide the fix for up to a minute (the longest hold) or 30 s (a denial), failing
+        scans that would pass; answers alone remove the measured failure. A name the hosts file
+        gives is neither written nor loaded: the file is read again at start, and may have
+        changed.
+      - **No config key**: the path follows `probe.spoolDir`, and nothing in it needs tuning.
+      - **Protocol 37**, a message change, so not 36 in place (36 builds run on `ms-server` and in
+        development, and the heartbeat's schema is closed): capability `answerFile` and the
+        heartbeat's `answersLoaded`, stripped for a core below 37. Core Probe Health reads it (a
+        gap when absent), the Probe Health type has a channel "Name answers loaded at start" with
+        no limits, and `/metrics` has `ms_probe_name_answers_loaded`. `api-reference.md` and
+        `sensor-reference.md` regenerated.
+      - **Deploy, checked, nothing changed.** On Linux `setup.sh` makes `/var/lib/ms-<svc>` 0750,
+        owned by the service user, for `--components probe` too, which the packages and
+        `install-probe.sh` run; the unit runs as `ms-probe` with `StateDirectory=ms-probe` and
+        `ReadWritePaths=/var/lib/ms-probe`, and the probe makes its spool directory itself. On
+        Windows the mode bits and the owner check do not apply, and the spool directory inherits
+        `ProgramData`'s access list: filed as `P-444`.
+      - **The cap** (decided 2026-10-18 in three rounds; `P-432`'s second design round reached the
+        same rule and calls it "unacked: 3"; tightened by the review below). A domain
+        (`domainOf`, so a sub-zone is its own) may hold all 4 first-lookup lanes only while both
+        hold (`#heldBack`, `#answering`, `#stuckLately`):
+        - (a) one of its names got an answer from DNS under the current configuration within the
+          last `ANSWER_MS` (30 s), an answer for a name the hosts file lists for the family not
+          counting, whatever nsswitch.conf says; an answer the answer file gave counts until a
+          lookup for its name settles, and never past its own grace, and not for a name the hosts
+          file lists;
+        - (b) it has had no lookup stuck lately: none in flight, a first lookup, a refresh or a
+          retry, has run past `STUCK_MS` with no lookup of the domain that ran as long answering
+          since it started (`silentSoFar`), and none ended so, stuck without an answer, within
+          the last `STUCK_MS` or since the last of its names answered from DNS.
+
+        Otherwise it may hold 3. So a never-answered domain gets 3 on the first tick, before any
+        of its lookups is stuck, and the answering domains keep the fourth; a healthy domain is
+        held to 3 only until its first answer; a zone answering in part is held while one name
+        hangs, and through the `STUCK_MS` after its hanging lookups end together, by when those
+        asked as they ended are stuck in turn. The rounds before: capping only while a lookup is
+        stuck could not reach a cold first tick, where about 8 silent names of the 80 a tick asks
+        fill the 4 lanes within a millisecond; capping only what had not answered missed a zone
+        answering in part.
+        - **A resolv.conf or nsswitch.conf change** resets both: every domain's last answer, its
+          loaded answers and its stuck history. An answer from a lookup the change cut loose
+          does not count.
+        - **The last shared lane** is not taken by a first lookup of a domain with a lookup stuck
+          lately, (b)'s, counting as taken every lane the refreshes running and queued may hold
+          (`first + 1 + min(4, refreshes running + queued) >= 5`): a lane freed goes to a first
+          lookup before a refresh (`#next`), so judged by what was running, each stuck refresh of
+          a warm zone gone silent that ended let its first lookup take the fourth shared lane and
+          its queued refresh the fifth.
+        - **A name the hosts file gives is never held back**, by either, where `getaddrinfo`
+          answers it from the file: nsswitch.conf's `hosts` line reads the file before DNS (with
+          no nsswitch.conf watched, Windows alone), and the file gives the name, as written,
+          trailing dot and all, an address of the family asked, or any for family 0. The line is
+          read as glibc reads it: the last `hosts` line, its name ended at a blank or a colon, a
+          list starting with an action read as none; the file is first when `files` comes before
+          any source that asks DNS with only `myhostname` or `mymachines` ahead, or when
+          `resolve` does (`hostsFileFirst`). `/etc/nsswitch.conf` is now watched beside the
+          hosts file and resolv.conf, and a change to it is a configuration change; a missing one
+          is glibc's default, DNS first. `answersToSave` and `restore` leave out the same names
+          by the same rule. Not in the decision; found by the hosts-edit scenario, where the
+          operator's fix for one silent device was held off the last shared lane and its sensor
+          went Warning for a scan. Said here so it can be undone.
+        - A lookup held back stays queued and waits for one of its own domain's first lookups to
+          end, or, held off the last shared lane, for any shared lane (`#blockers`), or for the
+          `STUCK_MS` after a stuck end to pass, which a timer marks (`#endedStuck`); `#ask` and a
+          configuration change look at the queue again too. Its check
+          fails at once when each of those is stuck, as it is asked (`#ask`) or when the last of
+          them becomes stuck (`#onStuck`). The FIFO and the ranked picks skip it, and a lane
+          every queued first lookup is held back from goes to a queued refresh (`#next`).
+          "Check now" is held to neither. With 3 lanes the cap is 1, and a domain whose refresh
+          is stuck takes no first lane.
+        - **Left as it is**: two domains held to 3 at once can take the 4 between them; `P-432`'s
+          helper bounds that, and a restart from the file keeps the answering zones answered
+          then (the two-zone scenario below).
+        - Lane tests that put every name in one domain or asked before any answer: "fails a check
+          at once when every lane … is stuck" has its stuck names in two domains, "fails a check
+          at once behind every refresh lane stuck" has its first lookup in another domain, and
+          "keeps what the new configuration said" runs with 7 lanes, since the old
+          configuration's three lookups fill the 3 a domain not yet answering under the new one
+          may hold.
+      - **The review** (2026-10-18, on `4febccd2`): 16 confirmed (2 major), 1 disputed, 1
+        refuted. Every one fixed:
+        - **L1** (major): a hosts-file answer set its domain's last answer, so a silent zone with
+          one name in the hosts file took all 4 lanes for 30 s after each. Only an answer from
+          DNS counts now (`#settle`).
+        - **L2** (major): the last-shared-lane rule looked at what ran now, and a freed lane goes
+          to a first lookup before a refresh: the rule above, judged from (b)'s history and with
+          the refreshes queued counted.
+        - **L3, F3, AF-2**: one grace end per domain, the latest of any loaded and never lowered.
+          A domain's loaded names are now a set, each counted within its own grace and let go
+          past it (`#answering`), and `#ask` unloads one it drops past its grace.
+        - **L4**: (b) looked only at what was in flight, and a domain's hanging lookups end
+          together: (b)'s history above. **L5**: the hosts-file exemption by name alone: by the
+          family asked and nsswitch's order now.
+        - **AF-1**: a FIFO at the file's path held `open`, and the start, for good: refused from
+          the `lstat` before any open, `O_NONBLOCK` added, and the check after the open says
+          "replaced … as it was opened". **AF-3**: the grace at load was the wall clock's alone:
+          the boot id and the monotonic clock above. A system with no clock of its own whose clock
+          file was saved after the probe's last write cannot be told apart; `administration.md`
+          says so, what it costs (each name's first check after the boot goes to the address it
+          had before the stop while its refresh asks, and for up to 5 minutes while DNS does not
+          answer) and what to do (delete the file after a long power-off). **AF-5**: a refused
+          file's version is said in at most 40 characters.
+        - **PROTO-1**: the release notes say protocol 28 to 37. **PROTO-2**: protocol 37's note
+          now says what `answersLoaded` tells apart.
+        - **F1** (disputed, done anyway): the restart-from-file scenario has two silent zones,
+          and the same restart with no file fails zone A. **F2**: the `zonefile` arm asserts the
+          silent zone served from the file through its grace, and its comment reads the
+          answering zone's none against `zone`. **F4**: the hosts-file exemption tested on the
+          per-domain path. **F5**: the cold scenario runs with a stuck bound of 1 s, so (a)
+          alone holds zone B on its first tick. **F6**: the window command below builds first and
+          reads the conditions after the load settles.
+        - AF-4, refuted: nothing done.
+      - **The narrow check** (2026-10-18, on `3df0625a`): 1 major, 4 minor, 1 nit. Every one fixed:
+        - **L2-slow-answering** (major): a lookup in flight past `STUCK_MS` counted as stuck when
+          its domain answered every lookup, so behind a resolver answering in 5 s (resolv.conf's
+          first nameserver down, glibc's timeout on it) a one-domain probe's refreshes kept the
+          last shared lane from its own first lookups: the checker's simulation resolved 69 of 200
+          names in 20 minutes. Now one in flight is silence only while no lookup of its domain
+          **that ran past `STUCK_MS` as well** has answered since it started (`silentSoFar`,
+          `DomainCount.slowSeq`, `Pending.startedSeq`). **A departure from the fix as given**,
+          which cleared it on any answer: that let a zone answering some names from a cache while
+          others hang take every lane again, which `P-432`'s attack round decided against and "holds
+          a domain whose names answer while one of them hangs" still asserts; a mutant of the
+          literal rule fails that test. One existing test changed: "keeps the last shared lane
+          from a first lookup of a domain whose refreshes are every one stuck" had one of its stuck
+          refreshes end answering, which is now evidence that the zone answers; it ends with
+          `EAI_AGAIN`.
+        - **window-release-no-pump**: when the `STUCK_MS` after a stuck end ran out, nothing
+          looked at the queue, and a lookup no longer held sat beside a free lane while its checks
+          failed `RESOLVER_STUCK`. A timer at the end of each such `STUCK_MS` pumps (at most one a
+          lane alive at once, each end having taken a lane that long), `#ask` pumps before judging
+          a queued lookup's lanes, and so does `checkFiles` after a change.
+        - **hosts-first-source-only** and **F1**: `hostsFileFirst` as above; and L1 no longer
+          depends on it: `#settle` and `restore` ask whether the hosts file lists the name for the
+          family (`hostsLists`), not whether nsswitch.conf reads it first.
+        - **F2**: under systemd-nspawn, or LXC without lxcfs, the boot id is the container's and
+          the uptime the host's, and every container reboot refused the file. The time since the
+          boot is now the smaller of the kernel's uptime and PID 1's age (`linuxSinceBootMs`,
+          `pid1AgeMs`: /proc/1/stat's start, field 22, against /proc/uptime, at 100 ticks a
+          second; the uptime alone where PID 1 reads as younger than the uptime, as under lxcfs);
+          where /proc/1 cannot be read the file is aged by the wall clock, as with no boot known.
+          `AnswerFileOptions.uptimeMs` is now `sinceBootMs`.
+        - **F3** (nit): the hosts comparison dropped a trailing dot, which glibc's files module
+          keeps: `hostsKey` keeps it now, so `foo.test.` is not the file's `foo.test`, and is
+          asked of DNS. `domainOf` still drops it.
+      - **Tests.**
+        - `answer-file.test.ts` (37, 5 new in the review, 3 in the narrow check): where the file
+          lives; writing (each answer kept, most recent first, wall-clock times, 0600; what is
+          left out; a name the hosts file gives only for the other family, or with DNS asked
+          first, kept; a name
+          forgotten mid-write; the bound; slices with the event loop between; the temporary file
+          made anew at 0600 whatever the umask; a failed write keeping the last; every minute and
+          at stop, never two at once); loading (before the first check, served at once while
+          asked again; within its own grace and never past it; past the grace; a file from the
+          future; a hosts-file name by family and nsswitch order; a file from this boot aged by
+          the monotonic clock with the wall clock put back an hour, by the wall clock when that
+          says longer, and refused when its monotonic time is ahead of now; one from another boot
+          refused when the clock says less than the uptime, and loaded at it; one from before a
+          container's boot timed from PID 1's start, not the host's uptime, and by the wall clock
+          alone where /proc/1 cannot be read, never in the future; PID 1's age read from /proc as
+          Linux writes it, a name with parentheses, a field cut short and lxcfs's uptime among
+          them (F2); the real boot id written and read back on Linux; duplicates, the bound and
+          entries it cannot use; never throwing); every refusal above, one line each, a FIFO
+          among them (refused within 5 s, never opened), a version cut short, and boot fields the
+          probe does not write; and the real probe process loading a seeded file, reporting
+          `answersLoaded` 1 in its heartbeat, and writing it again at 0600 at stop.
+        - `name-resolver.test.ts` (96: 23 for the cap, 12 more in the review, 9 in the narrow
+          check):
+          - (a): a cold first tick, one domain silent and another answering, the silent one held
+            to 3 and the other's first lookup on the 4th; a single healthy domain, 3 before its
+            first answer and 4 after; 3 again once its last answer is 30 s old; an answer the
+            file gave counting until its name's refresh settles, and not past its grace, nor once
+            the hosts file takes its name; two loaded names, the longer one's settled first, the
+            shorter counted to its own grace and no further (AF-2); a hosts-file answer leaving
+            its domain at 3 (L1); a resolv.conf change resetting it, for what was answered and
+            what was loaded, a late answer from the old configuration not counting, and letting
+            go of what hung under the old one.
+          - (b): a domain that answers, nothing stuck, takes all 4 however long its lookups run;
+            one with a lookup stuck holds 3 and the fourth goes to another domain, its parent
+            zone's too; all 4 again only once a stuck lookup has ended, one of its names has
+            answered since and `STUCK_MS` has passed; three stuck lookups ending together held
+            at 3, through `STUCK_MS` after a name answers, and past it until one answers from DNS,
+            denials not counting (L4); a domain answering for some names held while one hangs; a
+            stuck refresh counts, and a held name's retry stuck counts.
+          - The last shared lane: kept from a domain whose refreshes are every one stuck, its
+            check failing at once and another domain's taking the lane, until the lane is not the
+            last; and kept as four stuck refreshes end one at a time with refreshes and first
+            lookups of the zone queued, the lane left to another domain each time (L2); and given
+            to a new name of a domain whose every lookup answers after 2 × `STUCK_MS`, its
+            refreshes filling the refresh lanes (L2-slow).
+          - The `STUCK_MS` after a stuck end: a lookup it held back runs at its next check once it
+            is over, and runs the moment it is over when a check waits for it and nothing starts
+            or ends; and at once when a resolv.conf change lets go of what held it.
+          - A resolver answering every lookup slowly, the checker's simulation scaled down 20
+            times on the test's own timers (100 devices of one domain, a scan of 1 s, lookups of
+            250 to 259 ms, `STUCK_MS` 50 ms, answers kept 300 ms, checks waiting 900 ms): every
+            name answered within twice the lanes' own pace (16.7 s), and no check failing after.
+            Run here: 11 names by 1 s, 27 by 2 s, 75 by 5 s, all 100 by 6.7 s; 318 checks failed
+            `RESOLVER_STUCK` and 19 `RESOLVER_HELD` while they warmed, the last at 6.0 s, and none
+            in the 24 s after. The old rule, as a mutant: 24 names by 30 s, the last at 5.2 s,
+            and 2,315 checks failed `RESOLVER_STUCK`, the last at 30 s (the checker's run: 26 of
+            100).
+          - The hosts file: never held back, off the last shared lane or with its domain's 3
+            first lanes each stuck (F4); held back when the file gives the name only for the other
+            family, not for its own or family 0; held back when nsswitch.conf asks DNS first, does
+            not have `files` on its hosts line, has no hosts line, or is not there (L5);
+            nsswitch.conf's hosts line read as glibc reads it, 23 shapes of line (the last line, no
+            colon, `resolve`, `myhostname` and `mymachines` ahead, a list that starts with an
+            action, case); a name the file lists not counting its domain as answering under each
+            order, nor a loaded answer for one with DNS first; a trailing dot kept (F3).
+          - As before: "Check now" joining a held-back lookup runs it; a lane every first lookup
+            is held back from goes to a queued refresh; the ranked pick never takes a held-back
+            lookup; a held-back check failing at once when its domain's 3 are stuck, as asked and
+            as they become stuck; with 3 lanes, one before any answer and none for a domain whose
+            refresh is stuck; a lookup a resolv.conf change cut loose counting as stuck.
+          - Changed in the review: the stuck refresh and retry tests answer past `STUCK_MS`; "lets
+            a domain with one of its refreshes not stuck take the last shared lane" is L2's test
+            now, since a domain with a lookup stuck lately may not; the queued-refresh test starts
+            zone B's first lookups before the refreshes, for the same reason.
+        - `name-lookup-outage-scenario.test.ts` (5): the restart from the file, with two silent
+          zones of ten names each (F1): probe A warm, zones B and C silent, A stops and writes;
+          the same restart with no file fails zone A's checks behind the two zones' 4 first
+          lookups; B loads the file, and all 80 zone-A checks of its first scan are answered,
+          each under 1 s, zone A never changing state, zones B and C Warning then Down once at
+          the wall time they would have without the restart. It waits for A's held-up refreshes
+          before the stop: on the test's clock a silent lookup outlives three scans, and stopped
+          before they ran, the file's zone-A answers were from A's first scan and their grace
+          ended before B's third. And a cold start, every device handed to the pool at once, ten
+          silent names asked before any is stuck, with a stuck bound of 1 s so that only (a) can
+          hold zone B on its first tick (F5): zone A answered on the fourth lane from the first
+          scan, each under 1 s, never changing state; zone B Down at its second scan. The
+          hosts-edit case, now with an nsswitch.conf reading the file first, found the hosts-file
+          exemption above. It failed once in 18 runs after the review, with no message: every
+          wait in the five cases now has a labelled `within`, and each wait and assertion names
+          what it waited for and the resolver's state then (answered, held, in flight, the
+          lanes), so that the next failure names its cause. The 50 ms stuck bound is kept: with
+          the VM loaded to 11 to 26 on 8 CPUs, the file 4 to 5 times slower (32 to 46 s), the
+          case passed 6 of 6, and the exemption's mutant still fails it. Run 20 times in a row
+          after the narrow check, gated, with another project's CI taking the VM from the eighth
+          run: the first 7 passed 5 of 5 at a load of 5 to 10, 58 to 69 s each; from the eighth,
+          at a load of 26 to 72 with the VM's swap full, 42 cases failed in 12 runs, and the 20th
+          ran past the run's own bound. Each failure named its cause: 40 the pool's workers not
+          started within 30 s, one a scan's results not in within 10 s with the pool's workers
+          busy and checks queued, and one zone A's checks at the restart past their 2 s bound,
+          one with the main thread not taking the lookup ("the probe is overloaded") and the
+          other measured at 3.4 s on its 2 s timer. The hosts-edit case passed 12 times and
+          failed only waiting for its workers. Not yet re-taken on a quiet VM.
+        - Protocol and Probe Health: `capabilities.test.ts` (65), `probe-health-report.test.ts`
+          (48), core `probe-health.test.ts` (130) and `metrics.test.ts` (38),
+          `health-types.test.ts` (24).
+        - Beside them, unchanged and passing: `listener-lookup` (4), `pool-resolve` (7),
+          `resolve-client` (8), `core-client` (10), `capability-versions` (5), `messages` (132),
+          and core's `probe-endpoint` (69), `api-reference-render` (27), `build-hygiene` (25)
+          and `deploy-scripts` (129). Run again after the review, on the tree as committed:
+          `listener-lookup` (4), `pool-resolve` (7), `resolve-client` (8), `core-client` (10),
+          `capabilities` (65) and `messages` (132); the review changed a comment in
+          `messages.ts` and nothing the core reads. And after the narrow check, rebased on
+          `358bdaa3`: `name-resolver` (96), `answer-file` (37), the outage scenario (5),
+          `listener-lookup` (4), `pool-resolve` (7), `resolve-client` (8), `core-client` (10),
+          `capabilities` (65) and `messages` (132), every one passing.
+      - **Mutants**: 54, one at a time, each against the suite that should catch it, 52 killed;
+        then 27 on the cap as finally decided, all killed; then 32 on the review's fixes, 30
+        killed and 2 equivalent; then 18 on the narrow check's, all killed.
+        - **The narrow check's, 18**:
+          - L2-slow: the old rule, a lookup past `STUCK_MS` silent whatever its domain answered
+            (the new lane test fails, and the slow resolver's simulation answers 24 of 100); the
+            fix as given, any answer since the lookup started clearing it, which fails "holds a
+            domain whose names answer while one of them hangs", "counts a refresh stuck as one of
+            the domain's lookups stuck" and "counts a lookup the configuration has moved on from
+            as its domain's while it runs stuck": the reason for the departure; a slow answer not
+            recorded;
+          - the window: `#ask` not pumping, no timer, `checkFiles` not pumping after a change;
+          - the reader: the first source alone, the first hosts line, the colon required,
+            `resolve` not reading the file, a list that starts with an action read;
+          - L1 by nsswitch's order rather than the file, in `#settle` and in `restore`; F3, the
+            trailing dot stripped;
+          - F2: the kernel's uptime alone, no time since the boot refusing the file, PID 1's
+            fields counted from its first parenthesis, a negative PID 1 age taken as it is.
+          - And the scenario's three again with its waits labelled, each against its own case:
+            the hosts-file exemption dropped, (a) dropped, and the file loading nothing.
+        - **The review's, 32** (and an unmutated control of the `zonefile` arm, passing):
+          - the cap: a hosts-file answer counted (L1); the last shared lane judged by the
+            refreshes running alone, or the rule dropped (L2); no history, the `STUCK_MS` after an
+            end dropped, since-the-answer dropped, an end stuck not recorded, an answer not ending
+            the history, a configuration change keeping it (L4); a loaded answer counted past its
+            own grace, or after its name's lookup settles (AF-2);
+          - the hosts file: the family ignored, nsswitch's order ignored, `files` anywhere taken as
+            first, an empty or absent nsswitch.conf taken as files first, the exemption below the
+            per-domain cap (F4), the family ignored in `answersToSave` and in `restore`, and the
+            exemption dropped against the hosts-edit scenario;
+          - the file: neither the `lstat` refusal nor `O_NONBLOCK` (the FIFO test fails at its 5 s
+            bound and lets the open go), the `lstat` refusal alone (AF-1); this boot aged by the
+            wall clock alone or by the monotonic clock alone, another boot not bounded by the
+            uptime, the boot not written, a negative monotonic age loaded (AF-3); the version not
+            cut short (AF-5);
+          - the scenarios and the arm: (a) dropped against the cold scenario alone, with its 1 s
+            bound (F5); the file loading nothing against the two-zone restart alone (F1); and
+            `restore` keeping each answer past its grace against a `zonefile` arm at 200 sensors
+            for 15 s, which fails only on the new assertion, "every silent-zone check within its
+            grace served the answer the file kept", 0 of 5, while the answering zone answered 47
+            of 47 cold (F2).
+          - **Two equivalent, as expected.** `#ask` not unloading an answer it drops past its
+            grace: `#answering` lets go of a loaded answer at its own grace whoever asks, so the
+            unload in `#ask` only keeps the set small sooner. `O_NONBLOCK` dropped with the
+            `lstat` refusal kept: a FIFO there before the open is refused from the `lstat`, and
+            `O_NONBLOCK` only covers one put there between the `lstat` and the open, which no test
+            can time.
+          - Four first ran to the 120 s test timeout, the nsswitch-order and family tests waiting
+            on a check that should have failed at once: they now assert it settled before reading
+            it, and the four were run again with the configuration-history mutant, which first
+            survived and now fails "lets go of what hung under the old configuration".
+        - **The cap as decided, 27**: (a) dropped (the resolver suite and the cold scenario each
+          fail), (b) dropped, the 30 s ignored, loaded answers not counted, retries not counted;
+          a resolv.conf change resetting nothing, the old configuration's late answer counted,
+          an answer under the current one not recorded; a loaded answer still counted after its
+          name's lookup settles, past its grace, or after its name is forgotten; the last
+          shared lane given, kept from a domain with any refresh stuck, or every shared lane
+          kept rather than the last; a hosts-file name held back (the resolver suite and the
+          hosts-edit scenario each fail); "Check now" held, every domain counted as one, no
+          floor of one, the blockers its class's, both messages, both picks taking a held-back
+          lookup, no fall-through to a refresh; and the restart scenario with nothing loaded.
+        - **The cap's first rounds, 17**, run on the rule before the last: the stuck test
+          removed, `STUCK_MS` ignored, refreshes not counted, the cap kept once a domain had a
+          lookup stuck, a domain keyed by its last two labels, and the rest as above.
+        - **Restore and save, 10**: kept fresh, the grace from the load, past the grace, hosts
+          names, duplicates, the bound, the order, and each of the three save filters.
+        - **The file, 20**, and **the probe, protocol and Probe Health, 7**.
+        - **Two survived.** `F13`, `savedAnswer`'s own check that a name is not an address,
+          was equivalent: `restore` refuses the same name and counts it with the others. That
+          check is gone, and a mutant on `restore`'s (`F13b`) fails 2 tests. `P02`, `main.ts`
+          loading the file without waiting for it, survives: no check runs before the probe has
+          connected to its core, so the load ends first in any test that runs the process. The
+          `await` is what keeps it so, and no test reads it.
+      - **Perf.** A `zonefile` arm: a resolver of its own answers every device's name and writes
+        the file at stop; the arm's resolver loads it before the wheel starts, and it asserts
+        every name loaded, the silent zone served what the file kept through its grace (every
+        check of it before its grace ends answered: the review's F2), the answering zone never
+        given up and nothing refused, and past the grace the silent zone failing. The silent
+        zone's checks are now counted before or past their own name's grace, from its last
+        answer before the silence or from the file's load, with those within 2 s of it apart (the
+        third window's 174 given up "inside the grace" were this boundary). Smoke runs, not the
+        measurement. Every arm at 200 sensors for
+        15 s (`MS_DNS_SENSORS=200 MS_DNS_MINUTES=0.25 MS_DNS_POOL=8 MS_DNS_HANG_MS=5000`), 7 of 7:
+        `zonefile` loaded 20 and answered 45 of 45 and the silent zone's 5 of 5 kept, and `zone`
+        answered 45 of 45 with the 5 given up all silent. `MS_DNS_ARMS=warmzone,zonefile` at that
+        size, 6 minutes each, past the grace:
+        - `warmzone`: answering 1,260 of 1,260; the silent zone's kept answers 101 of 101; 2 of 3
+          at the edge; past the grace 16 of 16 given up.
+        - `zonefile`: 20 loaded; answering 1,080 of 1,080; kept 99 of 99; 1 of 1 at the edge; past
+          the grace 20 of 20 given up.
+        - **The window's command**, with `ms-server` stopped, the other project's containers
+          paused and no other toolchain run, as the third window was. Built first, in a run of its
+          own, and the conditions read after three minutes, so that the load they print is the
+          window's and not the compile's (the review's F6):
+          `./scripts/dev.sh "timeout 600 npx tsc -b packages/probe"`, then
+          `./scripts/dev.sh "timeout 2100 sh -c 'sleep 180; node scripts/perf-conditions.mjs;
+          MS_DNS_ARMS=zone,zonefile MS_DNS_COLD_MINUTES=7 node --test --test-concurrency=1
+          packages/probe/dist/test/perf/name-lookups.test.js'"`. Read `zone` and `zonefile`
+          against the third window's 2,251 given up and 31 s.
+        - **Expected**: `zone` improves on the third window. The silent zone, never answered,
+          holds 3 lanes from the first tick and the answering zone is asked on the fourth, its
+          names answering at once in the model, so its given-up checks fall from 2,251 towards
+          none, and every answering name is kept as soon as a check first asks it (the wheel
+          reaches each within about 27 s) rather than at 31 s. Check-run time and jitter may rise
+          a little: checks that failed at once now do their 200 ms of work. The silent zone still
+          fails every check from the first scan. `zonefile`: all 500 names loaded, every silent-zone
+          check before its grace ends served what the file kept, none of the answering zone's
+          checks given up, and the silent zone failing past its grace. The review's changes do not
+          move `zone`'s expectation: one silent zone, never answered, is held to 3 by (a) from the
+          first tick as before, and (b)'s history and the last-shared-lane rule hold it there
+          once its lookups start ending.
+        - **Not a measurement**: one 1-minute `zone` arm at full size on a busy host (`ms-server`
+          up, the other project's containers running, P-437's run alongside) gave up none of the
+          answering zone's checks, with all 450 of its names kept by 28 s. On that host it also
+          refused 653 checks and failed 138 for other reasons, with a jitter p95 of 28 s, which
+          the third window, on a quiet one, did not. A second try beside P-437's run died without
+          output, most likely for memory, and was not repeated. The window says which of those
+          is the host's.
+- [ ] **P-444 — a Windows probe's data directory inherits `ProgramData`'s access list** · S ·
+      H-06, P-438 · Found 2026-10-18 by `P-438`. `install-probe.ps1` makes
+      `%ProgramData%\MonitoringSystem\probe\spool` and leaves its access list to inheritance; it
+      locks down `tls\probe.key` alone, to SYSTEM and Administrators with inheritance broken. The
+      spool directory holds `identity.json`, which carries the key the core issued to this probe
+      once approved, the spooled results, and since `P-438` `name-answers.json`, the names of the
+      probe's devices and their addresses. Inherited from a default `ProgramData`, every local user
+      can read them, and can create a file in the directory. The probe makes no owner or mode check
+      on Windows, as it does on POSIX, so a local user could put an answer file in place before the
+      probe's first write, and the probe would serve its addresses for up to five minutes: the
+      target policy and a credential's pinned address still judge each, but a check with a
+      credential and no pin would send it to whatever address the policy allows. **Done when** the
+      installer, and `ms-setup.ps1` on an upgrade, give the probe's data directory to SYSTEM and
+      Administrators only, inheritance broken, as they do the key; the probe refuses an answer
+      file on Windows whose owner is not the service's account or whose list grants anyone else,
+      with a test where one can run; and the Windows smoke (`S-11`) reads the list.
 - [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
       `#retire` and `#startTimedOut` do, so a memory reading during a slow terminate treats that

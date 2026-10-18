@@ -49,6 +49,7 @@ import {
   resolverLanes,
   threadpoolSize,
 } from './resolver/name-resolver.js';
+import { AnswerFile, answerFilePath } from './resolver/answer-file.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -231,13 +232,25 @@ async function main(): Promise<void> {
   const threads = threadpoolSize(process.env['UV_THREADPOOL_SIZE']);
   const libuvLanes = lookupLanes(threads);
   const resolver = new NameResolver({ logger, lanes: resolverLanes(libuvLanes) });
+  // The answers it kept before the last stop (`P-438`), loaded before the first scan, so that a
+  // probe restarted in the middle of an outage serves what it had while it asks again; written
+  // every minute and at stop. A file it cannot use is a cold start, said in one line.
+  const answerFile = new AnswerFile({
+    path: answerFilePath(config.probe.spoolDir),
+    resolver,
+    logger,
+  });
+  await answerFile.load();
   resolver.start();
+  answerFile.start();
+  // After the check pool has stopped (registered before it), so the last answers are in; well
+  // inside the ten seconds the pool and the process runner leave the spool (`P-227`).
   lifecycle.onShutdown({
     name: 'name-resolver',
-    timeoutMs: 1_000,
-    run: () => {
+    timeoutMs: 2_000,
+    run: async () => {
       resolver.stop();
-      return Promise.resolve();
+      await answerFile.stop();
     },
   });
   const lanesSaid = {
@@ -590,6 +603,8 @@ async function main(): Promise<void> {
     // runner's, and the probe's resolver's running and queued (`P-426`), which every worker's
     // lookup is. All of them on the same libuv thread pool.
     lookups: lookupsBesideThePool(queries, resolver),
+    // How many answers the resolver loaded from its answer file at start (`P-438`).
+    answersLoaded: () => answerFile.loaded(),
     // Only when this probe runs that listener. What the channels are for is `rejected`: a device
     // sending the wrong community has every message dropped before the ring, so the sensor reads
     // a quiet network rather than a receiver turning everything away (`P-64`).

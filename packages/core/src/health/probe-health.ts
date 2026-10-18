@@ -676,6 +676,9 @@ export class ProbeHealthService {
       // either end below protocol 36, never a zero that reads as a resolver answering everything.
       lookupsInFlight: health?.lookupsInFlight ?? null,
       lookupsGivenUp: health?.lookupsGivenUp ?? null,
+      // `P-438`. The answers the probe's resolver loaded at start from those it kept when it last
+      // stopped: a gap for a build without the file and for either end below protocol 37.
+      answersLoaded: health?.answersLoaded ?? null,
       scheduled: health?.scheduled ?? null,
       skippedTicks: health?.skippedTicks ?? null,
       spoolDepth: health?.spoolPending ?? null,

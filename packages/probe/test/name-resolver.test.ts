@@ -24,6 +24,7 @@ import {
   DENIAL_MS,
   domainOf,
   HOLD_MAX_MS,
+  hostsFileFirst,
   hostsNames,
   lookupLanes,
   MAX_ADDRESSES,
@@ -512,16 +513,18 @@ describe('the resolver’s lanes (P-426)', () => {
 
   it('fails a check at once when every lane its lookup could use is stuck; the lookup stays queued', async () => {
     const { ask, last, callsFor } = make();
-    const stuck = ['s1', 's2', 's3', 's4'].map((name) => `${name}.test`);
+    // Two other domains' lookups, so that a lane one of them gives back is early's to take: a
+    // domain none of whose names has answered may hold no more than 3 of the 4 (`P-438`).
+    const stuck = ['s1.zone-b.test', 's2.zone-b.test', 's3.zone-b.test', 's4.zone-c.test'];
     // Their own checks wait out their bound, as a check already waiting does.
     const held = stuck.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
     // Asked before the lanes were stuck: waits, and is failed the moment they are.
-    const early = ask('early.test', 4, { waitMs: 60_000 });
+    const early = ask('early.zone-a.test', 4, { waitMs: 60_000 });
     const failedEarly = assert.rejects(early, (error: Error) => {
       assert.equal(codeOf(error), RESOLVER_STUCK);
       assert.match(
         error.message,
-        /every lane a lookup for early\.test could use is held by a lookup that has run past 40 ms \(s1\.test, s2\.test, s3\.test\); it stays queued/u,
+        /every lane a lookup for early\.zone-a\.test could use is held by a lookup that has run past 40 ms \(s1\.zone-b\.test, s2\.zone-b\.test, s3\.zone-b\.test\); it stays queued/u,
       );
       return true;
     });
@@ -533,19 +536,19 @@ describe('the resolver’s lanes (P-426)', () => {
       within(
         1_000,
         'a check behind stuck lanes to fail at once',
-        ask('late.test', 4, { waitMs: 60_000 }),
+        ask('late.zone-a.test', 4, { waitMs: 60_000 }),
       ),
       (error) => codeOf(error) === RESOLVER_STUCK,
     );
     assert.ok(performance.now() - started < 20, 'at once');
-    assert.equal(callsFor('early.test').length, 0, 'not run yet');
+    assert.equal(callsFor('early.zone-a.test').length, 0, 'not run yet');
     // A lane comes back: the queued lookup runs, and its answer is kept for the next check.
-    last('s1.test').answer();
+    last('s1.zone-b.test').answer();
     await settled();
-    assert.equal(callsFor('early.test').length, 1, 'it stayed queued, and ran');
-    last('early.test').answer();
+    assert.equal(callsFor('early.zone-a.test').length, 1, 'it stayed queued, and ran');
+    last('early.zone-a.test').answer();
     await settled();
-    assert.deepEqual(await ask('early.test'), A);
+    assert.deepEqual(await ask('early.zone-a.test'), A);
     for (const name of stuck.slice(1)) last(name).answer();
     assert.deepEqual(await within(1_000, 'the stuck lanes’ own checks', Promise.all(held)), [
       A,
@@ -585,7 +588,9 @@ describe('the resolver’s lanes (P-426)', () => {
 
   it('fails a check at once behind every refresh lane stuck, though a first lookup’s lane is not', async () => {
     // A refresh queued while the refreshes hold all the lanes they may can only take one of
-    // theirs: a first lookup's lane, running and not stuck, is not a lane it could get.
+    // theirs: a first lookup's lane, running and not stuck, is not a lane it could get. The first
+    // lookup is another domain's: the last shared lane is kept from one of the domain whose
+    // refreshes are every one stuck (`P-438`).
     const { ask, last, clock, callsFor } = make();
     const warm = ['r1', 'r2', 'r3', 'r4', 'late'].map((name) => `${name}.test`);
     for (const name of warm) {
@@ -599,8 +604,8 @@ describe('the resolver’s lanes (P-426)', () => {
     // late's kept answer is past its grace now, so a check of it waits for that refresh.
     clock.now = ANSWER_MS + STALE_MS;
     await pastStuck();
-    const first = ask('first.test', 4, { waitMs: 60_000 });
-    assert.equal(callsFor('first.test').length, 1, 'a first lookup runs, not yet stuck');
+    const first = ask('first.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('first.zone-a.test').length, 1, 'a first lookup runs, not yet stuck');
     const behind = ask('late.test', 4, { waitMs: 60_000 });
     assert.equal(await isSettled(behind), true, 'at once');
     await assert.rejects(behind, (error: Error) => {
@@ -608,7 +613,7 @@ describe('the resolver’s lanes (P-426)', () => {
       assert.match(error.message, /\(r1\.test, r2\.test, r3\.test\); it stays queued/u);
       return true;
     });
-    last('first.test').answer();
+    last('first.zone-a.test').answer();
     assert.deepEqual(await first, A);
     for (const name of warm.slice(0, 4)) last(name).answer();
     await settled();
@@ -640,6 +645,898 @@ describe('the resolver’s lanes (P-426)', () => {
     assert.equal(resolverLanes(lookupLanes(64)), 6, 'never more than 6');
     assert.equal(resolverLanes(lookupLanes(12)), 4);
     assert.equal(resolverLanes(lookupLanes(4)), 3, 'never fewer than its classes need');
+  });
+});
+
+describe('a domain not known to answer, or with a lookup stuck, takes at most 3 of the 4 first-lookup lanes (P-438)', () => {
+  // Each test passes the bound for stuck itself, on a mocked `setTimeout`, so which lookups are
+  // stuck is the test's to say, not the host's speed.
+  const b = (n: number): string => `b${String(n)}.zone-b.test`;
+  const a = (n: number): string => `a${String(n)}.zone-a.test`;
+  /** One of zone B's names answered now, so that zone B is known to answer. */
+  async function answered(made: ReturnType<typeof make>, name = b(0)): Promise<void> {
+    const asked = made.ask(name);
+    made.last(name).answer();
+    assert.deepEqual(await asked, A);
+  }
+
+  it('gives a domain none of whose names has answered 3 on a cold first tick, before any lookup is stuck, and the 4th to another domain', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor } = make();
+    // A probe's first tick, started cold in the middle of zone B's outage: zone B's names and
+    // zone A's asked together, none answered and none stuck yet.
+    const names = [b(1), b(2), b(3), b(4), a(1), b(5), a(2)];
+    const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [1, 1, 1, 0, 1, 0, 0],
+      'zone B three, and zone A’s first lookup the fourth',
+    );
+    last(a(1)).answer();
+    await settled();
+    assert.deepEqual(
+      [b(4), b(5), a(2)].map((name) => callsFor(name).length),
+      [0, 0, 1],
+      'the lane zone A gives back is zone A’s again',
+    );
+    // Zone B's first lookup ends, as getaddrinfo giving up on a name does.
+    last(b(1)).fail('EAI_AGAIN');
+    await settled();
+    assert.equal(callsFor(b(4)).length, 1, 'zone B has two: b4 runs');
+    last(a(2)).answer();
+    await settled();
+    assert.equal(callsFor(b(5)).length, 0, 'and three again, none of its names answered');
+    last(b(2)).answer();
+    await settled();
+    assert.equal(callsFor(b(5)).length, 1, 'until one does');
+    for (const name of [b(3), b(4), b(5)]) last(name).answer();
+    assert.deepEqual(await Promise.all(asked), [undefined, A, A, A, A, A, A]);
+  });
+
+  it('holds a domain whose names answer to 3 only until its first answer', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor } = make();
+    const names = [1, 2, 3, 4, 5].map(b);
+    const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [1, 1, 1, 0, 0],
+      'three before any of its names has answered',
+    );
+    last(b(1)).answer();
+    await settled();
+    assert.deepEqual(
+      [4, 5].map((n) => callsFor(b(n)).length),
+      [1, 1],
+      'and all four the moment one has',
+    );
+    for (const name of names.slice(1)) last(name).answer();
+    assert.deepEqual(await Promise.all(asked), [A, A, A, A, A]);
+  });
+
+  it('holds a domain to 3 again once its last answer is 30 s old', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    await answered(made);
+    /** Asks for `names` together: how many run at once. Each is then denied: none is an answer. */
+    const atOnce = async (names: readonly string[]): Promise<number> => {
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+      const ran = names.filter((name) => callsFor(name).length > 0).length;
+      for (const name of names) {
+        // One queued runs as a lane comes back.
+        await settled();
+        last(name).fail('ENOTFOUND');
+      }
+      await Promise.all(asked);
+      return ran;
+    };
+    clock.now = ANSWER_MS - 1;
+    assert.equal(await atOnce([1, 2, 3, 4].map(b)), 4, 'all four: its answer is under 30 s old');
+    clock.now = ANSWER_MS;
+    assert.equal(await atOnce([5, 6, 7, 8].map(b)), 3, 'three: its answer is 30 s old');
+  });
+
+  it('lets a domain that answers, none of whose lookups is stuck, take all 4, however long they have run', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor } = made;
+    await answered(made);
+    const names = [1, 2, 3, 4, 5].map(b);
+    const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK - 1);
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [1, 1, 1, 1, 0],
+      'the four first-lookup lanes, all one domain’s: the fifth waits for the class, not the domain',
+    );
+    last(b(1)).answer();
+    await settled();
+    assert.equal(callsFor(b(5)).length, 1, 'and a lane it gives back is its own domain’s again');
+    for (const name of names.slice(1)) last(name).answer();
+    assert.deepEqual(await Promise.all(asked), [A, A, A, A, A]);
+  });
+
+  it('holds a domain to 3 while one of its lookups is stuck, and gives the 4th to another domain, its parent zone’s too', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor } = made;
+    // A sub-zone is a domain of its own (`domainOf`), keyed as the ranking keys one.
+    const s = (n: number): string => `s${String(n)}.silent.zone-b.test`;
+    // Known to answer, so that what holds it is the lookup stuck.
+    await answered(made, s(0));
+    const stuck = ask(s(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const more = [s(2), s(3)].map((name) => ask(name, 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      [s(1), s(2), s(3)].map((name) => callsFor(name).length),
+      [1, 1, 1],
+    );
+    const fourth = ask(s(4), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(s(4)).length, 0, 'held back: its domain holds 3, one of them stuck');
+    assert.equal(
+      await isSettled(fourth),
+      false,
+      'and its check waits: two of the three are not stuck',
+    );
+    const parent = ask(b(1), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(1)).length, 1, 'the parent zone’s first lookup takes the fourth lane');
+    last(b(1)).answer();
+    assert.deepEqual(await parent, A);
+    await settled();
+    assert.equal(callsFor(s(4)).length, 0, 'the lane it gives back is not the stuck domain’s');
+    const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('a1.zone-a.test').length, 1, 'but any other domain’s');
+    last('a1.zone-a.test').answer();
+    assert.deepEqual(await other, A);
+    // One of the domain's own gives its lane back: it holds 2, and the fourth runs.
+    last(s(2)).answer();
+    await settled();
+    assert.equal(callsFor(s(4)).length, 1);
+    for (const name of [s(1), s(3), s(4)]) last(name).answer();
+    assert.deepEqual(await Promise.all([stuck, ...more, fourth]), [A, A, A, A]);
+  });
+
+  it('gives a domain that answers all 4 again only once a stuck lookup has ended, one of its names has answered since, and STUCK_MS has passed', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    await answered(made);
+    const first = ask(b(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const rest = [2, 3, 4].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      [1, 2, 3, 4].map((n) => callsFor(b(n)).length),
+      [1, 1, 1, 0],
+    );
+    // The stuck lookup ends, as getaddrinfo giving up on a name does.
+    last(b(1)).fail('EAI_AGAIN');
+    await assert.rejects(first);
+    assert.equal(callsFor(b(4)).length, 1, 'the fourth runs: its domain holds 2');
+    const fifth = ask(b(5), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(5)).length, 0, 'but not a fifth: none has answered since it was stuck');
+    last(b(2)).answer();
+    await settled();
+    const sixth = ask(b(6), 4, { waitMs: 60_000 });
+    assert.deepEqual(
+      [5, 6].map((n) => callsFor(b(n)).length),
+      [1, 0],
+      'one has answered since, and within STUCK_MS of its end it holds 3',
+    );
+    clock.now += STUCK;
+    const seventh = ask(b(7), 4, { waitMs: 60_000 });
+    assert.deepEqual(
+      [6, 7].map((n) => callsFor(b(n)).length),
+      [1, 0],
+      'and all 4 once STUCK_MS has passed: the fourth lane is the sixth’s, and the seventh waits for the class',
+    );
+    for (const n of [3, 4, 5, 6]) last(b(n)).answer();
+    await settled();
+    last(b(7)).answer();
+    assert.deepEqual(await Promise.all([...rest, fifth, sixth, seventh]), [A, A, A, A, A, A]);
+  });
+
+  it('holds a domain to 3 while its hanging lookups end together and those asked as they end are not stuck yet', async (t) => {
+    // `P-438`'s review (L4): a domain's hanging lookups start together and wait out the same
+    // getaddrinfo timeout, so they end together, and those started as they end are not stuck for
+    // STUCK_MS. Judged by what was in flight, the domain took all 4 lanes in between.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    await answered(made);
+    const hanging = [1, 2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }).catch(() => undefined));
+    t.mock.timers.tick(STUCK);
+    // Their checks fail at once, behind the 3 stuck; their lookups stay queued.
+    const queued = [4, 5, 6, 7].map((n) => ask(b(n), 4, { waitMs: 60_000 }).catch(() => undefined));
+    // They end on the resolver's clock past the bound for stuck too, as hanging lookups do.
+    clock.now += STUCK;
+    for (const n of [1, 2, 3]) last(b(n)).fail('EAI_AGAIN');
+    await Promise.all(hanging);
+    await settled();
+    assert.deepEqual(
+      [4, 5, 6, 7].map((n) => callsFor(b(n)).length),
+      [1, 1, 1, 0],
+      'three: nothing of it is stuck in flight, but none of its names has answered since',
+    );
+    // A zone answering in part: one of its names answers now, within STUCK_MS of the end.
+    const again = ask(b(0), 4, { waitMs: 60_000, fresh: true });
+    last(b(0)).answer();
+    assert.deepEqual(await again, A);
+    await settled();
+    assert.equal(callsFor(b(7)).length, 0, 'still three, within STUCK_MS of the end');
+    clock.now += STUCK;
+    const eighth = ask(b(8), 4, { waitMs: 60_000 });
+    assert.deepEqual(
+      [7, 8].map((n) => callsFor(b(n)).length),
+      [1, 0],
+      'all 4 once STUCK_MS has passed',
+    );
+    for (const n of [4, 5, 6, 7]) last(b(n)).answer();
+    await settled();
+    last(b(8)).answer();
+    await Promise.all(queued);
+    assert.deepEqual(await eighth, A);
+  });
+
+  it('holds a domain to 3 while none of its names has answered since one of its lookups was stuck, past STUCK_MS too', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    await answered(made);
+    const hanging = ask(b(1), 4, { waitMs: 60_000 }).catch(() => undefined);
+    t.mock.timers.tick(STUCK);
+    last(b(1)).fail('EAI_AGAIN');
+    await hanging;
+    /** Asks for `names` together: how many run at once. Each is then denied: none is an answer. */
+    const atOnce = async (names: readonly string[]): Promise<number> => {
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+      const ran = names.filter((name) => callsFor(name).length > 0).length;
+      for (const name of names) {
+        await settled();
+        last(name).fail('ENOTFOUND');
+      }
+      await Promise.all(asked);
+      return ran;
+    };
+    clock.now += STUCK * 10;
+    assert.equal(
+      await atOnce([2, 3, 4, 5].map(b)),
+      3,
+      'three: its answer is under 30 s old, but older than the lookup stuck, and a denial is no answer',
+    );
+    await answered(made, b(6));
+    assert.equal(await atOnce([7, 8, 9, 10].map(b)), 4, 'and all 4 once one of its names answers');
+  });
+
+  it('holds a domain whose names answer while one of them hangs', async (t) => {
+    // `P-432`'s attack round: a recursor serving some of a zone from its cache, or a sub-zone
+    // delegated under the same key, answers for most of its names while others hang. Capped for
+    // what it had not answered, such a domain never was, and its silent names took every lane.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor } = make();
+    for (const n of [1, 2]) {
+      const asked = ask(b(n));
+      last(b(n)).answer();
+      assert.deepEqual(await asked, A);
+    }
+    const hangs = ask(b(3), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const answering = [4, 5].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    last(b(4)).answer();
+    await settled();
+    const sixth = ask(b(6), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(6)).length, 1, 'b3 stuck, b5 and b6: three');
+    const seventh = ask(b(7), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(7)).length, 0, 'held back, though three of its names have answered');
+    const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('a1.zone-a.test').length, 1, 'the fourth lane is another domain’s');
+    last('a1.zone-a.test').answer();
+    assert.deepEqual(await other, A);
+    last(b(3)).fail('EAI_AGAIN');
+    await assert.rejects(hangs);
+    assert.equal(callsFor(b(7)).length, 1, 'until the one that hung ends');
+    for (const n of [5, 6, 7]) last(b(n)).answer();
+    assert.deepEqual(await Promise.all([...answering, sixth, seventh]), [A, A, A, A]);
+  });
+
+  it('counts a refresh stuck as one of the domain’s lookups stuck', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    await answered(made, b(1));
+    clock.now = ANSWER_MS;
+    assert.deepEqual(await ask(b(1)), A, 'served, and refreshed behind');
+    assert.equal(callsFor(b(1)).length, 2, 'the refresh runs');
+    // Known to answer now, so that what holds it is the refresh stuck.
+    await answered(made);
+    t.mock.timers.tick(STUCK);
+    const firsts = [2, 3, 4].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      [2, 3, 4].map((n) => callsFor(b(n)).length),
+      [1, 1, 1],
+    );
+    const fifth = ask(b(5), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(5)).length, 0, 'held back: its domain’s refresh is stuck');
+    const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('a1.zone-a.test').length, 1, 'another domain takes the fourth lane');
+    last('a1.zone-a.test').answer();
+    assert.deepEqual(await other, A);
+    clock.now += STUCK;
+    last(b(1)).answer();
+    await settled();
+    assert.equal(callsFor(b(5)).length, 1, 'until the refresh ends, answering');
+    for (const n of [2, 3, 4, 5]) last(b(n)).answer();
+    assert.deepEqual(await Promise.all([...firsts, fifth]), [A, A, A, A]);
+  });
+
+  it('does not hold “Check now” to it, joining a lookup held back', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor } = make();
+    const first = ask(b(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const rest = [2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    const scan = ask(b(4), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(4)).length, 0, 'a scan’s lookup is held back');
+    const now = ask(b(4), 4, { waitMs: 60_000, fresh: true });
+    assert.equal(callsFor(b(4)).length, 1, '“Check now” runs it, on the fourth lane');
+    last(b(4)).answer();
+    assert.deepEqual(await Promise.all([scan, now]), [A, A]);
+    for (const n of [1, 2, 3]) last(b(n)).answer();
+    assert.deepEqual(await Promise.all([first, ...rest]), [A, A, A]);
+  });
+
+  it('gives a lane every queued first lookup is held back from to a queued refresh', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, clock } = make();
+    const warm = ['r1.zone-a.test', 'r2.zone-a.test', 'r3.zone-a.test'];
+    for (const name of warm) {
+      const asked = ask(name);
+      last(name).answer();
+      await asked;
+    }
+    const first = ask(b(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const rest = [2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    clock.now = ANSWER_MS;
+    // Three of the stuck domain's first lookups and two refreshes: the five shared lanes.
+    assert.deepEqual(await ask('r1.zone-a.test'), A);
+    assert.deepEqual(await ask('r2.zone-a.test'), A);
+    const held = ask(b(4), 4, { waitMs: 60_000 });
+    assert.deepEqual(await ask('r3.zone-a.test'), A, 'served');
+    assert.deepEqual(
+      [...warm.map((name) => callsFor(name).length), callsFor(b(4)).length],
+      [2, 2, 1, 0],
+      'the third refresh and the fourth first lookup queued, the shared lanes full',
+    );
+    last('r1.zone-a.test').answer();
+    await settled();
+    assert.equal(callsFor(b(4)).length, 0, 'the first lookup is still held back');
+    assert.equal(callsFor('r3.zone-a.test').length, 2, 'so the lane is the queued refresh’s');
+    for (const name of ['r2.zone-a.test', 'r3.zone-a.test', b(1)]) last(name).answer();
+    await settled();
+    for (const n of [2, 3, 4]) last(b(n)).answer();
+    assert.deepEqual(await Promise.all([first, ...rest, held]), [A, A, A, A]);
+  });
+
+  it('never picks a lookup held back, ranked ahead of the one that may run or behind it', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor } = make();
+    // Zone A has one of its three names failing, a share of 1/3 for a3; the stuck zone B one of
+    // nine, 1/9 for b4 and b5: ranked by share alone, either of those goes first.
+    for (const name of ['ok1', 'ok2', 'ok3', 'ok4'].map((n) => `${n}.zone-b.test`)) {
+      const asked = ask(name);
+      last(name).answer();
+      await asked;
+    }
+    const a2 = ask('a2.zone-a.test');
+    last('a2.zone-a.test').answer();
+    await a2;
+    const down = ask('down.zone-a.test');
+    last('down.zone-a.test').fail('EAI_AGAIN');
+    await assert.rejects(down);
+    const first = ask(b(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const rest = [2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    // The fourth lane, so that what follows queues.
+    const x1 = ask('x1.zone-c.test', 4, { waitMs: 60_000 });
+    const names = [b(4), 'a3.zone-a.test', b(5)];
+    const queued = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+    last('x1.zone-c.test').answer();
+    await x1;
+    await settled();
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [0, 1, 0],
+      'the lane is a3’s, the one queued that may run',
+    );
+    last('a3.zone-a.test').answer();
+    for (const n of [1, 2, 3]) last(b(n)).answer();
+    await settled();
+    for (const n of [4, 5]) last(b(n)).answer();
+    assert.deepEqual(await Promise.all([first, ...rest, ...queued]), [A, A, A, A, A, A]);
+  });
+
+  it('fails a held-back check at once when each of its domain’s 3 is stuck, though the 4th lane is not', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor } = make();
+    const three = [1, 2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK);
+    const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('a1.zone-a.test').length, 1, 'the fourth lane runs, not stuck');
+    const behind = ask(b(4), 4, { waitMs: 60_000 });
+    assert.equal(await isSettled(behind), true, 'at once');
+    await assert.rejects(behind, (error: Error) => {
+      assert.equal(codeOf(error), RESOLVER_STUCK);
+      assert.match(
+        error.message,
+        /\(b1\.zone-b\.test, b2\.zone-b\.test, b3\.zone-b\.test\), its own domain’s, which holds the 3 first lanes a domain may while one of its lookups has; it stays queued/u,
+      );
+      return true;
+    });
+    assert.equal(callsFor(b(4)).length, 0, 'it stays queued');
+    last(b(1)).answer();
+    await settled();
+    assert.equal(callsFor(b(4)).length, 1, 'and runs when one of its domain’s ends');
+    for (const name of [b(2), b(3), b(4), 'a1.zone-a.test']) last(name).answer();
+    assert.deepEqual(await Promise.all([...three, other]), [A, A, A, A]);
+  });
+
+  it('fails a held-back check already waiting the moment the last of its domain’s 3 is stuck', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last } = make();
+    const first = ask(b(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    const two = [2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK / 2);
+    // Started later than b2 and b3, so not stuck when they are.
+    const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+    const behind = ask(b(4), 4, { waitMs: 60_000 });
+    assert.equal(await isSettled(behind), false, 'waits: two of the three are not stuck');
+    t.mock.timers.tick(STUCK / 2);
+    assert.equal(await isSettled(behind), true, 'failed the moment they were');
+    await assert.rejects(behind, (error) => codeOf(error) === RESOLVER_STUCK);
+    for (const name of [b(1), b(2), b(3), 'a1.zone-a.test']) last(name).answer();
+    await settled();
+    last(b(4)).answer();
+    assert.deepEqual(await Promise.all([first, ...two, other]), [A, A, A, A]);
+  });
+
+  it('counts a held name’s retry stuck as one of the domain’s lookups stuck', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    await answered(made);
+    const down = 'down.zone-b.test';
+    const failed = ask(down);
+    last(down).fail('EAI_AGAIN');
+    await assert.rejects(failed);
+    // Its 5 s hold over, and zone B's answer still under 30 s old.
+    clock.now = 5_000;
+    const retry = ask(down, 4, { waitMs: 60_000 });
+    assert.equal(callsFor(down).length, 2, 'the retry runs, on its own lane');
+    t.mock.timers.tick(STUCK);
+    const firsts = [1, 2, 3].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    const fourth = ask(b(4), 4, { waitMs: 60_000 });
+    assert.deepEqual(
+      [1, 2, 3, 4].map((n) => callsFor(b(n)).length),
+      [1, 1, 1, 0],
+      'held back: its domain’s retry is stuck',
+    );
+    const other = ask(a(1), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(a(1)).length, 1, 'another domain takes the fourth lane');
+    last(a(1)).answer();
+    assert.deepEqual(await other, A);
+    clock.now += STUCK;
+    last(down).answer();
+    await settled();
+    assert.equal(callsFor(b(4)).length, 1, 'until the retry ends, answering');
+    for (const n of [1, 2, 3, 4]) last(b(n)).answer();
+    assert.deepEqual(await Promise.all([retry, ...firsts, fourth]), [A, A, A, A, A]);
+  });
+
+  it('counts an answer the answer file gave as one of its domain’s answering, until a lookup for its name settles', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, resolver } = make();
+    const kept = 'kept.zone-b.test';
+    const counts = await resolver.restore([
+      { host: kept, family: 4, addresses: B, answeredAgoMs: 10_000, expiresInMs: 20_000 },
+    ]);
+    assert.equal(counts.loaded, 1);
+    /** Asks for `names` together: how many run at once. Each is then denied: none is an answer. */
+    const atOnce = async (names: readonly string[]): Promise<number> => {
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+      const ran = names.filter((name) => callsFor(name).length > 0).length;
+      for (const name of names) {
+        await settled();
+        last(name).fail('ENOTFOUND');
+      }
+      await Promise.all(asked);
+      return ran;
+    };
+    assert.equal(await atOnce([1, 2, 3, 4].map(b)), 4, 'all four, before any is asked again');
+    // Its name's first check: served what the file gave, while a refresh asks again, and fails.
+    assert.deepEqual(await ask(kept), B);
+    assert.equal(callsFor(kept).length, 1, 'the refresh runs');
+    last(kept).fail('EAI_AGAIN');
+    await settled();
+    assert.equal(await atOnce([5, 6, 7, 8].map(b)), 3, 'three once that refresh has settled');
+  });
+
+  it('stops counting an answer the answer file gave at the end of its grace', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, resolver, clock } = make();
+    // Expired as it is loaded: its grace ends 5 minutes on.
+    await resolver.restore([
+      {
+        host: 'kept.zone-b.test',
+        family: 4,
+        addresses: B,
+        answeredAgoMs: 10_000,
+        expiresInMs: 20_000,
+      },
+    ]);
+    const atOnce = async (names: readonly string[]): Promise<number> => {
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+      const ran = names.filter((name) => callsFor(name).length > 0).length;
+      for (const name of names) {
+        await settled();
+        last(name).fail('ENOTFOUND');
+      }
+      await Promise.all(asked);
+      return ran;
+    };
+    clock.now = STALE_MS - 1;
+    assert.equal(await atOnce([1, 2, 3, 4].map(b)), 4, 'within its grace');
+    clock.now = STALE_MS;
+    assert.equal(await atOnce([5, 6, 7, 8].map(b)), 3, 'past it');
+  });
+
+  it('counts each answer the answer file gave within its own grace: not past it while another’s, settled since, ran longer', async (t) => {
+    // `P-438`'s review (AF-2): one grace end for the domain, the latest of any loaded, counted a
+    // name past its own once the longer one's lookup had settled.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, resolver, clock } = make();
+    const counts = await resolver.restore([
+      // Expired as it is loaded: its grace ends 5 minutes on.
+      {
+        host: 'long.zone-b.test',
+        family: 4,
+        addresses: B,
+        answeredAgoMs: 10_000,
+        expiresInMs: 20_000,
+      },
+      // Expired 170 s before the load: its grace ends 130 s on.
+      {
+        host: 'short.zone-b.test',
+        family: 4,
+        addresses: B,
+        answeredAgoMs: 200_000,
+        expiresInMs: -170_000,
+      },
+    ]);
+    assert.equal(counts.loaded, 2);
+    // The longer one's name is asked, and its refresh settles: it no longer counts.
+    assert.deepEqual(await ask('long.zone-b.test'), B);
+    last('long.zone-b.test').fail('EAI_AGAIN');
+    await settled();
+    const atOnce = async (names: readonly string[]): Promise<number> => {
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+      const ran = names.filter((name) => callsFor(name).length > 0).length;
+      for (const name of names) {
+        await settled();
+        last(name).fail('ENOTFOUND');
+      }
+      await Promise.all(asked);
+      return ran;
+    };
+    clock.now = 130_000 - 1;
+    assert.equal(await atOnce([1, 2, 3, 4].map(b)), 4, 'within the shorter one’s grace');
+    clock.now = 130_000;
+    assert.equal(await atOnce([5, 6, 7, 8].map(b)), 3, 'past it, though the longer one’s runs on');
+    const late = ask('short.zone-b.test');
+    assert.equal(await isSettled(late), false, 'and its answer is no longer served');
+    last('short.zone-b.test').answer();
+    assert.deepEqual(await late, A);
+  });
+
+  it('keeps the last shared lane from a first lookup of a domain whose refreshes are every one stuck', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    const warm = [1, 2, 3, 4].map((n) => `r${String(n)}.zone-b.test`);
+    for (const name of warm) await answered(made, name);
+    clock.now = ANSWER_MS;
+    for (const name of warm) assert.deepEqual(await ask(name), A, 'served, and refreshed behind');
+    t.mock.timers.tick(STUCK);
+    // The four refresh lanes, every one zone B's and stuck, and the fifth shared lane free.
+    const held = ask(b(1), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(1)).length, 0, 'held back from the last shared lane');
+    assert.equal(await isSettled(held), true, 'its check failed at once');
+    await assert.rejects(held, (error: Error) => {
+      assert.equal(codeOf(error), RESOLVER_STUCK);
+      assert.match(
+        error.message,
+        /\(r1\.zone-b\.test, r2\.zone-b\.test, r3\.zone-b\.test\), and the one lane left is kept for other domains while its own domain has a lookup stuck lately; it stays queued/u,
+      );
+      return true;
+    });
+    const other = ask(a(1), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(a(1)).length, 1, 'another domain’s first lookup takes it');
+    // A refresh ends with no answer: the three left are every one stuck, and with a1 the lane b1
+    // would take is still the last. (One that ended answering would say the zone answers, if
+    // slowly: `P-438`'s narrow check.)
+    last('r1.zone-b.test').fail('EAI_AGAIN');
+    await settled();
+    assert.equal(callsFor(b(1)).length, 0, 'still held back');
+    last(a(1)).answer();
+    assert.deepEqual(await other, A);
+    await settled();
+    assert.equal(callsFor(b(1)).length, 1, 'and it runs once its lane is not the last');
+    for (const name of [...warm.slice(1), b(1)]) last(name).answer();
+    await settled();
+  });
+
+  it('keeps the last shared lane from a silent zone as its stuck refreshes end one at a time, its refreshes queued counted as taking theirs', async (t) => {
+    // `P-438`'s review (L2): a lane freed goes to a first lookup before a refresh, so judged by
+    // what was running, each stuck refresh that ended let the zone's first lookup take the fourth
+    // lane and its queued refresh the fifth, and the zone held all 5.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = make();
+    const { ask, last, callsFor, clock } = made;
+    const r = (n: number): string => `r${String(n)}.zone-b.test`;
+    const warm = [1, 2, 3, 4, 5, 6].map(r);
+    for (const name of warm) await answered(made, name);
+    clock.now = ANSWER_MS;
+    for (const name of warm.slice(0, 4)) assert.deepEqual(await ask(name), A);
+    t.mock.timers.tick(STUCK);
+    // Two more of its refreshes queued behind the four stuck, and two of its first lookups.
+    for (const name of warm.slice(4)) assert.deepEqual(await ask(name), A);
+    const firsts = [1, 2].map((n) => ask(b(n), 4, { waitMs: 60_000 }).catch(() => undefined));
+    assert.deepEqual(
+      [...warm.map((name) => callsFor(name).length), callsFor(b(1)).length],
+      [2, 2, 2, 2, 1, 1, 0],
+    );
+    last(r(1)).fail('EAI_AGAIN');
+    await settled();
+    assert.deepEqual(
+      [callsFor(b(1)).length, callsFor(r(5)).length],
+      [0, 2],
+      'the lane is its queued refresh’s, not its first lookup’s',
+    );
+    const other = ask(a(1), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(a(1)).length, 1, 'and the last shared lane is left to another domain');
+    last(r(2)).fail('EAI_AGAIN');
+    await settled();
+    assert.deepEqual([callsFor(b(1)).length, callsFor(r(6)).length], [0, 2], 'the next as well');
+    last(a(1)).answer();
+    assert.deepEqual(await other, A);
+    await settled();
+    assert.equal(callsFor(b(1)).length, 0, 'and the lane another domain gives back stays free');
+    last(r(3)).fail('EAI_AGAIN');
+    await settled();
+    assert.deepEqual(
+      [1, 2].map((n) => callsFor(b(n)).length),
+      [1, 0],
+      'with no refresh queued, its first lookup takes the fourth, and not the fifth',
+    );
+    const another = ask(a(2), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(a(2)).length, 1, 'which another domain’s takes');
+    last(a(2)).answer();
+    assert.deepEqual(await another, A);
+    for (const name of [r(4), r(5), r(6), b(1)]) last(name).answer();
+    await settled();
+    last(b(2)).answer();
+    await Promise.all(firsts);
+  });
+
+  it('with 3 lanes, lets a domain take its one first lane before it has answered, and keeps it from one whose refresh is stuck', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, clock } = make({ lanes: 3 });
+    const kept = ask(b(1));
+    assert.equal(callsFor(b(1)).length, 1, 'never fewer than one');
+    last(b(1)).answer();
+    assert.deepEqual(await kept, A);
+    clock.now = ANSWER_MS;
+    assert.deepEqual(await ask(b(1)), A);
+    assert.equal(callsFor(b(1)).length, 2, 'the refresh runs');
+    t.mock.timers.tick(STUCK);
+    const held = ask(b(2), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(b(2)).length, 0, 'held back from the one shared lane left');
+    await assert.rejects(held, (error) => codeOf(error) === RESOLVER_STUCK);
+    const other = ask(a(1), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(a(1)).length, 1, 'another domain’s takes it');
+    last(a(1)).answer();
+    assert.deepEqual(await other, A);
+    last(b(1)).answer();
+    await settled();
+    assert.equal(callsFor(b(2)).length, 1, 'and it runs once the refresh ends');
+    last(b(2)).answer();
+    await settled();
+  });
+
+  it('gives a first lookup the last shared lane in a domain whose every lookup answers after 2 × STUCK_MS, its refreshes filling the refresh lanes (P-438’s narrow check)', async (t) => {
+    // A resolver behind a first nameserver that is down: glibc waits out its 5 s on that one for
+    // every lookup, and the second answers. Every lookup runs past STUCK_MS, and answers. Counted
+    // as stuck, the domain's refreshes kept the last shared lane from its own first lookups, and
+    // on a probe of one domain no other ever took it.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, clock } = make();
+    const d = (n: number): string => `d${String(n)}.slow.test`;
+    for (const n of [1, 2, 3, 4, 5]) {
+      const asked = ask(d(n), 4, { waitMs: 60_000 });
+      t.mock.timers.tick(2 * STUCK);
+      last(d(n)).answer();
+      assert.deepEqual(await asked, A);
+    }
+    // Their answers have run out: each is served, and refreshed behind it.
+    clock.now = ANSWER_MS;
+    for (const n of [1, 2, 3, 4]) assert.deepEqual(await ask(d(n)), A);
+    t.mock.timers.tick(STUCK);
+    assert.deepEqual(await ask(d(5)), A);
+    assert.deepEqual(
+      [1, 2, 3, 4, 5].map((n) => callsFor(d(n)).length),
+      [2, 2, 2, 2, 1],
+      'four refreshes running, past STUCK_MS, and a fifth queued',
+    );
+    // The first of them answers, after 2 × STUCK_MS, and the queued one takes its lane.
+    t.mock.timers.tick(STUCK);
+    last(d(1)).answer();
+    await settled();
+    assert.equal(callsFor(d(5)).length, 2);
+    const fresh = ask(d(9), 4, { waitMs: 60_000 });
+    assert.equal(
+      callsFor(d(9)).length,
+      1,
+      'a new name’s first lookup takes the last shared lane: its domain answers, slowly',
+    );
+    t.mock.timers.tick(2 * STUCK);
+    last(d(9)).answer();
+    assert.deepEqual(await fresh, A);
+    for (const n of [2, 3, 4, 5]) last(d(n)).answer();
+    await settled();
+  });
+
+  describe('the STUCK_MS after a domain’s lookup ended stuck (P-438’s narrow check)', () => {
+    const s = (n: number): string => `s${String(n)}.silent.test`;
+    const d = (n: number): string => `d${String(n)}.zone-d.test`;
+    /**
+     * Zone S's four names kept and zone D known to answer; then one of zone D's lookups ending
+     * stuck without an answer, and another of its names answering after it from DNS: zone D is
+     * held only by the STUCK_MS after that end.
+     */
+    async function heldByTheWindow(made: ReturnType<typeof make>, tick: (ms: number) => void) {
+      for (const name of [1, 2, 3, 4].map(s)) await answered(made, name);
+      made.clock.now = ANSWER_MS;
+      await answered(made, d(0));
+      return async () => {
+        const ended = made.ask(d(1), 4, { waitMs: 60_000 });
+        tick(STUCK);
+        made.last(d(1)).fail('EAI_AGAIN');
+        await assert.rejects(ended);
+        const now = made.ask(d(2), 4, { fresh: true, waitMs: 60_000 });
+        made.last(d(2)).answer();
+        assert.deepEqual(await now, A);
+      };
+    }
+
+    it('runs a lookup it held back at its next check once it is over, rather than failing the check beside a free lane', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const made = make();
+      const { ask, last, callsFor, clock } = made;
+      const endStuck = await heldByTheWindow(made, (ms) => {
+        t.mock.timers.tick(ms);
+      });
+      // Zone S goes silent: its four refreshes fill the refresh lanes, and are stuck.
+      for (const name of [1, 2, 3, 4].map(s)) assert.deepEqual(await ask(name), A);
+      t.mock.timers.tick(STUCK);
+      await endStuck();
+      const inside = ask(d(3), 4, { waitMs: 60_000 });
+      assert.equal(await isSettled(inside), true, 'within it, held back from the last shared lane');
+      await assert.rejects(inside, (error) => codeOf(error) === RESOLVER_STUCK);
+      // It is over, and nothing starts or ends: no timer is run here, so only the check asking
+      // can let the lookup go.
+      clock.now += STUCK;
+      const after = ask(d(3), 4, { waitMs: 60_000 });
+      assert.equal(callsFor(d(3)).length, 1, 'it runs on the last shared lane, free');
+      last(d(3)).answer();
+      assert.deepEqual(await after, A);
+    });
+
+    it('runs a lookup it held back that a check waits for the moment it is over, though nothing starts or ends then', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const made = make();
+      const { ask, last, callsFor, clock } = made;
+      const endStuck = await heldByTheWindow(made, (ms) => {
+        t.mock.timers.tick(ms);
+      });
+      await endStuck();
+      // Zone S goes silent: its four refreshes fill the refresh lanes, not stuck yet.
+      for (const name of [1, 2, 3, 4].map(s)) assert.deepEqual(await ask(name), A);
+      const waiting = ask(d(3), 4, { waitMs: 60_000 });
+      assert.equal(callsFor(d(3)).length, 0, 'held back from the last shared lane');
+      assert.equal(
+        await isSettled(waiting),
+        false,
+        'its check waits: no lane it could take is stuck',
+      );
+      // STUCK_MS passes: zone D's is over as zone S's refreshes are stuck, and nothing else moves.
+      clock.now += STUCK;
+      t.mock.timers.tick(STUCK);
+      assert.equal(callsFor(d(3)).length, 1, 'it runs on the last shared lane, free');
+      last(d(3)).answer();
+      assert.deepEqual(await waiting, A);
+    });
+  });
+});
+
+describe('a resolver that answers every lookup, slowly (P-438’s narrow check)', () => {
+  it('resolves every name of a probe of one domain behind it at the lanes’ pace, and fails none of their checks after', async (t) => {
+    // The narrow check's simulation, scaled down 20 times as it was: 100 devices of one domain,
+    // each handed out once a scan of 1 s, spread over it; every lookup answering after 250 to
+    // 259 ms (glibc's 5 s on a first nameserver that is down); STUCK_MS 50 ms; answers kept
+    // 300 ms (30 s against a 60 s scan, scaled) and served behind their refresh for as long as it
+    // takes; a check waiting 900 ms. Every timer is the test's, so the run is the same each time.
+    // With a lookup in flight past STUCK_MS taken as silence whatever its domain answered, 26 of
+    // the 100 had answered after 30 s and the rest failed RESOLVER_STUCK every scan.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const LOOKUP_MS = 250;
+    const SCAN_MS = 1_000;
+    const N = 100;
+    const STEP_MS = 10;
+    const RUN_MS = 30_000;
+    const clock = { now: 0 };
+    const answeredAt = new Map<string, number>();
+    let turn = 0;
+    const resolver = new NameResolver({
+      logger: silent,
+      now: () => clock.now,
+      random: () => 0.5,
+      stuckMs: 50,
+      answerMs: 300,
+      staleMs: 1e9,
+      holdFirstMs: 10,
+      holdMaxMs: 20,
+      watch: { files: [], everyMs: 60_000 },
+      lookup: (host) =>
+        new Promise((resolve) => {
+          // By turns, so that the lanes' lookups do not all end together.
+          turn = (turn + 3) % 10;
+          setTimeout(() => {
+            if (!answeredAt.has(host)) answeredAt.set(host, clock.now);
+            resolve(A);
+          }, LOOKUP_MS + turn);
+        }),
+    });
+    const names = Array.from({ length: N }, (_, i) => `dev-${String(i)}.site.test`);
+    const failed = new Map<string, number>();
+    let lastFailure = -1;
+    let handedOut = 0;
+    for (let at = 0; at < RUN_MS; at += STEP_MS) {
+      for (let k = 0; k < (N * STEP_MS) / SCAN_MS; k += 1) {
+        const name = names[handedOut % N] ?? '';
+        handedOut += 1;
+        resolver.resolve(name, 4, { waitMs: 900 }).catch((error: unknown) => {
+          const code = String(codeOf(error));
+          failed.set(code, (failed.get(code) ?? 0) + 1);
+          lastFailure = clock.now;
+        });
+      }
+      clock.now += STEP_MS;
+      t.mock.timers.tick(STEP_MS);
+      await settled();
+    }
+    const by = (ms: number): number => [...answeredAt.values()].filter((at) => at <= ms).length;
+    const said =
+      `names answered by 1 s ${String(by(1_000))}, 2 s ${String(by(2_000))}, 5 s ` +
+      `${String(by(5_000))}, 10 s ${String(by(10_000))}, 30 s ${String(by(RUN_MS))}; the last ` +
+      `at ${String(Math.max(...answeredAt.values()))} ms; checks failed ` +
+      `${JSON.stringify(Object.fromEntries(failed))}, the last at ${String(lastFailure)} ms`;
+    t.diagnostic(said);
+    // The lanes' own pace: a first lookup may hold 4 of the 5 shared lanes, so 100 lookups of
+    // 250 ms take 6.25 s of them at best, and 8.3 s while the domain is held to 3. The bound is
+    // twice that, from the first scan's start.
+    assert.equal(by(2 * 8_334), N, `every name answered within 16.7 s: ${said}`);
+    assert.ok(lastFailure < 2 * 8_334, `and no check failed once every name had answered: ${said}`);
   });
 });
 
@@ -1164,16 +2061,27 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
   let made = 0;
-  /** A hosts file and a resolv.conf of the test's own, and a resolver watching them. */
-  function watched(options: Partial<NameResolverOptions> = {}) {
+  /**
+   * A hosts file, a resolv.conf and an nsswitch.conf of the test's own, the hosts file read before
+   * DNS unless `nsswitch` says otherwise, and a resolver watching them.
+   */
+  function watched(
+    options: Partial<NameResolverOptions> = {},
+    nsswitch: string | null = 'hosts: files dns\n',
+  ) {
     made += 1;
     const hosts = join(dir, String(made), 'hosts');
     const resolvConf = join(dir, String(made), 'resolv.conf');
+    const nsswitchConf = join(dir, String(made), 'nsswitch.conf');
     mkdirSync(join(dir, String(made)));
     writeFileSync(hosts, '127.0.0.1 localhost\n');
     writeFileSync(resolvConf, 'nameserver 192.0.2.53\n');
-    const made_ = make({ watch: { files: [hosts, resolvConf], everyMs: 60_000 }, ...options });
-    return { ...made_, hosts, resolvConf };
+    if (nsswitch !== null) writeFileSync(nsswitchConf, nsswitch);
+    const made_ = make({
+      watch: { files: [hosts, resolvConf, nsswitchConf], everyMs: 60_000 },
+      ...options,
+    });
+    return { ...made_, hosts, resolvConf, nsswitchConf };
   }
 
   it('reads a hosts file as getaddrinfo does: each name with its addresses, comments left out', () => {
@@ -1190,7 +2098,7 @@ describe('the hosts file and resolv.conf (P-426)', () => {
       [
         ['localhost', '127.0.0.1'],
         ['a.test', '10.0.0.5 2001:db8::5'],
-        ['a-alias.test', '10.0.0.5'],
+        ['a-alias.test.', '10.0.0.5'],
       ],
     );
   });
@@ -1289,7 +2197,13 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     // `P-426`'s second review: an old configuration's answer arriving last was kept whenever no
     // answer was, over a denial or a hold the new configuration had given, which it let go with
     // the name's failures in a row.
-    const { resolver, ask, last, clock, callsFor, resolvConf } = watched();
+    // Nothing here is stuck, and there are seven lanes, so that the old configuration's three
+    // first lookups, one domain's, leave the new configuration's a first lane though the domain
+    // has not answered under it (`P-438`): with six it may hold 3.
+    const { resolver, ask, last, clock, callsFor, resolvConf } = watched({
+      stuckMs: 60_000,
+      lanes: 7,
+    });
     await resolver.checkFiles();
     // failing.test has failed once, and its retry is under way when the configuration changes.
     await assert.rejects(
@@ -1347,6 +2261,425 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     assert.equal(callsFor('denied.test').length, 3);
     last('denied.test').fail('ENOTFOUND');
     await assert.rejects(askedAgain, (error) => codeOf(error) === 'ENOTFOUND');
+  });
+
+  it('counts a lookup the configuration has moved on from as its domain’s while it runs stuck (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, resolvConf } = watched();
+    await resolver.checkFiles();
+    const old = ask('b1.zone-b.test', 4, { waitMs: 60_000 });
+    writeFileSync(resolvConf, 'nameserver 192.0.2.54\n');
+    assert.equal(await resolver.checkFiles(), true);
+    // Zone B answers under the new configuration, so that what holds it is the old lookup stuck.
+    const fresh = ask('b0.zone-b.test');
+    last('b0.zone-b.test').answer();
+    assert.deepEqual(await fresh, A);
+    // Stuck and not held, since its name is asked again under the new configuration, so nothing
+    // is counted failing: it still holds its lane.
+    t.mock.timers.tick(STUCK);
+    const rest = ['b2', 'b3'].map((name) => ask(`${name}.zone-b.test`, 4, { waitMs: 60_000 }));
+    const held = ask('b4.zone-b.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('b4.zone-b.test').length, 0, 'held back: its domain holds 3, one stuck');
+    const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(
+      callsFor('a1.zone-a.test').length,
+      1,
+      'another domain’s, queued after it, runs first',
+    );
+    for (const name of ['a1.zone-a.test', 'b1.zone-b.test', 'b2.zone-b.test']) last(name).answer();
+    await settled();
+    assert.equal(callsFor('b4.zone-b.test').length, 1);
+    for (const name of ['b3.zone-b.test', 'b4.zone-b.test']) last(name).answer();
+    assert.deepEqual(await Promise.all([old, ...rest, held, other]), [A, A, A, A, A]);
+  });
+
+  it('holds every domain to 3 again after a resolv.conf change, until one of its names answers under the new configuration (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, resolvConf } = watched();
+    await resolver.checkFiles();
+    // Zone B answered under the old configuration, and zone C from the answer file.
+    const kept = ask('b0.zone-b.test');
+    last('b0.zone-b.test').answer();
+    assert.deepEqual(await kept, A);
+    await resolver.restore([
+      { host: 'c0.zone-c.test', family: 4, addresses: B, answeredAgoMs: 1_000, expiresInMs: 0 },
+    ]);
+    // And b1, asked under the old configuration, answers after the change.
+    const late = ask('b1.zone-b.test', 4, { waitMs: 60_000 });
+    writeFileSync(resolvConf, 'nameserver 192.0.2.54\n');
+    assert.equal(await resolver.checkFiles(), true);
+    last('b1.zone-b.test').answer();
+    assert.deepEqual(await late, A);
+    /** Asks for `names` together: how many run at once. Each is then denied: none is an answer. */
+    const atOnce = async (names: readonly string[]): Promise<number> => {
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }).catch(() => undefined));
+      const ran = names.filter((name) => callsFor(name).length > 0).length;
+      for (const name of names) {
+        await settled();
+        last(name).fail('ENOTFOUND');
+      }
+      await Promise.all(asked);
+      return ran;
+    };
+    assert.equal(
+      await atOnce(['b2', 'b3', 'b4', 'b5'].map((name) => `${name}.zone-b.test`)),
+      3,
+      'zone B: what it answered before, and the late answer from the old configuration, are not counted',
+    );
+    assert.equal(
+      await atOnce(['c1', 'c2', 'c3', 'c4'].map((name) => `${name}.zone-c.test`)),
+      3,
+      'zone C: nor is what the answer file gave',
+    );
+    // Answering under the new configuration, zone C is known to answer again.
+    const fresh = ask('c5.zone-c.test');
+    last('c5.zone-c.test').answer();
+    assert.deepEqual(await fresh, A);
+    assert.equal(
+      await atOnce(['c6', 'c7', 'c8', 'c9'].map((name) => `${name}.zone-c.test`)),
+      4,
+      'and takes all four',
+    );
+  });
+
+  it('lets go of what hung under the old configuration on a resolv.conf change (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, resolvConf } = watched();
+    await resolver.checkFiles();
+    const hung = ask('b1.zone-b.test', 4, { waitMs: 60_000 }).catch(() => undefined);
+    t.mock.timers.tick(STUCK);
+    last('b1.zone-b.test').fail('EAI_AGAIN');
+    await hung;
+    // The fix, at once: another server.
+    writeFileSync(resolvConf, 'nameserver 192.0.2.54\n');
+    assert.equal(await resolver.checkFiles(), true);
+    const fresh = ask('b0.zone-b.test');
+    last('b0.zone-b.test').answer();
+    assert.deepEqual(await fresh, A);
+    const names = [2, 3, 4, 5].map((n) => `b${String(n)}.zone-b.test`);
+    const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [1, 1, 1, 1],
+      'all four, within STUCK_MS of its lookup that hung: that was the old configuration’s',
+    );
+    for (const name of names) last(name).answer();
+    assert.deepEqual(await Promise.all(asked), [A, A, A, A]);
+  });
+
+  it('stops counting an answer the answer file gave once the hosts file takes its name (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, hosts } = watched();
+    await resolver.checkFiles();
+    await resolver.restore([
+      { host: 'k1.zone-b.test', family: 4, addresses: B, answeredAgoMs: 1_000, expiresInMs: 0 },
+    ]);
+    // Another of zone B's names kept, so that zone B is still kept when k1 is dropped.
+    const denied = ask('b9.zone-b.test');
+    last('b9.zone-b.test').fail('ENOTFOUND');
+    await assert.rejects(denied);
+    writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 k1.zone-b.test\n');
+    assert.equal(await resolver.checkFiles(), true);
+    const names = [1, 2, 3, 4].map((n) => `b${String(n)}.zone-b.test`);
+    const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [1, 1, 1, 0],
+      'three: what the file gave for k1 went with it',
+    );
+    for (const name of names.slice(0, 3)) last(name).answer();
+    await settled();
+    last('b4.zone-b.test').answer();
+    assert.deepEqual(await Promise.all(asked), [A, A, A, A]);
+  });
+
+  it('never holds back a name the hosts file gives, which getaddrinfo answers from the file (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, clock, hosts } = watched();
+    await resolver.checkFiles();
+    const warm = [1, 2, 3, 4].map((n) => `r${String(n)}.zone-b.test`);
+    for (const name of warm) {
+      const asked = ask(name);
+      last(name).answer();
+      assert.deepEqual(await asked, A);
+    }
+    clock.now = ANSWER_MS;
+    for (const name of warm) assert.deepEqual(await ask(name), A, 'served, and refreshed behind');
+    t.mock.timers.tick(STUCK);
+    // Zone B's four refreshes stuck: a first lookup of its own may not take the last shared lane.
+    await assert.rejects(
+      ask('dev.zone-b.test', 4, { waitMs: 60_000 }),
+      (error) => codeOf(error) === RESOLVER_STUCK,
+    );
+    assert.equal(callsFor('dev.zone-b.test').length, 0, 'held back');
+    // The operator's fix: one device of the zone given its address in the hosts file.
+    writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
+    assert.equal(await resolver.checkFiles(), true);
+    const fixed = ask('fixed.zone-b.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('fixed.zone-b.test').length, 1, 'asked at once, on the last shared lane');
+    const address = [{ address: '192.0.2.200', family: 4 }] as const;
+    last('fixed.zone-b.test').answer(address);
+    assert.deepEqual(await fixed, address);
+    for (const name of warm) last(name).answer();
+    await settled();
+    last('dev.zone-b.test').answer();
+    await settled();
+  });
+
+  it('never holds back a name the hosts file gives, though its domain holds its 3 first lanes, each stuck (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, hosts } = watched();
+    writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
+    await resolver.checkFiles();
+    // A cold probe in zone B's outage: its 3 first lanes, every one stuck.
+    const silent = [1, 2, 3].map((n) => ask(`b${String(n)}.zone-b.test`, 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK);
+    await assert.rejects(
+      ask('b4.zone-b.test', 4, { waitMs: 60_000 }),
+      (error) => codeOf(error) === RESOLVER_STUCK,
+    );
+    const fixed = ask('fixed.zone-b.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('fixed.zone-b.test').length, 1, 'asked at once, on the fourth lane');
+    const address = [{ address: '192.0.2.200', family: 4 }] as const;
+    last('fixed.zone-b.test').answer(address);
+    assert.deepEqual(await fixed, address);
+    for (const n of [1, 2, 3]) last(`b${String(n)}.zone-b.test`).answer();
+    await settled();
+    last('b4.zone-b.test').answer();
+    assert.deepEqual(await Promise.all(silent), [A, A, A]);
+  });
+
+  for (const [order, nsswitch] of [
+    ['the hosts file first', 'hosts: files dns\n'],
+    ['DNS first', 'hosts: dns files\n'],
+    ['no nsswitch.conf', null],
+  ] as const) {
+    it(`does not count a name the hosts file lists as its domain answering, whatever nsswitch.conf says: ${order} (P-438)`, async (t) => {
+      // `P-438`'s review (L1): the operator's fix for one device of a silent zone answered from the
+      // file at once, and the zone took all 4 lanes for the next 30 s. And its narrow check: judged
+      // by the order nsswitch.conf was read as giving, a line read wrongly brought it back.
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const { resolver, ask, last, callsFor, hosts } = watched({}, nsswitch);
+      writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
+      await resolver.checkFiles();
+      const fixed = ask('fixed.zone-b.test');
+      const address = [{ address: '192.0.2.200', family: 4 }] as const;
+      last('fixed.zone-b.test').answer(address);
+      assert.deepEqual(await fixed, address);
+      const names = [1, 2, 3, 4].map((n) => `b${String(n)}.zone-b.test`);
+      const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+      assert.deepEqual(
+        names.map((name) => callsFor(name).length),
+        [1, 1, 1, 0],
+        'still three: none of its names has answered from DNS',
+      );
+      const other = ask('a1.zone-a.test', 4, { waitMs: 60_000 });
+      assert.equal(callsFor('a1.zone-a.test').length, 1, 'and the fourth lane is another domain’s');
+      last('a1.zone-a.test').answer();
+      assert.deepEqual(await other, A);
+      for (const name of names.slice(0, 3)) last(name).answer();
+      await settled();
+      last('b4.zone-b.test').answer();
+      assert.deepEqual(await Promise.all(asked), [A, A, A, A]);
+    });
+  }
+
+  it('does not count an answer the answer file gave for a name the hosts file lists as its domain answering, DNS asked first or not (P-438’s narrow check)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, hosts } = watched({}, 'hosts: dns files\n');
+    writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
+    await resolver.checkFiles();
+    const counts = await resolver.restore([
+      {
+        host: 'fixed.zone-b.test',
+        family: 4,
+        addresses: [{ address: '192.0.2.200', family: 4 }],
+        answeredAgoMs: 1_000,
+        expiresInMs: ANSWER_MS - 1_000,
+      },
+    ]);
+    assert.equal(counts.loaded, 1, 'kept: getaddrinfo asks DNS for it first');
+    const names = [1, 2, 3, 4].map((n) => `b${String(n)}.zone-b.test`);
+    const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      names.map((name) => callsFor(name).length),
+      [1, 1, 1, 0],
+      'three: an answer the hosts file lists says nothing of whether DNS answers zone B',
+    );
+    for (const name of names.slice(0, 3)) last(name).answer();
+    await settled();
+    last('b4.zone-b.test').answer();
+    assert.deepEqual(await Promise.all(asked), [A, A, A, A]);
+  });
+
+  it('compares a name with the hosts file’s as glibc does, a trailing dot kept (P-438’s narrow check)', async (t) => {
+    // glibc's files module does not give `fixed.zone-b.test.` for a line naming
+    // `fixed.zone-b.test`: that lookup goes to DNS, and may hang there as the zone's others do.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, hosts } = watched();
+    writeFileSync(
+      hosts,
+      '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n192.0.2.201 dotted.zone-b.test.\n',
+    );
+    await resolver.checkFiles();
+    const silent = [1, 2, 3].map((n) => ask(`b${String(n)}.zone-b.test`, 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK);
+    const held = ask('fixed.zone-b.test.', 4, { waitMs: 60_000 });
+    assert.equal(
+      callsFor('fixed.zone-b.test.').length,
+      0,
+      'held back: the file gives it without the dot',
+    );
+    assert.equal(await isSettled(held), true);
+    await assert.rejects(held, (error) => codeOf(error) === RESOLVER_STUCK);
+    const given = ask('dotted.zone-b.test.', 4, { waitMs: 60_000 });
+    assert.equal(
+      callsFor('dotted.zone-b.test.').length,
+      1,
+      'the file’s name as it is written runs at once',
+    );
+    last('dotted.zone-b.test.').answer();
+    assert.deepEqual(await given, A);
+    for (const n of [1, 2, 3]) last(`b${String(n)}.zone-b.test`).answer();
+    await settled();
+    last('fixed.zone-b.test.').answer();
+    assert.deepEqual(await Promise.all(silent), [A, A, A]);
+  });
+
+  it('runs a held-back lookup a check waits for once a resolv.conf change lets go of what held it (P-438’s narrow check)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const made = watched();
+    const { resolver, ask, last, callsFor, clock, resolvConf } = made;
+    await resolver.checkFiles();
+    const s = (n: number): string => `s${String(n)}.silent.test`;
+    const d = (n: number): string => `d${String(n)}.zone-d.test`;
+    for (const name of [...[1, 2, 3, 4].map(s), d(0)]) {
+      const asked = ask(name);
+      last(name).answer();
+      await asked;
+    }
+    clock.now = ANSWER_MS;
+    // Zone D's lookup ends stuck without an answer, and another of its names answers after it.
+    const ended = ask(d(1), 4, { waitMs: 60_000 });
+    t.mock.timers.tick(STUCK);
+    last(d(1)).fail('EAI_AGAIN');
+    await assert.rejects(ended);
+    const now = ask(d(2), 4, { fresh: true, waitMs: 60_000 });
+    last(d(2)).answer();
+    assert.deepEqual(await now, A);
+    // Zone S's refreshes fill the refresh lanes, and zone D's next is held back from the last.
+    for (const name of [1, 2, 3, 4].map(s)) assert.deepEqual(await ask(name), A);
+    const waiting = ask(d(3), 4, { waitMs: 60_000 });
+    assert.equal(callsFor(d(3)).length, 0, 'held back');
+    assert.equal(await isSettled(waiting), false);
+    writeFileSync(resolvConf, 'nameserver 192.0.2.54\n');
+    assert.equal(await resolver.checkFiles(), true);
+    assert.equal(
+      callsFor(d(3)).length,
+      1,
+      'it runs at once: what held it back was the old configuration’s',
+    );
+    last(d(3)).answer();
+    assert.deepEqual(await waiting, A);
+  });
+
+  it('holds back a name the hosts file gives only for another family than the one asked (P-438)', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { resolver, ask, last, callsFor, hosts } = watched();
+    writeFileSync(
+      hosts,
+      '127.0.0.1 localhost\n192.0.2.200 v4.zone-b.test\n2001:db8::200 v6.zone-b.test\n',
+    );
+    await resolver.checkFiles();
+    const silent = [1, 2, 3].map((n) => ask(`b${String(n)}.zone-b.test`, 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK);
+    // getaddrinfo finds no line of the family asked in the file, and asks DNS.
+    for (const [name, family] of [
+      ['v4.zone-b.test', 6],
+      ['v6.zone-b.test', 4],
+    ] as const) {
+      const held = ask(name, family, { waitMs: 60_000 });
+      assert.equal(callsFor(name).length, 0, `${name} for family ${String(family)} is held back`);
+      assert.equal(await isSettled(held), true, 'and its check failed at once');
+      await assert.rejects(held, (error) => codeOf(error) === RESOLVER_STUCK);
+    }
+    // The family the file gives, or any.
+    const given = [
+      ask('v4.zone-b.test', 4, { waitMs: 60_000 }),
+      ask('v6.zone-b.test', 0, { waitMs: 60_000 }),
+    ];
+    assert.deepEqual(
+      ['v4.zone-b.test', 'v6.zone-b.test'].map((name) => callsFor(name).length),
+      [1, 0],
+      'v4 for family 4 runs at once, on the fourth lane',
+    );
+    for (const name of ['v4.zone-b.test', 'b1.zone-b.test']) last(name).answer();
+    await settled();
+    assert.equal(callsFor('v6.zone-b.test').length, 1, 'and v6 for family 0 on the next');
+    for (const name of ['b2.zone-b.test', 'b3.zone-b.test', 'v6.zone-b.test']) last(name).answer();
+    await settled();
+    for (const call of callsFor('v4.zone-b.test').slice(1)) call.answer();
+    for (const call of callsFor('v6.zone-b.test').slice(1)) call.answer();
+    assert.deepEqual(await Promise.all([...given, ...silent]), [A, A, A, A, A]);
+  });
+
+  for (const [order, nsswitch] of [
+    ['DNS first', 'hosts: dns [!UNAVAIL=return] files\n'],
+    ['the hosts file not on its hosts line', 'passwd: files\nhosts: dns myhostname\n'],
+    ['no hosts line, glibc’s default', 'passwd: files\n'],
+    ['no nsswitch.conf at all', null],
+  ] as const) {
+    it(`holds back a name the hosts file gives when nsswitch.conf asks DNS before it: ${order} (P-438)`, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const { resolver, ask, last, callsFor, hosts } = watched({}, nsswitch);
+      writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
+      await resolver.checkFiles();
+      const silent = [1, 2, 3].map((n) => ask(`b${String(n)}.zone-b.test`, 4, { waitMs: 60_000 }));
+      t.mock.timers.tick(STUCK);
+      const held = ask('fixed.zone-b.test', 4, { waitMs: 60_000 });
+      assert.equal(callsFor('fixed.zone-b.test').length, 0, 'held back: DNS is asked first');
+      assert.equal(await isSettled(held), true, 'and its check failed at once');
+      await assert.rejects(held, (error) => codeOf(error) === RESOLVER_STUCK);
+      for (const n of [1, 2, 3]) last(`b${String(n)}.zone-b.test`).answer();
+      await settled();
+      last('fixed.zone-b.test').answer();
+      assert.deepEqual(await Promise.all(silent), [A, A, A]);
+    });
+  }
+
+  it('reads nsswitch.conf’s hosts line as glibc does: the hosts file first or not, its actions left out (P-438)', () => {
+    const lines: [string, boolean, string][] = [
+      ['hosts: files dns\n', true, 'Debian’s'],
+      ['hosts:     files dns myhostname\n', true, 'Rocky’s'],
+      ['# hosts: dns files\nhosts:\tfiles mdns4_minimal [NOTFOUND=return] dns\n', true, 'Ubuntu’s'],
+      ['hosts: dns files\n', false, 'DNS first'],
+      ['hosts: dns\n', false, 'DNS alone'],
+      ['passwd: files\n', false, 'no hosts line: glibc’s default, DNS first'],
+      ['', false, 'an empty file'],
+      // `P-438`'s narrow check: sources that never ask DNS ahead of the file, and resolve, which
+      // answers the hosts file's names itself.
+      ['hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n', true, 'nss-resolve’s'],
+      ['hosts: mymachines files dns\n', true, 'mymachines ahead'],
+      ['hosts: myhostname files dns\n', true, 'myhostname ahead'],
+      ['hosts: myhostname dns files\n', false, 'DNS ahead of the file, myhostname first'],
+      ['hosts: mdns4_minimal [NOTFOUND=return] files dns\n', false, 'another network source first'],
+      // The last hosts line is the one in force.
+      ['hosts: dns\nhosts: files\n', true, 'the last line, the file first'],
+      ['hosts: files dns\nhosts: dns\n', false, 'the last line, DNS alone'],
+      // The name ends at a blank or a colon.
+      ['hosts files dns\n', true, 'no colon'],
+      ['hosts dns\n', false, 'no colon, DNS'],
+      ['hosts:files dns\n', true, 'no blank'],
+      ['  hosts: files\n', true, 'blanks before it'],
+      ['hosts: files[NOTFOUND=return] dns\n', true, 'an action against the name'],
+      ['hosts: [NOTFOUND=return] files dns\n', false, 'a list that starts with an action'],
+      ['Hosts: files\n', false, 'not the hosts line: glibc reads names as written'],
+      ['hosts: Files dns\n', false, 'nor `Files` as files'],
+      ['hosts: dns # files\n', false, 'a comment'],
+    ];
+    for (const [text, first, why] of lines) {
+      assert.equal(hostsFileFirst(text), first, `${why}: ${JSON.stringify(text)}`);
+    }
   });
 
   it('looks on its timer once started, and a file that appears is a change too', async () => {

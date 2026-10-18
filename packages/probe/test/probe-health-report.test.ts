@@ -121,6 +121,8 @@ function reporter(options: {
   poolLookups?: LookupCounters;
   /** The main thread's own lookups (`A-66`). Absent, no such source. */
   mainLookups?: LookupCounters;
+  /** The answers loaded at start (`P-438`). Absent, no such source. */
+  answersLoaded?: number;
 }): ProbeHealthReporter {
   let cpuCall = 0;
   let clockCall = 0;
@@ -135,6 +137,9 @@ function reporter(options: {
       : {
           lookups: (): LookupCounters => options.mainLookups ?? { inFlight: 0, givenUp: 0 },
         }),
+    ...(options.answersLoaded === undefined
+      ? {}
+      : { answersLoaded: (): number => options.answersLoaded ?? 0 }),
     ...(options.children === false ? {} : { children: () => options.childStats ?? CHILDREN }),
     ...(options.spool === false ? {} : { spool: () => SPOOL }),
     ...(options.drain === false
@@ -207,6 +212,14 @@ describe('the probe’s own health report', () => {
     const report = reporter({}).report();
     assert.equal('lookupsInFlight' in report, false);
     assert.equal('lookupsGivenUp' in report, false);
+  });
+
+  it('reports the answers its resolver loaded at start, a zero included, and none with no file (`P-438`)', () => {
+    assert.equal(reporter({ answersLoaded: 450 }).report().answersLoaded, 450);
+    // No file, or one it could not use: a real zero, which says the probe started cold.
+    assert.equal(reporter({ answersLoaded: 0 }).report().answersLoaded, 0);
+    // A build without the answer file says nothing, and the channel gaps.
+    assert.equal('answersLoaded' in reporter({}).report(), false);
   });
 
   it('reports the child-process runner, which is a second runner and a second set of counters', () => {

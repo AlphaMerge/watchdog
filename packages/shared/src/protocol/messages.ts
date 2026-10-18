@@ -77,6 +77,16 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * capability: a core below 36 is sent neither, and a probe below 36 sends neither and both
  * channels gap.
  *
+ * Version 37 adds `answersLoaded`, under `answerFile` (`P-438`): how many answers the probe's
+ * resolver loaded at start from the file it writes at stop and every minute, the same for the
+ * process's life, and none when there was no file or it could not be used. It says whether a probe
+ * restarted served the answers it kept (more than none) or started cold (none): started cold in
+ * the middle of an outage, its silent zone's sensors fail from the first scan rather than when
+ * their kept answers run out, and with more silent zones than the resolver's lanes leave room
+ * for, its answering zones' checks fail too until the silent lookups end. One new field in a
+ * closed schema: a core below 37 is sent the report without it, and a probe below 37 sends none
+ * and the channel gaps.
+ *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
@@ -207,7 +217,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 36;
+export const PROTOCOL_VERSION = 37;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -646,6 +656,12 @@ export interface ProbeHealthReport {
    */
   lookupsInFlight?: number;
   lookupsGivenUp?: number;
+  /**
+   * How many answers the probe's resolver loaded from its answer file at start (`P-438`): the
+   * same for the process's life, and 0 when there was no file or it could not be used. Absent on
+   * a build without the file. Sent only to a core at protocol 37.
+   */
+  answersLoaded?: number;
   /**
    * The child-process runner (`P-61`).
    *
@@ -1195,6 +1211,7 @@ const PROBE_HEALTH_SCHEMA = {
     sessionsOpened: { type: 'integer', minimum: 0 },
     lookupsInFlight: { type: 'integer', minimum: 0 },
     lookupsGivenUp: { type: 'integer', minimum: 0 },
+    answersLoaded: { type: 'integer', minimum: 0 },
     childSlots: { type: 'integer', minimum: 0 },
     childBusy: { type: 'integer', minimum: 0 },
     childQueued: { type: 'integer', minimum: 0 },

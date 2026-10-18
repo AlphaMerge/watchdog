@@ -60,6 +60,11 @@ export interface ProbeHealthSources {
    * `lookupsBesideThePool`. Absent, only the pool's.
    */
   lookups?: () => LookupCounters;
+  /**
+   * How many answers the probe's resolver loaded from its answer file at start (`P-438`): none
+   * when there was no file or it could not be used. Absent on a build without the file.
+   */
+  answersLoaded?: () => number;
   trapListener?: () => TrapListenerStats;
   syslogListener?: () => SyslogListenerStats;
   /**
@@ -208,6 +213,7 @@ export class ProbeHealthReporter {
     const drain = this.#sources.drain?.();
     const log = this.#sources.log?.();
     const lookups = lookupsOf(pool.lookups, this.#sources.lookups?.());
+    const answersLoaded = this.#sources.answersLoaded?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
     // The lowest headroom is the highest usage, so both are the lowest of what they cover.
     const { machine, limit } = this.#memoryFor(heartbeat);
@@ -259,6 +265,9 @@ export class ProbeHealthReporter {
       ...(lookups === undefined
         ? {}
         : { lookupsInFlight: lookups.inFlight, lookupsGivenUp: lookups.givenUp }),
+      // `P-438`: the answers loaded at start, the same all the process's life. Absent on a build
+      // without the answer file, so the channel gaps. Sent only to a core at protocol 37.
+      ...(answersLoaded === undefined ? {} : { answersLoaded }),
       // Absent on a build with no child-process runner, so the channels gap rather than reading
       // a confident zero that cannot be told from a probe running no EXE or Script sensors.
       ...(children === undefined

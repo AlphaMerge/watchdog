@@ -238,6 +238,14 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'lookups',
     counter: { bits: 64 },
   },
+  // **The answers the resolver started with (`P-438`), and no limit.** At stop, and every minute,
+  // the probe writes the answers its resolver keeps to a file in its spool directory, and at start
+  // it loads them before the first scan, each served while it is asked again and never past five
+  // minutes after it expired. This is how many it loaded: the same all the process's life, and
+  // zero for a probe that started cold — no file, one it could not use (its log says why), or one
+  // older than the grace. Not an outage by itself, so no limit; it is what an operator reads to
+  // see whether a probe restarted in an outage kept its names.
+  { key: 'answersLoaded', name: 'Name answers loaded at start', unit: 'answers' },
   // **How far memory lets the pool grow** (`P-236`). `P-34` derives the ceiling from the work
   // alone, and checks that hang to their timeout made it about 540 workers against a 4 GiB box
   // that held about a hundred: the probe grew until the kernel killed it, six times, while

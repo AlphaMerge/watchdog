@@ -135,6 +135,17 @@ describe('the self-monitoring sensor types', () => {
     assert.equal(keys.indexOf('lookupsGivenUp'), keys.indexOf('lookupsInFlight') + 1);
   });
 
+  it('carries the name answers loaded at start as a gauge, without limits, after the lookups (`P-438`)', () => {
+    // A probe that started cold is not an outage, and the checks it cannot answer already alarm.
+    const channels = probeHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'answersLoaded'),
+      { key: 'answersLoaded', name: 'Name answers loaded at start', unit: 'answers' },
+    );
+    const keys = channels.map((one) => one.key);
+    assert.equal(keys.indexOf('answersLoaded'), keys.indexOf('lookupsGivenUp') + 1);
+  });
+
   it('carries what each listener kept out of a first scan as a counter, without limits (`P-270`)', () => {
     // Not a loss: the sensor's message names it, and a limit would alarm on every reconnect after
     // an outage the link channels already alarm on. Each beside its listener's overwritten count.

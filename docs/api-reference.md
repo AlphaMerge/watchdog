@@ -1480,6 +1480,7 @@ How one probe is doing, right now
 | `channels.sessionsOpened` | number | nullable |  |
 | `channels.lookupsInFlight` | number | nullable |  |
 | `channels.lookupsGivenUp` | number | nullable |  |
+| `channels.answersLoaded` | number | nullable |  |
 | `channels.poolCeiling` | number | nullable |  |
 | `channels.poolMemoryCap` | number | nullable |  |
 | `channels.poolHeldBack` | number | nullable |  |

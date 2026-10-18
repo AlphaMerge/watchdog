@@ -1,11 +1,13 @@
 import { strict as assert } from 'node:assert';
-import { stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { availableParallelism, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { systemResolve, type ResolvedAddress } from '@ms/sensors';
 import { lookupsBesideThePool, ProbeHealthReporter } from '../../src/health/report.js';
+import { AnswerFile, answerFilePath } from '../../src/resolver/answer-file.js';
 import {
   ANSWER_MS,
   lookupLanes,
@@ -24,7 +26,8 @@ import {
 import { pollWithin } from '../support/within.js';
 
 /**
- * What a name lookup a scan costs once the probe's resolver keeps answers (`A-66`, `P-426`).
+ * What a name lookup a scan costs once the probe's resolver keeps answers (`A-66`, `P-426`), and
+ * keeps them across a restart (`P-438`).
  *
  * **`A-57` made SNMP by name one `getaddrinfo` a scan in the probe**, and `A-66` measured what that
  * cost at the 5,000-sensor class: a resolver answering in 100 ms, or one zone in ten not
@@ -51,6 +54,13 @@ import { pollWithin } from '../support/within.js';
  * | `warmzone` | `lane-warm-*` | answering for a scan interval, then one zone in ten silent | the answering zone never given up, nothing refused; past the grace, every answering name refreshed within it, and the silent zone failing at once |
  * | `hung` | `lane-hung-*` | every name silent, cold: `MS_DNS_HANG_MS` then `EAI_AGAIN` | nothing refused, and jitter as the `addresses` arm's |
  * | `zone` | both | one zone in ten silent, cold | read only: how long the answering zone takes to be kept |
+ * | `zonefile` | both | as `zone`, on a probe restarted from the answer file another wrote at stop | every name loaded, the silent zone served what the file kept through its grace, the answering zone never given up, nothing refused; past the grace, the silent zone failing |
+ *
+ * **The restart** (`zonefile`, `P-438`): the probe before it ran warm, every device's name answered,
+ * and wrote its answer file at stop as the zone went silent; the arm's resolver loads that file
+ * before the wheel starts, as `main.ts` does before the first scan. Every name is then kept as
+ * expired: served while it is asked again, for at most the 5-minute grace. Read it against the
+ * `zone` arm, the same restart with no file.
  *
  * **A zone is a domain**: device `n` is `lane-<kind>-n.zone-b.test` in the zone that goes silent
  * and `….zone-a.test` in the others, as a DNS zone's names are, since the resolver gives a lane to
@@ -72,7 +82,10 @@ import { pollWithin } from '../support/within.js';
  * keeps; the lanes' deepest queue, p95 wait and how busy they were; a thread-pool probe, an
  * `fs.stat` every 100 ms; and how long the pool took to drain once the wheel stopped. The zone
  * arms say how each zone fared; the warm one how long an answering name went between answers, the
- * cold one how long the answering names took to be kept.
+ * cold one how long the answering names took to be kept. The silent zone's checks are counted
+ * before or past the grace of their own name's kept answer (`P-438`): from its last answer before
+ * the silence, or from the answer file's load, as the resolver serves it, and those asked within
+ * `EDGE_MS` of it apart, since a check's ask is read back from its result.
  *
  * **Asserted for every arm**: `lookupsGivenUp` is exactly the checks that failed for want of an
  * answer, so the Probe Health number is the one the checks say.
@@ -81,9 +94,10 @@ import { pollWithin } from '../support/within.js';
  * `MS_DNS_HANG_MS` (30,000), `MS_DNS_LANES` (8), `MS_DNS_POOL` (the shipped ceiling),
  * `MS_DNS_WARM_MINUTES` (the `warmzone` arm's time after its zone goes silent, `MS_DNS_MINUTES`
  * unless set: 7 reaches past the 5-minute grace, and only then are the answering zone's refreshes
- * within it and the silent zone's failing asserted), `MS_DNS_COLD_MINUTES` (the `zone` arm's time,
- * `MS_DNS_MINUTES` unless set: long enough for every answering name to be kept, or the row says
- * how many were not), `MS_DNS_ARMS` (a comma list of arm names, all unless set).
+ * within it and the silent zone's failing asserted), `MS_DNS_COLD_MINUTES` (the `zone` and
+ * `zonefile` arms' time, `MS_DNS_MINUTES` unless set: long enough for every answering name to be
+ * kept, or the row says how many were not; 7 takes `zonefile` past the grace), `MS_DNS_ARMS` (a
+ * comma list of arm names, all unless set).
  */
 
 const silent = pino({ level: 'silent' });
@@ -120,6 +134,11 @@ const GIVEN_UP = /the probe’s resolver is not answering/u;
  * one that starts a hold's retry on a free lane waits for it, up to its bound.
  */
 const AT_ONCE_MS = 1_500;
+/**
+ * How near its own name's grace end a silent-zone check is read as on its edge, and counted in
+ * neither bucket: a check's ask is read back from its result, its run time before it arrived.
+ */
+const EDGE_MS = 2_000;
 
 function percentile(sorted: readonly number[], fraction: number): number {
   if (sorted.length === 0) return 0;
@@ -167,6 +186,11 @@ class LookupLanes {
 
   start(): void {
     this.#startedAt ??= performance.now();
+  }
+
+  /** When `answeredAt`'s times are from. */
+  get startedAt(): number | undefined {
+    return this.#startedAt;
   }
 
   /** From now, the `lane-warm-*` names this says are silent never answer. */
@@ -294,6 +318,8 @@ interface Arm {
   readonly silentZone?: (device: number) => boolean;
   /** Answering for a scan interval first, then the silent zone silent. */
   readonly warmFirst?: boolean;
+  /** Started from the answer file a probe that ran warm wrote at stop (`P-438`). */
+  readonly fromFile?: boolean;
 }
 
 const oneInTen = (device: number): boolean => device % 10 === 0;
@@ -330,7 +356,40 @@ const ALL_ARMS: readonly Arm[] = [
     kind: (device) => (oneInTen(device) ? 'hung' : 'ok'),
     silentZone: oneInTen,
   },
+  {
+    name: 'zonefile',
+    label: 'one zone in ten silent, restarted from the answer file',
+    kind: (device) => (oneInTen(device) ? 'hung' : 'ok'),
+    silentZone: oneInTen,
+    fromFile: true,
+  },
 ];
+
+/**
+ * The answer file a probe that ran warm wrote at stop, loaded into `resolver` as the probe loads
+ * it before its first scan (`P-438`): how many answers it loaded. The probe before is a resolver
+ * of its own that answered every device's name at once, for SNMP's family as
+ * `support/lookup-registry.ts` asks it.
+ */
+async function restartedFrom(arm: Arm, devices: number, resolver: NameResolver): Promise<number> {
+  const dir = await mkdtemp(join(tmpdir(), 'ms-perf-answers-'));
+  try {
+    const path = answerFilePath(dir);
+    const before = new NameResolver({
+      logger: silent,
+      lookup: () => Promise.resolve([{ address: '127.0.0.1', family: 4 }]),
+      watch: { files: [], everyMs: 60_000 },
+    });
+    for (let device = 0; device < devices; device += 1) {
+      await before.resolve(host(device, arm.kind(device)), 4, {});
+    }
+    const saved = await new AnswerFile({ path, resolver: before, logger: silent }).save('stop');
+    assert.equal(saved?.saved, devices, 'the probe before wrote every name');
+    return await new AnswerFile({ path, resolver, logger: silent }).load();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 interface Tally {
   results: number;
@@ -350,11 +409,17 @@ interface Run {
   readonly all: Tally;
   /** The answering zone, in a zone arm. */
   readonly answering: Tally | undefined;
-  /** The silent zone, before and after its kept answers could last no longer, in a zone arm. */
+  /**
+   * The silent zone, asked before and after each name's own kept answer could last no longer,
+   * and within `EDGE_MS` of it, in the `warmzone` and `zonefile` arms.
+   */
   readonly silentBefore: Tally | undefined;
   readonly silentAfter: Tally | undefined;
-  /** Whether the arm ran past the silent zone's grace. */
+  readonly silentEdge: Tally | undefined;
+  /** Whether the arm ran past every silent name's grace. */
   readonly pastGrace: boolean;
+  /** Answers loaded from the answer file before the wheel started, in the `zonefile` arm. */
+  readonly answersLoaded: number | undefined;
   readonly refused: number;
   readonly deferred: number;
   readonly timedOut: number;
@@ -388,6 +453,15 @@ async function soak(arm: Arm): Promise<Run> {
   const answering = tally();
   const silentBefore = tally();
   const silentAfter = tally();
+  const silentEdge = tally();
+  /** The silent zone's results, each with when its check asked: put in a bucket at the end. */
+  const silentResults: {
+    readonly device: number;
+    readonly askedAt: number;
+    readonly outcome: string;
+    readonly message: string;
+    readonly durationMs: number;
+  }[] = [];
   const jitter: number[] = [];
   const run: number[] = [];
   const lateBySensor = new Map<number, number>();
@@ -405,10 +479,10 @@ async function soak(arm: Arm): Promise<Run> {
     },
     watch: { files: [], everyMs: 60_000 },
   });
-  /** When the silent zone went silent, and when nothing kept for it can be served any more. */
+  /** When the silent zone went silent. */
   let silencedAt: number | undefined;
-  const graceOver = (): boolean =>
-    silencedAt !== undefined && performance.now() >= silencedAt + ANSWER_MS + STALE_MS;
+  /** When the answer file was loaded, in the `zonefile` arm. */
+  let loadedAt: number | undefined;
 
   const count = (into: Tally, outcome: string, message: string, durationMs: number): void => {
     into.results += 1;
@@ -434,12 +508,13 @@ async function soak(arm: Arm): Promise<Run> {
         if (!inSilentZone(result.sensorId)) {
           count(answering, result.outcome, result.message, result.durationMs);
         } else if (silencedAt !== undefined) {
-          count(
-            graceOver() ? silentAfter : silentBefore,
-            result.outcome,
-            result.message,
-            result.durationMs,
-          );
+          silentResults.push({
+            device: deviceOf(result.sensorId),
+            askedAt: performance.now() - result.durationMs,
+            outcome: result.outcome,
+            message: result.message,
+            durationMs: result.durationMs,
+          });
         }
       }
       run.push(result.durationMs);
@@ -462,8 +537,14 @@ async function soak(arm: Arm): Promise<Run> {
   let laneStats: LaneStats;
   let wheelStartedAt = 0;
   let stoppedAt = 0;
+  let answersLoaded: number | undefined;
   try {
     await pool.start();
+    // Before the wheel, as the probe loads the file before its first scan.
+    if (arm.fromFile === true) {
+      answersLoaded = await restartedFrom(arm, devices, resolver);
+      loadedAt = performance.now();
+    }
     // **Made once the workers have loaded**, because the wheel takes its epoch when it is made:
     // made before, its first ticks were late by the pool's start-up and read as jitter.
     const epochNs = process.hrtime.bigint();
@@ -554,6 +635,37 @@ async function soak(arm: Arm): Promise<Run> {
     lanes.stop();
   }
 
+  // Each silent name's own grace (`P-438`): read from the silencing, a name whose last answer was
+  // older ended its grace sooner, and its failures were counted as served.
+  const lanesFrom = lanes.startedAt ?? wheelStartedAt;
+  const graceEndsAt = (device: number): number => {
+    // Loaded as expired, each answer the file kept is served for the grace from the load.
+    if (loadedAt !== undefined) return loadedAt + STALE_MS;
+    const name = host(device, arm.kind(device));
+    const last = (lanes.answeredAt.get(name) ?? [])
+      .map((at) => lanesFrom + at)
+      .filter((at) => at < (silencedAt ?? 0))
+      .at(-1);
+    return last === undefined ? (silencedAt ?? 0) : last + ANSWER_MS + STALE_MS;
+  };
+  for (const result of silentResults) {
+    const ends = graceEndsAt(result.device);
+    const into =
+      result.askedAt < ends - EDGE_MS
+        ? silentBefore
+        : result.askedAt > ends + EDGE_MS
+          ? silentAfter
+          : silentEdge;
+    count(into, result.outcome, result.message, result.durationMs);
+  }
+  const silentDevices = Array.from({ length: devices }, (_, device) => device).filter(
+    (device) => arm.silentZone?.(device) === true,
+  );
+  const pastGrace =
+    silencedAt !== undefined &&
+    silentDevices.length > 0 &&
+    silentDevices.every((device) => stoppedAt > graceEndsAt(device) + EDGE_MS);
+
   // The answering names, by how they were answered.
   const answeringNames = Array.from({ length: devices }, (_, device) => device)
     .filter((device) => arm.silentZone !== undefined && !arm.silentZone(device))
@@ -598,9 +710,11 @@ async function soak(arm: Arm): Promise<Run> {
     dispatched: wheelStats.dispatched,
     all,
     answering: arm.silentZone === undefined ? undefined : answering,
-    silentBefore: arm.warmFirst === true ? silentBefore : undefined,
-    silentAfter: arm.warmFirst === true ? silentAfter : undefined,
-    pastGrace: graceOver(),
+    silentBefore: arm.warmFirst === true || arm.fromFile === true ? silentBefore : undefined,
+    silentAfter: arm.warmFirst === true || arm.fromFile === true ? silentAfter : undefined,
+    silentEdge: arm.warmFirst === true || arm.fromFile === true ? silentEdge : undefined,
+    pastGrace,
+    answersLoaded,
     refused: stats.refused,
     deferred: stats.deferred,
     timedOut: stats.timedOut,
@@ -631,14 +745,27 @@ const said = (label: string, t: Tally): string =>
 
 function row(run: Run): string {
   const zone: string[] = [];
+  if (run.answersLoaded !== undefined) {
+    zone.push(
+      `answers loaded before the wheel started, from the file the probe before wrote at stop: ${String(run.answersLoaded)}`,
+    );
+  }
   if (run.answering !== undefined) zone.push(said('answering zone', run.answering));
   if (run.silentBefore !== undefined)
     zone.push(said('silent zone, kept answers served', run.silentBefore));
+  if (run.silentEdge !== undefined && run.silentEdge.results > 0) {
+    zone.push(
+      said(
+        `silent zone, within ${ms(EDGE_MS)} of a name's grace end, not asserted`,
+        run.silentEdge,
+      ),
+    );
+  }
   if (run.silentAfter !== undefined) {
     zone.push(
       run.pastGrace
         ? said('silent zone, past the grace', run.silentAfter)
-        : 'silent zone, past the grace: not reached (MS_DNS_WARM_MINUTES=7 reaches it)',
+        : `silent zone, past the grace: not reached (${run.answersLoaded === undefined ? 'MS_DNS_WARM_MINUTES' : 'MS_DNS_COLD_MINUTES'}=7 reaches it)`,
     );
   }
   if (run.longestGapMs !== undefined) {
@@ -652,11 +779,16 @@ function row(run: Run): string {
     }
   }
   if (run.cached !== undefined) {
+    // From the file, each was kept from the start, and what is read is its first fresh answer.
+    const kept =
+      run.answersLoaded === undefined
+        ? 'answering names kept'
+        : 'answering names answered afresh, each served from the file until then';
     zone.push(
       run.cached.never > 0
-        ? `answering names kept, from the wheel's start: ${String(run.cached.never)} of ` +
+        ? `${kept}, from the wheel's start: ${String(run.cached.never)} of ` +
             `${String(run.cached.of)} not by the arm's end (MS_DNS_COLD_MINUTES=7 reaches them)`
-        : `answering names kept, from the wheel's start: all ${String(run.cached.of)}, p50 ` +
+        : `${kept}, from the wheel's start: all ${String(run.cached.of)}, p50 ` +
             `${ms(run.cached.p50)}, p95 ${ms(run.cached.p95)}, last ${ms(run.cached.max)}`,
     );
   }
@@ -678,7 +810,7 @@ function row(run: Run): string {
   );
 }
 
-describe('a name lookup a scan, through the probe’s resolver (A-66, P-426)', () => {
+describe('a name lookup a scan, through the probe’s resolver (A-66, P-426, P-438)', () => {
   const runs: Run[] = [];
 
   after(() => {
@@ -686,7 +818,7 @@ describe('a name lookup a scan, through the probe’s resolver (A-66, P-426)', (
       `\n    measured: ${String(SENSORS)} sensors at ${String(INTERVAL_SECONDS)} s on ` +
         `${String(Math.ceil(SENSORS / SENSORS_PER_DEVICE))} devices, ${String(MINUTES)} min an arm ` +
         `(warmzone ${String(INTERVAL_SECONDS)} s answering, then ${String(WARM_MINUTES)} min; ` +
-        `zone ${String(COLD_MINUTES)} min), ` +
+        `zone and zonefile ${String(COLD_MINUTES)} min), ` +
         `pool ${String(POOL_SIZE)}, queue ${String(QUEUE_MAX)}, ${String(availableParallelism())} cores\n` +
         `    lookup bound ${ms(SNMP_TIMEOUT_MS / 2)} (SNMP's ${ms(SNMP_TIMEOUT_MS)}), ` +
         `check ${ms(MODEL_CHECK_MS)} after it; ${String(LANES)} lookup lanes, the resolver ` +
@@ -752,6 +884,45 @@ describe('a name lookup a scan, through the probe’s resolver (A-66, P-426)', (
             (failedMs.at(-1) ?? 0) < SNMP_TIMEOUT_MS / 2 + AT_ONCE_MS,
             `none past its bound: ${ms(failedMs.at(-1) ?? 0)}`,
           );
+        }
+      }
+      if (arm.name === 'zonefile') {
+        // `P-438`: the cold `zone` arm's answering zone gave up 2,251 of 31,500 in the third quiet
+        // window, behind the silent zone's first lookups. With the cap the cold arm may reach none
+        // too, so the answering zone's none here is read against `zone`'s row, not credited to the
+        // file. What only the file does is serve the silent zone what it had, through its grace.
+        assert.equal(
+          run.answersLoaded,
+          Math.ceil(SENSORS / SENSORS_PER_DEVICE),
+          'every name the probe before kept, loaded',
+        );
+        const before = run.silentBefore;
+        assert.ok(
+          before !== undefined && before.results > 0,
+          'the silent zone scanned within its grace',
+        );
+        assert.equal(
+          before.answered,
+          before.results,
+          'every silent-zone check within its grace served the answer the file kept',
+        );
+        assert.equal(run.refused, 0, 'no check refused');
+        const answering = run.answering;
+        assert.ok(answering !== undefined && answering.results > 0, 'the answering zone scanned');
+        assert.equal(
+          answering.givenUp,
+          0,
+          'every answering-zone check answered, from the first scan',
+        );
+        assert.equal(answering.other, 0);
+        if (run.pastGrace) {
+          const after = run.silentAfter;
+          assert.ok(
+            after !== undefined && after.results > 0,
+            'the silent zone scanned past its grace',
+          );
+          assert.equal(after.answered, 0, 'nothing served past the grace');
+          assert.equal(after.givenUp, after.results, 'every one failed naming the resolver');
         }
       }
       if (arm.name === 'hung') {

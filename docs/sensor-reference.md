@@ -1069,6 +1069,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `sessionsOpened` | Sessions opened | sessions | 64-bit counter → rate |
 | `lookupsInFlight` | Name lookups in flight | lookups | — |
 | `lookupsGivenUp` | Name lookups given up | lookups | 64-bit counter → rate |
+| `answersLoaded` | Name answers loaded at start | answers | — |
 | `poolCeiling` | Worker pool ceiling | workers | — |
 | `poolMemoryCap` | Workers memory can hold | workers | — |
 | `poolHeldBack` | Workers held back by memory | workers | — |

@@ -483,6 +483,22 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_name_lookups_given_up_total${label}`), false);
     });
 
+    it('exports the name answers a probe loaded at start, a zero included, and nothing for one that sent none', async () => {
+      // `P-438`.
+      const label = `{probe="${String(probeId)}"}`;
+      const loaded = (answersLoaded: number) => (): ProbeLink => ({
+        ...connected,
+        health: { ...connected.health, lookupsGivenUp: 1_250, answersLoaded },
+      });
+      const metrics = parse((await varying(loaded(450)).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_name_answers_loaded${label}`), 450);
+      assert.equal(metrics.get(`ms_probe_name_lookups_given_up_total${label}`), 1_250);
+      const cold = parse((await varying(loaded(0)).scrape()).body);
+      assert.equal(cold.get(`ms_probe_name_answers_loaded${label}`), 0);
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_name_answers_loaded${label}`), false);
+    });
+
     it('exports the readings a probe could not send, and nothing for a probe that sent none', async () => {
       // `P-283`. Distinct values, so a series reading its neighbour's field is seen.
       const label = `{probe="${String(probeId)}"}`;

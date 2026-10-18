@@ -122,7 +122,7 @@ spells its version `1.0.0~rc.3`, so that `1.0.0` upgrades it.
 upgrade*, *Every probe host* and *After the upgrade*. From anything older, including every build
 that says `0.1.0`, read *From a build older than rc.2* as well. From rc.2, the core's first start
 applies migrations 071 to 084 (there is no 083) while `database.autoMigrate` is on, the default,
-and the protocol between core and probe moves from 28 to 36.
+and the protocol between core and probe moves from 28 to 37.
 
 ### Before you upgrade
 
@@ -341,16 +341,31 @@ also says what taking back 064 and 073 does).
 - **The field test is still to come** (`H-09`): a clean install on Ubuntu, monitoring 100 real
   devices for a week without intervention, which is 1.0's exit criterion
   ([PLAN.md](PLAN.md), Phase 10; [the runbook](runbook-field-test.md)). It waits on hardware.
-- **Name resolution.** A probe looks up a device given by host name once a scan, two lookups at a
-  time for the whole probe. Measured at 5,000 sensors on 500 named devices
-  ([the finding](findings/2026-10-17-name-lookups-a-scan.md)): with a resolver taking 100 ms a
-  lookup, or one zone in ten not answering, nearly every check that needed a lookup failed,
-  whichever device it was for; the arithmetic puts the slow threshold near 24 ms. `P-426`, a
-  resolver in the probe that keeps the answers it gets, is to land for 1.0. Whether lookups also
-  move off the thread pool every check shares (`P-432`) is decided after a measurement. Either
-  way, Probe Health's `lookupsInFlight` and `lookupsGivenUp` show a resolver that is not keeping
-  up, and a device given by address is not looked up at all. **Before `v1.0.0`**: rewrite this
-  item to say what 1.0 carries.
+- **Name resolution.** A probe looks up a device given by host name through a resolver of its own
+  (`P-426`), which keeps each answer 30 s, serves an expired one for up to 5 minutes while the
+  system's resolver does not answer, holds a name it does not answer rather than letting every
+  check wait on it, and runs at most six `getaddrinfo` lookups at once, giving a lane to the
+  zones that answer first
+  ([how a probe resolves its devices' names](administration.md#how-a-probe-resolves-its-devices-names)).
+  The answers it keeps now survive a restart (`P-438`): written to the probe's spool directory at
+  stop and every minute, and read before the first scan, so a probe restarted in the middle of an
+  outage answers the zones that answer from that scan, and Probe Health's `answersLoaded` says
+  how many it read. And a zone none of whose names has answered from DNS, or with a lookup stuck
+  lately, takes at most three of the four lanes for names with nothing kept, and never the last
+  lane those share with refreshes, so a first start in the middle of one zone's outage, or a
+  restart with no file to read, asks the zones that answer on the fourth from the first scan. A
+  resolver that answers every lookup slowly, as one does behind a first nameserver that is down,
+  is answering, not silent, and its zones keep every lane. Two zones silent at once can still
+  take the four between them, which only the file covers. Measured
+  at 5,000 sensors on 500 named devices, before
+  ([the first finding](findings/2026-10-17-name-lookups-a-scan.md)) and through the resolver
+  ([the second](findings/2026-10-18-name-lookups-through-the-resolver.md)): a resolver taking
+  100 ms a lookup, or one zone in ten not answering on a running probe, no longer fails the
+  answering devices' checks. Before `P-438`, a cold start in the middle of an outage failed about
+  half the answering devices' sensors for one scan. `P-432`, an option that moves lookups off the
+  thread pool every check shares, is decided for 1.0 and still to land. A device given by address
+  is not looked up at all. **Before `v1.0.0`**: add what `P-432` carries, and the restart's
+  measurement (the cold start and the restart from the file), to this item.
 - **Slipped to 1.0.1:**
   - `A-84`: when a probe's protocol flap ends, the core should push that probe its configuration
     and let go what the flap held, and no test has run that step. If Probe Health's

@@ -723,6 +723,12 @@ const PROBE_METRICS: readonly Metric[] = [
     help: 'Checks that failed for want of an answer from the probe’s resolver, a running total: their bound passed, they were cancelled, or the resolver failed them at once (EAI_AGAIN, a name it holds, every lane stuck, or a full queue).',
     counter: true,
   },
+  // `P-438`. The answers the probe's resolver loaded at start from those it kept when it stopped.
+  {
+    key: 'answersLoaded',
+    name: 'ms_probe_name_answers_loaded',
+    help: 'Name answers the probe’s resolver loaded at start from those it kept when it last stopped, each served while it is asked again. Zero is a cold start: no file, one it could not use, or one past the grace.',
+  },
   {
     key: 'spoolCorrupt',
     name: 'ms_probe_spool_corrupt_total',

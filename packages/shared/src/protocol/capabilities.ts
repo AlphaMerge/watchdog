@@ -233,6 +233,11 @@ export interface ProbeCapabilities {
    * stripped below this together.
    */
   lookupCounters: boolean;
+  /**
+   * Keeps its resolver's answers across a restart (`P-438`), and reports how many it loaded at
+   * start: one field, `answersLoaded`, stripped below this.
+   */
+  answerFile: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -278,6 +283,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'be told that it presented a certificate other than the one its identity is bound to',
   failurePhase: 'say where a failed check failed, as a phase and a host beside its message',
   lookupCounters: 'report the name lookups its resolver has not answered, and those it gave up on',
+  answerFile: 'report how many name answers it loaded at start from those it kept when it stopped',
 };
 
 /**
@@ -342,6 +348,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.answerFile) {
+    const { answersLoaded: _loaded, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.lookupCounters) {
     const { lookupsInFlight: _inFlight, lookupsGivenUp: _givenUp, ...older } = sent;
     sent = older;
