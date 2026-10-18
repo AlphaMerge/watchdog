@@ -12823,6 +12823,17 @@ because each is a decision rather than a defect:
       under its own bound before it starts the bound on the behaviour it names, so a failure says
       which of the two was slow, with a mutant per test showing it still fails when the behaviour is
       removed.
+- [ ] **P-447 — a database timeout test leaves 400 ms between a loaded pass and the bug it guards** · XS ·
+      A-70, A-85 · Found 2026-10-18 in `A-85`'s third round, on a VM at a load near 17. In
+      `packages/sensors/test/db-checked-target.test.ts`, 'the lookup and the connection share a
+      database sensor’s connect timeout' → `db.mssql` took 2,720 ms against `ms < TIMEOUT + 500`
+      (2,500 ms) and passed on the rerun; no database code had changed. The case gives a 900 ms
+      lookup and a 2,000 ms timeout, so the bug it guards (the whole timeout given again after the
+      lookup) would take about 2,900 ms: a loaded pass and the bug are 400 ms apart, and the
+      host's load decides which side a run lands. **Done when** the two are far apart (a lookup
+      that takes most of the timeout, so the bug adds well over a second, with the bound between),
+      or the case reads the deadline the driver was handed rather than the wall clock; with a
+      mutant giving the whole timeout again that still fails it.
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
