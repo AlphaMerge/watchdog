@@ -917,7 +917,7 @@ if runbook_to_box '# /etc/systemd/system/ms-core-failed.service' \
    && runbook_to_box 'OnFailure=ms-core-failed.service' \
      /etc/systemd/system/ms-core.service.d/h25-failed.conf 644; then
   docker exec "${container}" systemctl daemon-reload
-  # Each name on its own: systemd lists them in its own order, not the order they were added in.
+  # Each name on its own: systemd lists them in no fixed order, not the order they were added in.
   named="$(docker exec "${container}" systemctl show ms-core -p OnFailure --value)"
   case " ${named} " in
     *" ms-recover@ms-core.service "*) ;;

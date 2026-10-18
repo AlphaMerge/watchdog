@@ -36356,9 +36356,10 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         `systemctl edit` line, which used to share it. `mail` is the one thing replaced, by
         `scripts/smoke/mail-stub.sh`, which writes down what it was given.
       - **`OnFailure=`.** The smoke's own check asks for `ms-recover@<svc>.service` among the
-        names, not for exactly that. With the runbook's drop-in systemd lists both, in its own
-        order — `ms-core-failed.service ms-recover@ms-core.service`, which the runbook's example
-        output now shows (it had them the other way round) — and a core that refused its file
+        names, not for exactly that. With the runbook's drop-in systemd lists both, in an order
+        that is not fixed — the 2026-10-17 run listed `ms-core-failed.service` first, the
+        2026-10-18 run `ms-recover@ms-core.service` first, and the runbook's example now says either
+        order (`H-25`'s second review) — and a core that refused its file
         (exit 78, `failed`) had `ms-core-failed.service` mail once, *ms-core has failed on
         <host>*, with the failed unit's `systemctl status`.
       - **The heartbeat.** A receiver on loopback (`scripts/smoke/heartbeat-receiver.mjs`, under
@@ -36413,6 +36414,9 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         ms-core-failed.service* and its mail at exit 78; *up: both 0, no mail; down: ms-core-check
         mailed each run (2), the variant once; back: the variant mailed once that it was back; a
         token it does not know: 401, mailed* — and *smoke test passed*.
+      - **Second review.** The two smoke runs listed the drop-in's `OnFailure=` names in opposite
+        orders, so the runbook says to check both are there in either order, and the outcome
+        above, and the smoke's comment, no longer call one of them systemd's.
 
 - [x] **H-26 — an upgrade does not show a passing config check's warnings** · S · B-08 ·
       Found 2026-10-02 by `B-08`. `deploy/place-release.sh` runs `config check` and keeps the

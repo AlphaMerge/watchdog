@@ -2251,11 +2251,12 @@ OnFailure=ms-core-failed.service
 
 **The drop-in adds to the unit's own `OnFailure=`, it does not replace it**: the shipped unit names
 `ms-recover@`, which is what [starts a crashing core again](#when-a-service-keeps-crashing), and a
-dependency listed in a drop-in is added to the list. Check that both are there:
+dependency listed in a drop-in is added to the list. Check that both are there, in either order:
+systemd keeps them in no fixed order, and two boots can list them the other way round.
 
 ```
 systemctl show ms-core -p OnFailure --value
-# ms-core-failed.service ms-recover@ms-core.service
+# ms-core-failed.service ms-recover@ms-core.service   (or the other way round)
 ```
 
 (`smoke-install.sh` installs these two blocks as they are written here, makes the core fail, and
