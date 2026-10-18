@@ -12583,6 +12583,158 @@ because each is a decision rather than a defect:
       - **S2 landed** 2026-10-18: the lookup helper and its child (`lookup-helper.ts`, `lookup-helper-child.ts`), not yet wired into the resolver.
       - **S1 landed** 2026-10-19: the lane rule (`lane-rule.ts`: `heldBy`/`mayStart`, `firstLoad`, `probeFirstRule`, `gateFirstRule`), with `P-438`'s `#heldBack` written on it and `system` unchanged. Wider than the design's `KeyLoad`/`KeyRule`: `P-438`'s last-shared-lane rule (its L2) needs `sharedTaken` and `sharedLanes`, and `lanes` is infinite, since `P-438` holds a domain known to answer by its class alone. From its review: `probeFirstRule(firstCap, sharedCap)` takes both from `P-426`'s lane set rather than working the shared lanes out from the first; a limit that is not finite is no limit, whatever the load says; `heldBy` names the limit that held (`lanes`, `cappedLanes`, `unacked` or `shared`), and the fail-at-once message says a domain not known to answer is held "while none of its names has answered within 30 s", not the capped domain's words. `lane-rule.test.ts` (40) holds both rules to `P-438`'s `#heldBack` as built, the limit named included, over 1,368,000 distinct worlds each (first lanes 1 to 6, each with `P-426`'s shared lanes and one more); name-resolver (97) tests the message; 30 mutants killed: the first sweep's 19 again, and 11 for the review (the shared lanes taken from the lane set, each infinite-limit guard, each limit named, the message); one survives as equivalent, the constructor passing `#firstCap + 1` for `#sharedCap`, which `NameResolver` always makes equal.
       - **Decided 2026-10-19 by Claude, under the user's delegation:** one lane rule. The gate's first-lane rule is `P-438`'s (D24: `gateFirstRule` returns `probeFirstRule`), and S3 adds no second, count-based `unacked` for the gate (the design's "first lookups started since the domain's latest answer"): gate mode differs in its load alone, `capped` also counting the domain's helper lookups the child reported stuck. One source of truth for when a domain may take the first lanes; two rules would drift. The cost: a warm domain that goes silent has `system`'s 1 s before its first lookups are capped in gate mode too.
+      - **S4 landed** 2026-10-19: the gate's name policy (`system-names.ts`, `GlibcNamePolicy`),
+        not yet wired into the resolver. **An allowlist**, by the user's decision of 2026-10-19,
+        after two review rounds found 7, then 6, false vouches in a model of glibc. The check is
+        on only while six rules hold, checked in this order, and otherwise off, naming the first
+        that failed (`CheckOff`). While it is off every name goes to the lookup helper and none
+        is `local`. A slip can move a lookup between the lane sets or cost it the routing wait,
+        never change what it resolves to.
+        1. Linux, and glibc 2.28 to 2.42 by the version it runs (`process.report`, with its
+           network section left out).
+        2. resolv.conf has only these lines: blank ones and comments; `nameserver` and one IPv4
+           or IPv6 address with no scope, the first three (the ones asked) all different;
+           `search` with one or more domains, or `domain` with one, each `.` or a lower-case
+           name, the last line winning; `options` of `ndots:0` to `15`, `timeout:N` (capped at
+           30, and held as at least 1), `attempts:N` (1 or more, capped at 5), `rotate`, `edns0`
+           and `trust-ad`. No NUL and no CR, and at least one server.
+        3. No `LOCALDOMAIN`, `RES_OPTIONS` or `HOSTALIASES` in the environment; `LD_LIBRARY_PATH`,
+           `LD_PRELOAD` and `LD_AUDIT` unset or empty; and /etc/ld.so.preload absent or empty.
+        4. nsswitch.conf has one `hosts:` line, `files dns`, `files dns myhostname` or
+           `files myhostname dns`, ending in a newline; no other line has an action group; and
+           every module the hosts: line needs is installed: an ELF object for this machine in
+           the standard directories. A module named only by ld.so.cache cannot be told, and is
+           off.
+        5. nscd is not running.
+        6. The hosts file and gai.conf can be read, and nothing read at load has moved since:
+           the contents of resolv.conf, nsswitch.conf, gai.conf or /etc/ld.so.preload, by
+           digest; the hostname's domain while the search list is the hostname's; or a module
+           the line needs. The first move is named (`skew`) with what it was and what it is now,
+           and logged once, and the check stays off until ms-probe restarts. The hosts file is
+           followed.
+        - **Classes** (`classify`). `local`: an `inet_aton` form; for family 4, a name of digits
+          and dots that glibc refuses; a name the hosts file gives for the family, unless it is
+          one the check cannot vouch for anyway (for family 4 a `::1` or `::ffff:a.b.c.d` line
+          gives it, as the files backend maps those to IPv4 for AF_INET); the hostname under
+          `files myhostname dns`, for families 0 and 4; and from 2.29, a name that starts with
+          `-`, which glibc's `dns` refuses unasked. `cannotVouch`: a name that is not a DNS
+          name, systemd's own names, `localhost` and the names under it when the hosts file
+          does not give them, an `inet_aton` form for family 6, and a candidate that is too
+          long. Everything else is `walk`, with the candidates `__res_context_search` asks, in
+          order, and the types.
+        - **The watch.** P-438's resolver tells `onLook` what each look read anew. It uses the
+          digest that S2's child computes too: sha256 of the bytes, `absent`, or
+          `unreadable:<code>`. So the policy and the resolver act on one reading of each file,
+          and the policy looks at nscd and the modules on the same tick. A look told before
+          load has read is kept, the latest of each file, and compared with what load read.
+          A look that has not ended within `POLICY_LOOK_MS` (10 s), or load within
+          `POLICY_LOAD_MS` (30 s), is let go, and the check is off for now (`slow`). If the
+          next look finds it still not ended, the check is off until restart (`fault`).
+          `snapshot()` and `skewed()` give
+          the helper's `ready` the files read once (D28): gai.conf unless it says `reload yes`,
+          nsswitch.conf below 2.33, and /etc/ld.so.preload, which ld.so reads as a process
+          starts.
+        - **For S8.** `test/fixtures/system-names-rows.json` holds the 266 rows the check walks
+          or calls `local`. Each row has its world, its answer plans and the wire glibc should
+          send, for each image: Rocky 8 and 9, Ubuntu 22.04 and 24.04, Debian 12 and 13.
+          `system-names-recordings.json` stays empty until S8 records, and the test asserts that
+          every recording still holds.
+        - **Decided 2026-10-19 by Claude, under the user's delegation:**
+          - `watchedFiles()` adds only what `systemResolverFiles` does not watch: gai.conf, and
+            since round 3 /etc/ld.so.preload. nsswitch.conf is already watched, with the hosts
+            file and resolv.conf, through P-438's `systemResolverFiles`. Watching it twice would
+            mean two code paths for one change.
+          - The narrowings stay, because they fit "vouch only on known shapes". Each is now a
+            named, tested rule (`NARROWINGS`, named on `CheckOff.narrowing`). A narrowing is a
+            shape that every glibc from 2.28 to 2.42 reads alike, in a way the check could
+            follow, which the check is off for all the same:
+            - `no-server`: resolv.conf is absent or names no server, and glibc asks 127.0.0.1;
+            - `blank-search`: a `search` or `domain` line names no domain, and glibc skips it;
+            - `domain-words`: a `domain` line names more than one, and glibc takes the first;
+            - `search-shape`: a search domain, or the hostname's domain when it is searched, is
+              not a lower-case name, and glibc takes it as written;
+            - `ndots-over-15`: glibc takes 15;
+            - `unreadable-as-absent`: the hosts file, gai.conf or /etc/ld.so.preload cannot be
+              read, and glibc reads it as a file that is not there.
+
+            Each has its rows, and a mutant that drops its name fails them.
+        - **Round 3** (an independent review of `04fd3c5e` found four false vouches and two
+          lower defects, and S6 one more). Decided 2026-10-19 by Claude, under the user's
+          delegation:
+          - **An action group on any other nsswitch.conf line turns the check off.** From 2.33
+            glibc reads the file as a whole (nss/nss_database.c `process_line`), and a line it
+            cannot parse, for any database it knows, fails the read. Then `getaddrinfo` asks
+            nothing at all. Only `[…]` can fail to parse (nss/nss_action_parse.c). The rule
+            takes every line with a `[`, comments included, which costs nothing on stock Rocky 9
+            or Debian 12: neither has one. Rows at 2.32 and 2.36.
+          - **A `::1` or `::ffff:a.b.c.d` hosts line gives the name for family 4.** Asked for
+            AF_INET, files-hosts.c's `LINE_PARSER` maps them to 127.0.0.1 or a.b.c.d. So family
+            4 for `ip6-localhost` or `ip6-loopback` on Debian's stock `::1` line is now
+            `local:hosts`, where it was walked. Rows at families 0, 4 and 6, and pins that
+            `::2`, `1::1`, an IPv4-compatible address and the near-misses of `::ffff:` are not
+            mapped.
+          - **A reading the watch tells during load is kept, not dropped.** The resolver sets
+            what it told before it tells, so it never sends a reading again. Before, a look that
+            came during load was lost, and the policy vouched on stale servers until restart.
+          - **`LD_PRELOAD` or `LD_AUDIT` non-empty, or /etc/ld.so.preload non-empty, turns the
+            check off.** An interposed `getaddrinfo` replaces glibc's. The file is read at load
+            and watched as a read-once file. A file that cannot be read is off too, as the
+            `unreadable-as-absent` narrowing, since ld.so preloads nothing it cannot `access`.
+          - **The reasons say what happened.** An unreadable file is named with its error code,
+            for example `(EACCES)`. A move says what the file was and what it is now: `absent`,
+            `unreadable (<code>)` or `contents sha256:<12 hex>`. A module's move says its states.
+          - **A load or look is bounded by `POLICY_LOOK_MS`, 2 s**, since no resolver constant
+            fits a file look. On expiry the check goes off with `fault` until restart, and the
+            watch is let go. The re-check below changed this to 10 s, off for now. The bound
+            covers load as well as onLook: the same file and module reads with no bound would
+            hold up the start S3 awaits. After a fault, a look returns at once rather than
+            piling up behind one that hangs, and a look that ends late changes nothing.
+          - **`timeout:0` is held as 1**, as send_dg floors every try at 1 s
+            (resolv/res_send.c).
+        - **Re-check of `508f3fcc`** (fixes 1 to 4 and 7, and the `::ffff:` mapping, held
+          against glibc). Decided 2026-10-19 by Claude, under the user's delegation:
+          - **The bound is a hang detector, not a budget.** At 2 s it could fire on a healthy
+            host and leave the check off until restart. One event-loop stall of 2 s trips it,
+            because libuv runs timers before the poll that would deliver reads already done.
+            And at load 20, a module look's dozen or so file operations can add up to 2 s.
+            `POLICY_LOOK_MS` is now 10 s, and load has its own `POLICY_LOAD_MS`, 30 s.
+          - **A look past its bound turns the check off for now** (`slow`), and the watch is
+            let go. Its file moves were taken before its first await, so nothing is lost. At
+            the next look, a look still not ended is a hang, and the check is off until
+            restart (`fault`). A look that has ended has what it found dropped (a generation
+            count), and the next look looks again, which can turn the check back on.
+          - **A load past its bound** is off for now too. If it ends, it builds its view. If
+            the first look after its bound finds it still reading, that is a `fault`.
+          - **While `slow`, what load read stands:** the snapshot for the helper's `ready`
+            does not change. A move already named stays named.
+          - **`#fail` holds for one episode.** The first reason stands, logged once. A hung
+            load that fails after its hang is named does not overwrite the reason, and a look
+            let go that fails later is dropped, like any other way it can end.
+        - **Left for S3**:
+          - S2's `glibcRuntime` calls `process.report.getReport()` without `excludeNetwork`, in
+            the probe's own `helperSelf` as well, so it can wait on DNS on the main thread. Use
+            one function for both.
+          - S2 gives glibc as `null` off glibc, and the policy as `undefined`. Pick one form
+            before D28 compares them.
+          - Merge the digest into one function.
+          - Use one nsswitch reader: P-438's `hostsFileFirst` should take `readNsswitch`'s
+            rules.
+          - Wire `SystemFiles.ldSoPreload` and pass `watchedFiles()` to the watch. The helper
+            child's environment must not carry an `LD_PRELOAD` or `LD_AUDIT` the probe's lacks.
+        - **For S6**: `timeout` is `retrans`. glibc's send_dg waits `retrans << ns` seconds at
+          server index `ns` (after rotation), divided by `nscount` when `ns` is above 0, and
+          floored at 1 (resolv/res_send.c).
+        - **Tests**: `system-names.test.ts`, 433. Mutants: round 3's 145, all killed, each
+          with its marker in dist. 106 are the earlier rounds', where the six that could not be
+          judged as first written run as their twins, and 39 are for the round-3 fixes. The
+          re-check added 34, run on the final code. 33 were killed with their markers in dist.
+          The other, `G4a`, cannot be judged, because tsc drops a marker after a method's
+          opening brace; its twin `G4b` is killed. They are 27 for the bound and `#fail`, and
+          7 of round 3's run again on the new code. Three were not run, as equivalent: clearing
+          a late look that has ended, which a later look would clear anyway; `.then(settle,
+          settle)` against `.then(settle)`, since a load or look never rejects; and
+          `timer.unref()`. The four resolver files passed 112 of 112 in a run that was not
+          quiet, and are to be run once in a quiet window.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

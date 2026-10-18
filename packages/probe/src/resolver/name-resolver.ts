@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
@@ -19,6 +18,7 @@ import {
 import type { Logger } from '@ms/shared';
 import { firstLoad, heldBy, probeFirstRule, type HeldBy, type KeyRule } from './lane-rule.js';
 import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './protocol.js';
+import { digestOf, digestOfError } from './system-names.js';
 
 /**
  * The probe's one resolver (`P-426`): every name a check resolves to check it, asked once and kept
@@ -177,8 +177,32 @@ export interface NameResolverOptions {
    * (`checkFiles`); one named `nsswitch.conf` also says whether the hosts file is read before DNS
    * (`hostsGive`). The system's (`systemResolverFiles`) every `WATCH_EVERY_MS` unless a test says
    * otherwise.
+   *
+   * `onLook`, when given, is told after every look what it read that it had not told before: each
+   * file whose digest (its contents, or why it could not be read) moved since the last look, and
+   * at the first look every file, as this look read it. It is awaited, and its failure is logged
+   * and fails nothing. The gate's name policy (`P-432`) takes its readings from here, so that it
+   * and this resolver act on one reading of a file, and looks at the nscd socket on the same tick.
+   * What this resolver acts on is unchanged by it: a file it cannot read is still compared at the
+   * next look.
    */
-  readonly watch?: { readonly files: readonly string[]; readonly everyMs: number };
+  readonly watch?: {
+    readonly files: readonly string[];
+    readonly everyMs: number;
+    readonly onLook?: (readings: readonly WatchedReading[]) => Promise<unknown>;
+  };
+}
+
+/** What one look at a watched file read (`watch.onLook`). */
+export interface WatchedReading {
+  readonly file: string;
+  /** Its contents as UTF-8: `''` when it is absent, undefined when it cannot be read for another reason. */
+  readonly text: string | undefined;
+  /**
+   * Its digest by the contract `P-432`'s policy and lookup helper share (system-names.ts, `digestOf`):
+   * sha256 of the bytes read, `absent`, or `unreadable:<code>`.
+   */
+  readonly digest: string;
 }
 
 /** What the resolver is doing now, for Probe Health and the log. */
@@ -560,7 +584,7 @@ export class NameResolver implements PoolResolver {
   readonly #answeringOf = (count: DomainCount, now: number): boolean => this.#answering(count, now);
   /** How long a failing name no check asks about counts against its domain. */
   readonly #countFailingMs: number;
-  readonly #watch: { readonly files: readonly string[]; readonly everyMs: number };
+  readonly #watch: NonNullable<NameResolverOptions['watch']>;
   /** Least recently asked first: a check's ask moves its name to the end, nothing else does. */
   readonly #entries = new Map<string, Entry>();
   /** Every domain with a name kept, and how many of its names are failing. */
@@ -582,6 +606,8 @@ export class NameResolver implements PoolResolver {
   #view: HostsView = viewOf([]);
   /** Orders each domain's last answer and last lookup stuck (`P-438`). */
   #events = 0;
+  /** What `watch.onLook` was last told of each file: its digest. */
+  readonly #told = new Map<string, string>();
   readonly #queues: Record<LaneClass, Pending[]> = { first: [], refresh: [], retry: [] };
   readonly #running: Record<LaneClass, Set<Pending>> = {
     first: new Set(),
@@ -662,16 +688,21 @@ export class NameResolver implements PoolResolver {
     if (this.#watching) return false;
     this.#watching = true;
     try {
-      const looked = await Promise.all(
-        this.#watch.files.map(async (file) => ({ file, text: await this.#read(file) })),
-      );
+      const looked = await Promise.all(this.#watch.files.map((file) => this.#read(file)));
       const hostsChanged = new Set<string>();
+      const readings: WatchedReading[] = [];
       let configChanged = false;
       let changed = false;
-      for (const { file, text } of looked) {
+      for (const reading of looked) {
+        if (this.#told.get(reading.file) !== reading.digest) {
+          this.#told.set(reading.file, reading.digest);
+          readings.push(reading);
+        }
+        const { file, text } = reading;
         // Unreadable this time for another reason than its absence: compared at the next look.
         if (text === undefined) continue;
-        const digest = createHash('sha256').update(text).digest('hex');
+        // An absent file and an empty one say the same to this resolver, as to glibc.
+        const digest = text === '' ? '' : reading.digest;
         const seen = this.#seen.get(file);
         if (seen?.digest === digest) continue;
         const now = seenOf(file, text, digest);
@@ -686,7 +717,10 @@ export class NameResolver implements PoolResolver {
         }
       }
       this.#view = viewOf(this.#seen);
-      if (!changed) return false;
+      if (!changed) {
+        await this.#tell(readings);
+        return false;
+      }
 
       let dropped = 0;
       if (hostsChanged.size > 0) {
@@ -735,18 +769,32 @@ export class NameResolver implements PoolResolver {
       );
       // What held a queued lookup back may be gone: a domain's history, or a name not the file's.
       this.#pump();
+      await this.#tell(readings);
       return true;
     } finally {
       this.#watching = false;
     }
   }
 
-  /** A watched file's contents: empty when it is absent, undefined when it cannot be read now. */
-  async #read(file: string): Promise<string | undefined> {
+  /** `watch.onLook`, told what this look read; its failure fails nothing here. */
+  async #tell(readings: readonly WatchedReading[]): Promise<void> {
+    const onLook = this.#watch.onLook;
+    if (onLook === undefined) return;
     try {
-      return await readFile(file, 'utf8');
+      await onLook(readings);
     } catch (error: unknown) {
-      return codeOf(error) === 'ENOENT' ? '' : undefined;
+      this.#logger.error({ err: error }, 'what a watched file says could not be passed on');
+    }
+  }
+
+  /** A watched file as one look reads it: see `WatchedReading`. */
+  async #read(file: string): Promise<WatchedReading> {
+    try {
+      const bytes = await readFile(file);
+      return { file, text: bytes.toString('utf8'), digest: digestOf(bytes) };
+    } catch (error: unknown) {
+      const text = codeOf(error) === 'ENOENT' ? '' : undefined;
+      return { file, text, digest: digestOfError(error) };
     }
   }
 
@@ -802,7 +850,7 @@ export class NameResolver implements PoolResolver {
     const looked: [string, Seen][] = [];
     for (const file of this.#watch.files) {
       if (!isHostsFile(file) && !isNsswitch(file)) continue;
-      looked.push([file, seenOf(file, (await this.#read(file)) ?? '')]);
+      looked.push([file, seenOf(file, (await this.#read(file)).text ?? '')]);
     }
     const view = viewOf(looked);
     const counts = { loaded: 0, pastGrace: 0, hostsFile: 0, duplicate: 0, overCap: 0, invalid: 0 };
