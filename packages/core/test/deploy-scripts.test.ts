@@ -3454,6 +3454,145 @@ describe('watching the core from outside, as the runbook says to (`H-25`)', () =
       `mail ${BACK}`,
     ]);
   });
+
+  /** `smoke-install.sh`, which installs these blocks into a box and asserts what they do. */
+  const smokeInstall = (): string =>
+    readFileSync(join(repoRoot, 'scripts', 'smoke-install.sh'), 'utf8');
+
+  /**
+   * `runbook_to_box` from `smoke-install.sh`, on its own, as the smoke calls it: inside an `if`,
+   * under `set -euo pipefail`. `docker` is a stub that keeps what `cp` was given as
+   * `STUB_DIR/copied` and fails `cp` or `exec` with the status it is told; the runbook is a
+   * document of one block. It prints what the function returned and what it left in `failed`.
+   */
+  function toBox(
+    line: string,
+    sed: readonly string[],
+    { cp = 0, exec = 0 }: { cp?: number; exec?: number } = {},
+  ): { box: Sandbox; result: SpawnSyncReturns<string> } {
+    const fn = /\nrunbook_to_box\(\) \{\n[\s\S]*?\n\}\n/u.exec(smokeInstall())?.[0];
+    assert.ok(fn !== undefined, 'smoke-install.sh has no runbook_to_box');
+    const box = sandbox();
+    writeFileSync(
+      join(box.bin, 'docker'),
+      `#!/bin/sh\necho "docker $*" >> "$STUB_LOG"\ncase "$1" in\n` +
+        `  cp) cp "$2" "$STUB_DIR/copied"; exit ${String(cp)} ;;\n` +
+        `  exec) exit ${String(exec)} ;;\nesac\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const runbook = join(box.dir, 'runbook.md');
+    writeFileSync(
+      runbook,
+      '# Runbook\n\n```sh\n#!/bin/sh\n# The check.\nURL=https://ms.example.com\n```\n',
+    );
+    const script = [
+      'set -euo pipefail',
+      '. "$1"',
+      'runbook="$2"; logs="$3"; container=box; failed=0',
+      fn,
+      'shift 3',
+      'if runbook_to_box "$@"; then echo returned=0; else echo returned=1; fi',
+      'echo "failed=$failed"',
+    ].join('\n');
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        script,
+        'to-box',
+        join(repoRoot, 'scripts', 'lib', 'doc-block.sh'),
+        runbook,
+        box.dir,
+        line,
+        '/usr/local/bin/ms-core-check',
+        '755',
+        ...sed,
+      ],
+      { env: box.env, encoding: 'utf8', timeout: 10_000 },
+    );
+    return { box, result };
+  }
+
+  it('puts a block into the box, through the smoke’s edits, and says nothing', () => {
+    for (const [why, sed, url] of [
+      ['as written', [], 'URL=https://ms.example.com'],
+      [
+        'made this core’s',
+        ['-e', 's|^URL=.*|URL=http://127.0.0.1:8080|'],
+        'URL=http://127.0.0.1:8080',
+      ],
+    ] as const) {
+      const { box, result } = toBox('# The check.', sed);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, 'returned=0\nfailed=0\n', why);
+      assert.equal(result.stderr, '', why);
+      assert.equal(
+        readFileSync(join(box.dir, 'copied'), 'utf8'),
+        `#!/bin/sh\n# The check.\n${url}\n`,
+      );
+      assert.match(box.logged(), /^docker exec box chmod 755 \/usr\/local\/bin\/ms-core-check$/mu);
+    }
+  });
+
+  it('fails the smoke for every way a block can miss the box (`H-25` review)', () => {
+    // Its callers skip what they assert when it returns 1, so a failure that left `failed` alone
+    // was a section skipped in a run that passed.
+    for (const [why, line, sed, stubs, said] of [
+      [
+        'no such block',
+        '# Not in the runbook.',
+        [],
+        {},
+        /has no single block with '# Not in the runbook\.'/u,
+      ],
+      [
+        'an edit sed refuses',
+        '# The check.',
+        ['-e', 's|unclosed'],
+        {},
+        /could not edit the block/u,
+      ],
+      [
+        'docker cp failed',
+        '# The check.',
+        [],
+        { cp: 1 },
+        /could not install the block .* at \/usr\/local\/bin\/ms-core-check/u,
+      ],
+      ['chmod failed', '# The check.', [], { exec: 1 }, /could not install the block/u],
+    ] as const) {
+      const { result } = toBox(line, sed, stubs);
+      assert.equal(result.status, 0, `${why}: ${result.stderr}`);
+      assert.equal(result.stdout, 'returned=1\nfailed=1\n', why);
+      assert.match(result.stderr, said, why);
+    }
+  });
+
+  it('fails the smoke where a block did not reach the box, and says what went unasserted', () => {
+    const chains = [...smokeInstall().matchAll(/^(?:if|elif) runbook_to_box [\s\S]*?^fi$/gmu)];
+    assert.equal(chains.length, 2, 'the drop-in and the checks are not both installed this way');
+    for (const [chain] of chains) {
+      assert.match(
+        chain,
+        /\nelse\n(?: {2}#.*\n)* {2}echo " {4}FAILED — [^\n]*" >&2\n {2}failed=1\nfi$/u,
+        chain.split('\n')[0],
+      );
+    }
+  });
+
+  it('asks the shipped units for exactly their own OnFailure=, and the drop-in’s for membership', () => {
+    // A drop-in adds to the list, so membership is right for the runbook's (`H-25`); before it is
+    // installed, anything more than the release's own is a fault in the release (`H-25` review).
+    const smoke = smokeInstall();
+    const exact = smoke.indexOf('if [ "$' + '{named}" != "ms-recover@$' + '{svc}.service" ]; then');
+    const outside = smoke.indexOf('# --- watching the core from outside (H-25)');
+    const member = smoke.indexOf('*" ms-recover@ms-core.service "*) ;;');
+    assert.ok(exact >= 0, 'the shipped units’ OnFailure= is not compared whole');
+    assert.ok(outside >= 0 && member >= 0);
+    assert.ok(exact < outside, 'the whole comparison comes after a drop-in is installed');
+    assert.ok(outside < member, 'membership is asked before the drop-in is installed');
+    assert.equal(count(smoke, '-p OnFailure --value'), 2);
+  });
 });
 
 describe('the MS_* variables the product sets itself, and who reports them (`H-32`)', () => {

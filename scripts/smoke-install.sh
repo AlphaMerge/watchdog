@@ -783,17 +783,15 @@ docker exec "${container}" mkdir -p /etc/systemd/system/ms-recover@.service.d
 docker exec "${container}" bash -c "printf '[Service]\nEnvironment=MS_RECOVER_BASE_SEC=${cooldown}\n' \
   > /etc/systemd/system/ms-recover@.service.d/smoke.conf"
 docker exec "${container}" systemctl daemon-reload
-# **Among what the unit names, not all of it** (`H-25`): an operator's drop-in adds to the list,
-# as the runbook's `OnFailure=` below does, and that is not a fault in the release's unit.
+# **Exactly what the release's unit names**: no drop-in is installed yet, so anything else here
+# is the release's unit, or something left from earlier in this run. The runbook's drop-in, which
+# adds to the list, is asserted with membership in its own block below (`H-25`).
 for svc in ms-core ms-probe; do
   named="$(docker exec "${container}" systemctl show "${svc}" -p OnFailure --value)"
-  case " ${named} " in
-    *" ms-recover@${svc}.service "*) ;;
-    *)
-      echo "    FAILED — ${svc} names '${named}' in OnFailure=, without ms-recover@${svc}.service" >&2
-      failed=1
-      ;;
-  esac
+  if [ "${named}" != "ms-recover@${svc}.service" ]; then
+    echo "    FAILED — ${svc} names '${named}' in OnFailure=, not ms-recover@${svc}.service" >&2
+    failed=1
+  fi
 done
 is_active() { [ "$(docker exec "${container}" systemctl is-active ms-probe 2>/dev/null || true)" = active ]; }
 wait_active() {
@@ -880,7 +878,9 @@ wait_core() {
   return 1
 }
 # The runbook's one block with LINE in it, into the box at DEST with MODE, through any sed
-# expressions that follow.
+# expressions that follow. **Every way it can fail is a failed smoke** (`H-25` review): its callers
+# skip what they assert when it fails, so a step that failed here without saying so let the run
+# pass without the section.
 runbook_to_box() {
   local line="$1" dest="$2" mode="$3"
   shift 3
@@ -889,10 +889,18 @@ runbook_to_box() {
     failed=1
     return 1
   fi
-  [ "$#" -eq 0 ] || sed "$@" "${logs}/block" >"${logs}/block.edited"
-  [ "$#" -eq 0 ] || mv "${logs}/block.edited" "${logs}/block"
-  docker cp "${logs}/block" "${container}:${dest}"
-  docker exec "${container}" chmod "${mode}" "${dest}"
+  if [ "$#" -gt 0 ] && ! { sed "$@" "${logs}/block" >"${logs}/block.edited" \
+    && mv "${logs}/block.edited" "${logs}/block"; }; then
+    echo "    FAILED — could not edit the block with '${line}' for this box" >&2
+    failed=1
+    return 1
+  fi
+  if ! docker cp "${logs}/block" "${container}:${dest}" \
+    || ! docker exec "${container}" chmod "${mode}" "${dest}"; then
+    echo "    FAILED — could not install the block with '${line}' at ${dest}" >&2
+    failed=1
+    return 1
+  fi
 }
 # How many mails so far have TEXT in their command line or their message.
 mails() {
@@ -945,6 +953,10 @@ if runbook_to_box '# /etc/systemd/system/ms-core-failed.service' \
     failed=1
   fi
   docker exec "${container}" cp -p /tmp/core.json.h25 /etc/ms/core.json
+else
+  # runbook_to_box has said why; this says what was not asserted because of it.
+  echo "    FAILED — the OnFailure= drop-in and ms-core-failed.service were not asserted" >&2
+  failed=1
 fi
 docker exec "${container}" rm -rf /etc/systemd/system/ms-core.service.d \
   /etc/systemd/system/ms-core-failed.service
@@ -1085,6 +1097,10 @@ elif runbook_to_box '# Exits 0 only if the core answered 200 inside ten seconds.
       docker exec "${container}" cat "${box_mail}" >&2 2>/dev/null || true
       failed=1 ;;
   esac
+else
+  # runbook_to_box has said why; this says what was not asserted because of it.
+  echo "    FAILED — the runbook's two checks were not asserted" >&2
+  failed=1
 fi
 wait_core 60 || { echo "    FAILED — ms-core did not start again after the checks" >&2; failed=1; }
 

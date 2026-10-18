@@ -36394,6 +36394,25 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         of `OnFailure=`, which wanted the two names in the order they were added, every other
         assertion passing; the second, with the check reading each name on its own: *smoke test
         passed*.
+      - **Review.** `runbook_to_box` failed the smoke only for a block the runbook did not have:
+        an edit `sed` refused, a `docker cp` or a `chmod` that failed returned whatever the last
+        command did, and its callers, which skip what they assert when it returns 1, had no
+        `else`. Each failure now says what failed and sets `failed=1`, and each caller's `else`
+        says what was not asserted and sets it too. The shipped units' `OnFailure=` is compared
+        whole again, before any drop-in is installed; only the block that installs the runbook's
+        drop-in asks for membership. Tests: four more in `deploy-scripts.test.ts` — the function
+        taken out of `smoke-install.sh` and run as the smoke runs it, inside an `if` under
+        `set -euo pipefail`, against a stub `docker` (as written and edited: 0, nothing said; no
+        block, an edit `sed` refuses, `cp` failing, `chmod` failing: 1 and `failed=1`, each said),
+        both callers' `else`, and the whole comparison before the membership one.
+        **Mutations 7/7**: a failed `docker cp` or `chmod` passing; a failed edit or install
+        leaving `failed` alone; the drop-in caller's `else` leaving it; the checks caller with no
+        `else`; the shipped units' `OnFailure=` asked for membership.
+        **Smoke 2026-10-18**, the same `smoke-install.sh` run (Debian 12, arm64, `f6e4185a`): every
+        `runbook_to_box` call succeeded, so both ran — *OnFailure=ms-recover@ms-core.service
+        ms-core-failed.service* and its mail at exit 78; *up: both 0, no mail; down: ms-core-check
+        mailed each run (2), the variant once; back: the variant mailed once that it was back; a
+        token it does not know: 401, mailed* — and *smoke test passed*.
 
 - [x] **H-26 — an upgrade does not show a passing config check's warnings** · S · B-08 ·
       Found 2026-10-02 by `B-08`. `deploy/place-release.sh` runs `config check` and keeps the
