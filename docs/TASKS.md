@@ -37418,6 +37418,19 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `installation.md` → *Upgrading* carries a "from a release before `P-382`" paragraph saying
       which object kept the flag and how an operator can tell which one that is.
 
+- [ ] **H-45 — no box has swapped a real rc.2 `.rpm` for this release's** · S · H-40 · Found
+      2026-10-18 in `H-40`'s review. `dnf swap` between `ms` and `ms-probe` ends right because
+      the incoming package's `%pre` stops both services and its `%posttrans` enables and starts
+      them again after the outgoing package's erase, whatever that package was; rc.1's and
+      rc.2's `%preun` run the same commands as this release's, which `deploy-scripts.test.ts`
+      runs as rc.2's packager wrote them. But `smoke-packages.sh` swaps this release's packages
+      with each other only, and building an rc.2 `.rpm` means building the rc.2 tree.
+      `installation.md` §2 and the release notes say the swap from rc.2 or older has not been
+      run. **Done when** a Rocky 9 box (arm64) has the `v1.0.0-rc.2` `ms` rpm with its probe
+      running swapped for this release's `ms-probe`, and an rc.2 `ms-probe` for this release's
+      `ms`, ending with the probe enabled and running as the setup left it, recorded in
+      `docs/findings/`; then those two sentences come out.
+
 ---
 
 ## Phase 11 — Flow monitoring (`V2-01`)

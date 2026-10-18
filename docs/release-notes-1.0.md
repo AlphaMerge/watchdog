@@ -133,11 +133,17 @@ and the protocol between core and probe moves from 28 to 36.
 - **A probe that runs as root with a script directory** (`P-276`) no longer starts without
   `probe.processUid` and `probe.processGid`, or `allowScriptsAsRoot`. The packaged unit runs it as
   `ms-probe`, so this is a `User=root` drop-in or a probe started by hand. The installer's check
-  cannot see the unit's user, so the restart is where it fails (`H-41`)
+  runs as root and passes it; `ms-setup` then reads the unit's account and says the probe will
+  refuse before it restarts it, and the restart fails (`H-41`)
   ([installation.md → Upgrading](installation.md#upgrading)).
 - **`checkAbortGraceMs` under 1500** (`P-267`) is refused. Look in `/etc/ms/probe.json` and in any
   drop-in, and set it to 1500 or more, or remove it. A drop-in's value passes the installer's
   check and then stops the probe with exit 78 ([installation.md → Upgrading](installation.md#upgrading)).
+- **A tarball installation with files of your own in `bin`, `libexec`, `etc` or `deploy`**
+  under its prefix, or under `previous` (`H-39`): the installer replaces those directories
+  whole, so it now refuses the upgrade before it changes anything, and names the file. Move it
+  out of the prefix first. A prefix with anything in it and no release, `--prefix /usr/local`,
+  is refused the same way ([installation.md → Upgrading](installation.md#upgrading)).
 - **Then let the first start finish.** A migration reports itself every 15 seconds and can take
   minutes on a large installation; do not restart the core to hurry it
   ([a core that is still starting](administration.md#a-core-that-is-still-starting)). Before
@@ -186,6 +192,12 @@ From rc.2 or anything older:
     replaced them with what the type declares, and 073 lets the next start do the same to any not
     yet replaced. Set again the ones that were an operator's. (`H-43`: the installation guide does
     not say this yet.)
+- **A tarball installation has an uninstaller**, `sudo /opt/ms/libexec/ms-uninstall` (`H-39`),
+  which removes what a package's purge removes and keeps what it keeps. It removes nothing while
+  the `ms` or `ms-probe` package is installed, nor from a prefix holding anything in `bin`,
+  `libexec`, `etc` or `deploy` that no release put there. An installation from rc.2 or older has
+  no copy until it is upgraded; to remove one without upgrading, run `sudo ./deploy/uninstall.sh`
+  from this release's unpacked tarball ([uninstalling](installation.md#uninstalling)).
 - **The start-up passes** (`P-333`, migration 077) bring stored rows up to a build's declarations
   at its first start, not at every restart. One renames existing channels to what their type
   declares and gives them its units (`P-402`, `P-404`); a name or unit a build takes away stays
@@ -309,11 +321,13 @@ also says what taking back 064 and 073 does).
   - Two setup paths have run only in containers: the core's database password as an encrypted
     credential, and the ICMP setting across a reboot (`H-36`). Check whichever you use after the
     first reboot.
-  - Replacing `ms` with `ms-probe` (`dnf swap ms ms-probe`) leaves the new package's probe
-    stopped and disabled (`H-40`); afterwards, run `systemctl enable --now ms-probe`.
-  - The tarball's uninstall leaves `/etc/sysctl.d/60-ms-probe-ping.conf` (`H-39`;
-    [uninstalling](installation.md#uninstalling)), and the two ways of watching the core from
-    outside have not been run against a core (`H-25`;
+  - `dnf swap` between `ms` and `ms-probe`, either way, leaves the new package's services enabled
+    and started as its setup says, between this release's packages (`H-40`). From an `.rpm` of
+    rc.2 or older it should end the same, but has not been run from one (`H-45`): afterwards,
+    check `systemctl is-active ms-probe`, and run `systemctl enable --now ms-probe` if it is not
+    running ([installation.md §2](installation.md#2-the-application)).
+  - The two ways of watching the core from outside have run against a packaged core, but on the
+    core's own host against 127.0.0.1, not from another machine (`H-25`;
     [watching the core from outside](administration.md#watching-the-core-from-outside)).
 
 ## Verified
