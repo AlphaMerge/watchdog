@@ -143,8 +143,10 @@ and the protocol between core and probe moves from 28 to 36.
   under its prefix, or under `previous` (`H-39`): the installer replaces those directories
   whole, so it now refuses the upgrade before it changes anything, and names the file. Move it
   out of the prefix first. A prefix with anything in it and no release, `--prefix /usr/local`,
-  is refused the same way, unless it holds only empty directories, a filesystem's `lost+found`
-  or what an interrupted install left ([installation.md → Upgrading](installation.md#upgrading)).
+  is refused the same way, unless it holds only empty directories with a release's names
+  (`app`, `bin`, `web`, `docs`, `etc`, `deploy`, `libexec`, `previous`), a filesystem's
+  `lost+found` or what an interrupted install left
+  ([installation.md → Upgrading](installation.md#upgrading)).
 - **Then let the first start finish.** A migration reports itself every 15 seconds and can take
   minutes on a large installation; do not restart the core to hurry it
   ([a core that is still starting](administration.md#a-core-that-is-still-starting)). Before
@@ -197,8 +199,9 @@ From rc.2 or anything older:
   which removes what a package's purge removes and keeps what it keeps. It removes nothing while
   the `ms` or `ms-probe` package is installed, nor from a prefix holding anything in `bin`,
   `libexec`, `etc` or `deploy` that no release put there, nor a release kept inside an
-  installation (`previous`, `rolled-back`), which `rm -rf` removes. An installation from rc.2 or
-  older has no copy until it is upgraded; to remove one without upgrading, run
+  installation (`previous`, `rolled-back`), nor a prefix the installed units do not run from,
+  such as a copy of another installation; `rm -rf` removes either of those. An installation
+  from rc.2 or older has no copy until it is upgraded; to remove one without upgrading, run
   `sudo ./deploy/uninstall.sh` from this release's unpacked tarball ([uninstalling](installation.md#uninstalling)).
 - **The start-up passes** (`P-333`, migration 077) bring stored rows up to a build's declarations
   at its first start, not at every restart. One renames existing channels to what their type
@@ -324,12 +327,16 @@ also says what taking back 064 and 073 does).
     credential, and the ICMP setting across a reboot (`H-36`). Check whichever you use after the
     first reboot.
   - `dnf swap` between `ms` and `ms-probe`, either way, leaves the new package's services enabled
-    and started as its setup says, between this release's packages (`H-40`). From an `.rpm` of
-    rc.2 or older it should end the same, but has not been run from one (`H-45`): afterwards,
-    `systemctl is-enabled ms-probe` should say `enabled` (`systemctl enable ms-probe` if not),
-    and the probe should be running only where the setup said it started the services. A swap
-    from `ms-probe` to `ms` on a probe's host is the core's first installation, which starts
-    nothing, the probe included, until the core has a database password; then start both
+    and started as its setup says, a setup that failed part-way included, between this
+    release's packages (`H-40`). From an `.rpm` of rc.2 or older it should end the same, but has
+    not been run from one (`H-45`): afterwards, `systemctl is-enabled ms-probe` should say
+    `enabled` (`systemctl enable ms-probe` if not), and the probe should be running only where
+    the setup said it started the services; if the setup said it started them and
+    `systemctl is-active ms-probe` says otherwise, `sudo systemctl start ms-probe`. A swap from
+    `ms-probe` to `ms` on a probe's host is the core's first installation, which starts nothing,
+    the probe included, until the core has a database password; then start both. A probe that
+    serves a core elsewhere can be started at once with `sudo systemctl start ms-probe`; it
+    keeps dialling the core in `/etc/ms/probe.json` until you change that file
     ([installation.md §2](installation.md#2-the-application)).
   - The two ways of watching the core from outside have run against a packaged core, but on the
     core's own host against 127.0.0.1, not from another machine (`H-25`;

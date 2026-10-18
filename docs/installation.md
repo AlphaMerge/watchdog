@@ -170,13 +170,17 @@ either contains a core or it does not:
   package goes in, and the core's setup runs for both. **On a probe's host that is the core's
   first installation**: there is no `/etc/ms/core.json` yet, so the setup writes one and starts
   nothing, the probe included, until the core has a database password (`H-30`; §3). Then
-  `sudo systemctl start ms-core ms-probe`. Both ways are tested between packages of this
-  release, and either way the units end enabled, and running where the setup started them. From
-  an `.rpm` of 1.0.0-rc.2 or older the swap should end the same — the old package's erase runs
-  the same commands, and the new one enables the units again after it — but has not been run
-  against one (`H-45`): afterwards, `systemctl is-enabled ms-probe` should say `enabled`
+  `sudo systemctl start ms-core ms-probe`. A probe that serves a core elsewhere can be started
+  at once with `sudo systemctl start ms-probe`; it keeps dialling the core in
+  `/etc/ms/probe.json` until you change that file. Both ways are tested between packages of this
+  release, and either way the units end enabled, and running where the setup started them — a
+  setup that failed part-way included, for what it had started. From an `.rpm` of 1.0.0-rc.2 or
+  older the swap should end the same — the old package's erase runs the same commands, and the
+  new one enables the units again after it, and starts what the setup started — but has not been
+  run against one (`H-45`): afterwards, `systemctl is-enabled ms-probe` should say `enabled`
   (`sudo systemctl enable ms-probe` if not), and the probe should be running only where the
-  setup said it started the services.
+  setup said it started the services; if the setup said it started them and
+  `systemctl is-active ms-probe` says otherwise, `sudo systemctl start ms-probe`.
 - `--core-only` where the probe is somewhere else entirely.
 - `--no-start` to stage a machine that is not meant to come up yet. `MS_SETUP_NO_START=1` does
   the same for a package install, which is what baking a golden image wants.
@@ -391,11 +395,14 @@ the new build refuses your configuration differs:
   running. If a setting was renamed or made required, it stops there and says so: **nothing has
   been changed**, and the old version is still installed and still running. Fix the configuration
   and run the installer again. Otherwise it stops the services, moves the new release in, starts
-  them, and keeps the release it replaced at `/opt/ms/previous`. `bin`, `libexec`, `etc` and
+  them, and keeps the release it replaced at `/opt/ms/previous` — when it was whole: what a
+  stopped `ms-uninstall` leaves, a `VERSION` and a `libexec`, is not kept, and the installer
+  says so. `bin`, `libexec`, `etc` and
   `deploy` under the prefix are the release's and are replaced whole, so the installer refuses,
   before it changes anything, when one of them holds a file no release put there (`H-39`): move
   it out of the prefix and run it again. It refuses a prefix that has anything in it and no
-  release (`--prefix /usr/local`) the same way, unless what is there is only empty directories,
+  release (`--prefix /usr/local`) the same way, unless what is there is only empty directories
+  with a release's names (`app`, `bin`, `web`, `docs`, `etc`, `deploy`, `libexec`, `previous`),
   a filesystem's `lost+found`, or what an install interrupted before it finished left.
 - **A package** stops the services before it unpacks, because the package manager replaces the
   files itself and the new build can only be asked afterwards. If it refuses the configuration,
@@ -585,11 +592,14 @@ one without `libexec/ms-setup`, an `app` without a release's build stamp, or a f
 `libexec`, `etc` or `deploy` (or under `previous`) that no release put there (`H-39`). It
 refuses a release kept inside an installation — `/opt/ms/previous`, or the `rolled-back` that
 going back leaves — whose services and units are the installation's: remove one of those with
-`sudo rm -rf`. An edited `ms-core.service` or `ms-probe.service` that an earlier release left in
-`/etc/systemd/system`, and the setup kept, is yours: it is named at the end and left, for you to
-remove before `systemctl daemon-reload`. An installation from a release
-before `H-39` has no `ms-uninstall`; run `sudo ./deploy/uninstall.sh` from this release's unpacked
-tarball instead, which does the same.
+`sudo rm -rf`. It refuses, too, a prefix the installed units do not run from, such as a copy of
+another installation: remove that with `sudo rm -rf`. A run stopped part-way, by a dropped
+session or a file it could not remove, is finished by running it again. An edited
+`ms-core.service` or `ms-probe.service` that an earlier release left in `/etc/systemd/system`,
+and the setup kept, is yours: it is named at the end and left, for you to remove before
+`systemctl daemon-reload`. An installation from a release before `H-39` has no `ms-uninstall`;
+run `sudo ./deploy/uninstall.sh` from this release's unpacked tarball instead, which does the
+same.
 
 `/etc/ms`, `/var/lib/ms-*`, the database and your drop-ins under
 `/etc/systemd/system/ms-*.service.d` are left alone deliberately — they hold the

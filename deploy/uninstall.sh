@@ -79,7 +79,13 @@ if command -v rpm >/dev/null 2>&1; then
     if said="$(LC_ALL=C rpm -q "${pkg}" 2>&1)"; then
       die "the ${pkg} package is installed, and its files are its package manager's; remove it with: rpm -e ${pkg}"
     fi
-    [ "${said}" = "package ${pkg} is not installed" ] \
+    # **rpm's answer is its last line** (`H-39`'s round-2 check). It can warn before it — of a
+    # database in its old format, on an EL9 host that was upgraded — and still have read it; an
+    # `error:` anywhere is a database it could not read.
+    case "${said}" in
+      *error:*) die "could not ask rpm whether the ${pkg} package is installed (${said}); nothing was removed" ;;
+    esac
+    [ "$(printf '%s\n' "${said}" | tail -n 1)" = "package ${pkg} is not installed" ] \
       || die "could not ask rpm whether the ${pkg} package is installed (${said}); nothing was removed"
   done
 fi
@@ -94,32 +100,18 @@ version="$(cat "${PREFIX}/VERSION")"
 # libexec/ms-setup, and what a release puts in bin, libexec, etc and deploy has the names below —
 # in the release and in the one kept at `previous` — or nothing is removed at all. The lists are
 # `place-release.sh`'s, which says why they only grow.
-[ -f "${PREFIX}/libexec/ms-setup" ] \
-  || die "${PREFIX} has no libexec/ms-setup, which every installation has, so nothing was removed"
-# **Not a release kept inside an installation** (`H-39`'s second review): the one at `previous`,
-# or the one installation.md's going back sets aside at `rolled-back`, has a VERSION, a
-# libexec/ms-setup and a release's names, and the services and units below are the installation's
-# around it.
-parent="${PREFIX%/*}"
-while [ -n "${parent}" ]; do
-  [ ! -f "${parent}/libexec/ms-setup" ] \
-    || die "${PREFIX} is inside the installation at ${parent}, whose services and units this would stop and remove; a release kept there is removed with: rm -rf ${PREFIX}. Nothing was removed"
-  parent="${parent%/*}"
-done
-# **Nor one the units do not run from**, where that can be told: a unit whose ExecStart= is
-# another installation's launcher is that installation's. The units name /opt/ms whatever the
-# prefix, so one that names a directory with no installation in it says nothing, and one that
-# names a link to this prefix names this prefix.
-for svc in core probe; do
-  unit="${UNIT_DIR}/ms-${svc}.service"
-  [ -f "${unit}" ] || continue
-  runs="$(sed -n '/^ExecStart=/{s/^ExecStart=[-@+!:]*//;s/[[:space:]].*//;p;q;}' "${unit}")"
-  case "${runs}" in */bin/*) ;; *) continue ;; esac
-  home="${runs%/bin/*}"
-  [ -f "${home}/libexec/ms-setup" ] || continue
-  [ "$(readlink -f -- "${home}" 2>/dev/null || printf '%s' "${home}")" != "${PREFIX}" ] || continue
-  die "${unit} runs ${runs}, which is the installation at ${home}, not ${PREFIX}; nothing was removed"
-done
+#
+# **Or what a run of this script stopped in libexec left** (`H-39`'s round-2 check): VERSION and
+# part of libexec, every tree gone. It removes libexec before VERSION, so nothing else leaves
+# that, and a run finishes it.
+if [ ! -f "${PREFIX}/libexec/ms-setup" ]; then
+  trees=''
+  for entry in app bin web docs etc deploy previous; do
+    if [ -e "${PREFIX}/${entry}" ] || [ -L "${PREFIX}/${entry}" ]; then trees=1; fi
+  done
+  { [ -d "${PREFIX}/libexec" ] && [ -z "${trees}" ]; } \
+    || die "${PREFIX} has no libexec/ms-setup, which every installation has, so nothing was removed"
+fi
 # **An `app` with a release's build stamp** (`H-39`'s second review): every release's `app` holds
 # a `<component>/build.json` (`package.sh`, since rc.1), and an operator's `app` does not.
 if [ -e "${PREFIX}/app" ]; then
@@ -161,6 +153,33 @@ for under in '' previous/; do
       || die "${foreign} is not something a release puts there, so ${PREFIX} is not only a MonitoringSystem installation; nothing was removed"
   done
 done
+# These two name `rm -rf`, so they come once the prefix is known to hold only a release's
+# (`H-39`'s round-2 check), never a directory with the operator's files in it.
+#
+# **Not a release kept inside an installation** (`H-39`'s second review): the one at `previous`,
+# or the one installation.md's going back sets aside at `rolled-back`, has a VERSION, a
+# libexec/ms-setup and a release's names, and the services and units below are the installation's
+# around it.
+parent="${PREFIX%/*}"
+while [ -n "${parent}" ]; do
+  [ ! -f "${parent}/libexec/ms-setup" ] \
+    || die "${PREFIX} is inside the installation at ${parent}, whose services and units this would stop and remove; a release kept there is removed with: rm -rf ${PREFIX}. Nothing was removed"
+  parent="${parent%/*}"
+done
+# **Nor one the units do not run from**, where that can be told: a unit whose ExecStart= is
+# another installation's launcher is that installation's. The units name /opt/ms whatever the
+# prefix, so one that names a directory with no installation in it says nothing, and one that
+# names a link to this prefix names this prefix.
+for svc in core probe; do
+  unit="${UNIT_DIR}/ms-${svc}.service"
+  [ -f "${unit}" ] || continue
+  runs="$(sed -n '/^ExecStart=/{s/^ExecStart=[-@+!:]*//;s/[[:space:]].*//;p;q;}' "${unit}")"
+  case "${runs}" in */bin/*) ;; *) continue ;; esac
+  home="${runs%/bin/*}"
+  [ -f "${home}/libexec/ms-setup" ] || continue
+  [ "$(readlink -f -- "${home}" 2>/dev/null || printf '%s' "${home}")" != "${PREFIX}" ] || continue
+  die "${unit} runs ${runs}, which is the installation at ${home}, not ${PREFIX}; nothing was removed; a copy is removed with: rm -rf ${PREFIX}"
+done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "${here}/remove-ping-conf.sh" ] || die "no remove-ping-conf.sh beside ${BASH_SOURCE[0]}"
@@ -197,7 +216,10 @@ for entry in previous app bin web docs etc deploy; do
   fi
 done
 rm -rf "${PREFIX:?}/.incoming"
-rm -rf "${PREFIX:?}/libexec" "${PREFIX:?}/VERSION"
+# Two commands: `rm` goes on to the next name after one it cannot remove, and a libexec that kept
+# a file must keep VERSION too, or no run of this script would take the prefix for one to finish.
+rm -rf "${PREFIX:?}/libexec"
+rm -f "${PREFIX:?}/VERSION"
 # What is left in the prefix is the operator's, and each is named.
 left_in_prefix() {
   local left

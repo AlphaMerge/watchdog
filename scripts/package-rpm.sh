@@ -191,22 +191,28 @@ fi
 %post
 # Runs on install (\$1 = 1) and on upgrade (\$1 = 2). \`ms-setup\` is idempotent for exactly this
 # reason: the CA it issued the first time must survive, and so must an edited configuration.
-# **What it did is written down for %posttrans** (\`H-40\` review): one word, which ms-setup writes
-# only at the end of a run that succeeded (\`H-35\`). The file is removed first, so that one left by
-# a transaction that never reached its %posttrans cannot speak for this one. **And which of this
-# package's units it left enabled, whatever its exit status** (\`H-40\`'s second review): ms-setup
-# enables them before anything in it can refuse — its configuration check, its restart — so a
-# setup that failed has enabled them too, and a swap's erase of the outgoing package, after this,
-# disables ms-probe.service, which both packages ship. A failed setup still fails this scriptlet,
-# which rpm reports and goes on from.
-rm -f /run/ms-rpm-setup.outcome
+# **What ms-setup left is written down for %posttrans, whatever its exit status**: which of this
+# package's units are enabled (\`H-40\`'s second review) and which are running (\`H-40\`'s round-2
+# check). It enables them before anything in it can refuse — its configuration check, its
+# restart — and restarts each even after one has failed, so a setup that failed can have enabled
+# them all and started some; and a swap's erase of the outgoing package, after this, stops and
+# disables ms-probe.service, which both packages ship. %pre stopped every service there was, so
+# what runs now is what ms-setup started. Both files are removed first, so that ones left by a
+# transaction that never reached its %posttrans cannot speak for this one. A failed setup still
+# fails this scriptlet, which rpm reports and goes on from.
+rm -f /run/ms-rpm-setup.enabled /run/ms-rpm-setup.active
 ms_status=0
-/opt/ms/libexec/ms-setup --components $(IFS=,; echo "${services[*]}") --outcome /run/ms-rpm-setup.outcome || ms_status=\$?
+/opt/ms/libexec/ms-setup --components $(IFS=,; echo "${services[*]}") || ms_status=\$?
 {
 $(for svc in "${services[@]}"; do
   printf '  if systemctl is-enabled "ms-%s.service" >/dev/null 2>&1; then echo "ms-%s.service"; fi\n' "${svc}" "${svc}"
 done)
 } >/run/ms-rpm-setup.enabled 2>/dev/null || :
+{
+$(for svc in "${services[@]}"; do
+  printf '  if systemctl is-active "ms-%s.service" >/dev/null 2>&1; then echo "ms-%s.service"; fi\n' "${svc}" "${svc}"
+done)
+} >/run/ms-rpm-setup.active 2>/dev/null || :
 exit "\${ms_status}"
 
 %preun
@@ -244,24 +250,22 @@ fi
 # this release's, or rc.1's or rc.2's, which are the same — stops and disables ms-probe.service,
 # which both packages ship: the swap ended with the incoming package's probe stopped and disabled.
 # %posttrans runs once the whole transaction is done, whatever the outgoing package was. So each
-# unit %post found enabled once ms-setup was done is enabled again — all of them after a setup that
-# ran to the end, which enables them whatever its word, and after one that failed, those it or the
-# installation before it had enabled (\`H-40\`'s second review) — and started again only where the
-# word is \`started\`: not after a first installation, which starts nothing, nor under
-# MS_SETUP_NO_START, nor after a setup that failed. On a plain install or upgrade all of this is
-# already so, and asking changes nothing.
-ms_outcome="\$(cat /run/ms-rpm-setup.outcome 2>/dev/null || :)"
+# unit %post found enabled once ms-setup was done is enabled again (\`H-40\`'s second review), and
+# each it found running is started again (\`H-40\`'s round-2 check): after a setup that ran to the
+# end, what it started; after one that failed part-way, what it had started all the same — the
+# probe, which it restarts after a core whose restart failed, and which the erase then stopped; and
+# after a first installation, under MS_SETUP_NO_START or after a refused configuration, nothing.
+# On a plain install or upgrade all of this is already so, and asking changes nothing.
 ms_enabled="\$(cat /run/ms-rpm-setup.enabled 2>/dev/null || :)"
-rm -f /run/ms-rpm-setup.outcome /run/ms-rpm-setup.enabled
+ms_active="\$(cat /run/ms-rpm-setup.active 2>/dev/null || :)"
+rm -f /run/ms-rpm-setup.enabled /run/ms-rpm-setup.active
 for ms_unit in \${ms_enabled}; do
   systemctl enable "\${ms_unit}" >/dev/null 2>&1 || :
 done
-if [ "\${ms_outcome}" = started ]; then
-$(for svc in "${services[@]}"; do
-  printf '  systemctl start "ms-%s.service" >/dev/null 2>&1 \\\n' "${svc}"
-  printf '    || echo "warning: ms-%s did not start; see systemctl status ms-%s" >&2\n' "${svc}" "${svc}"
-done)
-fi
+for ms_unit in \${ms_active}; do
+  systemctl start "\${ms_unit}" >/dev/null 2>&1 \\
+    || echo "warning: \${ms_unit%.service} did not start; see systemctl status \${ms_unit%.service}" >&2
+done
 SPEC
 
 echo "==> building"

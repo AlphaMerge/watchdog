@@ -82,8 +82,10 @@ RELEASE_ENTRIES=(app bin web docs etc deploy libexec VERSION)
 # **A release's names are not enough without a VERSION** (`H-39`'s second review): `/srv/app`,
 # `/srv/web` or `/srv/docs` of the operator's passed on its name, and the operator's `app` was
 # moved to `previous` and deleted by the next run. So a prefix with no VERSION is filled only when
-# it holds nothing — empty directories, and `lost+found`, which a filesystem mounted at the prefix
-# has and nothing here moves — or when a run of this script stopped in it before it wrote VERSION:
+# it holds nothing — empty directories with a release's names (`app bin web docs etc deploy
+# libexec previous`; any other name is refused, empty or not, or an empty /usr/local would pass),
+# and `lost+found`, which a filesystem mounted at the prefix has and nothing here moves — or when
+# a run of this script stopped in it before it wrote VERSION:
 # it left `.incoming` (killed while copying), `previous/VERSION` (stopped once the release it
 # replaced was set aside) or an `app` with a release's `<component>/build.json` (`package.sh`).
 RELEASE_BIN='ms-backup ms-core ms-enrol ms-probe ms-recover ms-restore'
@@ -122,15 +124,20 @@ foreign_in_release() {
   done
   return 0
 }
-# Whether a run of this script stopped in the prefix before it wrote VERSION.
-interrupted() {
+# Whether DIR holds a release's `app`: one with a `<component>/build.json`, which every release's
+# has (`package.sh`, since rc.1). A VERSION alone is not a release.
+stamped() {
   local build
-  [ ! -d "${PREFIX}/.incoming" ] || return 0
-  [ ! -f "${PREFIX}/previous/VERSION" ] || return 0
-  for build in "${PREFIX}"/app/*/build.json; do
+  for build in "$1"/app/*/build.json; do
     [ ! -f "${build}" ] || return 0
   done
   return 1
+}
+# Whether a run of this script stopped in the prefix before it wrote VERSION.
+interrupted() {
+  [ ! -d "${PREFIX}/.incoming" ] || return 0
+  [ ! -f "${PREFIX}/previous/VERSION" ] || return 0
+  stamped "${PREFIX}"
 }
 # The first entry of the prefix that holds something, or nothing: an empty directory holds
 # nothing of anyone's, and nor does a filesystem's `lost+found`. Asked once `foreign_in` has
@@ -268,6 +275,27 @@ if [ -z "${installed}" ] && [ -f "${PREFIX}/previous/VERSION" ]; then
   # Setting that aside would delete the only copy of the release to go back to.
   for entry in "${RELEASE_ENTRIES[@]}"; do rm -rf "${PREFIX:?}/${entry}"; done
   echo "    $(cat "${PREFIX}/previous/VERSION") is kept at ${PREFIX}/previous, as the run before this one left it"
+elif [ -n "${installed}" ] && ! stamped "${PREFIX}" && stamped "${PREFIX}/previous" \
+  && [ ! -f "${PREFIX}/previous/VERSION" ]; then
+  # **A set-aside that stopped part-way** (`H-39`'s round-2 check): `app` is the first entry
+  # moved and VERSION the last, so the release is split between `previous` and here. It is
+  # finished, not started again: starting again would delete the half already at `previous`.
+  for entry in "${RELEASE_ENTRIES[@]}"; do
+    if [ -e "${PREFIX}/${entry}" ]; then mv "${PREFIX}/${entry}" "${PREFIX}/previous/${entry}"; fi
+  done
+elif [ -n "${installed}" ] && ! stamped "${PREFIX}"; then
+  # **A VERSION is not a release** (`H-39`'s round-2 check). What an `ms-uninstall` stopped
+  # part-way leaves is VERSION and libexec, the last two things it removes; set aside, they were
+  # announced as the release to go back to, and going back to them left units with no launcher.
+  # They are removed, and nothing is said to be at `previous` unless a whole release is there.
+  for entry in "${RELEASE_ENTRIES[@]}"; do rm -rf "${PREFIX:?}/${entry}"; done
+  if [ -f "${PREFIX}/previous/VERSION" ] && stamped "${PREFIX}/previous"; then
+    echo "    ${installed} was not whole here, so it is not kept; $(cat "${PREFIX}/previous/VERSION") is still at ${PREFIX}/previous"
+  else
+    rm -rf "${PREFIX:?}/previous"
+    echo "    ${installed} was not whole here, so no release is kept at ${PREFIX}/previous"
+  fi
+  installed=''
 elif [ -n "${set_aside}" ]; then
   rm -rf "${PREFIX}/previous"
   mkdir -m 0755 "${PREFIX}/previous"

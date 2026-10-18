@@ -37251,9 +37251,10 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       - **Second review.** **A release's names were enough without a `VERSION`**: `/srv` with an
         `app`, a `web` or a `docs` of its own passed, the `app` went to `previous` and the next run
         deleted it. `place-release.sh` now fills a prefix with no `VERSION` only when it holds
-        nothing — empty directories, and a filesystem's `lost+found`, which a volume mounted at the
-        prefix has and nothing here moves, count as nothing — or what a run that stopped before
-        `VERSION` left: `.incoming`, `previous/VERSION`, or an `app` with a release's
+        nothing — empty directories with a release's names, and a filesystem's `lost+found`,
+        which a volume mounted at the prefix has and nothing here moves, count as nothing — or
+        what a run that stopped before `VERSION` left: `.incoming`, `previous/VERSION`, or an
+        `app` with a release's
         `<component>/build.json`. **An empty `bin` got `bin/bin`**: only `app` sent the step to
         `previous`, and `mv` into a directory that exists nests; any release entry does now. A run
         stopped once it had set the release aside — `previous/VERSION` and no `VERSION` — keeps
@@ -37302,6 +37303,50 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         `libexec` first; the trees removed where they are; a leftover `.incoming` not cleared; a
         link prefix not kept, or what is in it not named; what is left, the hidden or the
         two-dot names among it, not named. Each restored by copy, `utime` and a byte compare.
+      - **Round-2 check.** **An upgrade over what a stopped `ms-uninstall` leaves kept it as the
+        release to go back to**: its `VERSION` and `libexec` went to `previous`, and the installer
+        said *1.0.0 is kept at /opt/ms/previous*. `place-release.sh` sets aside only a release
+        whose `app` has a build stamp now. Without one at the top, a set-aside that stopped
+        part-way — the stamped `app` already at `previous`, no `previous/VERSION` — is finished
+        rather than started again, which deleted the half at `previous` (`H-46`'s third item,
+        struck from it); anything else is removed, with *1.0.0 was not whole here, so no release
+        is kept at /opt/ms/previous*, and a whole release already at `previous` is left there and
+        named. `ms-uninstall` reads `rpm -q`'s answer from its last line, past the warning rpm
+        gives first on an upgraded EL9 host, and refuses on any `error:`; removes `libexec` and
+        then `VERSION` in two commands, so a `libexec` it could not empty keeps `VERSION`, and
+        takes a prefix holding only those two for a run to finish; and asks its two refusals that
+        name `rm -rf` — a release kept inside an installation, and a copy the units do not run
+        from, which now says *a copy is removed with: rm -rf …* — only once the prefix is known
+        to hold nothing of the operator's. `installation.md` and the release notes: the empty
+        directories a prefix may hold are those with a release's names; an upgrade keeps the
+        release it replaced only when it was whole; a copy the units do not run from is refused;
+        a stopped removal is finished by running it again.
+        Tests: `deploy-scripts.test.ts`, four more and three extended — in `place-release.sh`, an
+        upgrade over `VERSION`, `libexec` and a leftover `.incoming` keeps none of it and says so,
+        with nothing at `previous`, half a release, or a `VERSION` and a `libexec` an earlier
+        installer set aside, all removed, and a whole release there left where it was; a
+        set-aside stopped after `app` finished, the release whole at `previous`; an empty `logs`
+        refused; the fixtures' `app`s stamped, so every upgrade before still keeps its release.
+        In `ms-uninstall`, rpm's warning before its answer goes ahead and an `error:` before it
+        refuses; a stub `rm` that cannot empty `libexec`, and removes the rest as `rm` does,
+        leaves `VERSION`, and a second run finishes and runs the fragment, where a `VERSION` with
+        no `libexec` is refused; a copy and a kept release with the operator's `bin/htop` in them
+        are refused for that, with no `rm -rf`. **Mutations 18/18**: in `place-release.sh`, no
+        `app` taken for stamped; a `VERSION` alone set aside; a stopped set-aside started again,
+        or finished over a whole `previous` or into one with no `app`; the leftovers not removed;
+        a whole `previous` deleted with them, or one with a `VERSION` and no `app` kept; the
+        leftovers still said to be kept. In `ms-uninstall`, an `error:` before the answer taken;
+        the answer read from rpm's first line, or whole; a stop in `libexec` never finished; a
+        `VERSION` with no `libexec`, or trees beside a `libexec` with no `ms-setup`, taken for
+        one; `VERSION` removed by the same `rm` as `libexec`; the kept-release or the
+        `ExecStart=` check asked before the operator's files. Each restored by copy, `utime` and
+        a byte compare.
+        **Smoke 2026-10-18**, after the round-2 check, `smoke-install.sh` (Debian 12, arm64, a
+        tarball built at `5437f339`, this commit before these smoke lines, on main `c0eec719`,
+        not dirty): *smoke test passed*, the upgrade with *previous release: kept at
+        /opt/ms/previous* from a real release's build stamp, and `ms-uninstall` with */opt/ms,
+        the units, their enable links and the ping drop-in: gone, and said so* and */etc/ms,
+        /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
 
 - [x] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
       Found 2026-10-07 in `H-34`. `ms`'s rpm `%preun` with `$1=0` (and the `.deb`'s `prerm` on
@@ -37426,6 +37471,38 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         `%post` either. **Mutations 6/6**: `%post` writing down no enabled unit, exiting 0 after
         a failed setup, or stopping at it; `%posttrans` enabling nothing, enabling only after a
         word, or leaving the list. Each restored by copy, `utime` and a byte compare.
+      - **Round-2 check.** **A swap whose setup failed part-way left the probe stopped.**
+        `ms-setup` restarts every service even after one fails, so a core whose restart failed
+        left the probe it restarted next running; the outgoing package's erase then stopped it,
+        and `%posttrans`, which started anything only after the word `started`, left it so.
+        `%post` now writes down which of the package's units are running once `ms-setup` is done
+        (`/run/ms-rpm-setup.active`), as well as which are enabled, removing both lists before it
+        runs; `%posttrans` starts those it lists, warns of any that do not start, and removes
+        both. Nothing reads the word any more, so the `.rpm` no longer asks `ms-setup` for one.
+        `installation.md` §2 and the release notes: a swap's units end running where the setup
+        started them, a setup that failed part-way included; on a probe's host, a probe that
+        serves a core elsewhere can be started at once, and keeps dialling the core in
+        `/etc/ms/probe.json`; from rc.2, a probe the setup said it started that is not active is
+        started by hand.
+        Tests: `deploy-scripts.test.ts`, one more and one rewritten — a `%post` killed after
+        `ms-setup` leaves neither list an earlier transaction wrote; a swap whose setup failed,
+        each way, from this release and from rc.2's scriptlets, with nothing running or with
+        `ms-probe` running, ends with the outgoing stop and disable, the reload, the incoming
+        enables, and a start of exactly what was running. The stub `ms-setup` writes no word, the
+        other tests start what was running where they started on the word, and `H-27`'s test
+        follows `%post`. **Mutations 7/7**: `%post` writing down nothing running, asking
+        `is-enabled` for it, or keeping an earlier transaction's list; `%posttrans` starting
+        nothing, starting what is enabled, leaving the list, or saying nothing of a failed start.
+        Each restored by copy, `utime` and a byte compare.
+        **Smoke 2026-10-18**, after the round-2 check, `smoke-packages.sh rpm` with
+        `MS_SMOKE_REBUILD=1` (Rocky 9, arm64, packages built at `5437f339`, this commit before
+        these smoke lines, on main `c0eec719`; the `.deb`, which this does not touch, not run):
+        *package smoke test passed*, with *dnf swap -y ms /pkg/ms-probe-1.0.0~rc.2-1.aarch64.rpm:
+        ms gone, ms-probe active and enabled* — the probe `%post` found running, started again
+        by `%posttrans` after the erase stopped it — *rpm -e ms-probe: ms-probe inactive, and no
+        enable link left*, and *dnf swap -y ms-probe /pkg/ms-1.0.0~rc.2-1.aarch64.rpm: ms-probe
+        gone, the probe inactive (MS_SETUP_NO_START), ms-core and ms-probe enabled*. `H-28`'s
+        upgrade and `H-41`'s root probe passed, as did every earlier assertion.
 
 - [x] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
       · Found 2026-10-07 in `P-276`. Since `P-276` a root probe with scripts and no
@@ -37518,7 +37595,9 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `docs/findings/`; then those two sentences come out.
 
 - [ ] **H-46 — what the second review of `H-25`, `H-39` and `H-40` left** · S · H-39, H-40 ·
-      Found 2026-10-18. Each was judged not worth doing before S4 lands, and each is small:
+      Found 2026-10-18. Each was judged not worth doing before S4 lands, and each is small. One
+      more, a `place-release.sh` run stopped while it set the release aside, was done in
+      `H-39`'s round-2 check.
       - **No box shows `ms`'s `%pre` stopping the probe before the unpack** in a swap back. The
         outgoing package's `%preun` (or the `.deb`'s `prerm`) stops it later either way, so the
         smoke's end state passes whether or not `%pre` did; only `deploy-scripts.test.ts`'s log
@@ -37529,10 +37608,6 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         by a comment only. Commit `v1.0.0-rc.2:scripts/package-rpm.sh` as a test fixture, assert
         its git blob hash (`84f28cac13558238000816f0d0022be2609300b5`), and feed it through
         `rpmScriptlets()`, given a source path, in the outgoing role.
-      - **A `place-release.sh` run stopped while it set the release aside** — `VERSION` still at
-        the top, some of the release's entries already under `previous` — has the next run
-        delete `previous` with them, so no whole release is left to go back to. Older than the
-        review, found in it; the case the review fixed is the one stopped after `VERSION` went.
       - **`ms-uninstall` cannot tell a prefix outside `/opt/ms` from the units**: they name
         `/opt/ms` whatever `--prefix` was, and `ms-setup` does not rewrite them, so its check that
         the units run from the prefix says nothing there. Telling would need the prefix written

@@ -11,6 +11,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -589,6 +590,10 @@ function release(box: Sandbox, version: string): string {
   }
   writeFileSync(join(from, 'VERSION'), `${version}\n`);
   writeFileSync(join(from, 'app', 'marker'), version);
+  // The build stamp `package.sh` writes for each component, which is what makes an `app` a
+  // release's (`H-39`'s round-2 check).
+  mkdirSync(join(from, 'app', 'core'));
+  writeFileSync(join(from, 'app', 'core', 'build.json'), `{"version":"${version}"}\n`);
   writeFileSync(join(from, 'docs', 'README.md'), version);
   for (const svc of ['core', 'probe']) {
     writeFileSync(join(from, 'bin', `ms-${svc}`), launcher(svc, version), { mode: 0o755 });
@@ -611,6 +616,8 @@ function installed(box: Sandbox): { prefix: string; conf: string } {
   mkdirSync(conf);
   writeFileSync(join(prefix, 'VERSION'), '1.0.0\n');
   writeFileSync(join(prefix, 'app', 'marker'), '1.0.0');
+  mkdirSync(join(prefix, 'app', 'core'));
+  writeFileSync(join(prefix, 'app', 'core', 'build.json'), '{"version":"1.0.0"}\n');
   writeFileSync(join(prefix, 'operators-own-notes.txt'), 'mine');
   writeFileSync(join(conf, 'core.json'), '{"api":{"port":8080}}');
   writeFileSync(join(conf, 'probe.json'), '{}');
@@ -783,6 +790,14 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
           mkdirSync(join(prefix, 'lib'));
         },
       ],
+      // Empty, as provisioning can leave one: only a release's names pass empty (`H-39`’s
+      // round-2 check), or an empty /usr/local would.
+      [
+        'an empty logs, which no release has',
+        (prefix: string) => {
+          mkdirSync(join(prefix, 'logs'));
+        },
+      ],
       [
         'a file of the operator’s',
         (prefix: string) => {
@@ -913,6 +928,93 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
         assert.doesNotMatch(result.stdout, /is kept at/u, why);
       }
     }
+  });
+
+  it('keeps at previous only a release that was whole (`H-39`’s round-2 check)', () => {
+    // What an `ms-uninstall` stopped part-way leaves — VERSION and libexec, the last two things it
+    // removes, and the copy it was removing — is not a release to go back to: set aside, it was
+    // announced as one, and going back to it left units with no launcher. A whole release already
+    // at `previous` stays there; anything else there goes with it, a VERSION and a libexec an
+    // installer before this one set aside among them.
+    for (const before of [
+      'nothing',
+      'a whole release',
+      'half of one',
+      'a VERSION and a libexec, set aside',
+    ] as const) {
+      const box = sandbox();
+      const prefix = join(box.dir, 'opt-ms');
+      const conf = join(box.dir, 'etc-ms');
+      mkdirSync(join(prefix, 'libexec'), { recursive: true });
+      mkdirSync(join(prefix, '.incoming', 'bin'), { recursive: true });
+      mkdirSync(conf);
+      writeFileSync(join(prefix, 'VERSION'), '1.0.0\n');
+      for (const name of ['ms-setup', 'ms-uninstall', 'remove-ping-conf.sh']) {
+        writeFileSync(join(prefix, 'libexec', name), '#!/bin/sh\n', { mode: 0o755 });
+      }
+      writeFileSync(join(prefix, '.incoming', 'bin', 'ms-core'), '#!/bin/sh\n');
+      if (before === 'a whole release') {
+        mkdirSync(join(prefix, 'previous', 'app', 'core'), { recursive: true });
+        writeFileSync(join(prefix, 'previous', 'VERSION'), '0.9.0\n');
+        writeFileSync(join(prefix, 'previous', 'app', 'core', 'build.json'), '{}\n');
+      } else if (before === 'half of one') {
+        mkdirSync(join(prefix, 'previous', 'bin'), { recursive: true });
+        writeFileSync(join(prefix, 'previous', 'bin', 'ms-core'), '#!/bin/sh\n');
+      } else if (before === 'a VERSION and a libexec, set aside') {
+        mkdirSync(join(prefix, 'previous', 'libexec'), { recursive: true });
+        writeFileSync(join(prefix, 'previous', 'VERSION'), '0.9.0\n');
+        writeFileSync(join(prefix, 'previous', 'libexec', 'ms-setup'), '#!/bin/sh\n');
+      }
+      const result = place(box, release(box, '2.0.0'), prefix, conf);
+      assert.equal(result.status, 0, `${before}: ${result.stderr}`);
+      assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '2.0.0\n', before);
+      assert.ok(readFileSync(join(prefix, 'bin', 'ms-core'), 'utf8').includes('2.0.0'), before);
+      assert.equal(sha256(join(prefix, 'libexec', 'ms-uninstall')), sha256(script('uninstall.sh')));
+      assert.ok(!existsSync(join(prefix, '.incoming')), before);
+      assert.doesNotMatch(result.stdout, /1\.0\.0 is kept at/u, before);
+      if (before === 'a whole release') {
+        assert.equal(readFileSync(join(prefix, 'previous', 'VERSION'), 'utf8'), '0.9.0\n');
+        assert.ok(existsSync(join(prefix, 'previous', 'app', 'core', 'build.json')));
+        assert.ok(!existsSync(join(prefix, 'previous', 'libexec')), 'set aside after all');
+        assert.ok(
+          result.stdout.includes(
+            `1.0.0 was not whole here, so it is not kept; 0.9.0 is still at ${join(prefix, 'previous')}\n`,
+          ),
+          result.stdout,
+        );
+      } else {
+        assert.ok(!existsSync(join(prefix, 'previous')), before);
+        assert.ok(
+          result.stdout.includes(
+            `1.0.0 was not whole here, so no release is kept at ${join(prefix, 'previous')}\n`,
+          ),
+          `${before}: ${result.stdout}`,
+        );
+      }
+    }
+  });
+
+  it('finishes setting a release aside, when a run stopped part-way through (`H-39`’s round-2 check)', () => {
+    // `app` is the first entry moved to `previous` and VERSION the last: stopped between them, the
+    // release is in two halves. Started again, the half at `previous` was deleted.
+    const box = sandbox();
+    const { prefix, conf } = installed(box);
+    writeFileSync(join(prefix, 'bin', 'ms-core'), '1.0.0 launcher');
+    mkdirSync(join(prefix, 'previous'));
+    renameSync(join(prefix, 'app'), join(prefix, 'previous', 'app'));
+    const result = place(box, release(box, '2.0.0'), prefix, conf);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(prefix, 'previous', 'VERSION'), 'utf8'), '1.0.0\n');
+    assert.equal(readFileSync(join(prefix, 'previous', 'app', 'marker'), 'utf8'), '1.0.0');
+    assert.equal(
+      readFileSync(join(prefix, 'previous', 'bin', 'ms-core'), 'utf8'),
+      '1.0.0 launcher',
+    );
+    assert.ok(!existsSync(join(prefix, 'previous', 'previous')));
+    assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '2.0.0\n');
+    assert.equal(readFileSync(join(prefix, 'app', 'marker'), 'utf8'), '2.0.0');
+    assert.match(result.stdout, /1\.0\.0 is kept at \S*opt-ms\/previous\n/u);
+    assert.doesNotMatch(result.stdout, /not whole/u);
   });
 
   it('says what to do with a prefix that is a link to nothing, and creates nothing', () => {
@@ -1419,9 +1521,9 @@ describe('who shows a passing check’s warnings (`H-27`)', () => {
       ['scripts/package-deb.sh', /configure\)\n\s+\/opt\/ms\/libexec\/ms-setup --components /],
       [
         'scripts/package-rpm.sh',
-        // After the word an earlier transaction left is removed (`H-40`), with its exit status
-        // kept for the scriptlet's own (`H-40`'s second review).
-        /%post\n(?:#.*\n)*rm -f \/run\/ms-rpm-setup\.outcome\nms_status=0\n\/opt\/ms\/libexec\/ms-setup --components /,
+        // After what an earlier transaction wrote down is removed (`H-40`), with its exit status
+        // kept for the scriptlet's own (`H-40`'s second review and round-2 check).
+        /%post\n(?:#.*\n)*rm -f \/run\/ms-rpm-setup\.enabled \/run\/ms-rpm-setup\.active\nms_status=0\n\/opt\/ms\/libexec\/ms-setup --components /,
       ],
     ] as const) {
       const text = read(packager);
@@ -2445,12 +2547,12 @@ describe(
   { skip: linux ? false : 'Linux only' },
   () => {
     /**
-     * Where the scriptlets look for an installed ms or ms-probe, and where %post leaves its word
-     * and the units ms-setup left enabled.
+     * Where the scriptlets look for an installed ms or ms-probe, and where %post writes down the
+     * units ms-setup left enabled and the ones it left running.
      */
     const SETUP = '/opt/ms/libexec/ms-setup';
-    const OUTCOME = '/run/ms-rpm-setup.outcome';
     const ENABLED = '/run/ms-rpm-setup.enabled';
+    const ACTIVE = '/run/ms-rpm-setup.active';
 
     /**
      * What rc.1's and rc.2's %preun and %postun run, comments aside, transcribed from
@@ -2485,15 +2587,14 @@ describe(
         .map((line) => `${line}\n`)
         .join('');
 
-    /** `ms-setup` as far as a scriptlet sees it: the word it writes, and its exit status. */
+    /**
+     * `ms-setup` as far as a scriptlet sees it: its exit status, and with `STUB_KILL_SCRIPTLET`
+     * the scriptlet that ran it killed once it is done — a %post that dies between ms-setup and
+     * what it writes down. What it left running is the stub `systemctl`'s `STATE_ms_*`.
+     */
     const STUB_SETUP = `#!/bin/sh
 echo "ms-setup $*" >> "$STUB_LOG"
-out=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = --outcome ]; then out="$2"; fi
-  shift
-done
-if [ -n "\${STUB_WORD:-}" ]; then printf '%s\\n' "$STUB_WORD" > "$out"; fi
+if [ -n "\${STUB_KILL_SCRIPTLET:-}" ]; then kill -KILL "$PPID"; fi
 exit "\${STUB_SETUP_STATUS:-0}"
 `;
 
@@ -2501,10 +2602,10 @@ exit "\${STUB_SETUP_STATUS:-0}"
       readonly box: Sandbox;
       /** Where /opt/ms/libexec/ms-setup is, for this host. */
       readonly setup: string;
-      /** And /run/ms-rpm-setup.outcome. */
-      readonly outcome: string;
       /** And /run/ms-rpm-setup.enabled. */
       readonly enabled: string;
+      /** And /run/ms-rpm-setup.active. */
+      readonly active: string;
     }
     /** A host with an installation's ms-setup in place, or none. */
     function host(installed: boolean): Host {
@@ -2512,8 +2613,8 @@ exit "\${STUB_SETUP_STATUS:-0}"
       const at = {
         box,
         setup: join(box.dir, 'opt-ms-libexec-ms-setup'),
-        outcome: join(box.dir, 'run-ms-rpm-setup.outcome'),
         enabled: join(box.dir, 'run-ms-rpm-setup.enabled'),
+        active: join(box.dir, 'run-ms-rpm-setup.active'),
       };
       if (installed) writeFileSync(at.setup, STUB_SETUP, { mode: 0o755 });
       return at;
@@ -2532,8 +2633,8 @@ exit "\${STUB_SETUP_STATUS:-0}"
     ): SpawnSyncReturns<string> {
       const moved = body
         .replaceAll(SETUP, at.setup)
-        .replaceAll(OUTCOME, at.outcome)
-        .replaceAll(ENABLED, at.enabled);
+        .replaceAll(ENABLED, at.enabled)
+        .replaceAll(ACTIVE, at.active);
       for (const path of ['/opt/', '/run/', '/etc/systemd/system']) {
         assert.ok(!code(moved).includes(path), `the scriptlet would reach this machine’s ${path}`);
       }
@@ -2544,23 +2645,27 @@ exit "\${STUB_SETUP_STATUS:-0}"
       });
     }
     const logLines = (at: Host): string[] => at.box.logged().split('\n').filter(Boolean);
+    /** The stub `systemctl`'s answer to `is-active` for each of `services`: running. */
+    const running = (services: readonly string[]): NodeJS.ProcessEnv =>
+      Object.fromEntries(services.map((svc) => [`STATE_ms_${svc}`, 'active']));
 
     /**
      * `dnf swap OUT IN`, and `rpm -U` from one version to the next, in rpm's order: the incoming
      * package's %pre, its files, its %post; then the outgoing package's %preun, its files away and
      * its %postun; then the incoming package's %posttrans, once the transaction is done. The two
-     * ship ms-setup at the same path, so it is there throughout. With `setupFails`, ms-setup
-     * exits 1 and writes no word, and the %post fails with it, which rpm reports and goes on from.
+     * ship ms-setup at the same path, so it is there throughout. `started` is what ms-setup left
+     * running when it was done. With `setupFails`, ms-setup exits 1, and the %post fails with it,
+     * which rpm reports and goes on from.
      */
     function transaction(
       at: Host,
       incoming: Record<string, string>,
       outgoing: { preun: string; postun: string },
       {
-        word,
+        started,
         upgrade = false,
         setupFails = false,
-      }: { word: string; upgrade?: boolean; setupFails?: boolean },
+      }: { started: readonly string[]; upgrade?: boolean; setupFails?: boolean },
     ): void {
       for (const [step, body, remaining] of [
         ['the incoming %pre', incoming['pre'] ?? '', upgrade ? 2 : 1],
@@ -2569,27 +2674,44 @@ exit "\${STUB_SETUP_STATUS:-0}"
         ['the outgoing %postun', outgoing.postun, upgrade ? 1 : 0],
         ['the incoming %posttrans', incoming['posttrans'] ?? '', 0],
       ] as const) {
-        const failing = setupFails && step === 'the incoming %post';
-        const result = run(
-          at,
-          body,
-          remaining,
-          failing ? { STUB_SETUP_STATUS: '1' } : { STUB_WORD: word },
-        );
-        if (failing) {
+        const post = step === 'the incoming %post';
+        const result = run(at, body, remaining, {
+          ...(post ? running(started) : {}),
+          ...(post && setupFails ? { STUB_SETUP_STATUS: '1' } : {}),
+        });
+        if (post && setupFails) {
           assert.notEqual(result.status, 0, 'the %post did not fail with its ms-setup');
         } else {
           assert.equal(result.status, 0, `${step}: ${result.stderr}`);
         }
       }
-      assert.ok(!existsSync(at.outcome), '%posttrans left the word behind');
       assert.ok(!existsSync(at.enabled), '%posttrans left the list of enabled units behind');
+      assert.ok(!existsSync(at.active), '%posttrans left the list of running units behind');
     }
-    /** What %post asks once ms-setup is done: which of the package's units are enabled. */
-    const asked = (services: readonly string[]): string[] =>
-      services.map((svc) => `systemctl is-enabled ms-${svc}.service`);
+    /**
+     * What %post asks once ms-setup is done: which of the package's units are enabled, then which
+     * are running.
+     */
+    const recorded = (services: readonly string[]): string[] => [
+      ...services.map((svc) => `systemctl is-enabled ms-${svc}.service`),
+      ...services.map((svc) => `systemctl is-active ms-${svc}.service`),
+    ];
     const units = (verb: string, services: readonly string[]): string[] =>
       services.map((svc) => `systemctl ${verb} ms-${svc}.service`);
+    const SWAPS = [
+      ['ms to ms-probe', ['probe'], ['core', 'probe']],
+      ['ms-probe to ms', ['core', 'probe'], ['probe']],
+    ] as const;
+    /** The outgoing package's %preun and %postun: this release's, and rc.1's or rc.2's. */
+    const outgoings = (
+      services: readonly string[],
+    ): (readonly [string, { preun: string; postun: string }])[] => {
+      const ours = rpmScriptlets(services);
+      return [
+        ['this release', { preun: ours['preun'] ?? '', postun: ours['postun'] ?? '' }],
+        ['rc.1 or rc.2', { preun: RC2_PREUN(services), postun: RC2_POSTUN }],
+      ];
+    };
 
     it('is rc.1’s and rc.2’s at an erase, and nothing at an upgrade', () => {
       for (const services of [['core', 'probe'], ['probe']]) {
@@ -2633,26 +2755,19 @@ exit "\${STUB_SETUP_STATUS:-0}"
     });
 
     it('ends a swap with the incoming package’s services enabled and running: dnf swap ms ms-probe, and back', () => {
-      for (const [swap, incoming, outgoing] of [
-        ['ms to ms-probe', ['probe'], ['core', 'probe']],
-        ['ms-probe to ms', ['core', 'probe'], ['probe']],
-      ] as const) {
-        const ours = rpmScriptlets(outgoing);
-        for (const [release, preun, postun] of [
-          ['this release', ours['preun'] ?? '', ours['postun'] ?? ''],
-          ['rc.1 or rc.2', RC2_PREUN(outgoing), RC2_POSTUN],
-        ] as const) {
+      for (const [swap, incoming, outgoing] of SWAPS) {
+        for (const [release, scriptlets] of outgoings(outgoing)) {
           const why = `${swap}, from ${release}`;
           const at = host(true);
-          transaction(at, rpmScriptlets(incoming), { preun, postun }, { word: 'started' });
+          transaction(at, rpmScriptlets(incoming), scriptlets, { started: incoming });
           assert.deepEqual(
             logLines(at),
             [
               // Both, before the incoming files go in: they run from the same tree.
               'systemctl stop ms-core.service',
               'systemctl stop ms-probe.service',
-              `ms-setup --components ${incoming.join(',')} --outcome ${at.outcome}`,
-              ...asked(incoming),
+              `ms-setup --components ${incoming.join(',')}`,
+              ...recorded(incoming),
               ...outgoing.flatMap((svc) => [
                 `systemctl stop ms-${svc}.service`,
                 `systemctl disable ms-${svc}.service`,
@@ -2668,19 +2783,18 @@ exit "\${STUB_SETUP_STATUS:-0}"
     });
 
     it('starts nothing that ms-setup did not: a first installation, MS_SETUP_NO_START', () => {
-      for (const word of ['first-install', 'not-started']) {
-        // A swap under MS_SETUP_NO_START, as `smoke-packages.sh` runs one.
-        const swapped = host(true);
-        const ours = rpmScriptlets(['probe']);
-        transaction(
-          swapped,
-          rpmScriptlets(['core', 'probe']),
-          { preun: ours['preun'] ?? '', postun: ours['postun'] ?? '' },
-          { word },
-        );
-        assert.deepEqual(logLines(swapped).slice(-2), units('enable', ['core', 'probe']), word);
-        assert.doesNotMatch(swapped.box.logged(), /^systemctl (start|restart) /mu, word);
-      }
+      // A swap under MS_SETUP_NO_START, as `smoke-packages.sh` runs one: %pre stopped both, and
+      // ms-setup started nothing.
+      const swapped = host(true);
+      const ours = rpmScriptlets(['probe']);
+      transaction(
+        swapped,
+        rpmScriptlets(['core', 'probe']),
+        { preun: ours['preun'] ?? '', postun: ours['postun'] ?? '' },
+        { started: [] },
+      );
+      assert.deepEqual(logLines(swapped).slice(-2), units('enable', ['core', 'probe']));
+      assert.doesNotMatch(swapped.box.logged(), /^systemctl (start|restart) /mu);
       // A first installation: nothing to stop, before or after. ms-setup's files are in at %post.
       for (const services of [['core', 'probe'], ['probe']]) {
         const at = host(false);
@@ -2689,14 +2803,12 @@ exit "\${STUB_SETUP_STATUS:-0}"
         assert.equal(at.box.logged(), '', `${services.join(',')}: %pre stopped something`);
         writeFileSync(at.setup, STUB_SETUP, { mode: 0o755 });
         for (const step of ['post', 'posttrans']) {
-          const result = run(at, scriptlets[step] ?? '', step === 'post' ? 1 : 0, {
-            STUB_WORD: 'first-install',
-          });
+          const result = run(at, scriptlets[step] ?? '', step === 'post' ? 1 : 0);
           assert.equal(result.status, 0, `${step}: ${result.stderr}`);
         }
         assert.deepEqual(logLines(at), [
-          `ms-setup --components ${services.join(',')} --outcome ${at.outcome}`,
-          ...asked(services),
+          `ms-setup --components ${services.join(',')}`,
+          ...recorded(services),
           ...units('enable', services),
         ]);
       }
@@ -2710,15 +2822,15 @@ exit "\${STUB_SETUP_STATUS:-0}"
           at,
           ours,
           { preun: ours['preun'] ?? '', postun: ours['postun'] ?? '' },
-          { word: 'started', upgrade: true },
+          { started: services, upgrade: true },
         );
         assert.deepEqual(
           logLines(at),
           [
             'systemctl stop ms-core.service',
             'systemctl stop ms-probe.service',
-            `ms-setup --components ${services.join(',')} --outcome ${at.outcome}`,
-            ...asked(services),
+            `ms-setup --components ${services.join(',')}`,
+            ...recorded(services),
             ...units('enable', services),
             ...units('start', services),
           ],
@@ -2728,64 +2840,70 @@ exit "\${STUB_SETUP_STATUS:-0}"
     });
 
     it('starts nothing after a setup that failed, and leaves enabled what it enabled', () => {
-      // A transaction that never reached its %posttrans left `started`; this one's ms-setup
-      // failed, and wrote nothing. rpm only warns of a %post that failed, and goes on. ms-setup
-      // enables the units before anything in it can refuse, so each one it left enabled is
-      // enabled again, and one it did not reach — the probe's, here — is left as it is.
+      // A transaction that never reached its %posttrans left both units in both lists; this
+      // one's ms-setup failed on a configuration it refused, and started nothing. rpm only warns
+      // of a %post that failed, and goes on. ms-setup enables the units before anything in it can
+      // refuse, so each one it left enabled is enabled again, and one it did not reach — the
+      // probe's, here — is left as it is.
       const at = host(true);
-      writeFileSync(at.outcome, 'started\n');
+      for (const file of [at.enabled, at.active]) {
+        writeFileSync(file, 'ms-core.service\nms-probe.service\n');
+      }
       const { post = '', posttrans = '' } = rpmScriptlets(['core', 'probe']);
       const failed = run(at, post, 1, { STUB_SETUP_STATUS: '1', ENABLED_ms_probe: 'disabled' });
       assert.notEqual(failed.status, 0, 'the %post did not fail with its ms-setup');
       const result = run(at, posttrans, 0);
       assert.equal(result.status, 0, result.stderr);
       assert.deepEqual(logLines(at), [
-        `ms-setup --components core,probe --outcome ${at.outcome}`,
-        ...asked(['core', 'probe']),
+        'ms-setup --components core,probe',
+        ...recorded(['core', 'probe']),
         'systemctl enable ms-core.service',
       ]);
-      assert.ok(!existsSync(at.outcome));
       assert.ok(!existsSync(at.enabled));
+      assert.ok(!existsSync(at.active));
     });
 
-    it('ends a swap whose setup failed with its units enabled and nothing started (`H-40`’s second review)', () => {
-      // `dnf swap` with a configuration ms-setup refuses: its %post fails, rpm goes on, and the
-      // outgoing package's erase disables ms-probe.service, which both packages ship. The
-      // transaction ends as ms-setup left the units — enabled — and starts nothing, whichever
-      // release the outgoing package is.
-      for (const [swap, incoming, outgoing] of [
-        ['ms to ms-probe', ['probe'], ['core', 'probe']],
-        ['ms-probe to ms', ['core', 'probe'], ['probe']],
-      ] as const) {
-        const ours = rpmScriptlets(outgoing);
-        for (const [release, preun, postun] of [
-          ['this release', ours['preun'] ?? '', ours['postun'] ?? ''],
-          ['rc.1 or rc.2', RC2_PREUN(outgoing), RC2_POSTUN],
-        ] as const) {
-          const why = `${swap}, from ${release}`;
-          const at = host(true);
-          // What an earlier transaction that never reached its %posttrans left.
-          writeFileSync(at.outcome, 'started\n');
-          transaction(
-            at,
-            rpmScriptlets(incoming),
-            { preun, postun },
-            { word: 'started', setupFails: true },
-          );
-          const log = logLines(at);
-          assert.deepEqual(
-            log.slice(-(outgoing.length * 2 + 1 + incoming.length)),
-            [
+    it('reads nothing an earlier transaction left, when this one’s %post died after ms-setup', () => {
+      // `H-40`'s round-2 check: %post removes both lists before it runs ms-setup, so one that is
+      // killed before it writes them down leaves %posttrans nothing to read.
+      const at = host(true);
+      for (const file of [at.enabled, at.active]) {
+        writeFileSync(file, 'ms-core.service\nms-probe.service\n');
+      }
+      const { post = '', posttrans = '' } = rpmScriptlets(['core', 'probe']);
+      const killed = run(at, post, 2, { STUB_KILL_SCRIPTLET: '1' });
+      assert.equal(killed.signal, 'SIGKILL', 'the %post was not killed after its ms-setup');
+      assert.ok(!existsSync(at.enabled) && !existsSync(at.active), 'the lists were not removed');
+      const result = run(at, posttrans, 0);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(logLines(at), ['ms-setup --components core,probe']);
+    });
+
+    it('ends a swap whose setup failed as ms-setup left it: enabled, and running what it started', () => {
+      // `dnf swap` whose ms-setup refused the configuration, or started the probe and then failed
+      // on the core's restart (`H-40`'s round-2 check): its %post fails, rpm goes on, and the
+      // outgoing package's erase stops and disables ms-probe.service, which both packages ship.
+      // The transaction ends with the units enabled, and with what ms-setup had started started
+      // again — nothing, or the probe — whichever release the outgoing package is.
+      for (const [swap, incoming, outgoing] of SWAPS) {
+        for (const [release, scriptlets] of outgoings(outgoing)) {
+          for (const started of [[], ['probe']] as const) {
+            const why = `${swap}, from ${release}, with ${started.join(',') || 'nothing'} started`;
+            const at = host(true);
+            transaction(at, rpmScriptlets(incoming), scriptlets, { started, setupFails: true });
+            const log = logLines(at);
+            const end = [
               ...outgoing.flatMap((svc) => [
                 `systemctl stop ms-${svc}.service`,
                 `systemctl disable ms-${svc}.service`,
               ]),
               'systemctl daemon-reload',
               ...units('enable', incoming),
-            ],
-            why,
-          );
-          assert.ok(!log.some((line) => /^systemctl (start|restart) /u.test(line)), why);
+              ...units('start', started),
+            ];
+            assert.deepEqual(log.slice(-end.length), end, why);
+            assert.ok(!log.includes('systemctl start ms-core.service'), why);
+          }
         }
       }
     });
@@ -2815,8 +2933,9 @@ exit "\${STUB_SETUP_STATUS:-0}"
         const result = run(at, body, remaining, failing);
         assert.equal(result.status, 0, `${step} would have failed:\n${result.stderr}`);
       }
-      writeFileSync(at.outcome, 'started\n');
-      writeFileSync(at.enabled, 'ms-core.service\nms-probe.service\n');
+      for (const file of [at.enabled, at.active]) {
+        writeFileSync(file, 'ms-core.service\nms-probe.service\n');
+      }
       const result = run(at, posttrans, 0, failing);
       assert.equal(result.status, 0, `%posttrans would have failed:\n${result.stderr}`);
       for (const svc of ['core', 'probe']) {
@@ -3140,6 +3259,44 @@ describe(
       }
     });
 
+    it('reads rpm’s answer from its last line, past a warning (`H-39`’s round-2 check)', () => {
+      // What rpm on an upgraded EL9 host says before its answer, and still reads the database;
+      // an `error:` is a database it could not read, whatever follows it.
+      for (const [why, before, goes] of [
+        [
+          'a warning',
+          'warning: Found bdb_ro Packages database while attempting sqlite backend: using bdb_ro backend.',
+          true,
+        ],
+        ['an error', 'error: rpmdb: BDB0113 Thread/process 1234 failed: Thread died', false],
+      ] as const) {
+        const box = sandbox();
+        const at = tarballInstallation(box);
+        packageTools(box, {}, []);
+        writeFileSync(
+          join(box.bin, 'rpm'),
+          '#!/usr/bin/env bash\necho "rpm $*" >> "$STUB_LOG"\n' +
+            `echo '${before}' >&2\n` +
+            'echo "package ${@: -1} is not installed"\nexit 1\n',
+          { mode: 0o755 },
+        );
+        const result = uninstall(box, at);
+        if (goes) {
+          assert.equal(result.status, 0, `${why}: ${result.stdout}${result.stderr}`);
+          assert.ok(!existsSync(join(at.prefix, 'app')), why);
+          assert.ok(box.logged().includes('rpm -q ms-probe\n'), why);
+        } else {
+          assert.equal(result.status, 1, `${why}: ${result.stdout}`);
+          assert.match(
+            result.stderr,
+            /could not ask rpm whether the ms package is installed \(error: rpmdb: BDB0113 /u,
+            why,
+          );
+          untouched(box, at);
+        }
+      }
+    });
+
     it('takes the prefix as one spelling: a trailing slash, doubled slashes, a link', () => {
       for (const spell of [
         (prefix: string) => `${prefix}/`,
@@ -3335,6 +3492,28 @@ describe(
         untouched(box, at);
         assert.ok(existsSync(join(inside, 'VERSION')), kept);
       }
+
+      // One with the operator's in it is refused for that first, and `rm -rf` is not suggested
+      // for it (`H-39`’s round-2 check).
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      const inside = join(at.prefix, 'rolled-back');
+      for (const dir of ['app/core', 'bin', 'libexec']) {
+        mkdirSync(join(inside, dir), { recursive: true });
+      }
+      writeFileSync(join(inside, 'VERSION'), '1.0.0\n');
+      writeFileSync(join(inside, 'app', 'core', 'build.json'), '{}\n');
+      writeFileSync(join(inside, 'libexec', 'ms-setup'), '#!/bin/sh\n', { mode: 0o755 });
+      writeFileSync(join(inside, 'bin', 'htop'), '');
+      const result = uninstall(
+        box,
+        { prefix: inside, env: at.env },
+        join(at.prefix, 'libexec', 'ms-uninstall'),
+      );
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /bin\/htop is not something a release puts there/u);
+      assert.doesNotMatch(result.stderr, /rm -rf/u);
+      untouched(box, at);
     });
 
     it('refuses a prefix the units do not run from, where another installation is', () => {
@@ -3353,12 +3532,22 @@ describe(
       assert.ok(
         result.stderr.includes(
           `${join(at.units, 'ms-core.service')} runs ${join(at.prefix, 'bin', 'ms-core')}, which ` +
-            `is the installation at ${at.prefix}, not ${other}; nothing was removed`,
+            `is the installation at ${at.prefix}, not ${other}; nothing was removed; a copy is ` +
+            `removed with: rm -rf ${other}\n`,
         ),
         result.stderr,
       );
       untouched(box, at);
       assert.ok(existsSync(join(other, 'VERSION')));
+
+      // A copy with the operator's in it is refused for that first, and `rm -rf` is not suggested
+      // for it (`H-39`’s round-2 check).
+      writeFileSync(join(other, 'bin', 'htop'), '');
+      const theirs = uninstall(box, { prefix: other, env: at.env });
+      assert.equal(theirs.status, 1, theirs.stdout);
+      assert.match(theirs.stderr, /bin\/htop is not something a release puts there/u);
+      assert.doesNotMatch(theirs.stderr, /rm -rf/u);
+      untouched(box, at);
 
       // Units that name a directory with no installation in it — /opt/ms, for an installation
       // made elsewhere — or a link to this prefix say nothing against it.
@@ -3417,6 +3606,65 @@ describe(
       assert.deepEqual(readdirSync(at.prefix), ['operators-own-notes.txt']);
       assert.ok(!existsSync(at.ping), 'the fragment did not run');
       assert.match(second.stdout, /MonitoringSystem 2\.0\.0 was removed from/);
+    });
+
+    it('keeps VERSION when libexec could not all be removed, and is finished by running it again', () => {
+      // `rm -rf libexec` and `rm -f VERSION` are two commands (`H-39`’s round-2 check): one `rm`
+      // goes on to VERSION past a libexec it could not empty, and left a libexec that no run took
+      // for an installation's. Here `rm` takes ms-setup, the file a run looks for, and cannot
+      // take the rest of libexec; whatever else it was given, it removes, as rm does.
+      const box = sandbox();
+      const at = tarballInstallation(box);
+      writeFileSync(
+        join(box.bin, 'rm'),
+        '#!/usr/bin/env bash\n' +
+          'for arg in "$@"; do\n' +
+          '  case "$arg" in */libexec) ;; *) continue ;; esac\n' +
+          '  [ ! -e "$STUB_DIR/rm-stopped" ] || break\n' +
+          '  : > "$STUB_DIR/rm-stopped"\n' +
+          '  PATH=/usr/bin:/bin rm -f "$arg/ms-setup"\n' +
+          '  for other in "$@"; do\n' +
+          '    case "$other" in -* | "$arg") ;; *) PATH=/usr/bin:/bin rm -rf "$other" ;; esac\n' +
+          '  done\n' +
+          '  echo "rm: cannot remove \'$arg\': Operation not permitted" >&2\n' +
+          '  exit 1\n' +
+          'done\n' +
+          'PATH=/usr/bin:/bin exec rm "$@"\n',
+        { mode: 0o755 },
+      );
+      const first = uninstall(box, at);
+      assert.notEqual(first.status, 0, first.stdout);
+      assert.ok(existsSync(join(box.dir, 'rm-stopped')), 'the stub rm never stopped');
+      assert.ok(existsSync(join(at.prefix, 'VERSION')), 'VERSION went with libexec half-removed');
+      assert.ok(!existsSync(join(at.prefix, 'libexec', 'ms-setup')));
+      assert.ok(existsSync(join(at.prefix, 'libexec', 'ms-uninstall')));
+      assert.ok(existsSync(at.ping), 'the fragment ran before the release had gone');
+      for (const entry of ['app', 'bin', 'etc', 'deploy', 'previous', '.incoming']) {
+        assert.ok(!existsSync(join(at.prefix, entry)), entry);
+      }
+
+      const second = uninstall(box, at);
+      assert.equal(second.status, 0, `${second.stdout}${second.stderr}`);
+      assert.deepEqual(readdirSync(at.prefix), ['operators-own-notes.txt']);
+      assert.ok(!existsSync(at.ping), 'the fragment did not run');
+      assert.match(second.stdout, /MonitoringSystem 2\.0\.0 was removed from/);
+
+      // Only that is taken for one: a VERSION with no libexec is not an installation this removes,
+      // nor one with a tree beside a libexec that has no ms-setup, which is refused above.
+      const again = sandbox();
+      const where = tarballInstallation(again);
+      const runner = join(release(again, '3.0.0'), 'deploy', 'uninstall.sh');
+      chmodSync(runner, 0o755);
+      rmSync(join(where.prefix, 'libexec'), { recursive: true });
+      for (const entry of ['app', 'bin', 'web', 'docs', 'etc', 'deploy', 'previous']) {
+        rmSync(join(where.prefix, entry), { recursive: true });
+      }
+      const refused = uninstall(again, where, runner);
+      assert.equal(refused.status, 1, refused.stdout);
+      assert.match(refused.stderr, /has no libexec\/ms-setup, which every installation has/u);
+      assert.equal(readdirSync(where.units).length, 4);
+      assert.ok(existsSync(where.ping));
+      assert.ok(!again.logged().includes('systemctl'), again.logged());
     });
 
     it('lists the names place-release.sh does, and every launcher package.sh puts in bin', () => {
