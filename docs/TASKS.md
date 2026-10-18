@@ -37246,6 +37246,60 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         tree, `f6e4185a`, not dirty): *smoke test passed*, ending with `ms-uninstall`: */opt/ms, the
         units, their enable links and the ping drop-in: gone, and said so* and */etc/ms,
         /var/lib/ms-\*, the service users: kept; ms-core and ms-probe: stopped*.
+      - **Second review.** **A release's names were enough without a `VERSION`**: `/srv` with an
+        `app`, a `web` or a `docs` of its own passed, the `app` went to `previous` and the next run
+        deleted it. `place-release.sh` now fills a prefix with no `VERSION` only when it holds
+        nothing — empty directories, and a filesystem's `lost+found`, which a volume mounted at the
+        prefix has and nothing here moves, count as nothing — or what a run that stopped before
+        `VERSION` left: `.incoming`, `previous/VERSION`, or an `app` with a release's
+        `<component>/build.json`. **An empty `bin` got `bin/bin`**: only `app` sent the step to
+        `previous`, and `mv` into a directory that exists nests; any release entry does now. A run
+        stopped once it had set the release aside — `previous/VERSION` and no `VERSION` — keeps
+        that one at `previous` and drops its half of a copy, which it used to set aside over the
+        only release to go back to. A prefix that is a link to nothing is named. `ms-uninstall`
+        refuses an `app` with no build stamp; a prefix inside an installation, at any depth
+        (`previous`, the `rolled-back` going back leaves, `old/1.0.0`), naming `rm -rf` for it;
+        a prefix the units do not run from where their `ExecStart=` is another installation's
+        launcher, through a link (the units name `/opt/ms` whatever the prefix, so one that names
+        a directory with no installation says nothing); and a package database that cannot
+        answer — `dpkg-query` exiting 2, or `rpm -q` saying anything but *package X is not
+        installed*. **A run stopped part-way left a prefix every copy refused**, `libexec` and
+        `VERSION` gone and the units left for launchers that were gone too: now the units go
+        first, each tree is renamed into `.incoming` and removed from there (a rename is all or
+        nothing, and `rm` can take `app`'s build stamp first), and `VERSION` and `libexec` go
+        last, so running it again finishes the job. What it keeps in the prefix is named, hidden
+        names too, and a prefix that is a link is kept with its directory. `foreign_in` in both
+        scripts reaches names that start with two dots. `smoke-install.sh` fails when `ms-core`
+        and `ms-probe` do not both start before `ms-uninstall`, whose stop asserted nothing over
+        services already down. `installation.md` and the release notes say what is refused and
+        why, and that `rolled-back` is the operator's to delete.
+        Tests: `deploy-scripts.test.ts`, five more and two rewritten — in `place-release.sh`, the
+        operator's own `app`, `web`, `docs`, `previous` or a link of theirs to an empty directory
+        refused unchanged; an empty prefix, empty directories, `lost+found` (kept, with what fsck
+        put in it), `.incoming`, `previous/VERSION` (the release there kept) and a build stamp
+        each filled with every entry where it belongs and none nested; a link to nothing named;
+        `..keep` refused at an upgrade. In `ms-uninstall`, the fixture has a build stamp and a
+        unit naming its launcher; what is kept is listed, hidden names too; the `dpkg-query` stub
+        answers only `-W -f=${db:Status-Status}`, so a script reading another field fails, and
+        `rpm` says what rpm says; a dpkg database that does not parse and an rpm database that
+        will not open refuse; a link prefix kept and its contents named; `..keep` and an `app`
+        with no stamp refused; a release inside an installation refused at three depths; the
+        units running another installation refused, a directory with no installation or a link
+        to this one not; and a stub `rm` that stops at the first tree, after which the units are
+        gone, `VERSION` and `ms-setup` are not, and a second run finishes. **Mutations
+        36/36**: in `place-release.sh`, names with two dots missed; each of the three signs of an
+        interrupted run ignored, or every prefix taken for one; an empty directory, a link to one
+        or `lost+found` counted, at the top or among what holds something; that never asked; a
+        link to nothing not named; set aside only for an installed release, or only for `app`; an
+        interrupted swap's `previous` set aside over, or its half copy kept. In `ms-uninstall`,
+        dpkg's exit 2 taken for an answer, or its status ignored; `Status` read whole; rpm's other
+        answers taken for *not installed*; no installation around the prefix asked, or only its
+        parent; the units' `ExecStart=` not asked, its prefix characters kept, a link to the
+        prefix taken for another installation, a directory with none taken for one; the build
+        stamp not asked; names with two dots missed; the units after the trees; `VERSION` and
+        `libexec` first; the trees removed where they are; a leftover `.incoming` not cleared; a
+        link prefix not kept, or what is in it not named; what is left, the hidden or the
+        two-dot names among it, not named. Each restored by copy, `utime` and a byte compare.
 
 - [x] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
       Found 2026-10-07 in `H-34`. `ms`'s rpm `%preun` with `$1=0` (and the `.deb`'s `prerm` on

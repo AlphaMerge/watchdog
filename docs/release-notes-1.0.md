@@ -143,7 +143,8 @@ and the protocol between core and probe moves from 28 to 36.
   under its prefix, or under `previous` (`H-39`): the installer replaces those directories
   whole, so it now refuses the upgrade before it changes anything, and names the file. Move it
   out of the prefix first. A prefix with anything in it and no release, `--prefix /usr/local`,
-  is refused the same way ([installation.md → Upgrading](installation.md#upgrading)).
+  is refused the same way, unless it holds only empty directories, a filesystem's `lost+found`
+  or what an interrupted install left ([installation.md → Upgrading](installation.md#upgrading)).
 - **Then let the first start finish.** A migration reports itself every 15 seconds and can take
   minutes on a large installation; do not restart the core to hurry it
   ([a core that is still starting](administration.md#a-core-that-is-still-starting)). Before
@@ -195,9 +196,10 @@ From rc.2 or anything older:
 - **A tarball installation has an uninstaller**, `sudo /opt/ms/libexec/ms-uninstall` (`H-39`),
   which removes what a package's purge removes and keeps what it keeps. It removes nothing while
   the `ms` or `ms-probe` package is installed, nor from a prefix holding anything in `bin`,
-  `libexec`, `etc` or `deploy` that no release put there. An installation from rc.2 or older has
-  no copy until it is upgraded; to remove one without upgrading, run `sudo ./deploy/uninstall.sh`
-  from this release's unpacked tarball ([uninstalling](installation.md#uninstalling)).
+  `libexec`, `etc` or `deploy` that no release put there, nor a release kept inside an
+  installation (`previous`, `rolled-back`), which `rm -rf` removes. An installation from rc.2 or
+  older has no copy until it is upgraded; to remove one without upgrading, run
+  `sudo ./deploy/uninstall.sh` from this release's unpacked tarball ([uninstalling](installation.md#uninstalling)).
 - **The start-up passes** (`P-333`, migration 077) bring stored rows up to a build's declarations
   at its first start, not at every restart. One renames existing channels to what their type
   declares and gives them its units (`P-402`, `P-404`); a name or unit a build takes away stays

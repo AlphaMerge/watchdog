@@ -1179,7 +1179,12 @@ if [ "${MS_SMOKE_KEEP:-0}" = "1" ]; then
   echo "==> not removing the installation: MS_SMOKE_KEEP=1 keeps it, so ms-uninstall is not asserted"
 else
   echo "==> asserting ms-uninstall removes the installation and the ping drop-in, and keeps the data (H-39)"
-  docker exec "${container}" systemctl start ms-core ms-probe || true
+  # Started, or the stop below asserts nothing (`H-39`'s second review). Both are Type=notify, so
+  # the start's exit status says whether each came up.
+  if ! docker exec "${container}" systemctl start ms-core ms-probe; then
+    echo "    FAILED — ms-core and ms-probe did not both start, so ms-uninstall's stop is not asserted" >&2
+    failed=1
+  fi
   if docker exec "${container}" /opt/ms/libexec/ms-uninstall >"${logs}/uninstall.log" 2>&1; then
     left=''
     for path in /opt/ms /usr/lib/systemd/system/ms-core.service \

@@ -390,7 +390,8 @@ the new build refuses your configuration differs:
   `deploy` under the prefix are the release's and are replaced whole, so the installer refuses,
   before it changes anything, when one of them holds a file no release put there (`H-39`): move
   it out of the prefix and run it again. It refuses a prefix that has anything in it and no
-  release (`--prefix /usr/local`) the same way.
+  release (`--prefix /usr/local`) the same way, unless what is there is only empty directories,
+  a filesystem's `lost+found`, or what an install interrupted before it finished left.
 - **A package** stops the services before it unpacks, because the package manager replaces the
   files itself and the new build can only be asked afterwards. If it refuses the configuration,
   the new version is installed, **both services are left stopped**, and the message says so. Fix
@@ -503,6 +504,9 @@ sudo mv previous/* . && sudo rmdir previous
 sudo systemctl start ms-core ms-probe
 ```
 
+`/opt/ms/rolled-back` is then yours: remove it with `sudo rm -rf /opt/ms/rolled-back` once the
+earlier release is the one you keep. `ms-uninstall` leaves it, and names it.
+
 A package has no `previous`: install the earlier package version with `apt` or `dnf`, after the
 same `migrate down`.
 
@@ -569,12 +573,16 @@ sudo /opt/ms/libexec/ms-uninstall
 It stops and disables both services, removes the release from `/opt/ms` with the one it kept at
 `/opt/ms/previous` (anything you put beside them yourself stays, and is named), removes the
 units from `/usr/lib/systemd/system`, and takes the probe's ping setting away as a purge does
-(below). It removes nothing, and says why, while the `ms` or `ms-probe` package is installed —
-remove that with `dpkg -P` or `rpm -e` — and where the prefix is not only a release's: one without
-`libexec/ms-setup`, or with a file in `bin`, `libexec`, `etc` or `deploy` (or under `previous`)
-that no release put there (`H-39`). An edited `ms-core.service` or `ms-probe.service` that an
-earlier release left in `/etc/systemd/system`, and the setup kept, is yours: it is named at the
-end and left, for you to remove before `systemctl daemon-reload`. An installation from a release
+(below). A prefix that is a link is kept, with the directory it leads to. It removes nothing,
+and says why, while the `ms` or `ms-probe` package is installed — remove that with `dpkg -P` or
+`rpm -e` — or when it cannot tell whether one is; and where the prefix is not only a release's:
+one without `libexec/ms-setup`, an `app` without a release's build stamp, or a file in `bin`,
+`libexec`, `etc` or `deploy` (or under `previous`) that no release put there (`H-39`). It
+refuses a release kept inside an installation — `/opt/ms/previous`, or the `rolled-back` that
+going back leaves — whose services and units are the installation's: remove one of those with
+`sudo rm -rf`. An edited `ms-core.service` or `ms-probe.service` that an earlier release left in
+`/etc/systemd/system`, and the setup kept, is yours: it is named at the end and left, for you to
+remove before `systemctl daemon-reload`. An installation from a release
 before `H-39` has no `ms-uninstall`; run `sudo ./deploy/uninstall.sh` from this release's unpacked
 tarball instead, which does the same.
 

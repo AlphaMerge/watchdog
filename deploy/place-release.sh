@@ -78,15 +78,24 @@ RELEASE_ENTRIES=(app bin web docs etc deploy libexec VERSION)
 # one kept at `previous`. `ms-uninstall` asks the same of the same lists. They are every name a
 # release has put there (rc.1 on); one a release stops shipping stays, or the upgrade from a
 # release that had it would be refused.
+#
+# **A release's names are not enough without a VERSION** (`H-39`'s second review): `/srv/app`,
+# `/srv/web` or `/srv/docs` of the operator's passed on its name, and the operator's `app` was
+# moved to `previous` and deleted by the next run. So a prefix with no VERSION is filled only when
+# it holds nothing — empty directories, and `lost+found`, which a filesystem mounted at the prefix
+# has and nothing here moves — or when a run of this script stopped in it before it wrote VERSION:
+# it left `.incoming` (killed while copying), `previous/VERSION` (stopped once the release it
+# replaced was set aside) or an `app` with a release's `<component>/build.json` (`package.sh`).
 RELEASE_BIN='ms-backup ms-core ms-enrol ms-probe ms-recover ms-restore'
 RELEASE_LIBEXEC='ms-setup ms-uninstall remove-ping-conf.sh'
 RELEASE_ETC='core.json probe.json'
 RELEASE_DEPLOY='systemd'
-# The first entry of DIR whose name is not among the ALLOWED, or nothing.
+# The first entry of DIR whose name is not among the ALLOWED, or nothing. The three patterns are
+# every name there is: `..keep` matches neither of the first two (`H-39`'s second review).
 foreign_in() {
   local dir="$1" allowed=" $2 " path
   [ -d "${dir}" ] || return 0
-  for path in "${dir}"/* "${dir}"/.[!.]*; do
+  for path in "${dir}"/* "${dir}"/.[!.]* "${dir}"/..?*; do
     [ -e "${path}" ] || [ -L "${path}" ] || continue
     case "${allowed}" in
       *" ${path##*/} "*) ;;
@@ -113,9 +122,40 @@ foreign_in_release() {
   done
   return 0
 }
+# Whether a run of this script stopped in the prefix before it wrote VERSION.
+interrupted() {
+  local build
+  [ ! -d "${PREFIX}/.incoming" ] || return 0
+  [ ! -f "${PREFIX}/previous/VERSION" ] || return 0
+  for build in "${PREFIX}"/app/*/build.json; do
+    [ ! -f "${build}" ] || return 0
+  done
+  return 1
+}
+# The first entry of the prefix that holds something, or nothing: an empty directory holds
+# nothing of anyone's, and nor does a filesystem's `lost+found`. Asked once `foreign_in` has
+# passed the prefix and nothing says a run stopped in it, so no name here starts with a dot: the
+# one it allows is `.incoming`.
+occupied_in() {
+  local path
+  for path in "${PREFIX}"/*; do
+    [ -e "${path}" ] || [ -L "${path}" ] || continue
+    [ "${path##*/}" != lost+found ] || continue
+    if [ -d "${path}" ] && [ ! -L "${path}" ] && [ -z "$(ls -A -- "${path}")" ]; then continue; fi
+    printf '%s\n' "${path}"
+    return 0
+  done
+  return 0
+}
+# **A prefix that is a link to nothing** (`H-39`'s second review): `install -d` below would fail
+# on it with a message that does not say why.
+if [ -L "${PREFIX}" ] && [ ! -e "${PREFIX}" ]; then
+  die "${PREFIX} is a link to $(readlink -- "${PREFIX}"), which does not exist; create that directory, or remove the link, and run this again"
+fi
 if [ -d "${PREFIX}" ] && [ -z "${installed}" ]; then
-  foreign="$(foreign_in "${PREFIX}" "${RELEASE_ENTRIES[*]} previous .incoming")"
+  foreign="$(foreign_in "${PREFIX}" "${RELEASE_ENTRIES[*]} previous .incoming lost+found")"
   [ -n "${foreign}" ] || foreign="$(foreign_in_release)"
+  if [ -z "${foreign}" ] && ! interrupted; then foreign="$(occupied_in)"; fi
   [ -z "${foreign}" ] \
     || die "${PREFIX} is not empty and has no release in it (no ${PREFIX}/VERSION), and ${foreign} is not a release's; install into an empty directory, or one a release is in. Nothing was changed"
 elif [ -d "${PREFIX}" ]; then
@@ -214,7 +254,21 @@ if [ -n "${installed}" ]; then
 fi
 
 echo "==> moving ${version} into ${PREFIX}"
-if [ -n "${installed}" ] || [ -d "${PREFIX}/app" ]; then
+# **Set aside whenever any of a release's entries is here** (`H-39`'s second review), not only
+# `app`: `mv` into a directory that exists puts the new one inside it, so an empty `bin` left the
+# launchers at `bin/bin`. What is set aside here was checked above, and holds a release's or
+# nothing.
+set_aside="${installed}"
+for entry in "${RELEASE_ENTRIES[@]}"; do
+  if [ -e "${PREFIX}/${entry}" ]; then set_aside=1; fi
+done
+if [ -z "${installed}" ] && [ -f "${PREFIX}/previous/VERSION" ]; then
+  # A run that stopped once it had set the release it replaced aside: that one is whole at
+  # `previous` — VERSION is the last entry moved — and what is here is part of this one's copy.
+  # Setting that aside would delete the only copy of the release to go back to.
+  for entry in "${RELEASE_ENTRIES[@]}"; do rm -rf "${PREFIX:?}/${entry}"; done
+  echo "    $(cat "${PREFIX}/previous/VERSION") is kept at ${PREFIX}/previous, as the run before this one left it"
+elif [ -n "${set_aside}" ]; then
   rm -rf "${PREFIX}/previous"
   mkdir -m 0755 "${PREFIX}/previous"
   for entry in "${RELEASE_ENTRIES[@]}"; do
