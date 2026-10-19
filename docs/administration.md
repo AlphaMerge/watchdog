@@ -1288,14 +1288,14 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   under a running probe, the next loss rests it until the probe restarts.
 - **A name that crashes `getaddrinfo` is found and kept off every lane.** After the second crash
   in ten minutes the names in flight are asked again one at a time, for 8 seconds after the last
-  crash, or longer while one of them is held, until it has been asked; the one that crashes
-  again, even after that, is poison: its checks fail at once, saying the lookup helper failed
-  while asking for it, and it is never asked on the probe's own lanes, resting included, where it
-  would crash the probe. It is asked again after an hour, at a moment the helper has nothing
-  else in flight, then after twice as long at each crash it alone was asked in, to a day. An
-  answer, or a restart of the probe, clears it. A name in flight at a crash that names no one is
-  kept off the probe's lanes too, until ten minutes after the helper is next up, a rest
-  included.
+  crash, or longer while one of them is held, until it has been asked. A name that crashes the
+  child while it is the only lookup in flight, then or later, is poison: its checks fail at once,
+  saying the lookup helper failed while asking for it, and it is never asked on the probe's own
+  lanes, resting included, where it would crash the probe. It is asked again after an hour, at a
+  moment the helper has nothing else in flight, then after twice as long at each crash it alone
+  was in flight for, to a day. An answer, or a restart of the probe, clears it. Every name in
+  flight at any crash is kept off the probe's lanes too, until ten minutes after the helper is
+  next up, a rest included.
 - **Stopping.** The helper serves the check pool until the pool has drained, then stops with the
   probe. A probe killed outright takes it with it: the child exits within a second of its channel
   to the probe closing.

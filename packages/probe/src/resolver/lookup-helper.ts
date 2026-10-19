@@ -76,14 +76,14 @@ import { afterPolls } from './verdict-timer.js';
  * returns cannot keep it on: `isolationMaxMs` (8 s) after the crash that began it or the last one
  * during it, or later while the resolver holds a suspect (`suspectHeld`), until that suspect's
  * hold has ended and the child could have said it is stuck. Every change says whether it is on. A
- * suspect asked while isolating stays one until it settles, isolation over or not. A crash is
- * charged only when it names its culprit: a suspect, with no other suspect and no lookup said
- * stuck in flight, or a poison name's re-ask with nothing else in flight at all. Otherwise no one
- * is charged, and each name in flight is avoided and asked again alone, so that a working name is
- * never poison for another's crash beside it in isolation. A charged name is poison, never asked
- * on a probe lane, and asked again alone here after an hour, then after twice as long at each
- * crash, to a day at most, at a moment nothing else is in flight; one that finds none for a whole
- * period waits for the next. An answer clears the mark; a restart of the probe does too.
+ * suspect asked while isolating stays one until it settles, isolation over or not. One rule
+ * charges every crash: to a lookup alone in flight, a suspect or a poison name's re-ask, and
+ * otherwise to no one, so that a working name is never poison for another's crash. Every name in
+ * flight at a crash, charged or not, is avoided, and those asked again go alone. A charged name is
+ * poison, never asked on a probe lane, and asked again alone here after an hour, then after twice
+ * as long at each crash, to a day at most, at a moment nothing else is in flight; one that finds
+ * none for a whole period waits for the next. An answer clears the mark; a restart of the probe
+ * does too.
  * `memory`, `hung` and `start` losses are never charged to a name. A change and a loss say whether
  * a crash made a `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and
  * not the second.
@@ -91,7 +91,7 @@ import { afterPolls } from './verdict-timer.js';
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So while the route is `resting` or `down`,
  * the resolver never asks the probe's own `getaddrinfo` for a poison name, a current suspect, or a
- * name in flight at an `exit` loss charged to no one: it fails that check at once instead. Such a
+ * name in flight at an `exit` loss: it fails that check at once instead. Such a
  * name is avoided from its crash until ten minutes after the helper is next up, so that a rest,
  * or a start that does not come up, never ends its ten minutes before a child has run them.
  */
@@ -831,7 +831,7 @@ export class LookupHelper implements HelperPort {
   #lapseGeneration = 0;
   readonly #poison = new Map<string, PoisonMark>();
   /**
-   * Each name in flight at an `exit` loss charged to no one, kept off probe lanes: with the time
+   * Each name in flight at an `exit` loss, charged or not, kept off probe lanes: with the time
    * its ten minutes run from, the helper's next `up`, and undefined until then.
    */
   readonly #crashed = new Map<string, number | undefined>();
@@ -1082,8 +1082,8 @@ export class LookupHelper implements HelperPort {
 
   /**
    * Whether the probe's own `getaddrinfo` must not be asked for this name now: it is poison, a
-   * current suspect, or was in flight at an `exit` loss charged to no one in the last `stableMs`,
-   * in its family or one a lookup of it would also ask for. The resolver asks before routing a
+   * current suspect, or was in flight at an `exit` loss, until `stableMs` after the helper was next
+   * up, in its family or one a lookup of it would also ask for. The resolver asks before routing a
    * name to the probe's lanes while the route is `resting` or `down`, and fails its check instead.
    */
   avoidsSystem(host: string, family: HelperFamily): boolean {
@@ -1686,21 +1686,15 @@ export class LookupHelper implements HelperPort {
 
     const lost = [...record.table.values()];
     record.table.clear();
-    // Charged only when the crash names its culprit (D27): a suspect asked while isolating, still
-    // in flight whether or not isolation has ended since, with no other in flight counting a
-    // lookup said stuck as one, since a crash on a slow reply comes after the child said so; or a
-    // poison name's re-ask with nothing else in flight at all. Otherwise no one is charged: a
-    // working name is never made poison for another's crash beside it in isolation. Each is
-    // avoided, and asked again alone. `memory`, `hung` and `start` losses are never charged.
+    // One rule for every crash (D27): charged only to a lookup alone in flight, a suspect asked
+    // while isolating (still in flight whether or not isolation has ended since) or a poison
+    // name's re-ask. With anything else in flight, said stuck or let go included, no one is
+    // charged, so a working name is never made poison for another's crash. `memory`, `hung` and
+    // `start` losses are never charged.
     let charged: InFlight | undefined;
-    if (reason === 'exit') {
-      const named = lost.filter(
-        (flight) => flight.suspect || flight.poisonAsk || (flight.stuck && !flight.detached),
-      );
-      const only = named.length === 1 ? named[0] : undefined;
-      if (only !== undefined && (only.suspect || (only.poisonAsk && lost.length === 1))) {
-        charged = only;
-      }
+    const [only] = lost;
+    if (reason === 'exit' && lost.length === 1 && only !== undefined) {
+      if (only.suspect || only.poisonAsk) charged = only;
     }
     let chargedKind: ChargedKind | undefined;
     if (charged !== undefined) {
@@ -1748,16 +1742,13 @@ export class LookupHelper implements HelperPort {
         this.#lapseAt = Math.max(this.#lapseAt, now + this.#limits.isolationMaxMs);
         this.#armIsolationLapse();
       }
-      // Charged to no one: any of them may be what crashed it, so none goes to the probe's own
-      // getaddrinfo until ten minutes after the helper is next up, resting or not.
-      if (charged === undefined) {
-        for (const [key, since] of this.#crashed) {
-          if (since !== undefined && now - since >= this.#limits.stableMs)
-            this.#crashed.delete(key);
-        }
-        for (const flight of lost) {
-          this.#crashed.set(poisonKey(flight.host, flight.family), undefined);
-        }
+      // Every name in flight, charged or not: any of them may be what crashed it, so none goes to
+      // the probe's own getaddrinfo until ten minutes after the helper is next up, resting or not.
+      for (const [key, since] of this.#crashed) {
+        if (since !== undefined && now - since >= this.#limits.stableMs) this.#crashed.delete(key);
+      }
+      for (const flight of lost) {
+        this.#crashed.set(poisonKey(flight.host, flight.family), undefined);
       }
     }
 

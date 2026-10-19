@@ -1360,7 +1360,7 @@ describe('the lookup helper: isolation and poison', () => {
     }
   });
 
-  it('U21: while isolating, a crash with two suspects in flight is charged to neither; asked again alone, the culprit is charged and only it', async () => {
+  it('U21: while isolating, a crash with two suspects in flight is charged to neither, nor one beside a bystander; alone, the culprit is charged and only it', async () => {
     const timers = new Timers({ clock: 'real', timeouts: 'fake', ticks: 'fake' });
     const made = make({ timers });
     try {
@@ -1389,17 +1389,29 @@ describe('the lookup helper: isolation and poison', () => {
       assert.equal(made.helper.avoidsSystem('hang.test', 6), true);
       assert.equal(made.helper.avoidsSystem('crash.test', 4), true);
       await nextChild(made, 3);
-      // Alone, as a suspect, beside a lookup that is none: charged, and only it.
+      // A suspect beside a lookup that is none: not alone, so charged to no one, and both are
+      // kept off the probe's lanes (one rule for every crash, decided 2026-10-19).
       const innocent = settled(made.helper.ask({ host: 'hang.test', family: 4, max: 64 }));
+      const beside = settled(
+        made.helper.ask({ host: 'crash.test', family: 4, max: 64, suspect: true }),
+      );
+      const unnamed = lostError((await within(WAIT, 'the culprit, beside', beside)).error);
+      const bystander = lostError((await within(WAIT, 'the innocent', innocent)).error);
+      assert.equal(unnamed.charged, false);
+      assert.equal(bystander.charged, false);
+      assert.equal(bystander.requeue, true);
+      assert.equal(made.helper.stats().poisoned, 0);
+      assert.equal(made.helper.avoidsSystem('hang.test', 4), true, 'the bystander');
+      assert.equal(made.helper.avoidsSystem('crash.test', 4), true);
+      await nextChild(made, 4);
+      // Alone, as a suspect: charged, and only it.
       const culprit = settled(
         made.helper.ask({ host: 'crash.test', family: 4, max: 64, suspect: true }),
       );
+      assert.equal(made.helper.isolating(), true, 'the fourth crash isolated again');
       const charged = lostError((await within(WAIT, 'the culprit', culprit)).error);
-      const bystander = lostError((await within(WAIT, 'the innocent', innocent)).error);
       assert.equal(charged.charged, true);
       assert.equal(charged.requeue, false);
-      assert.equal(bystander.charged, false);
-      assert.equal(bystander.requeue, true);
       assert.equal(made.helper.stats().poisoned, 1);
       assert.ok(made.helper.poison('crash.test', 4) !== undefined);
       assert.equal(made.helper.poison('hang.test', 6), undefined);
@@ -1528,7 +1540,7 @@ describe('the lookup helper: isolation and poison', () => {
     }
   });
 
-  it('U21: a suspect is charged only if asked while isolating, and stays one until it settles', async () => {
+  it('U21: a suspect is one only if asked while isolating, and stays one until it settles; beside a fresh lookup it is not charged, and both are avoided', async () => {
     const timers = new Timers({ clock: 'real', timeouts: 'fake', ticks: 'fake' });
     const made = make({ timers });
     try {
@@ -1548,7 +1560,8 @@ describe('the lookup helper: isolation and poison', () => {
       assert.equal(made.helper.stats().poisoned, 0);
       await nextChild(made, 1);
       // Isolating; a suspect left running when the resolver ends isolation stays one until it
-      // settles (decided 2026-10-19): the next crash is charged to it, whoever was beside it.
+      // settles. A crash with a fresh lookup beside it is not its alone: charged to no one, and
+      // both names are kept off the probe's lanes (decided 2026-10-19).
       const requeued = settled(made.helper.ask({ host: 'hang.test', family: 6, max: 64 }));
       await within(
         WAIT,
@@ -1569,10 +1582,12 @@ describe('the lookup helper: isolation and poison', () => {
         settled(made.helper.ask({ host: 'crash.test', family: 4, max: 64 })),
       );
       const left = lostError((await within(WAIT, 'the suspect left over', leftOver)).error);
-      assert.equal(left.charged, true);
-      assert.equal(left.requeue, false);
-      assert.equal(made.helper.stats().poisoned, 1);
-      assert.ok(made.helper.poison('hang.test', 4) !== undefined);
+      assert.equal(left.charged, false);
+      assert.equal(made.helper.stats().poisoned, 0);
+      // Its suspects aside: what stays is each name's crash.
+      made.helper.endIsolation();
+      assert.equal(made.helper.avoidsSystem('hang.test', 4), true, 'the suspect left over');
+      assert.equal(made.helper.avoidsSystem('crash.test', 4), true, 'the fresh lookup');
     } finally {
       await stop(made);
     }
@@ -2896,7 +2911,45 @@ describe('the lookup helper: names kept off the probe’s lanes (scripted proces
     }
   });
 
-  it('U30: suspects are avoided until they answer or isolation ends, and poison names always', async () => {
+  it('U30: a suspect and a bystander in flight at a crash that rests the helper: no one charged, and the bystander avoided through the rest', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      made.timers.fire((await crashAsking(made, 'dev-1.example.test')).delayMs ?? -1);
+      made.timers.fire((await crashAsking(made, 'dev-2.example.test')).delayMs ?? -1);
+      assert.equal(made.helper.isolating(), true);
+      // Two more losses with nothing in flight: four in ten minutes.
+      for (let loss = 0; loss < 2; loss += 1) {
+        await fakeUp(made);
+        made.timers.fire((await fakeCrash(made)).delayMs ?? -1);
+      }
+      await fakeUp(made);
+      const suspect = settled(
+        made.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
+      );
+      const beside = settled(made.helper.ask({ host: 'dev-7.example.test', family: 4, max: 64 }));
+      const rest = await fakeCrash(made);
+      assert.equal(rest.state, 'resting');
+      assert.equal(lostError((await suspect).error).charged, false, 'not alone');
+      const bystander = lostError((await beside).error);
+      assert.equal(bystander.charged, false);
+      assert.equal(bystander.suspect, false, 'no child to ask it again in');
+      made.timers.clock += rest.delayMs ?? -1;
+      assert.equal(made.helper.avoidsSystem('dev-7.example.test', 4), true, 'the rest over');
+      made.timers.fire(rest.delayMs ?? -1);
+      assert.equal(made.helper.avoidsSystem('dev-7.example.test', 4), true, 'starting');
+      await fakeUp(made);
+      const upAt = made.timers.clock;
+      made.timers.clock = upAt + 600_000 - 1;
+      assert.equal(made.helper.avoidsSystem('dev-7.example.test', 4), true);
+      made.timers.clock = upAt + 600_000;
+      assert.equal(made.helper.avoidsSystem('dev-7.example.test', 4), false, 'ten minutes up');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('U30: every name in flight at a crash is avoided, suspects too, whether they answer or isolation ends, for ten minutes up', async () => {
     const made = fakeMade();
     void made.helper.start();
     try {
@@ -2912,23 +2965,33 @@ describe('the lookup helper: names kept off the probe’s lanes (scripted proces
         made.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
       );
       const change = await fakeCrash(made);
-      // Charged to the suspect sent last: the others in flight are suspects, not crash names.
-      assert.equal(lostError((await culprit).error).charged, true);
+      // Three in flight: the crash is no one's alone, so no one is charged, and each is avoided.
+      assert.equal(lostError((await culprit).error).charged, false);
       assert.equal(lostError((await a).error).suspect, true);
       assert.equal(lostError((await b).error).suspect, true);
-      assert.equal(made.helper.avoidsSystem('bad.example.test', 0), true, 'poison');
-      assert.equal(made.helper.avoidsSystem('a.example.test', 4), true, 'a suspect');
-      assert.equal(made.helper.avoidsSystem('b.example.test', 4), true, 'a suspect');
+      assert.equal(made.helper.stats().poisoned, 0);
+      for (const host of ['a', 'b', 'bad']) {
+        assert.equal(made.helper.avoidsSystem(`${host}.example.test`, 4), true, host);
+      }
       made.timers.fire(change.delayMs ?? -1);
       const child = await fakeUp(made);
+      const upAt = made.timers.clock;
       const asked = made.helper.ask({ host: 'a.example.test', family: 4, max: 64, suspect: true });
       child.answer(child.asks.at(-1)?.id ?? -1);
       await within(WAIT, 'the suspect answered', asked);
-      assert.equal(made.helper.avoidsSystem('a.example.test', 4), false, 'it answered');
-      assert.equal(made.helper.avoidsSystem('b.example.test', 4), true);
+      assert.equal(made.helper.avoidsSystem('a.example.test', 4), true, 'in flight at the crash');
       made.helper.endIsolation();
-      assert.equal(made.helper.avoidsSystem('b.example.test', 4), false, 'no suspect any more');
-      assert.equal(made.helper.avoidsSystem('bad.example.test', 4), true, 'poison still');
+      assert.equal(made.helper.avoidsSystem('b.example.test', 4), true, 'no suspect, still so');
+      made.timers.clock = upAt + 600_000 - 1;
+      assert.equal(made.helper.avoidsSystem('a.example.test', 4), true);
+      made.timers.clock = upAt + 600_000;
+      for (const host of ['a', 'b', 'bad']) {
+        assert.equal(
+          made.helper.avoidsSystem(`${host}.example.test`, 4),
+          false,
+          `${host}: ten minutes up`,
+        );
+      }
     } finally {
       await stop(made);
     }

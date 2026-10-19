@@ -12948,6 +12948,39 @@ because each is a decision rather than a defect:
               lapse that is always ahead, and on a hold the lapse already covers. One was not
               run, as equivalent: pruning an entry not yet started at a crash. An `exit` loss
               needs a child that said `ready`, and that `up` started every pending entry.
+          - **One rule for every crash** (decided by Claude, under the user's delegation, on the
+            two points the re-check left owed). It makes suspects and poison re-asks symmetric.
+            - A crash is charged to a lookup only if that lookup was alone in flight, whether it
+              is a suspect (lingering after isolation or not) or a poison re-ask. Otherwise no
+              one is charged.
+            - At every crash, charged or not, every name in flight gets an avoidance entry. It is
+              pending until the helper's next `up`, then runs for `stableMs`.
+            - Reason: D27 has two halves. "A crashing name never reaches the probe's own
+              `getaddrinfo`" is kept by avoiding every name in flight. That closes the gap where a
+              name beside a charged crash fell back at the next `down`. "Never make a name poison
+              for another's crash" is kept by charging only a lone lookup.
+            - What it costs: a suspect sent beside a lookup the child said was stuck, or one
+              that was let go, is no longer charged when the child crashes. It and the others are
+              avoided and asked again. A name that only ever crashes with others in flight is
+              never charged, but it is avoided through every rest, so it never reaches the
+              probe's lanes.
+            - A charged crash can no longer have a bystander, so "a charged crash with a
+              bystander" is tested as the nearest case: a suspect and a bystander at a crash that
+              rests the helper. No one is charged, and the bystander is avoided through the rest,
+              while the next child starts, and for ten minutes after it is up.
+            - U21 is rewritten: a lingering suspect beside a fresh lookup is not charged, and
+              both are avoided. A lingering suspect alone is charged (U20). In the two-suspects
+              case, a suspect beside a bystander is charged to no one, and charged once it is
+              asked alone. U30's suspects test now pins the avoidance of every name in flight,
+              suspects included. The five-crash end to end still holds: the crashing name is
+              alone at its third crash, and never on the probe's lanes.
+            - Mutants: 26, every one killed on the final code with its marker in dist. 6 are new:
+              a charge beside another lookup, the old rule with stuck lookups uncounted, a
+              poison re-ask or a suspect alone not charged, no avoidance at a crash, and an
+              avoidance run from the crash. The other 20 are the helper's mutants from the
+              re-check, run again. One was not run, as equivalent: avoiding only at a crash
+              charged to no one. A charged crash has nothing else in flight, and its name is
+              poison, which is avoided anyway.
           - **Tests**: 1,498 of 1,498 in the targeted files, after the mutants, the last lint and
             a clean rebuild with no marker in dist: the probe's twelve unit files 868, its three
             timing files 99, one file at a time, shared 255 (capabilities, config, messages),
