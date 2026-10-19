@@ -18,9 +18,9 @@ import { pollWithin } from './support/within.js';
 /**
  * `probe.nameResolver` in the probe as a service manager runs it (`P-432` S3, the end to end):
  * in gate mode the probe starts one lookup helper child, `ms-probe: lookups`, before it reports,
- * and the child is gone after the probe stops, by SIGTERM or by SIGKILL; in `system` mode there is
- * none. The heartbeat says which mode ran, and a gate probe meeting a core below 38 says that core
- * cannot be told its helper's health.
+ * and the child is gone after the probe stops: within 500 ms of its exit after SIGTERM, and within
+ * 1 s after SIGKILL (§7.4). In `system` mode there is none. The heartbeat says which mode ran, and
+ * a gate probe meeting a core below 38 says that core cannot be told its helper's health.
  */
 
 const WAIT = 30_000;
@@ -125,7 +125,8 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
       const [helper] = helpers;
       assert.ok(helper !== undefined);
       assert.equal(await probe.stop(), 0);
-      await pollWithin(WAIT, 'the helper gone after the probe', () => dead(helper));
+      // The design's bound (§7.4): gone within 500 ms of the probe's exit.
+      await pollWithin(500, 'the helper gone within 500 ms of the probe', () => dead(helper), 10);
       assert.equal(core.refused.length, 0, core.refused.join('\n'));
     },
   );
@@ -139,8 +140,9 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
     assert.ok(helper !== undefined, 'a helper to outlive');
     probe.signal('SIGKILL');
     await probe.exited;
-    // The child's own backstop: it kills itself when its channel to the probe closes.
-    await pollWithin(WAIT, 'the helper gone after its parent', () => dead(helper));
+    // The child's own backstop: it kills itself when its channel to the probe closes, within the
+    // design's 1 s (§7.4).
+    await pollWithin(1_000, 'the helper gone within 1 s of its parent', () => dead(helper), 10);
   });
 
   it(
