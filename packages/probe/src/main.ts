@@ -44,12 +44,11 @@ import { buildFindings, carriesFlow } from './config-problems.js';
 import { rootScripts } from './root-scripts.js';
 import {
   lookupLanes,
-  NameResolver,
   RESOLVER_LANES,
   resolverLanes,
   threadpoolSize,
 } from './resolver/name-resolver.js';
-import { AnswerFile, answerFilePath } from './resolver/answer-file.js';
+import { buildNameResolution } from './resolver/name-resolution.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -231,27 +230,29 @@ async function main(): Promise<void> {
   // libuv reads it once, before this line could change it.
   const threads = threadpoolSize(process.env['UV_THREADPOOL_SIZE']);
   const libuvLanes = lookupLanes(threads);
-  const resolver = new NameResolver({ logger, lanes: resolverLanes(libuvLanes) });
   // The answers it kept before the last stop (`P-438`), loaded before the first scan, so that a
   // probe restarted in the middle of an outage serves what it had while it asks again; written
   // every minute and at stop. A file it cannot use is a cold start, said in one line.
-  const answerFile = new AnswerFile({
-    path: answerFilePath(config.probe.spoolDir),
-    resolver,
+  //
+  // `probe.nameResolver: gate` (`P-432`) adds the name policy and the lookup helper, a child
+  // process with lanes of its own for every name glibc does not answer without the network,
+  // started here before the check pool. `system`, the default, builds none of it.
+  const names = buildNameResolution({
+    mode: config.probe.nameResolver,
     logger,
+    lanes: resolverLanes(libuvLanes),
+    spoolDir: config.probe.spoolDir,
+    signal: lifecycle.signal,
   });
-  await answerFile.load();
-  resolver.start();
-  answerFile.start();
-  // After the check pool has stopped (registered before it), so the last answers are in; well
-  // inside the ten seconds the pool and the process runner leave the spool (`P-227`).
+  const { resolver, answerFile } = names;
+  await names.start();
+  // After the check pool has stopped (registered before it), so the last answers are in and the
+  // helper served the pool's drain; well inside the ten seconds the pool and the process runner
+  // leave the spool (`P-227`).
   lifecycle.onShutdown({
     name: 'name-resolver',
     timeoutMs: 2_000,
-    run: async () => {
-      resolver.stop();
-      await answerFile.stop();
-    },
+    run: () => names.stop(),
   });
   const lanesSaid = {
     uvThreadpoolSize: threads,

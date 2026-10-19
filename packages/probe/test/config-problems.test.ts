@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { dispatchTables, probeCatalogue } from '../src/catalogue.js';
-import { buildFindings, carriesFlow } from '../src/config-problems.js';
+import { buildFindings, carriesFlow, GATE_CHECK_OFF_NOTE } from '../src/config-problems.js';
 
 /**
  * `ms-probe config check` and a setting this build does nothing with (`B-08`).
@@ -68,6 +68,29 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
     }
   });
 
+  it('notes probe.nameResolver: gate with its check off, and says nothing of system (P-432)', () => {
+    const at = (nameResolver: 'system' | 'gate' | undefined) =>
+      buildFindings(
+        {
+          ...flow(false),
+          probe: {
+            ...flow(false).probe,
+            ...(nameResolver === undefined ? {} : { nameResolver }),
+          },
+        },
+        full,
+        'full',
+      );
+    const gate = at('gate');
+    assert.deepEqual(gate.notes, [GATE_CHECK_OFF_NOTE]);
+    assert.match(GATE_CHECK_OFF_NOTE, /^probe\.nameResolver: is gate, with its name check off/);
+    assert.match(GATE_CHECK_OFF_NOTE, /lookup helper \(ms-probe: lookups\)/);
+    assert.deepEqual(gate.warnings ?? [], [], 'it starts, and an upgrade is not held');
+    assert.deepEqual(gate.problems ?? [], []);
+    assert.deepEqual(at('system').notes ?? [], []);
+    assert.deepEqual(at(undefined).notes ?? [], []);
+  });
+
   describe('through the verb', () => {
     let dir: string;
     before(() => {
@@ -114,6 +137,26 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
         assert.match(run.stderr, /\(9995\)/);
         assert.match(run.stdout, /configuration is valid for ms-probe/);
         assert.doesNotMatch(run.stdout, /warning/, 'the warning went to stdout');
+      },
+    );
+
+    it(
+      'accepts probe.nameResolver gate with a note on stdout, refuses shadow, and exits 0 for system (P-432)',
+      { timeout: 150_000 },
+      () => {
+        const gate = check({ probe: { nameResolver: 'gate' } }, 'full');
+        assert.equal(gate.status, 0, gate.stderr);
+        assert.match(gate.stdout, /^note: probe\.nameResolver: is gate, with its name check off/m);
+        assert.doesNotMatch(gate.stderr, /warning/);
+
+        const system = check({ probe: { nameResolver: 'system' } }, 'full');
+        assert.equal(system.status, 0, system.stderr);
+        assert.doesNotMatch(system.stdout, /nameResolver/);
+
+        // No shadow mode (decided 2026-10-19), and no other name: refused, naming the setting.
+        const shadow = check({ probe: { nameResolver: 'shadow' } }, 'full');
+        assert.notEqual(shadow.status, 0);
+        assert.match(shadow.stderr + shadow.stdout, /nameResolver/);
       },
     );
 

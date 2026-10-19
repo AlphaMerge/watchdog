@@ -213,6 +213,30 @@ describe('loadConfig', () => {
     assert.equal(config.core.heartbeatIntervalMs, 10_000);
   });
 
+  describe('the probe’s name resolver (`P-432`)', () => {
+    const load = (probe: Record<string, unknown>) =>
+      loadConfig({
+        schema: probeConfigSchema,
+        env: {},
+        argv: ['--config', tempFile('probe.json', JSON.stringify({ probe }))],
+      });
+
+    it('is system unless gate is set, and nothing else is a name it takes', () => {
+      assert.equal(
+        loadConfig({ schema: probeConfigSchema, env: {}, argv: [] }).config.probe.nameResolver,
+        'system',
+      );
+      assert.equal(load({ nameResolver: 'gate' }).config.probe.nameResolver, 'gate');
+      assert.equal(load({ nameResolver: 'system' }).config.probe.nameResolver, 'system');
+      // No shadow mode, and c-ares never answers (decided 2026-10-19).
+      for (const refused of ['shadow', 'c-ares', 'Gate', '']) {
+        const error = captureError(() => load({ nameResolver: refused }));
+        assert.ok(error instanceof ConfigError);
+        assert.match(error.message, /nameResolver/);
+      }
+    });
+  });
+
   describe('the probe’s flow collector (`B-07`)', () => {
     const load = (flowListener: Record<string, unknown>) =>
       loadConfig({

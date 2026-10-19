@@ -26,12 +26,26 @@ export function carriesFlow(listenerFor: ReadonlyMap<string, string>): boolean {
   return [...listenerFor.values()].includes(FLOW_LISTENER_ID);
 }
 
+/**
+ * What `config check` says of `probe.nameResolver: gate` (`P-432`): a note, since the probe starts
+ * and resolves with it, naming why its name check is off. In this build it is always off: the
+ * check that lets a name its DNS servers answer run on the probe's own lanes is `P-432` S6's, so
+ * every name glibc does not answer from local files is asked in the lookup helper. The reasons the
+ * system's settings give (`nscd`, an NSS module, `LD_PRELOAD`, ...) are logged at start.
+ */
+export const GATE_CHECK_OFF_NOTE =
+  'probe.nameResolver: is gate, with its name check off in this build: every name glibc does ' +
+  'not answer from local files is asked in the lookup helper (ms-probe: lookups), and none on ' +
+  "the probe's own lookup lanes. The probe logs at start what the system's name settings say " +
+  'of the check';
+
 export function buildFindings(
   config: Pick<ProbeConfig, 'flowListener'> & {
     probe: Pick<
       ProbeConfig['probe'],
       'processUid' | 'processGid' | 'scriptDir' | 'allowScriptsAsRoot'
-    >;
+    > &
+      Partial<Pick<ProbeConfig['probe'], 'nameResolver'>>;
   },
   listenerFor: ReadonlyMap<string, string>,
   profile: BuildProfile,
@@ -41,6 +55,7 @@ export function buildFindings(
   // which the file does not say (`P-276`).
   const asRoot = rootScriptsNote(config.probe);
   const notes = asRoot === undefined ? [] : [asRoot];
+  if (config.probe.nameResolver === 'gate') notes.push(GATE_CHECK_OFF_NOTE);
   if (config.flowListener.enabled && !carriesFlow(listenerFor)) {
     warnings.push(
       `flowListener.enabled: is true, and this build (the ${profile} profile) carries no flow ` +
