@@ -378,6 +378,10 @@ export const PROBE_SHUTDOWN_BUDGET_MS = 20_000;
 export const PROBE_STOP_WAIT_MS = PROBE_SHUTDOWN_BUDGET_MS + 10_000;
 
 export interface RunningProbe {
+  /** The probe's process id, for a test that looks at what it started (`P-432`). */
+  readonly pid: number | undefined;
+  /** Sends it a signal, as a service manager's `KillMode` would (`P-432`). */
+  readonly signal: (signal: NodeJS.Signals) => void;
   /** Every line the probe has logged so far, parsed. */
   readonly logs: () => readonly Record<string, unknown>[];
   /** Stops it the way a service manager does, and resolves with its exit code. */
@@ -473,6 +477,10 @@ export function startProbe(options: {
   });
 
   return {
+    pid: child.pid,
+    signal: (signal) => {
+      child.kill(signal);
+    },
     logs: () => lines,
     exited,
     stop: async () => {
