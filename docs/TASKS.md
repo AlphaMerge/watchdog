@@ -12817,7 +12817,8 @@ because each is a decision rather than a defect:
         - **Done of S4's "Left for S3":** one `glibcRuntime` (the child's, with the report's
           network section left out), used by the policy and `helperSelf`; glibc `null` off glibc
           throughout; one digest function, the child's, re-exported by `system-names.ts`; P-438's
-          `hostsFileFirst` takes `readNsswitch`'s rules; `SystemFiles.ldSoPreload` wired and
+          `hostsFileFirst` took `readNsswitch`'s rules, until the review put `d94ac497`'s back
+          (below); `SystemFiles.ldSoPreload` wired and
           `watchedFiles()` in the watch; the child inherits `LD_PRELOAD` and `LD_AUDIT`, pinned
           by a test.
         - **Tests**: 1,461 of 1,461 in the targeted files, rebuilt from clean sources: the probe's
@@ -12839,9 +12840,92 @@ because each is a decision rather than a defect:
           left to its own backstop never makes). Rewritten before they counted: one equivalent as
           first written (a resting route fell through to the probe's lanes anyway; now it asks the
           resting helper), two that did not compile, and one whose marker the build dropped.
+        - **Review fixes** (two reviews of `63209443`, 2026-10-19). Decided by Claude, under the
+          user's delegation:
+          - **Isolation always ends, and a lookup that never returns freezes nothing (D27).**
+            - Isolation ends once no suspect is left to ask, held or queued, and none in flight
+              is still unsaid stuck, as §1.11 designs. It ends in any case 8 s
+              (`HELPER_ISOLATION_MAX_MS`) after the crash that began it, or after the last crash
+              during it, whether or not a suspect is in flight. Before, a suspect sent alone held
+              every other helper lookup with no bound, so a `getaddrinfo` that never returned
+              froze the helper.
+            - The resolver keeps its suspects as a set, held ones included, and calls
+              `endIsolation()` only once that set is empty (S2's contract, the header of
+              `lookup-helper.ts`). Before, a suspect held at the second crash was forgotten when
+              the queue emptied, and isolation ended with it still owed. Now a held suspect is
+              asked again alone once its hold ends, with nobody waiting for it.
+            - The poison ask never holds new starts back. It is sent at the first moment nothing
+              is in flight and isolation is off, and what is asked meanwhile starts beside it.
+              One that finds no such moment for a whole period waits for its next
+              (`poisonDue`).
+            - (c), `#helperBlocked` naming any wait that remains, is met by construction. The
+              only waits left are for lookups in flight that the child has not said are stuck:
+              a suspect sent alone, or what was in flight when the next suspect is due. Each
+              lasts at most the child's stuck clock (1 s), and the lapse ends them anyway. A
+              fail-fast branch for them could never fire before the child speaks, so none was
+              written: no test could reach it, and no mutant could judge it.
+            - The cost: a name that crashes the child only after it was said stuck is not
+              charged once isolation has ended. The five-loss rest still applies, and the names
+              in flight at a crash charged to no one stay off the probe's lanes for ten minutes.
+          - **The check is not built in S3** (`NAME_CHECK_BUILT`, false until S6 sets it).
+            - The check-on accrual, the start log's `check:` and Probe Health's
+              `nameCheckOnSeconds` say it is off, with the reason `unbuilt`, whatever the shape.
+            - `shapeOff` says what the shape alone would say. The view, and so `local` routing,
+              is the shape's as before.
+            - Tested with the real `GlibcNamePolicy` on a stock shape. The end to end asserts
+              the start log's `off` and a heartbeat's `nameCheckOnSeconds` of 0.
+          - **`hostsFileFirst` is `P-438`'s again** (`d94ac497`), not `readNsswitch`'s.
+            - This reverses the earlier decision to share the reader. That decision said that
+              direction "only costs such a name the exemption", and it cost more. The shared
+              reader took only `files dns`, `files dns myhostname` and `files myhostname dns` as
+              the file first. So Ubuntu's stock `files mdns4_minimal [NOTFOUND=return] dns`, a
+              `resolve` line, `mymachines` ahead of `files`, or an action group read as DNS
+              first. Each of those also put names the hosts file gives into the answer file, to
+              be served after a restart in place of the file.
+            - A differential test pins the function against a copy of the old one. It covers
+              the stock lines and comments glued to a source or to a later line's name, plus
+              every line of three sources from nine parts with four leads: 2,916 lines.
+          - **The answer file never saves or restores a name the hosts file lists for its
+            family** (`hostsLists`), whatever nsswitch.conf is read to say of the order.
+          - **The runbook's `yes (lookup)`.** `lookupHelperTrouble` has no limit; its lookup's
+            Warning entry is what moves the state. `build-hygiene` now takes a channel whose
+            lookup has an entry that is not Up as a yes of that kind. It had been red on the
+            branch.
+          - Smaller fixes:
+            - Two error logs name the helper change and the watched files they failed on.
+            - The release notes say the thread pool "is not the silent zone's while the helper
+              is up".
+            - The schema comment says 4 lanes, or 3 once a lookup is said stuck.
+            - The admin guide says `nameQuestionsOpen` runs since the last heartbeat the core
+              acknowledged, and that isolation lasts at most 8 s after a crash.
+            - The latch test sends an `idle` change.
+          - **Tests**: 1,498 of 1,498 in the targeted files, after the mutants, the last lint and
+            a clean rebuild with no marker in dist: the probe's twelve unit files 868, its three
+            timing files 99, one file at a time, shared 255 (capabilities, config, messages),
+            core 250 (`build-hygiene`, `probe-health`, `metrics`, `lookups`), and sensors 26.
+            Run beside another session's suite, not in a quiet window.
+          - **Mutants**: 44 more, every one killed on the final code, and the sources restored
+            and compared byte for byte. Each code mutant carried its marker into dist; the
+            runbook's three change the document the test reads:
+            - the helper's lapse and poison re-ask, 8;
+            - the resolver's isolation and poison, 14;
+            - the check-on accrual, 2;
+            - the two logs, 2;
+            - the policy's build flag, 5;
+            - `hostsFileFirst`, 7;
+            - the answer file, 2;
+            - the latch's `idle`, 1;
+            - the runbook's column, 3.
+
+            Two survived a first run. A guard that re-asked held suspects only while isolating
+            could never matter, since the change that ends isolation drops every suspect, so it
+            was removed. Stripping comments in `hostsFileFirst` was reached by no table line,
+            so two lines were added (a comment glued to a source, and one that ends a later
+            line's name), and it is killed as rewritten.
         - **For S6, S7 and S8:**
-          - S6: the check's eight fields need a protocol of their own, after 38; turning the check
-            on changes `nameCheckOnSeconds` from 0, and SC1 (with its `system` twin) is S6's.
+          - S6: the check's eight fields need a protocol of their own, after 38; S6 sets
+            `NAME_CHECK_BUILT`, which turns the check on for a shape it takes and changes
+            `nameCheckOnSeconds` from 0, and SC1 (with its `system` twin) is S6's.
           - S7: the gate's `test:perf` arms, cold and warm, beside `P-426`'s, in a quiet window;
             the scenarios' helper ticks once a scan where a real one ticks each second, so the
             liveness judgement is the unit tests', not the scenarios'.
