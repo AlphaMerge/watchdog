@@ -1,7 +1,16 @@
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { coreHealth, CREDENTIAL_KINDS, probeHealth } from '@ms/sensors';
@@ -1524,6 +1533,90 @@ describe('the smoke harnesses', () => {
         removes(handler) || removers.some((name) => new RegExp(`\\b${name}\\b`).test(handler)),
         `${file}: ${handlerName} removes no container`,
       );
+    }
+  });
+});
+
+/**
+ * `scripts/test-all.sh` bounds its runs inside the container (`H-50`).
+ *
+ * The rc.3 cut runs the full suite through it, and it called `dev.sh "npm test"` with no bound.
+ * A hung suite then had only the host's alarm, which kills `dev.sh` and leaves the toolchain
+ * container running and counted by every session's VM check (CLAUDE.md, rule 22 of
+ * `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`). Run here against a
+ * `dev.sh` that records what it was asked to run, so nothing starts a container.
+ */
+describe('scripts/test-all.sh', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+
+  /** A copy of the script beside a `dev.sh` that records its command and answers as told. */
+  const run = (
+    env: Record<string, string>,
+    args: readonly string[] = [],
+  ): { status: number | null; out: string; calls: string[] } => {
+    const dir = mkdtempSync(join(tmpdir(), 'test-all-'));
+    try {
+      mkdirSync(join(dir, 'scripts'));
+      copyFileSync(join(repoRoot, 'scripts', 'test-all.sh'), join(dir, 'scripts', 'test-all.sh'));
+      writeFileSync(
+        join(dir, 'scripts', 'dev.sh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$(dirname "$0")/../calls"',
+          'case "$*" in',
+          '  *"npm run lint"*) exit "${STUB_LINT_STATUS:-0}" ;;',
+          'esac',
+          "printf 'ℹ tests 2\\nℹ pass 2\\nℹ fail 0\\nℹ cancelled 0\\nℹ skipped 0\\n'",
+          'exit "${STUB_TEST_STATUS:-0}"',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const result = spawnSync('bash', [join(dir, 'scripts', 'test-all.sh'), ...args], {
+        encoding: 'utf8',
+        env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin', ...env },
+        timeout: 30_000,
+      });
+      const calls = existsSync(join(dir, 'calls'))
+        ? readFileSync(join(dir, 'calls'), 'utf8').trimEnd().split('\n')
+        : [];
+      return { status: result.status, out: `${result.stdout}${result.stderr}`, calls };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('runs the suite and the lint each under timeout, inside the container', () => {
+    const bounded = run({ MS_TEST_TIMEOUT: '77' });
+    assert.equal(bounded.status, 0, bounded.out);
+    assert.deepEqual(bounded.calls, ['timeout 77 npm test', 'timeout 77 npm run lint']);
+
+    const one = run({ MS_TEST_TIMEOUT: '77' }, ['@ms/sensors']);
+    assert.deepEqual(one.calls, [
+      'timeout 77 npm test --workspace @ms/sensors',
+      'timeout 77 npm run lint',
+    ]);
+
+    const byDefault = run({});
+    assert.deepEqual(byDefault.calls, ['timeout 3600 npm test', 'timeout 3600 npm run lint']);
+  });
+
+  it('says a run stopped at its bound, and is not clean', () => {
+    const suite = run({ MS_TEST_TIMEOUT: '77', STUB_TEST_STATUS: '124' });
+    assert.equal(suite.status, 1, suite.out);
+    assert.match(suite.out, /npm test ran past 77 s and was stopped/);
+    assert.doesNotMatch(suite.out, /==> clean/);
+
+    const lint = run({ MS_TEST_TIMEOUT: '77', STUB_LINT_STATUS: '124' });
+    assert.equal(lint.status, 1, lint.out);
+    assert.match(lint.out, /npm run lint ran past 77 s and was stopped/);
+  });
+
+  it('refuses a bound that is not a whole number of seconds, and runs nothing', () => {
+    for (const bound of ['0', '090', '1h', '-5']) {
+      const refused = run({ MS_TEST_TIMEOUT: bound });
+      assert.equal(refused.status, 2, `${bound}: ${refused.out}`);
+      assert.deepEqual(refused.calls, [], bound);
     }
   });
 });

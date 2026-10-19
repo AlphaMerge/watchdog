@@ -3,6 +3,7 @@
 #
 #     ./scripts/test-all.sh              # every workspace
 #     ./scripts/test-all.sh @ms/sensors  # one
+#     MS_TEST_TIMEOUT=5400 ./scripts/test-all.sh   # each run's bound, in seconds (3600)
 #
 # **`npm test` piped through `grep` is how a real failure went unexplained for a week.** A run of
 # `@ms/sensors` reported 755 passed and 1 failed where a clean run reports 781. The arithmetic
@@ -23,17 +24,37 @@ mkdir -p "${logs}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log="${logs}/${stamp}.log"
 
+# **Each run is bounded inside the container** (`H-50`), the suite and the lint each by
+# `MS_TEST_TIMEOUT` seconds. A bound on the host kills `dev.sh` and leaves the toolchain container
+# running, holding its database connections and counted by every session's VM check until someone
+# stops it; `timeout` inside stops the run and its container with it (CLAUDE.md, *A test's timeout
+# fails it and does not stop it*). An hour by default; give a loaded machine more.
+bound="${MS_TEST_TIMEOUT:-3600}"
+case "${bound}" in
+  *[!0-9]* | 0*)
+    echo "MS_TEST_TIMEOUT is a whole number of seconds above 0, not '${bound}'" >&2
+    exit 2
+    ;;
+esac
+# `timeout` answers 124 when the bound ran out.
+ran_out() {
+  if [ "$1" -eq 124 ]; then
+    echo "==> $2 ran past ${bound} s and was stopped (MS_TEST_TIMEOUT): what it had not reached did not run"
+  fi
+}
+
 if [ "$#" -gt 0 ]; then
-  command="npm test --workspace $1"
+  command="timeout ${bound} npm test --workspace $1"
   what="$1"
 else
-  command="npm test"
+  command="timeout ${bound} npm test"
   what="every workspace"
 fi
 
 echo "==> ${what}, full log in ${log}"
 "${repo_root}/scripts/dev.sh" "${command}" > "${log}" 2>&1
 status=$?
+ran_out "${status}" "npm test"
 
 # node:test prints one summary block per workspace. Every counter is read, not just the two
 # people look at.
@@ -126,8 +147,9 @@ fi
 # as one would bury the failures above it. Appended to the same log for the same reason
 # everything else is.
 echo "==> lint"
-"${repo_root}/scripts/dev.sh" "npm run lint" >> "${log}" 2>&1
+"${repo_root}/scripts/dev.sh" "timeout ${bound} npm run lint" >> "${log}" 2>&1
 lint_status=$?
+ran_out "${lint_status}" "npm run lint"
 if [ "${lint_status}" -ne 0 ]; then
   echo "    lint failed:"
   awk '/^\/workspace\//, 0' "${log}" | grep -E '^\s+[0-9]+:[0-9]+|^/workspace/' | head -20 |

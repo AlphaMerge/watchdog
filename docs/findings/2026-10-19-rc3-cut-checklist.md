@@ -75,10 +75,31 @@ Each of these is a yes, or the cut waits.
    git grep -nE '<!-- TODO[(]rc3-cut[)]' origin/main -- docs    # prints nothing
    ```
 
-4. **The full suite is green on the commit to be cut**, by `scripts/test-all.sh` (it fails on
-   `cancelled` and prints `﹣` lines for skipped suites, which a bare summary hides: compare the
-   totals with the last green run, `skipped 0` included). Nothing else lands from here until step
-   7 has pushed: the version commit's parent must be the commit that passed.
+4. **The full suite is green on the commit to be cut**, by `scripts/test-all.sh`, in a detached
+   worktree at `origin/main` and nowhere else: the main checkout can be on another commit or hold
+   changes. It fails on `cancelled`, and prints `﹣` lines for skipped suites, which a bare summary
+   hides. It bounds the suite and the lint inside the container, each by `MS_TEST_TIMEOUT`
+   seconds (3,600 by default), so a hung suite stops its own toolchain container rather than
+   leaving it counted in step 0.5; the host's alarm is above the two bounds together.
+   This is a heavy run: start it only when step 0.5's count is under 2.
+
+   ```bash
+   cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
+   git worktree add --detach /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite origin/main || exit 1
+   cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite || exit 1
+   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && [ -z "$(git status --porcelain)" ] || exit 1
+   git rev-parse HEAD              # the commit this run passes or fails, for step 1
+   perl -e 'alarm 1260; exec @ARGV' ./scripts/dev.sh "timeout 1200 npm ci"
+   MS_TEST_TIMEOUT=3600 perl -e 'alarm 7500; exec @ARGV' ./scripts/test-all.sh
+   ```
+
+   The last line must be `==> clean. Full log: …`. Write down its `tests · pass · fail ·
+   cancelled · skipped` line and every `﹣` line it lists, and compare them with the last green
+   run's: `skipped 0`, `cancelled 0` and `fail 0`, and a `tests` total that fell names suites that
+   did not run. `clean, but N suite(s) never ran` is not a pass. Then remove the worktree
+   (`git worktree remove --force` on it, from the main checkout). Nothing else lands from here
+   until step 7 has pushed: the version commit's parent must be the commit that passed, which
+   step 1 checks.
 5. **The VM has room.** Builds and smokes are heavy: start one only when fewer than two toolchain
    runs are going, counting the amd64 project's too, and run the smokes one at a time.
 
@@ -91,9 +112,12 @@ Each of these is a yes, or the cut waits.
 ```bash
 cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
 git rev-parse origin/main       # the commit the suite passed on, or stop
-git worktree add -b release/rc3 /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut origin/main
+git worktree add -b release/rc3 /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut origin/main || exit 1
 cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut && git status --porcelain    # prints nothing
 ```
+
+A second attempt stops at `worktree add`, which refuses while the first attempt's branch or
+worktree is there: clear them with step 3's block, then run this again.
 
 ## 2. The version commit
 
@@ -135,10 +159,23 @@ git tag -a v1.0.0-rc.3 -m "v1.0.0-rc.3: the v1 release candidate, Linux only, fr
 [ "$(git rev-parse 'v1.0.0-rc.3^{commit}')" = "${commit}" ] && echo "tag is ${commit}"
 ```
 
-The tag stays local until step 7. **If anything fails before then**, delete it
-(`git tag -d v1.0.0-rc.3`) and `release/`, fix on `main`, and cut again from step 1: as rc.3 again
-only if nothing built from this tag has left the machine, and otherwise as rc.4. A pushed tag is
-never moved (rc.1 stands as a tag with no packages for that reason).
+The tag stays local until step 7. **If anything fails before then**, fix on `main` and cut again
+from step 1: as rc.3 again only if nothing built from this tag has left the machine, and
+otherwise as rc.4. A pushed tag is never moved (rc.1 stands as a tag with no packages for that
+reason). Step 1 makes the branch `release/rc3` and the worktree `rc3-cut`, and git refuses to make
+either again, so clear the first attempt before it: the tag, both worktrees this page makes (their
+`release/` and `build/` go with them), and the branch.
+
+```bash
+cd /Users/admin/Desktop/Projects/MonitoringSystem || exit 1
+git tag -d v1.0.0-rc.3
+for tree in rc3-cut rc3-amd64; do
+  if [ -e ".claude/worktrees/${tree}" ]; then git worktree remove --force ".claude/worktrees/${tree}"; fi
+done
+git worktree prune
+git branch -D release/rc3
+git worktree list | grep -E 'rc3-(cut|amd64)'; git branch --list release/rc3    # both print nothing
+```
 
 ## 4. The arm64 build, and its provenance
 
@@ -286,19 +323,36 @@ DOCKER_DEFAULT_PLATFORM=linux/amd64 COMPOSE_PROJECT_NAME=ms-amd64 perl -e 'alarm
 
 `uname -m` must print `x86_64`. Then step 4's provenance block from this worktree with
 `ARCH=x86_64`, and two more checks: the manifest is the arm64 one byte for byte, and every native
-addon is x86-64:
+addon that loads on an x86_64 Linux host is x86-64 Linux code. **Not every `.node` in the
+tarball**: `argon2` ships a prebuild for every platform it supports under `prebuilds/` (linux-arm,
+linux-arm64, darwin-arm64, freebsd, win32 and linux-x64, musl and glibc), `package.sh` keeps them
+all, and only `prebuilds/linux-x64/*.glibc.node` is read on the field host. rc.2's tarball has
+the same set, so a check of every file fails on a correct build. What loads is what `npm ci`
+compiled (`build/Release`: `cpu-features` and `ssh2`'s crypto in rc.2), which must be the same
+addons the arm64 build compiled, and that one prebuild, which must be there. Both tarballs, the
+full one and the probe host's:
 
 ```bash
 cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-amd64 && bash <<'EOF'
 set -euo pipefail
-arm=/Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut/release/ms-1.0.0-rc.3-linux-aarch64.tar.gz
-x86=release/ms-1.0.0-rc.3-linux-x86_64.tar.gz
-cmp <(tar -xzOf "$arm" ms-1.0.0-rc.3/app/core/build.json) <(tar -xzOf "$x86" ms-1.0.0-rc.3/app/core/build.json)
-scratch="$(mktemp -d)"; tar -xzf "$x86" -C "$scratch"
-addons="$(find "$scratch" -name '*.node' -exec file {} +)"; rm -rf "$scratch"
-printf '%s\n' "$addons"
-[ -n "$addons" ] || { echo "no native addon found: the check would pass on nothing"; exit 1; }
-if grep -qv 'x86-64' <<<"$addons"; then echo "an addon is not x86-64"; exit 1; fi
+arm_release=/Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut/release
+cmp <(tar -xzOf "${arm_release}/ms-1.0.0-rc.3-linux-aarch64.tar.gz" ms-1.0.0-rc.3/app/core/build.json) \
+  <(tar -xzOf release/ms-1.0.0-rc.3-linux-x86_64.tar.gz ms-1.0.0-rc.3/app/core/build.json)
+scratch="$(mktemp -d)"; trap 'rm -rf "$scratch"' EXIT
+compiled() { tar -tzf "$1" | grep -E '/build/Release/.*[.]node$' | sort || true; }
+for name in ms ms-probe; do
+  arm="${arm_release}/${name}-1.0.0-rc.3-linux-aarch64.tar.gz"
+  x86="release/${name}-1.0.0-rc.3-linux-x86_64.tar.gz"
+  cmp <(compiled "$arm") <(compiled "$x86") \
+    || { echo "${name}: npm ci compiled other addons on x86_64 than on arm64"; exit 1; }
+  mkdir "$scratch/$name"; tar -xzf "$x86" -C "$scratch/$name"
+  addons="$(find "$scratch/$name" -name '*.node' \( -path '*/build/Release/*' -o -path '*/prebuilds/linux-x64/*.glibc.node' \) -exec file {} + | sed "s|^$scratch/$name/||")"
+  printf '%s\n' "$addons"
+  bad="$(grep -v 'ELF 64-bit LSB .*x86-64' <<<"$addons" || true)"
+  [ -z "$bad" ] || { echo "${name}: an addon that loads on x86_64 is not x86-64 ELF:"; printf '%s\n' "$bad"; exit 1; }
+done
+[ -f "$scratch/ms/ms-1.0.0-rc.3/app/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node" ] \
+  || { echo "argon2's linux-x64 glibc prebuild is not in the tarball"; exit 1; }
 echo "x86_64 manifest and addons ok"
 EOF
 ```
@@ -342,8 +396,9 @@ as rc.2's did):
 2. **`docs/runbook-field-test.md`**: the four *Last verified* rows, `2026-10-<dd>, v1.0.0-rc.3,
    locally (arm64; x86_64 except Ubuntu)`; and step 1's pointer to the record whose checksums a
    package is checked against.
-3. **`docs/release-notes-1.0.md`**: the *Verified* line (the commit, the date, the record), and
-   *What a candidate has been installed on* under *Requirements*.
+3. **`docs/release-notes-1.0.md`**: the *Verified* line (the commit, the date, the record), which
+   keeps saying that Ubuntu on x86_64 was not run (`H-29`) unless it was, and *What a candidate
+   has been installed on* under *Requirements*.
 4. **`docs/README.md`**: the row *Know what the current candidate is and what was checked* names
    rc.3's record.
 5. **`docs/TASKS.md`**: `H-50` is ticked with the record, `P-432`'s outcome names the cut, and
