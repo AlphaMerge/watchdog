@@ -54,6 +54,10 @@ simulator does not, and a week of unattended running.
 ## Before you start
 
 - **An Ubuntu host** for the core.
+- **A host for a remote probe: optional, and recommended.** Debian or RHEL, x86_64, whose
+  `resolv.conf` names the site's DNS servers, and which can reach the core on TCP 23560 (step 1,
+  *Every probe resolves names with the gate*). Without one, nothing in the week shows what the
+  gate's questions cost the site's resolver, and the write-up says so.
 - **100 devices you did not choose for being easy.** A field test against a hundred identical
   Linux VMs proves the scheduler and nothing about the sensor catalogue. Aim for a spread: some
   switches, some Windows servers, some appliances with slow SNMP agents, at least one device
@@ -126,10 +130,16 @@ tried on real devices and a real resolver before 1.0's default is decided
 ([release notes → Name resolution](release-notes-1.0.md#known-limits-and-what-comes-next)).
 A probe left on `"system"` tests nothing of it, and step 4 records that it did not.
 
-- **Both ends run this build.** A remote probe is the `ms-probe` package of the same candidate,
-  `ms-probe_<version>_amd64.deb` (or `.rpm`), checked against the record the same way. An older
-  probe refuses the key and stays stopped (exit 78), and under an older core the gate's health
-  never reaches Probe Health.
+- **Both ends run this build.** A remote probe is the same candidate's probe-only tarball,
+  `ms-probe-<version>-linux-x86_64.tar.gz`, checked against the record the same way, and installed
+  as [installation.md → Remote probes](installation.md#remote-probes) says: `ms-enrol` on the
+  core's host issues the probe its bundle, `sudo ./install-probe.sh --enrolment <bundle>` from
+  inside the unpacked tarball installs and enrols it, and it is approved onto a probe object of
+  its own on the core. That is the path `scripts/smoke-enrol.sh` runs. The `ms-probe` package is
+  not used for a remote probe here: it has no way to take an enrolment bundle, and its setup
+  issues a probe-channel certificate authority of its own, which the core does not trust. Give
+  the new probe its Probe Health sensor (above). An older probe refuses the key and stays stopped
+  (exit 78), and under an older core the gate's health never reaches Probe Health.
 - **A second probe pointed straight at the site's resolver, if you can.** Ubuntu's own probe asks
   `systemd-resolved`'s stub at `127.0.0.53`, which stands between the gate and the site's DNS
   servers, so it cannot show what the gate's questions cost them. A probe on Debian or RHEL whose
@@ -230,10 +240,15 @@ with neither never will, whatever it reads.
 
 **So eight of the nine need no threshold at all.** Their limits ship declared (`S-18`), or for
 `lookupHelperTrouble` its lookup, which means Core Health and Probe Health already go Down or
-Warning on their own. *State* triggers on those
-two sensors deliver all eight: **two on each, one for Down and one for Warning**, because a state
-trigger watches exactly one state. Give each a template whose body carries `%lastmessage`, which
-names the channel. What you are adding is delivery, not thresholds.
+Warning on their own. *State* triggers deliver all eight: **on Core Health and on every probe's
+Probe Health sensor, the local probe's and each remote one's, two on each, one for Down and one
+for Warning**, because a state trigger watches exactly one state. A remote probe's sensor left
+without them delivers nothing: not its spool or session channels, not its resolver giving checks
+up, not its lookup helper's Warning (step 4), and not its link, which goes Down through
+`ms.probe.link`. A sensor inherits the triggers of every object above it, so one pair on a common
+ancestor does the same; above sensors on different probes that is only the root, whose triggers
+fire for every sensor in the installation. Give each a template whose body carries
+`%lastmessage`, which names the channel. What you are adding is delivery, not thresholds.
 
 ```json
 { "kind": "state", "settings": { "state": "down", "initialTemplateId": 1, "recoveryTemplateId": 1 } }
@@ -248,8 +263,11 @@ file rather than `core.json` are in [`administration.md` → Email](administrati
 **Then prove it before the week, not during it.** The
 [test send](administration.md#the-test-send), `POST /api/v1/templates/<id>/test` with
 `{"sensorId": <probe-health-id>}`, sends one real message through the template, the relay and the
-recipients, and answers `"delivered": true` or the relay's error. A week with no alarm and a
-broken relay looks exactly like a week with nothing to report.
+recipients, and answers `"delivered": true` or the relay's error. Send one for Core Health and one
+for each probe's Probe Health sensor, and check that each of those sensors has both of its
+triggers: `GET /api/v1/objects/<id>/triggers` lists every trigger in effect on it, inherited
+ones included, with a state trigger for `down` and one for `warning` among them. A week with no
+alarm and a broken relay looks exactly like a week with nothing to report.
 
 **`probesDown` is the exception, and it is deliberate.** It carries no limit because a probe that
 is gone already alarms on its own Probe Health sensor, through the `ms.probe.link` lookup: that
@@ -402,20 +420,34 @@ The numbers that decide the criterion:
   stopped is a finding.
 - **The gate's five channels, on every probe** (`P-432`), written down here before the week so
   that nobody judges them after it. Only the trouble latch moves Probe Health's state (its
-  lookup reads `1` as Warning, so step 3's Warning trigger delivers it); read the others. A
-  counter is judged by its difference between two readings, not by its value:
-  - `lookupHelperTrouble` is `0` throughout. Each Warning, and any time the probe's log says the
-    lookup helper ran out of memory, is a finding, explained by the probe log's `lookup helper`
-    lines.
-  - `namePassedStuck` does not move: a lookup the gate sent to the probe's own lanes that then
-    ran past 1 s. Each one is explained from the log line naming its host, or it is a finding.
-  - `nameCheckOnSeconds` grows by at least 95% of what `uptime` grows by. Less, and the
-    write-up says the walk was not tested for that share of the week, and why, from the start
-    line and the log.
-  - `nameHelperStuck` is recorded, not judged: each is a lookup that `"system"` would have held
-    one of the probe's own lanes for.
-  - `nameQuestionsOpen`'s highest value at each reading is recorded beside the release notes'
-    bound (about 24 in an outage, 42 at most).
+  lookup reads `1` as Warning, so step 3's Warning trigger on that probe's sensor delivers it);
+  read the others. **The core stores a counter as a rate**, the difference between two readings
+  over the time between them, per second, so `/values` and the history give no running total to
+  subtract: each criterion below is on the hourly history since the start reading (the `curl`
+  loop above, `resolutionSeconds=3600`), in the form the core stores, and an hour with no value
+  is a gap the write-up explains:
+  - `lookupHelperTrouble` is `0` throughout: every hour's `max` is `0`. Each Warning, and any
+    time the probe's log says the lookup helper ran out of memory, is a finding, explained by the
+    probe log's `lookup helper` lines.
+  - `namePassedStuck` (a counter, so lookups a second) is `0` throughout: every hour's `max` is
+    `0`. Each one is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and
+    is explained from the log line naming its host, or it is a finding.
+  - `nameCheckOnSeconds` (a counter of seconds, so seconds a second: `1` while the check is on
+    and the helper up) averages at least `0.95` over the week: the mean of every hour's `avg`
+    since the start reading. Less, and the write-up says the walk was not tested for that share
+    of the week, and why, from the start line and the log.
+  - **A log line during the week saying the check is off until `ms-probe` restarts is a
+    finding: record it, and do not restart to clear it**, which is an intervention. It means a
+    file the probe reads only at start changed under it (`resolv.conf`, `nsswitch.conf`,
+    `gai.conf`, `/etc/ld.so.preload`, the hostname's domain or an NSS module; on Ubuntu, most
+    likely `systemd-resolved` rewriting its stub after a DHCP lease or netplan changed the search
+    domains), and every name goes to the helper from then on. The line names the file and when,
+    and `nameCheckOnSeconds` falls short from that hour.
+  - `nameHelperStuck` (a counter, so lookups a second) is recorded, not judged: the hours whose
+    `max` is above `0`, each a lookup that `"system"` would have held one of the probe's own
+    lanes for.
+  - `nameQuestionsOpen` (the highest since the last heartbeat) is recorded as the highest hourly
+    `max` at each reading, beside the release notes' bound (about 24 in an outage, 42 at most).
   - **The helper's memory**, at each reading, on each probe's host. Flat is the pass, judged as
     `memory` is; an elapsed time shorter than the probe's own means the helper was replaced, and
     that must match a loss in the probe's log:
@@ -424,29 +456,65 @@ The numbers that decide the criterion:
     ps -o pid=,rss=,etimes= -p "$(pgrep -f 'ms-probe: lookups')"
     ```
   <!-- TODO(rc3-cut): the process title, the log's wording and the 95% rule are P-432 S3 and
-  S6's (design §5, "The field test's record"). Check them against the landed code. -->
+  S6's (design §5, "The field test's record"). Check them against the landed code, and each
+  channel's kind in packages/sensors/src/types/probe-health.ts: the design declares
+  nameCheckOnSeconds a Counter and namePassedStuck and nameHelperStuck Rates, which the core
+  stores as rates, as written above. One that landed as a gauge of a running total is judged by
+  its difference between two readings instead, nameCheckOnSeconds against uptime's. -->
+- **`lookupsGivenUp`, on every probe** (`P-426`; a counter, so lookups a second): at each reading,
+  the hours since the start reading whose `max` is above `0`, from the same hourly history, each
+  explained from the probe's log (the name and its zone). It is the only place Probe Health shows
+  a zone that stops answering: no limit moves the sensor for one (`P-441`, in the release notes'
+  *Also open*), so Probe Health can read Up all week while its devices' checks are given up.
+  Record `answersLoaded` once, after step 2's restart, and the highest hourly `max` of
+  `lookupsInFlight` beside it.
+  <!-- TODO(rc3-cut): if P-441 landed with S3, say here what it adds to Probe Health, or delete
+  this item with the release notes' P-441 item. -->
 
 ### After the end reading: the gate drill (`P-432`)
 
 **Not part of the week, and not a condition of `H-09`**: an intervention, so it starts only after
 the end reading is taken. A clean week shows that the gate did no harm; it cannot show that the
 gate helps, because a week with no DNS outage never routes a name to the helper for the reason
-the gate exists. So, on the same installation, once with `"gate"` and once with `"system"`:
+the gate exists. **The drill is the case `"system"` does not cover.** With one zone silent,
+`"system"` already keeps the zones that answer answered, cold or restarted from its answer file
+(`P-438`: none of the answering zone's 31,500 checks given up either way,
+[the third finding](findings/2026-10-19-name-lookups-answer-file-and-lanes.md)), so a drill of
+one zone would pass in both modes and tell them apart in nothing. What only the gate covers is
+two zones silent at once after a restart with nothing kept, where the two can take all four of
+`"system"`'s first lanes between them. So the drill needs devices in at least three DNS zones,
+and runs on the same installation once with `"gate"` and once with `"system"`:
 
-1. Pick one DNS zone that some of the devices are in, and make the site's resolver drop its
-   questions without answering (a blackhole, not a refusal). Note the time.
-2. Restart the probe that serves those devices (`reset-failed`, then `restart`), and add one new
-   device in the zone that still answers.
-3. Wait two scan intervals, then record every sensor state change since the zone went silent,
+1. Pick two DNS zones that some of the devices are in, and make the site's resolver drop both
+   zones' questions without answering (a blackhole, not a refusal). Note the time.
+2. Restart the probe that serves those devices with nothing kept: stop it, which writes its
+   answer file, move the file out of its spool directory (`probe.spoolDir`,
+   `/var/lib/ms-probe/spool` unless set; the file would answer the zones that answer from the
+   first scan, which is `P-438`'s case and not this one), then start it, and add one new device
+   in a zone that still answers:
+
+   ```bash
+   sudo systemctl stop ms-probe
+   sudo mv /var/lib/ms-probe/spool/name-answers.json /root/name-answers.json.drill
+   sudo systemctl reset-failed ms-probe
+   sudo systemctl start ms-probe
+   ```
+
+   Probe Health's `answersLoaded` then reads `0`; anything else, and the restart kept something.
+3. Wait two scan intervals, then record every sensor state change since the zones went silent,
    from `GET /api/v1/state-log`, and the six Probe Health channels above.
-4. Restore the zone; set the other mode on that probe and restart it; repeat from 1.
+4. Restore both zones, set the other mode in that probe's `probe.json`, and repeat from 1: step
+   2's restart applies it.
 
-The pass: under `"gate"`, no sensor on a device in the zone that answers changes state, the new
+The pass: under `"gate"`, no sensor on a device in a zone that answers changes state, the new
 device's sensors come Up at their first scan, and `lookupHelperTrouble` stays `0`. Under
-`"system"` some of them may not, which is the comparison the drill exists to make. Put both
-records in the write-up. If the gate has to come off during the week instead, that is an
-intervention and the week has failed: set `"system"`, restart the probe after `reset-failed`,
-and record why.
+`"system"`, expect the answering zones' first checks to be given up while the two silent zones'
+first lookups hold all four lanes: that is what `P-438`'s outage scenario asserts for the same
+restart with no file (`name-lookup-outage-scenario.test.ts`). If they are not given up under
+`"system"`, the drill did not reach the case, and the write-up says so rather than reading the
+two runs as alike. Put both records in the write-up. If the gate has to come off during the week
+instead, that is an intervention and the week has failed: set `"system"`, restart the probe
+after `reset-failed`, and record why.
 
 ## 5. What counts as a failure
 

@@ -40310,6 +40310,72 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           probes, and rc.2's record had checksums only for the full package.
         - **Quiet-machine runs: none.** The cut measures nothing. Its smokes are pass or fail
           and are bounded, so they need the VM gate, not a quiet window.
+      - **Review, fix round 1** (2026-10-20, on `ccdbc607`): 14 findings, three of them found twice
+        (11 distinct). Every one fixed:
+        - **The x86_64 addon check failed every correct build** (step 8). `argon2` ships a
+          prebuild for every platform and `package.sh` keeps them all, so `file` on every `.node`
+          always found ARM and Mach-O. It now checks what loads on an x86_64 Linux host: what
+          `npm ci` compiled (`build/Release`), which must be the same addons as arm64's, and
+          `prebuilds/linux-x64/*.glibc.node`, of which `argon2`'s must be there, in both the full
+          and the probe host's tarball, each `ELF 64-bit LSB … x86-64`.
+        - **A redo of the cut stopped at step 1**, whose branch and worktree a first attempt
+          leaves. Step 3's failure path is a block that deletes the tag, removes both worktrees
+          and deletes the branch, and step 1's `worktree add` now stops the block when it fails,
+          which it did not: its last line, a `git status` in the old worktree, printed nothing
+          and read as clean.
+        - **Step 0.4 has a command**: a detached worktree at `origin/main`, `npm ci`, and
+          `scripts/test-all.sh` under a host alarm, with what to compare. `test-all.sh` now runs
+          the suite and the lint each under `timeout ${MS_TEST_TIMEOUT:-3600}` inside the
+          container, says which one ran out, and refuses a bound that is not whole seconds.
+        - **Release notes**: the gate's allowlist paragraph says what S4 does, that only the
+          hosts file and `nscd` are followed after start and any other change, the hostname's
+          domain and an NSS module included, turns the check off until restart, with
+          `LD_LIBRARY_PATH` in the list; an `A-82` upgrade item; the *Verified* line says Ubuntu
+          on x86_64 was not run, and step 9.3 keeps it so.
+        - **Runbook**: step 3 puts both state triggers on every probe's Probe Health sensor, sends
+          the test once for each and checks each sensor's triggers; step 4 judges the gate's
+          counters in the form the core stores them, rates per second over the hourly history,
+          records `lookupsGivenUp`, and calls a mid-week "off until restart" a finding not to be
+          restarted away; the drill is two zones silent after a restart with the answer file
+          moved out, the case `"system"` does not cover; *Before you start* lists a remote probe's
+          host, and step 1 installs a remote probe from the probe-only tarball by
+          `installation.md` → *Remote probes*.
+        - **Tests**: `build-hygiene` and `candidate-surface`, 37 of 37 (34 before, and three new
+          ones in `build-hygiene` for `test-all.sh`, against a `dev.sh` that records what it is
+          asked). Mutants, each restored with `shutil.copy` and `os.utime` and compared byte for
+          byte: the suite unbounded, the lint unbounded, no word at 124, and no refusal of a bad
+          bound, each killed by one of the three; a misspelt link to `installation.md`, killed by
+          *all resolve to a file that exists*. The checklist's blocks were run as written, on the
+          host, from the page's text: step 8's on tarballs made from rc.2's (a correct x86_64
+          build passes, and the old block fails it as the review said; an arm64 addon left in
+          either tarball, `argon2`'s prebuild missing or arm64, an addon `npm ci` did not compile,
+          and a differing manifest, each fail it), and step 1, a first attempt, step 3's redo and
+          step 1 again in a scratch repository (passes; without the branch deletion, the
+          worktree removal or the tag deletion, each fails).
+      - **Decided 2026-10-19 by Claude, under the user's delegation** (fix round 1):
+        - **A remote probe is installed from the probe-only tarball, not the `ms-probe`
+          package.** The package has no way to take an enrolment bundle, and its setup issues a
+          probe-channel CA of its own when none is there, which the core does not trust;
+          `install-probe.sh --enrolment` is the documented path and the one `smoke-enrol.sh`
+          runs. The record lists the probe tarball already.
+        - **The addon check compares the compiled set with arm64's** rather than requiring some
+          compiled addon: `cpu-features` and `ssh2`'s crypto are optional builds, so their
+          absence on both is a build like rc.2's, and on x86_64 alone a different build.
+        - **`test-all.sh` is bounded by default, an hour each for the suite and the lint**, and
+          not only when asked: the orchestrator runs it for every landing, and an unbounded hang
+          is what CLAUDE.md forbids. An empty `MS_TEST_TIMEOUT` is the default, and `0`, which
+          `timeout` reads as no bound, is refused.
+        - **The gate's counters are judged as rates** because the design declares them Counter
+          and Rate, which the core stores per second. The marker beside them says what changes
+          if S3 lands one as a gauge.
+        - **The drill blackholes two zones and moves the answer file out** because the third
+          finding measured one zone, cold and from the file, with none of the answering zone's
+          checks given up under `"system"`; `"system"` given up on the answering zones is the
+          drill's own check that it reached the case.
+        - **Triggers go on each Probe Health sensor, not the root**: a pair on the root fires
+          for every sensor in the installation, which is a different alarm policy from the one
+          the runbook asks for.
+        - **Quiet-machine runs: none.** Nothing here is measured.
 
 ## Release 1.1 — Windows
 

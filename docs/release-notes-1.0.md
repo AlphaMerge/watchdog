@@ -262,6 +262,16 @@ From rc.2 or anything older:
 - **`100.100.100.200`, Alibaba Cloud's metadata address, is refused** under the default target
   policy (`A-79`): a sensor on it fails its next scan, and `probe.targetPolicy: none` on its probe
   is the way back ([the target policy](administration.md#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not)).
+- **A scheduled rediscovery provisions as the account that last wrote its rule** (`A-82`), where
+  under rc.2 a pass a schedule fired had the installation's sight. It matches, reports and
+  creates within what that account can see and write now. One whose writer has been disabled or
+  deleted, was never recorded, or has lost write on the group since creates nothing, and each new
+  host becomes one of the run's problems saying so. Save such a rule again as an account that
+  should stand behind it. A rule the installation wrote, or any rule with
+  `api.requireAuthentication` off, sees the installation as before. **Reading a run's problems
+  needs write on its group** (`GET /api/v1/discovery/{id}/problems`): a client that read them
+  with less now gets 403
+  ([credentials for monitored devices](administration.md#credentials-for-monitored-devices)).
 - **Two probe objects marked local become one** (migration 075, `P-382`): the one with an approved
   probe keeps the flag, then the one a probe connected to most recently, then the lowest id. Where
   both had an approved probe, that can be a remote one. The others can then be deleted, and the
@@ -461,18 +471,23 @@ after `systemctl reset-failed ms-probe`.
   landed code, and link the administration guide's "The gate" subsection. -->
 
   The probe follows the system's lookup order only where it can be sure of it, and checks that
-  at start and whenever those files change: Linux with glibc 2.28 to 2.42; a `resolv.conf` of
-  `nameserver`, `search` or `domain`, and the options `ndots`, `timeout`, `attempts`, `rotate`,
-  `edns0` and `trust-ad`; a `hosts:` line in `nsswitch.conf` of `files dns`, `files dns
-  myhostname` or `files myhostname dns`; no `nscd`; and nothing preloaded or set in the
-  environment that changes how a name is looked up (`LOCALDOMAIN`, `RES_OPTIONS`,
-  `HOSTALIASES`, `LD_PRELOAD`, `LD_AUDIT`, `/etc/ld.so.preload`). Anywhere else the probe's log
-  names the first thing that did not fit, and every name is asked in the helper. A file that
-  glibc reads once per process and that changes leaves the check off until `ms-probe` restarts,
-  and the log says so (`P-432` S4).
+  at start: Linux with glibc 2.28 to 2.42; a `resolv.conf` of `nameserver`, `search` or
+  `domain`, and the options `ndots`, `timeout`, `attempts`, `rotate`, `edns0` and `trust-ad`; a
+  `hosts:` line in `nsswitch.conf` of `files dns`, `files dns myhostname` or `files myhostname
+  dns`; no `nscd`; and nothing preloaded or set in the environment that changes how a name is
+  looked up (`LOCALDOMAIN`, `RES_OPTIONS`, `HOSTALIASES`, `LD_PRELOAD`, `LD_AUDIT`,
+  `LD_LIBRARY_PATH`, `/etc/ld.so.preload`). Anywhere else the probe's log names the first thing
+  that did not fit, and every name is asked in the helper. **After start, only the hosts file is
+  followed**, and `nscd` starting or stopping. Any change to `resolv.conf`, `nsswitch.conf`,
+  `gai.conf` or `/etc/ld.so.preload`, to the hostname's domain while `resolv.conf` has no search
+  list, or to the NSS modules the `hosts:` line names, turns the check off until `ms-probe`
+  restarts, and the log says so (`P-432` S4). Every name is then asked in the helper. On Ubuntu
+  that includes `systemd-resolved` rewriting its stub `resolv.conf` when a DHCP lease or netplan
+  changes the search domains.
   <!-- TODO(rc3-cut): S4's policy (landed b13888f6) is wired into the resolver by S3. Check the
-  log's wording, and that the check is on for the field host's stock Ubuntu with
-  systemd-resolved (the S8 differential). -->
+  log's wording, that what is followed and what turns the check off until restart are still as
+  above, and that the check is on for the field host's stock Ubuntu with systemd-resolved (the S8
+  differential). -->
 
   If the helper fails three times in ten minutes, or runs out of memory, Probe Health's
   `lookupHelperTrouble` goes Warning once, until ten minutes pass without a failure; after five
@@ -531,7 +546,8 @@ after `systemctl reset-failed ms-probe`.
     counts them and has no limit, so a zone that stops answering shows in its devices' sensors
     and the probe's log, not on Probe Health. Read it at each of the field test's readings.
     <!-- TODO(rc3-cut): P-441 rides protocol 38 with P-432 S3. If it landed, replace this item
-    with what it adds to Probe Health, or delete it. -->
+    with what it adds to Probe Health, or delete it, and change the runbook's step-4 item on
+    lookupsGivenUp to match. -->
   - **A device given as an address of the other family is connected to anyway** (`A-87`): a
     device whose host is an IPv4 address and whose IP version is `v6`, or the other way round, is
     reached at that address, whatever its IP version says.
@@ -539,9 +555,9 @@ after `systemctl reset-failed ms-probe`.
 ## Verified
 
 **Verified:** `v1.0.0-rc.3` at `<commit, filled at the rc.3 cut>`, on `<date>`: the four smoke
-tests of [runbook-field-test.md](runbook-field-test.md) on arm64 and x86_64, and `P-432`'s
-differential against `getaddrinfo`, run by
-[the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md), with their results in the
-rc.3 record.
+tests of [runbook-field-test.md](runbook-field-test.md) on arm64, and on x86_64 all but the
+Ubuntu install, which this machine's emulator cannot boot (`H-29`); and `P-432`'s differential
+against `getaddrinfo`. Run by [the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md),
+with their results in the rc.3 record.
 rc.2, for comparison, is `0a43b7bf`, cut 2026-10-04
 ([its record](findings/2026-10-04-v1-release-candidate-cut.md)).
