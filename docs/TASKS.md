@@ -13190,6 +13190,138 @@ because each is a decision rather than a defect:
           the unsafe line per key, the resident set at a loss and at stop, the silent words' two
           kinds, the episode warn, its quiet minute, its server and its count, and the core's text.
           The quiet-window runs listed for S6 stand as they are.
+      - **S8 landed** 2026-10-20: the differential, recording (A) of D30
+        (`scripts/smoke/name-gate-differential.sh`). Every row S4 exports is replayed in a box of
+        each image the rows name, against that image's own `getaddrinfo`, with the S5 simulator as
+        every server, and the run fails on any row where `GlibcNamePolicy` and glibc disagree. On
+        a pass it writes `system-names-recordings.json`, which `system-names.test` holds every row
+        to.
+        - **The boxes** (`scripts/smoke/Dockerfile.names`), one per image, each the
+          distribution's own base image (the smoke images' bases for Debian 12, Ubuntu 24.04 and
+          Rocky 9) with Node 24.19.0 from the smoke images' tarball, `ip`, and
+          `libnss-myhostname` (Rocky has it in systemd-libs): Rocky 8 (glibc 2.28), **Debian 11
+          (2.31), added** as D30 requires, Rocky 9 (2.34), Ubuntu 22.04 (2.35), Debian 12
+          (2.36), Ubuntu 24.04 (2.39) and Debian 13 (2.41). arm64 on this machine. Privileged, so
+          the rows' servers can be put on `lo` and the hostname set, and with no network.
+        - **Ubuntu 24.04 runs systemd-resolved.** The box boots systemd, resolved serves its
+          stub with the simulator at 127.0.0.2 as its upstream, and a row whose server is the
+          stub is played through it. glibc's questions to the stub are read off `lo` (tcpdump);
+          resolved's own upstream questions are kept with the run, never judged. The run fails if
+          resolved is not active before and after. A row was added to S4's table for the stub file
+          as Ubuntu writes it for a link with a search domain (`search corp.example`), beside the
+          `search .` one: 267 rows.
+        - **What a row is held to** (`test/differential/names-differential.ts`, pure, and run
+          unchanged in the boxes):
+          1. The policy, loaded in the box against the row's real files, that glibc, the modules
+             installed and the lookup's environment, classifies the question as the row says:
+             class, `via`, candidates, types, servers and `rotate`. A row is judged by what the
+             policy reads there, not only by the export.
+          2. For each plan, glibc's questions are the plan's wire exactly, as
+             `[server, name, type, try]` in the order the servers saw them: none for a `local`
+             name, and under `rotate` one of `wireByOffset`, whose offset is kept.
+          - Every server the row's resolv.conf names is a simulator, the ones past the third
+            included, and so are 127.0.0.1 and ::1 when no row server is, so a question sent
+            anywhere unnamed is in the wire.
+          - Each plan's `getaddrinfo` runs in a process of its own through `systemLookup`, the call
+            behind `systemResolve` and the helper. So nsswitch.conf and gai.conf are read afresh,
+            as glibc reads them once per process below 2.33, and `rotate` starts at random. Every
+            cache is cold: no nscd, a simulator with no cache, and resolved with `Cache=no`.
+          - An image not run, run twice or on another glibc, a row not replayed, a plan not
+            played, and a world not set up are problems too. A run with any problem records
+            nothing.
+        - **The simulator** binds a server's IPv6 address in place of ::1 (`address6`), for the
+          row whose servers are `::1`, `2001:db8::1` and `::ffff:10.0.0.1`. Named, the address
+          must bind or the start fails.
+        - **Run 1, on S4's policy as it landed** (`docs/findings/2026-10-20-name-gate-differential.md`):
+          267 rows in each of the seven images, 2,998 plans, the whole run in 825 s. 2,938
+          plans agreed and **60 did not**, all of one kind: the policy walked a name that glibc
+          answered without asking DNS. That is a walk the gate did not need, never a lookup that
+          can block put on a probe lane.
+          - **The hostname for family 6 under `files myhostname dns`** (3 rows, every image).
+            nss-myhostname answered `probe-1`, `probe-1.` and the dotted hostname for AAAA. The
+            policy's comment had said it "does not pin" this case, and it walked it anyway.
+          - **A name beginning with `-` on Rocky 8** (9 rows). Rocky 8's 2.28 carries BZ 24112's
+            `check_name` and refused all nine unasked, where the policy walked them as upstream
+            2.28 asks them.
+        - **Fixed in the policy**, as the S4 outcome said a disagreeing row must be. **Decided
+          2026-10-20 by Claude, under the user's delegation:** both are now `cannotVouch`, so
+          they go to the helper, which is right whatever glibc does. Neither could be made
+          `local`: the first depends on the host's IPv6 and systemd's version, and the second on
+          whether a distribution's 2.28 carries the fix, and the policy reads neither.
+          - `hostname-family-6`: the hostname, or it with one trailing dot, asked for family 6
+            under `files myhostname dns`. Families 0 and 4 stay `local:myhostname`; they agreed
+            in every image.
+          - `leading-dash`: a name beginning with `-` below 2.29.
+          - S4's export now leaves an image's expectation out when it claims no wire there
+            (`byImage` null, not replayed): the 9 `-dash` rows on Rocky 8. It no longer has the 3
+            hostname rows: 264 rows.
+        - **Run 2, on the narrowed policy: it passed.** 264 rows in each image (255 on Rocky
+          8), **2,938 plans, every one agreeing**, each image's rows in 95–137 s and the whole
+          run in 793 s. Ubuntu 24.04 ran with systemd 255's resolved active before and after,
+          and both stub rows went through it. The recordings are committed:
+          `system-names-recordings.json`, 2,938 of them.
+        - **To run it again** (by hand on the VM, gate below 2, not a quiet run: it judges which
+          questions glibc sends, never how long anything takes): build with
+          `./scripts/dev.sh "npx tsc -b packages/probe"`, then
+          `MS_DIFF_WRITE=1 ./scripts/smoke/name-gate-differential.sh`, then prettier on the
+          recordings. `MS_DIFF_IMAGES` and `MS_DIFF_ONLY` narrow a run, which then never
+          verifies.
+        - **Tests**:
+          - `names-differential.test.ts`, 16: the judgement over S4's committed rows, a glibc
+            that did what they say verifying every image and plan.
+          - `system-names.test.ts`, 436: the narrowed classes, the export leaving out what claims
+            no wire, and every plan recorded in every image (2 new).
+          - `dns-server.test.ts`, 42, with `address6`.
+          - `name-resolver.test.ts`, 97, the policy's one importer.
+        - **Mutants: 31, all killed.**
+          - **27 on the toolchain**, 26 killed there with the marker in dist and none left after:
+            - the judgement: try numbering, TCP marked, the check off, two class fields, the
+              exact wire, the rotate offset, an image not run, another glibc, a row not
+              replayed, a plan not played or played extra, a world not set up, and recording
+              despite a problem;
+            - the setup helpers: every nameserver named, the canonical address, the v4-mapped
+              listener;
+            - the capture: a response, another port;
+            - `expectationIn`, S4's `unrecorded`, and Debian 11 in its images;
+            - both narrowings, the export's null, and `address6` not forcing IPv6.
+          - **The 27th, `address6` bound as ::1, survives there**: the toolchain has no IPv6, so
+            the test sees EADDRNOTAVAIL either way. The box kills it: the replay stops.
+          - **4 more in the boxes**, each failing the run on the rows it names:
+            - the policy misreading `ndots`, caught in the box by the policy's own class;
+            - the same with the export regenerated from it, caught by glibc's wire;
+            - the replay not writing nsswitch.conf, on rows unlike the box's own line (on rows
+              like it, Debian's `files myhostname dns`, it is equivalent);
+            - the stub's capture dropped.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **The recordings are S4's file, not a second one.** The design's `glibc-wire.json`
+            would hold what `system-names-recordings.json` already holds and S4's test already
+            reads. Schema 1 gains `outcome` and `ms` per recording and `images` (base, digest,
+            glibc, Node, whether resolved served the stub).
+          - **Every plan of every row must be recorded in every image that replays it**
+            (`system-names.test`, D30's "an unverified row fails the run"). A row exported anew,
+            or a new image, fails the suite until the differential has recorded it, so a change
+            to the policy's tables needs a differential run before it lands.
+          - **Boxes of the base images, not the smoke images.** The glibc and the NSS modules
+            are the distribution's either way, and the smoke images' PostgreSQL and TimescaleDB,
+            which the differential never touches, take minutes to build. Debian 11 takes its
+            packages from the snapshot its base image was built from, because its security pool
+            on deb.debian.org no longer has the arm64 packages its index lists.
+          - **resolved is told three things beyond the cold cache**, each so that the stub
+            answers as the plan says and nothing else asks: `ResolveUnicastSingleLabel=yes`,
+            since otherwise resolved answers a single-label name SERVFAIL itself and glibc asks
+            it again (a wire, but of resolved's making, not the plan's); LLMNR and mDNS off; and a
+            dummy link with an address in 198.18.0.0/15 and the default route, because resolved
+            asks its global servers only while a link has a routable address, and with no
+            network it answers SERVFAIL at once.
+          - **Only recording (A).** Recording (B), the walk's wire from `DnsCheck.route`, needs
+            S6, which has not landed: `P-460`. So do D30's regression assertions (gate against
+            `system`, the helper against the lanes), its budget rows, and §7.5's rows about
+            answers rather than routes (TC with TCP dropped, FORMERR, A answered and AAAA
+            SERVFAIL, a helper SIGKILL mid-run).
+          - **No nscd box.** With nscd running the check is off (rule 5), so no row claims a wire
+            there; `P-461` asks for boxes that show the check off in situ.
+          - **S3's end to end is S3's.** The design puts it in S3's tests
+            (`support/probe-process.ts`), not on the smoke images.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
@@ -13506,6 +13638,25 @@ because each is a decision rather than a defect:
       for the exit. The scenarios kill the child only between scans, so none ran into it. **Done when** only a signal a crash raises (SIGSEGV, SIGBUS, SIGABRT, SIGILL,
       SIGFPE, SIGTRAP, SIGSYS) charges a suspect or a re-ask, and any other end is an `exit` loss
       charged to no one, its suspects asked again alone, with a test for each and a mutant.
+- [ ] **P-460 — the name gate's differential has glibc's wire and not yet the walk's** · S ·
+      P-432 · Filed 2026-10-20 by `P-432` S8. S8 records what glibc sends for each of S4's rows
+      in seven images and holds the policy to it. D30's second recording, the walk's wire from
+      `DnsCheck.route` alone (no lanes, no helper), needs S6. **Done when**, with S6 landed,
+      `name-gate-differential.sh` records the walk for every row and plan beside glibc's and
+      fails where they differ: the qnames, qtypes and servers in order up to where each stops;
+      heard if and only if glibc returned within 1 s; plus §7.5's regression assertions (gate
+      answers against `system`'s, the helper's against the lanes'), its budget rows (dnsmasq at
+      `dns-forward-max=30` with a 150-name silent zone in both modes, the same after a helper
+      SIGKILL, resolved's distinct upstream questions), and its answer rows (TC with TCP dropped,
+      with and without `edns0`; FORMERR; A answered and AAAA SERVFAIL from server 1 with server 2
+      silent).
+- [ ] **P-461 — the differential shows the check off in no box** · XS · P-432 · Filed 2026-10-20
+      by `P-432` S8. Every box S8 replays in has the check on, because a row the check is off for
+      claims no wire. Rules 3 to 5 are unit-tested against fixtures, but nothing shows the policy
+      off in a real box: nscd running, `libnss-resolve` on the hosts line (Ubuntu's
+      `files resolve [!UNAVAIL=return] dns`), `mdns4_minimal`, `LD_PRELOAD`. **Done when** the
+      differential has a box for each, in which the policy loaded in situ reports the check off
+      with the rule named, and the run fails if it does not.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

@@ -2,6 +2,7 @@
   "schema": 2,
   "images": {
     "rocky8": "2.28",
+    "debian11": "2.31",
     "rocky9": "2.34",
     "ubuntu2204": "2.35",
     "debian12": "2.36",
@@ -13,6 +14,7 @@
     "t1a6c2c25cedd": "nameserver 10.0.0.53\nsearch corp.example\n",
     "t2ad90a00ddc4": "hosts: files dns\n",
     "t300758bfb844": "nameserver 10.0.0.53\noptions timeout:31 attempts:9\n",
+    "t3e7f11a496e2": "nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch corp.example\n",
     "t43290385f1b3": "hosts: files myhostname dns\n",
     "t4aee7371a3ce": "nameserver 10.0.0.1\nnameserver 10.0.0.2\nnameserver 10.0.0.3\nsearch corp.example\noptions rotate edns0 trust-ad\n",
     "t4f38b7bdbaa0": "nameserver 10.0.0.53\nsearch corp.example\noptions ndots:0\n",
@@ -3052,43 +3054,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["A", "AAAA"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "nxdomain",
-                  "AAAA": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1],
-                ["10.0.0.53", "-dash", "A", 1],
-                ["10.0.0.53", "-dash", "AAAA", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "address",
-                  "AAAA": "address"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1]
-              ]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -3131,36 +3097,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["A"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash", "A", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "address"
-                }
-              },
-              "wire": [["10.0.0.53", "-dash.corp.example", "A", 1]]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -3203,36 +3140,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["AAAA"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "AAAA": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1],
-                ["10.0.0.53", "-dash", "AAAA", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "AAAA": "address"
-                }
-              },
-              "wire": [["10.0.0.53", "-dash.corp.example", "AAAA", 1]]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -6907,43 +6815,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["A", "AAAA"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "nxdomain",
-                  "AAAA": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1],
-                ["10.0.0.53", "-dash", "A", 1],
-                ["10.0.0.53", "-dash", "AAAA", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "address",
-                  "AAAA": "address"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1]
-              ]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -6986,36 +6858,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["A"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash", "A", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "address"
-                }
-              },
-              "wire": [["10.0.0.53", "-dash.corp.example", "A", 1]]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -7058,36 +6901,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["AAAA"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "AAAA": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1],
-                ["10.0.0.53", "-dash", "AAAA", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "AAAA": "address"
-                }
-              },
-              "wire": [["10.0.0.53", "-dash.corp.example", "AAAA", 1]]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -10481,59 +10295,6 @@
       "byImage": {}
     },
     {
-      "id": "81a27796bf94e7d6",
-      "title": "files myhostname dns: probe-1, family 6",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "t43290385f1b3",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "probe-1",
-        "family": 6
-      },
-      "expect": {
-        "class": "walk",
-        "candidates": ["probe-1.corp.example", "probe-1"],
-        "types": ["AAAA"],
-        "servers": ["10.0.0.53"],
-        "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": [
-              ["10.0.0.53", "probe-1.corp.example", "AAAA", 1],
-              ["10.0.0.53", "probe-1", "AAAA", 1]
-            ]
-          },
-          {
-            "plan": "answer",
-            "answers": {
-              "10.0.0.53": {
-                "AAAA": "address"
-              }
-            },
-            "wire": [["10.0.0.53", "probe-1.corp.example", "AAAA", 1]]
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
       "id": "6a752baa95399079",
       "title": "files myhostname dns: probe-1., family 0",
       "world": {
@@ -10616,56 +10377,6 @@
       "byImage": {}
     },
     {
-      "id": "13266110fcc03a1b",
-      "title": "files myhostname dns: probe-1., family 6",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "t43290385f1b3",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "probe-1.",
-        "family": 6
-      },
-      "expect": {
-        "class": "walk",
-        "candidates": ["probe-1"],
-        "types": ["AAAA"],
-        "servers": ["10.0.0.53"],
-        "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": [["10.0.0.53", "probe-1", "AAAA", 1]]
-          },
-          {
-            "plan": "answer",
-            "answers": {
-              "10.0.0.53": {
-                "AAAA": "address"
-              }
-            },
-            "wire": [["10.0.0.53", "probe-1", "AAAA", 1]]
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
       "id": "40d18b3b38f0a80d",
       "title": "files myhostname dns: -dash, family 0",
       "world": {
@@ -10705,43 +10416,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["A", "AAAA"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "nxdomain",
-                  "AAAA": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1],
-                ["10.0.0.53", "-dash", "A", 1],
-                ["10.0.0.53", "-dash", "AAAA", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "address",
-                  "AAAA": "address"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1]
-              ]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -10784,36 +10459,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["A"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "A", 1],
-                ["10.0.0.53", "-dash", "A", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "A": "address"
-                }
-              },
-              "wire": [["10.0.0.53", "-dash.corp.example", "A", 1]]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -10856,36 +10502,7 @@
         ]
       },
       "byImage": {
-        "rocky8": {
-          "class": "walk",
-          "candidates": ["-dash.corp.example", "-dash"],
-          "types": ["AAAA"],
-          "servers": ["10.0.0.53"],
-          "rotate": false,
-          "plans": [
-            {
-              "plan": "nxdomain",
-              "answers": {
-                "10.0.0.53": {
-                  "AAAA": "nxdomain"
-                }
-              },
-              "wire": [
-                ["10.0.0.53", "-dash.corp.example", "AAAA", 1],
-                ["10.0.0.53", "-dash", "AAAA", 1]
-              ]
-            },
-            {
-              "plan": "answer",
-              "answers": {
-                "10.0.0.53": {
-                  "AAAA": "address"
-                }
-              },
-              "wire": [["10.0.0.53", "-dash.corp.example", "AAAA", 1]]
-            }
-          ]
-        }
+        "rocky8": null
       }
     },
     {
@@ -11779,59 +11396,6 @@
               }
             },
             "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "b87fdca9175497c2",
-      "title": "a dotted hostname, its own domain searched, family 6",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1.lab.example",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "tb0aea6b105b1",
-          "/etc/nsswitch.conf": "t43290385f1b3",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "probe-1.lab.example",
-        "family": 6
-      },
-      "expect": {
-        "class": "walk",
-        "candidates": ["probe-1.lab.example", "probe-1.lab.example.lab.example"],
-        "types": ["AAAA"],
-        "servers": ["10.0.0.53"],
-        "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": [
-              ["10.0.0.53", "probe-1.lab.example", "AAAA", 1],
-              ["10.0.0.53", "probe-1.lab.example.lab.example", "AAAA", 1]
-            ]
-          },
-          {
-            "plan": "answer",
-            "answers": {
-              "10.0.0.53": {
-                "AAAA": "address"
-              }
-            },
-            "wire": [["10.0.0.53", "probe-1.lab.example", "AAAA", 1]]
           }
         ]
       },
@@ -12739,6 +12303,66 @@
             "wire": [
               ["127.0.0.53", "sw1", "A", 1],
               ["127.0.0.53", "sw1", "AAAA", 1]
+            ]
+          }
+        ]
+      },
+      "byImage": {}
+    },
+    {
+      "id": "4a7f9ac896d06992",
+      "title": "systemd-resolved’s stub file with a link’s search domain, as Ubuntu writes it",
+      "world": {
+        "glibc": "2.39",
+        "hostname": "probe-1",
+        "env": {},
+        "files": {
+          "/etc/hosts": "t993dacab9bdf",
+          "/etc/resolv.conf": "t3e7f11a496e2",
+          "/etc/nsswitch.conf": "t2ad90a00ddc4",
+          "/etc/gai.conf": "te3b0c44298fc"
+        },
+        "missingModules": [],
+        "addresses": ["127.0.0.53"],
+        "ipv6": false
+      },
+      "question": {
+        "name": "sw1",
+        "family": 0
+      },
+      "expect": {
+        "class": "walk",
+        "candidates": ["sw1.corp.example", "sw1"],
+        "types": ["A", "AAAA"],
+        "servers": ["127.0.0.53"],
+        "rotate": false,
+        "plans": [
+          {
+            "plan": "nxdomain",
+            "answers": {
+              "127.0.0.53": {
+                "A": "nxdomain",
+                "AAAA": "nxdomain"
+              }
+            },
+            "wire": [
+              ["127.0.0.53", "sw1.corp.example", "A", 1],
+              ["127.0.0.53", "sw1.corp.example", "AAAA", 1],
+              ["127.0.0.53", "sw1", "A", 1],
+              ["127.0.0.53", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "answer",
+            "answers": {
+              "127.0.0.53": {
+                "A": "address",
+                "AAAA": "address"
+              }
+            },
+            "wire": [
+              ["127.0.0.53", "sw1.corp.example", "A", 1],
+              ["127.0.0.53", "sw1.corp.example", "AAAA", 1]
             ]
           }
         ]

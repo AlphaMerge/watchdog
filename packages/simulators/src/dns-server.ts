@@ -194,6 +194,12 @@ export interface DnsServerSpec extends DnsLayer, DnsServerPolicy {
   readonly port?: number;
   /** Bind ::1 too, on the same port. Default the simulator's `ipv6`. */
   readonly ipv6?: boolean;
+  /**
+   * The IPv6 address to bind in place of ::1, on the same port: a server glibc is told of by an
+   * address that is not a loopback, such as 2001:db8::1 in the differential's box, which adds it
+   * to `lo` (`P-432` S8). Set, the server must bind it, whatever `ipv6` says, or the start fails.
+   */
+  readonly address6?: string;
   /** `silent` drops every datagram; `refused` binds nothing, so clients get ECONNREFUSED. */
   readonly dead?: DnsDead;
 }
@@ -216,8 +222,11 @@ export interface DnsServerInfo {
   readonly port: number;
   /** 127.0.0.1, unless the spec named another address. */
   readonly ipv4: string;
-  /** `::1`, unless this machine has no IPv6 loopback or `ipv6` was false. */
-  readonly ipv6: '::1' | undefined;
+  /**
+   * `::1` (or the spec's `address6`), unless this machine has no IPv6 loopback or `ipv6` was
+   * false.
+   */
+  readonly ipv6: string | undefined;
 }
 
 export type DnsOutcome =
@@ -555,7 +564,7 @@ export class DnsSimulator {
     if (family === 6 && server.ipv6 === undefined) {
       throw new Error(`the DNS simulator's ${server.name} has no IPv6 loopback here`);
     }
-    return { address: family === 6 ? '::1' : server.ipv4, port: server.port };
+    return { address: family === 6 ? (server.ipv6 ?? '::1') : server.ipv4, port: server.port };
   }
 
   /** The servers as `dns.Resolver#setServers` takes them, in order: `127.0.0.1:5353`. */

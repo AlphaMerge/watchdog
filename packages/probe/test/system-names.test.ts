@@ -73,7 +73,7 @@ import {
  *     walked one the `candidates` in order and the `types` asked of each, A first; the `servers`
  *     in order, `rotate`, and the `plans`;
  *   - `byImage`: the expectation in an image where it is not `expect`, or null where the check is
- *     off in that image, which then does not replay the row.
+ *     off in that image or does not vouch for the name there, which then does not replay the row.
  * - A plan is what the simulator answers and what glibc should send. `answers` gives each server's
  *   reply to each type: `nxdomain`, `servfail`, `refused`, `silent`, or `address` (an A or AAAA
  *   record). `wire` is the questions glibc sends, in order, as `[server, name, type, try]`, `try`
@@ -91,10 +91,15 @@ import {
  *   recording disagrees is fixed in the policy, or turns the check off, before the cut.
  *
  * **Recordings** (`test/fixtures/system-names-recordings.json`, schema 1) are S8's, never this
- * test's: each `{ id, image, plan, offset?, wire }` is the wire glibc sent for a row's plan in an
- * image. For every one, this test asserts that the row is still exported under that id, is still
+ * test's: each `{ id, image, plan, offset?, wire, outcome, ms }` is the wire glibc sent for a row's
+ * plan in an image, how `getaddrinfo` ended and how long it took, and `images` says what each image
+ * was (its base and digest, glibc, Node, and whether systemd-resolved served the stub). They are
+ * written by `scripts/smoke/name-gate-differential.sh`, only when every row of every image
+ * verified. For every one, this test asserts that the row is still exported under that id, is still
  * replayed in that image, and still expects that wire, so a regeneration cannot paper over a
- * regression.
+ * regression; and every plan of every row must have one in every image that replays it, so a row
+ * exported anew, or a new image, fails here until the differential has recorded it (D30: an
+ * unverified row fails the run).
  */
 
 const silent = pino({ level: 'silent' });
@@ -373,6 +378,16 @@ const RESOLV_ROWS: readonly ResolvRow[] = [
     resolv: STUB,
     servers: ['127.0.0.53'],
     search: ['.'],
+    searchFrom: 'search',
+    options: { edns0: true, trustAd: true },
+  },
+  {
+    // What Ubuntu's systemd-resolved writes when a link has a search domain: S8 plays it through
+    // resolved's own stub on Ubuntu 24.04.
+    name: 'systemd-resolved’s stub file with a link’s search domain, as Ubuntu writes it',
+    resolv: 'nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch corp.example\n',
+    servers: ['127.0.0.53'],
+    search: ['corp.example'],
     searchFrom: 'search',
     options: { edns0: true, trustAd: true },
   },
@@ -1363,15 +1378,23 @@ const NAMES: readonly (readonly [string, readonly [string, string, string]])[] =
   [LONG, all('cannotVouch:candidate')],
 ];
 
-/** nss-myhostname answers the hostname before DNS only under `files myhostname dns`. */
+/**
+ * nss-myhostname answers the hostname before DNS only under `files myhostname dns`; for family 6
+ * it may or may not, by the host's IPv6 and systemd's version (S8 found it answering on Rocky 8 and
+ * Debian 11), so the check does not vouch.
+ */
+const HF6 = 'cannotVouch:hostname-family-6';
 const MYHOSTNAME_FIRST: Readonly<Record<string, readonly [string, string, string]>> = {
-  'probe-1': ['local:myhostname', 'local:myhostname', w('probe-1.corp.example', 'probe-1')],
-  'probe-1.': ['local:myhostname', 'local:myhostname', w('probe-1')],
+  'probe-1': ['local:myhostname', 'local:myhostname', HF6],
+  'probe-1.': ['local:myhostname', 'local:myhostname', HF6],
 };
 
-/** At 2.28 `dns` asks a name beginning with `-` (no `check_name` before 2.29). */
+/**
+ * At 2.28 upstream `dns` asks a name beginning with `-` (no `check_name` before 2.29), but Rocky 8's
+ * 2.28 carries the fix and refuses it unasked (S8): the check does not vouch.
+ */
 const BEFORE_CHECK_NAME: Readonly<Record<string, readonly [string, string, string]>> = {
-  '-dash': all(w('-dash.corp.example', '-dash')),
+  '-dash': all('cannotVouch:leading-dash'),
 };
 
 interface ClassWorld {
@@ -1444,11 +1467,7 @@ const HOSTNAME_ROWS: readonly {
     name: 'a dotted hostname, its own domain searched',
     hostname: 'probe-1.lab.example',
     host: 'probe-1.lab.example',
-    expect: [
-      'local:myhostname',
-      'local:myhostname',
-      w('probe-1.lab.example', 'probe-1.lab.example.lab.example'),
-    ],
+    expect: ['local:myhostname', 'local:myhostname', HF6],
   },
   {
     name: 'the short name of a dotted hostname is not it',
@@ -2903,6 +2922,7 @@ describe('the description logged at start', () => {
 
 const IMAGES: Readonly<Record<string, string>> = {
   rocky8: '2.28',
+  debian11: '2.31',
   rocky9: '2.34',
   ubuntu2204: '2.35',
   debian12: '2.36',
@@ -3130,7 +3150,9 @@ async function buildRows(): Promise<S8Export> {
     const byImage: Record<string, S8Expect | null> = {};
     for (const [image, glibc] of Object.entries(IMAGES)) {
       const there = await expectationOf({ ...f, glibc }, source.name, source.family);
-      if (!isDeepStrictEqual(there, expect)) byImage[image] = there;
+      // A class that claims no wire there (off, or not vouched for) is not replayed there.
+      const claims = there !== null && (there.class === 'local' || there.class === 'walk');
+      if (!isDeepStrictEqual(there, expect)) byImage[image] = claims ? there : null;
     }
     rows.push({
       id: digestOf(JSON.stringify(sorted({ world, question }))).slice(0, 16),
@@ -3166,6 +3188,32 @@ function recordingProblem(rows: readonly S8Row[], recording: Recording): string 
     : `row ${recording.id} in ${recording.image}, ${recording.plan}: the policy expects ${JSON.stringify(wire)}, glibc sent ${JSON.stringify(recording.wire)}`;
 }
 
+/**
+ * Each plan of each row, in each image that replays it, that no recording verifies, as
+ * `<id> in <image>: <plan>`: an unverified row fails the run (D30), and so a row exported anew
+ * waits for the differential to record it.
+ */
+function unrecorded(rows: readonly S8Row[], recordings: readonly Recording[]): string[] {
+  const out: string[] = [];
+  for (const row of rows) {
+    for (const image of Object.keys(IMAGES)) {
+      const e = Object.hasOwn(row.byImage, image) ? row.byImage[image] : row.expect;
+      if (e === null || e === undefined) continue;
+      for (const plan of e.plans) {
+        const found = recordings.some(
+          (each) =>
+            each.id === row.id &&
+            each.image === image &&
+            each.plan === plan.plan &&
+            recordingProblem([row], each) === undefined,
+        );
+        if (!found) out.push(`${row.id} in ${image}: ${plan.plan}`);
+      }
+    }
+  }
+  return out;
+}
+
 const fixturePath = (name: string): string =>
   fileURLToPath(new URL(`../../test/fixtures/${name}`, import.meta.url));
 
@@ -3193,16 +3241,21 @@ describe('S8: the rows the check is on for, exported for the differential', () =
       assert.ok(names.length >= 2, row.title);
     }
     assert.ok(walks.some((row) => row.expect.servers.length === 3 && row.expect.rotate));
+    // Only a name beginning with - is left out of an image: at 2.28 the check does not vouch for
+    // it, as Rocky 8's 2.28 refuses it unasked where upstream's asks it (S8).
+    const notEverywhere = rows.filter((row) => Object.values(row.byImage).includes(null));
+    assert.ok(notEverywhere.length > 0);
+    for (const row of notEverywhere) {
+      assert.equal(row.question.name, '-dash', row.title);
+      assert.deepEqual(row.byImage, { rocky8: null }, row.title);
+    }
     assert.ok(
-      rows.every((row) => Object.values(row.byImage).every((e) => e !== null)),
-      'no exported row is off in an image',
+      rows.every((row) => Object.values(row.byImage).every((e) => e?.class !== 'cannotVouch')),
     );
-    // The 2.28 image walks a name beginning with -, which later ones refuse unasked.
     const dash = rows.find((row) => row.question.name === '-dash' && row.question.family === 4);
     assert.ok(dash !== undefined);
     assert.equal(dash.expect.class, 'local');
-    assert.equal(dash.byImage['rocky8']?.class, 'walk');
-    assert.deepEqual(Object.keys(dash.byImage), ['rocky8']);
+    assert.equal(dash.byImage['rocky8'], null);
   });
 
   it('a plan’s wire: NXDOMAIN walks the candidates at one server, failures walk the servers', () => {
@@ -3284,6 +3337,39 @@ describe('S8: the rows the check is on for, exported for the differential', () =
     for (const recording of parsed.recordings as Recording[]) {
       assert.equal(recordingProblem(rows, recording), undefined);
     }
+  });
+
+  it('every plan of every row is recorded in every image that replays it (D30)', async () => {
+    const parsed = JSON.parse(
+      readFileSync(fixturePath('system-names-recordings.json'), 'utf8'),
+    ) as { readonly recordings: readonly Recording[] };
+    const { rows } = await exportRows();
+    assert.deepEqual(unrecorded(rows, parsed.recordings), []);
+  });
+
+  it('a plan with no recording is named: a row, an image or a plan missing', async () => {
+    const { rows } = await exportRows();
+    const row = rows.find(
+      (each) => each.expect.class === 'walk' && each.expect.servers.length === 1,
+    );
+    assert.ok(row !== undefined);
+    const all: Recording[] = [];
+    for (const image of Object.keys(IMAGES)) {
+      for (const plan of row.expect.plans) {
+        all.push({ id: row.id, image, plan: plan.plan, wire: plan.wire ?? [] });
+      }
+    }
+    assert.deepEqual(unrecorded([row], all), []);
+    assert.deepEqual(unrecorded([row], all.slice(1)), [
+      `${row.id} in rocky8: ${row.expect.plans[0]?.plan ?? ''}`,
+    ]);
+    assert.equal(
+      unrecorded([row], []).length,
+      Object.keys(IMAGES).length * row.expect.plans.length,
+    );
+    // A row the check is off for in an image is not replayed there, so it owes no recording.
+    const off = { ...row, byImage: { rocky8: null } };
+    assert.deepEqual(unrecorded([off], all.slice(1)), []);
   });
 
   it('a recording that no longer holds is caught: a moved wire, a lost row, an image now off', async () => {

@@ -224,7 +224,7 @@ function listenTcp(
   const server = createServer(onSocket);
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen({ host, port, exclusive: true, ipv6Only: host === '::1' }, () => {
+    server.listen({ host, port, exclusive: true, ipv6Only: isIPv6(host) }, () => {
       server.removeListener('error', reject);
       resolve(server);
     });
@@ -250,6 +250,8 @@ class Server {
   readonly #tcpMode: 'listen' | 'closed';
   /** The IPv4 address bound: 127.0.0.1 unless the spec names another loopback. */
   readonly address: string;
+  /** The IPv6 address bound when IPv6 is: ::1 unless the spec names another (`address6`). */
+  readonly address6: string;
   /** A fixed port, or 0 for an ephemeral one. */
   readonly fixedPort: number;
   dead: DnsDead;
@@ -298,8 +300,15 @@ class Server {
     this.#tcpMode = spec.tcp ?? options.tcp ?? 'listen';
     this.dead = spec.dead ?? false;
     this.address = spec.address ?? '127.0.0.1';
+    this.address6 = spec.address6 ?? '::1';
     this.fixedPort = spec.port ?? 0;
-    this.#ipv6 = (spec.ipv6 ?? options.ipv6) === false ? false : undefined;
+    // A named IPv6 address must bind: `true` before the bind makes its failure the start's.
+    this.#ipv6 =
+      spec.address6 !== undefined
+        ? true
+        : (spec.ipv6 ?? options.ipv6) === false
+          ? false
+          : undefined;
   }
 
   info(): DnsServerInfo {
@@ -307,7 +316,7 @@ class Server {
       name: this.name,
       port: this.port,
       ipv4: this.address,
-      ipv6: this.#ipv6 === true ? '::1' : undefined,
+      ipv6: this.#ipv6 === true ? this.address6 : undefined,
     };
   }
 
@@ -326,7 +335,7 @@ class Server {
         const port = udp4.address().port;
         if (this.#ipv6 !== false) {
           try {
-            udp.push(await bindUdp('udp6', '::1', port));
+            udp.push(await bindUdp('udp6', this.address6, port));
             this.#ipv6 = true;
           } catch (error) {
             const code = errorCode(error);
@@ -340,7 +349,7 @@ class Server {
             this.#accept(socket);
           };
           tcp.push(await listenTcp(this.address, port, accept));
-          if (this.#ipv6) tcp.push(await listenTcp('::1', port, accept));
+          if (this.#ipv6) tcp.push(await listenTcp(this.address6, port, accept));
         }
         for (const socket of udp) {
           const family = socket.address().family === 'IPv6' ? 6 : 4;
@@ -1216,7 +1225,7 @@ class Background {
     );
     portClasses.set(socket.address().port, spec.name);
     return new Background(spec, socket, {
-      address: v6 ? '::1' : server.address,
+      address: v6 ? server.address6 : server.address,
       port: server.port,
     });
   }

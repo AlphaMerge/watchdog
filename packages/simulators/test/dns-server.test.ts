@@ -183,6 +183,36 @@ describe('the DNS simulator', () => {
       assert.deepEqual(replied(await ask(sim, 'dev-1.zone-a.test')).addresses, [ZONE_A]);
     });
 
+    it('binds the IPv6 address a row names in place of ::1, or fails naming it (P-432 S8)', async (t) => {
+      // An address that is on no interface here: named, it must bind or the start fails, never
+      // quietly fall back to ::1 or to IPv4 alone.
+      await assert.rejects(
+        DnsSimulator.start({ servers: [{ name: 'ns2', address6: '2001:db8::77' }] }),
+        /EADDRNOTAVAIL/u,
+      );
+      if (!v6Here) {
+        t.diagnostic('this machine has no ::1: only the refusal is tested');
+        return;
+      }
+      // Named, it binds even where `ipv6` says no, and the server says it is there.
+      const sim = await start(t, {
+        ipv6: false,
+        servers: [{ name: 'ns1', address: '127.0.0.1', address6: '::1' }],
+        zones: { 'zone-a.test': { reply: replies.addresses(ZONE_A) } },
+      });
+      const { port, ipv6 } = sim.server();
+      assert.equal(ipv6, '::1');
+      assert.equal(await udpFree('udp6', '::1', port), false);
+      assert.equal(await tcpFree('::1', port), false);
+      assert.deepEqual(sim.serverList(undefined, 6), [`[::1]:${String(port)}`]);
+      const v6 = { ...sim.target(undefined, 6) };
+      assert.deepEqual(
+        replied(await dnsQuery(v6, 'dev-4.zone-a.test', 'A', { timeoutMs: ANSWER_BOUND_MS }))
+          .addresses,
+        [ZONE_A],
+      );
+    });
+
     it('closes every socket at stop', async () => {
       const sim = await within(15_000, 'the DNS simulator to bind', DnsSimulator.start());
       const { port } = sim.server();

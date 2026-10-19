@@ -93,6 +93,8 @@ export const NSS_BUILT_IN_FROM: GlibcVersion = [2, 34];
  * From 2.29 the `dns` source refuses, before it asks, a name `res_hnok` rejects (BZ 24112:
  * resolv/nss_dns/dns-host.c `check_name`, NOTFOUND): for a name the check walks, one whose first
  * label begins with `-` (resolv/res_comp.c, later res-name-checking.c, `binary_leading_dash`).
+ * Below it such a name is not vouched for (`leading-dash`): a distribution's 2.28 may carry the
+ * fix, as Rocky 8's does, which the S8 differential found refusing it unasked.
  */
 export const DNS_CHECKS_NAMES_FROM: GlibcVersion = [2, 29];
 /**
@@ -922,7 +924,13 @@ export function viewOf(inputs: PolicyInputs, files: SystemFiles = SYSTEM_FILES):
 }
 
 export type CannotVouch =
-  'not-a-dns-name' | 'systemd-name' | 'localhost' | 'numeric-family-6' | 'candidate';
+  | 'not-a-dns-name'
+  | 'systemd-name'
+  | 'localhost'
+  | 'numeric-family-6'
+  | 'candidate'
+  | 'hostname-family-6'
+  | 'leading-dash';
 
 /**
  * Where the policy sends a name (§1.3 rows 3, 4, 5 in part, and 8). `local`'s `refused`: a name
@@ -987,12 +995,14 @@ function inHosts(host: string, family: Family, view: PolicyView): boolean {
  * Row 4's `myhostname` rule, under `files myhostname dns` only: in the other two lines DNS is asked
  * first. nss-myhostname answers the hostname exactly as `gethostname` gives it, or with one trailing
  * dot (`streq`, systemd src/nss-myhostname/nss-myhostname.c), and the asked name is in lower case,
- * so a mixed-case hostname is not answered (O-OS-7). It is read at each ask. Families 0 and 4 only:
- * for family 6 on a host without IPv6, newer systemd answers NOTFOUND and glibc goes on to DNS,
- * which the policy does not pin.
+ * so a mixed-case hostname is not answered (O-OS-7). It is read at each ask. It is `local` for
+ * families 0 and 4. For family 6 it is not vouched for (`hostname-family-6`): whether
+ * nss-myhostname answers depends on the host's IPv6 and systemd's version (on a host without IPv6
+ * newer systemd answers NOTFOUND and glibc goes on to DNS; with it, the S8 differential found Rocky
+ * 8's and Debian 11's answering with no DNS asked), which the policy does not read.
  */
-function byMyhostname(host: string, family: Family, line: HostsLine, hostname: string): boolean {
-  if (line !== 'files myhostname dns' || family === 6 || hostname === '') return false;
+function namesHostname(host: string, line: HostsLine, hostname: string): boolean {
+  if (line !== 'files myhostname dns' || hostname === '') return false;
   return host === hostname || host === `${hostname}.`;
 }
 
@@ -1097,9 +1107,15 @@ export function classifyName(
     return { kind: 'local', via: 'hosts' };
   }
   if (unvouched !== undefined) return { kind: 'cannotVouch', reason: unvouched };
-  if (byMyhostname(host, family, line, hostname)) return { kind: 'local', via: 'myhostname' };
-  if (host.startsWith('-') && atLeast(glibc, DNS_CHECKS_NAMES_FROM)) {
-    return { kind: 'local', via: 'refused' };
+  if (namesHostname(host, line, hostname)) {
+    return family === 6
+      ? { kind: 'cannotVouch', reason: 'hostname-family-6' }
+      : { kind: 'local', via: 'myhostname' };
+  }
+  if (host.startsWith('-')) {
+    return atLeast(glibc, DNS_CHECKS_NAMES_FROM)
+      ? { kind: 'local', via: 'refused' }
+      : { kind: 'cannotVouch', reason: 'leading-dash' };
   }
   const candidates = candidatesOf(host, conf);
   if (candidates === undefined) return { kind: 'cannotVouch', reason: 'candidate' };

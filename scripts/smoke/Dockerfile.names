@@ -1,0 +1,59 @@
+# The boxes the name gate's differential replays in (TASKS.md P-432 S8, the design's D30).
+#
+# Development only: one box per image the policy's rows name, each the distribution's own base
+# image (the smoke images' bases for Debian 12, Ubuntu 24.04 and Rocky 9), so its glibc and NSS
+# modules are the distribution's, with Node from the same tarball as the smoke images and the
+# little the replay needs: `ip` to put the rows' servers on `lo`, and on Debian and Ubuntu the
+# `myhostname` module that Rocky ships in systemd-libs. No PostgreSQL, no MonitoringSystem: the
+# worktree is mounted read-only, and the replay runs its build.
+#
+# `RESOLVED=1` (Ubuntu 24.04) adds systemd, systemd-resolved and tcpdump: that box boots systemd,
+# resolved serves its stub, and the questions glibc sends the stub are read off `lo`.
+ARG BASE=debian:bookworm
+FROM ${BASE}
+
+ARG NODE_VERSION=24.19.0
+ARG RESOLVED=0
+# `APT_SNAPSHOT=1` (Debian 11): take packages from the snapshot the base image was built from,
+# which its sources.list names in comments. Bullseye is past its LTS, and deb.debian.org's
+# security pool no longer has the arm64 packages its index still lists.
+ARG APT_SNAPSHOT=0
+
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+      export DEBIAN_FRONTEND=noninteractive; \
+      if [ "${APT_SNAPSHOT}" = 1 ]; then \
+        sed -i -e 's/^deb /# was: deb /' -e 's/^# deb http:\/\/snapshot/deb http:\/\/snapshot/' /etc/apt/sources.list; \
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot; \
+      fi; \
+      apt-get update; \
+      pkgs="ca-certificates curl xz-utils iproute2 libnss-myhostname"; \
+      if [ "${RESOLVED}" = 1 ]; then pkgs="${pkgs} systemd systemd-sysv dbus systemd-resolved tcpdump"; fi; \
+      apt-get install -y --no-install-recommends ${pkgs} || { dpkg --configure -a; apt-get install -y --no-install-recommends ${pkgs}; }; \
+      rm -rf /var/lib/apt/lists/*; \
+    else \
+      dnf install -y --allowerasing --setopt=install_weak_deps=False curl xz iproute systemd-libs; \
+      dnf clean all; \
+    fi
+
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64) node_arch=x64 ;; \
+      aarch64) node_arch=arm64 ;; \
+      *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+      -o /tmp/node.tar.xz; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+      --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
+    rm /tmp/node.tar.xz; \
+    node --version
+
+RUN if [ "${RESOLVED}" = 1 ]; then \
+      systemctl mask systemd-udevd systemd-udev-trigger systemd-firstboot \
+        systemd-journald-audit.socket getty.target; \
+      systemctl enable systemd-resolved; \
+    fi
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["sleep", "infinity"]
