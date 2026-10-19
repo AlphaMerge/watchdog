@@ -184,7 +184,7 @@ function childEnv(row: Row): Record<string, string> {
 async function inImage(row: Row): Promise<{ inImage: InImage; glibc: string | undefined }> {
   const policy = new GlibcNamePolicy({ logger, env: childEnv(row) });
   await policy.load();
-  const glibc = policy.describe().glibc;
+  const glibc = policy.describe().glibc ?? undefined;
   const c = policy.classify(row.question.name, row.question.family);
   const conf = policy.view().conf;
   if (c.kind === 'off')

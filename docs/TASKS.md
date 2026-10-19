@@ -13446,6 +13446,33 @@ because each is a decision rather than a defect:
               into run 3's out dir (`MS_DIFF_REFRESH=1 MS_DIFF_IMAGES=rocky8
               MS_DIFF_ONLY=2afc407e45ed9f87`) removed the six other images' files and reported
               each "not run", and printed that `rockylinux:8` is still the recorded digest.
+      - **Decided 2026-10-20 by Claude, under the user's delegation**, landing S3, S6 and S8
+        together on `integ/r5-1019`:
+        - **SC12 claims what K4 promises.** With four silent labels on a cold scan, an
+          answering label whose lookup reaches the helper after the fourth waits behind the
+          helper's 4 first lanes and fails at the 1 s stuck bound, as K4 decided. The old script
+          passed only while the fourth silent label happened to arrive last. S3's fix narrows
+          the scenario to three silent labels and asserts their overlap, not the code. K4 stands:
+          SC12 runs with the check off, and with the check on, an answering name its servers are
+          heard for goes to the probe's lanes and never queues behind the helper's.
+        - **The check's missing EDNS record is a known limit in 1.0, bounded by D25.** Measured
+          2026-10-20 in the toolchain: Node 24.19.0's c-ares 1.34.6 sends a question with
+          ARCOUNT 0, while glibc sends an OPT record under `options edns0`, which
+          systemd-resolved's stub `resolv.conf` sets. Only a server that answers the two
+          differently can make the check disagree with `getaddrinfo`. The side that matters, a
+          server that answers plain questions and drops EDNS ones, puts a name on the probe's
+          lanes that then sticks there, and D25 marks its zone at the first such lookup, so later
+          ones go to the helper. The other side sends names to the helper, which is safe.
+          Building our own asker would replace the design's c-ares. Node exposes no EDNS flag.
+          `P-454` holds the fix, and the release notes list the limit.
+        - **`P-453`, `P-460` and `P-461` are in 1.0, before the rc.3 cut.** The field test runs
+          the gate (the user's decision of 2026-10-19), so a working name poisoned for an hour by
+          an outside kill would be a false alarm there (`P-453`). The design gives S8 two
+          recordings before the cut, and `P-460` is the second. `P-461` is the one place the
+          policy is not shown off in a real box.
+        - **S6's re-check gaps are closed before the cut.** The D27 invariant is on the design's
+          never-cut list: an avoided name started from the probe's queues (`#pumpProbe`), and an
+          avoided name settled after `stop()` with the probe's pool.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
@@ -13762,6 +13789,17 @@ because each is a decision rather than a defect:
       for the exit. The scenarios kill the child only between scans, so none ran into it. **Done when** only a signal a crash raises (SIGSEGV, SIGBUS, SIGABRT, SIGILL,
       SIGFPE, SIGTRAP, SIGSYS) charges a suspect or a re-ask, and any other end is an `exit` loss
       charged to no one, its suspects asked again alone, with a test for each and a mutant.
+- [ ] **P-454 — the name check asks without the EDNS record glibc sends under `options edns0`** · S ·
+      P-432 · Filed 2026-10-20 by the coordinator, from S6's open list. `DnsCheck` asks through
+      Node's `dns.Resolver` (c-ares 1.34.6 in Node 24.19.0), whose questions carry no OPT
+      record (ARCOUNT 0, measured), while glibc adds one under `options edns0`, and
+      systemd-resolved's stub `resolv.conf` sets it. A server that answers plain questions and
+      drops EDNS ones is heard by the check, and its names then stick on the probe's lanes until
+      D25 marks the zone, one lookup per zone. Node exposes no EDNS flag on `Resolver`. **Done
+      when** the check's question carries an OPT record exactly when the policy reads
+      `options edns0` (an asker of our own over `dgram`, or a c-ares flag if Node exposes one),
+      `P-460`'s differential compares the OPT record along with the qnames, qtypes and servers,
+      and the release notes' known limit is removed.
 - [ ] **P-460 — the name gate's differential has glibc's wire and not yet the walk's** · S ·
       P-432 · Filed 2026-10-20 by `P-432` S8. S8 records what glibc sends for each of S4's rows
       in seven images and holds the policy to it. D30's second recording, the walk's wire from
