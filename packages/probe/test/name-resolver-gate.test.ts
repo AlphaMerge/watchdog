@@ -622,6 +622,43 @@ describe('losing the helper (P-432 S3, §1.11)', () => {
     assert.ok(!ran.ok && /the probe is stopping/u.test(messageOf(ran.error)));
   });
 
+  it('N14: once the resolver has stopped, a helper going down settles what is queued for it, and none of it runs on the probe’s lanes', async () => {
+    // The real helper's stop takes its child, says `stopping` with the route down, and says
+    // `stopped` only once the child has exited: between the two, what was queued for the helper
+    // fell back to the probe's lanes, after the pool had drained (SC10 found it).
+    const { helper, ask, calls, resolver } = make();
+    for (let i = 0; i < 3; i += 1)
+      void outcome(ask(`dev-${String(i)}.zone-b.test`, 4, { waitMs: 60_000 }));
+    const queued = outcome(ask('dev-9.zone-b.test', 4, { waitMs: 60_000 }));
+    assert.equal(
+      helper.inFlight().length,
+      3,
+      'the domain’s three first lookups run, a fourth queued',
+    );
+    resolver.stop();
+    helper.move('down', { state: 'stopping' });
+    const got = await queued;
+    assert.ok(!got.ok && codeOf(got.error) === RESOLVER_FAULT);
+    assert.match(messageOf(got.error), /the probe is stopping/u);
+    assert.equal(calls.length, 0, 'nothing asked on the probe’s lanes');
+  });
+
+  it('N14: while the pool drains, a lost child’s queued lookups still fall back to the probe’s lanes', async () => {
+    const { helper, ask, calls } = make();
+    for (let i = 0; i < 3; i += 1)
+      void outcome(ask(`dev-${String(i)}.zone-b.test`, 4, { waitMs: 60_000 }));
+    const queued = ask('dev-9.zone-b.test', 4, { waitMs: 60_000 });
+    assert.equal(helper.inFlight().length, 3);
+    helper.move('down', { state: 'stopping' });
+    assert.deepEqual(
+      calls.map(({ host }) => host),
+      ['dev-9.zone-b.test'],
+      'asked on the probe’s lanes, under D24',
+    );
+    calls[0]?.answer(B);
+    assert.deepEqual(await queued, B);
+  });
+
   it('knows the helper’s lost code by its value: the module cannot import it', () => {
     assert.equal(HELPER_LOST_CODE, HELPER_LOST);
   });

@@ -806,6 +806,11 @@ export class NameResolver implements PoolResolver {
   readonly #gate: Gate | undefined;
   /** Whether `firstLook` took the watch's baseline, so `start` need not. */
   #firstLooked = false;
+  /**
+   * Set by `stop`: the check pool has drained (`main.ts` stops the resolver after it), so a helper
+   * that goes down from here has nobody to answer on the probe's lanes (`P-432` S3).
+   */
+  #stopped = false;
   #watchTimer: NodeJS.Timeout | undefined;
   /** Each pumps the queue when the `STUCK_MS` after a lookup ended stuck is over (`#endedStuck`). */
   readonly #windowTimers = new Set<NodeJS.Timeout>();
@@ -880,6 +885,7 @@ export class NameResolver implements PoolResolver {
    * it is acted on by `checkFiles`.
    */
   start(): void {
+    this.#stopped = false;
     this.#startGate();
     if (this.#watchTimer !== undefined || this.#watch.files.length === 0) return;
     if (!this.#firstLooked) void this.checkFiles();
@@ -888,6 +894,7 @@ export class NameResolver implements PoolResolver {
   }
 
   stop(): void {
+    this.#stopped = true;
     clearInterval(this.#watchTimer);
     this.#watchTimer = undefined;
     if (this.#gate !== undefined) {
@@ -2522,7 +2529,10 @@ export class NameResolver implements PoolResolver {
       this.#accrueCheckOn(gate, this.#now());
       for (const ref of change.detached ?? []) this.#detach(gate, ref);
       gate.route = change.route;
-      if (change.state === 'stopped') {
+      // Stopped, or stopping once the resolver has: the helper's stop takes its child before it
+      // says it is stopped, and what is queued for it then is the probe's stop's, never the
+      // probe's lanes' (`P-432` S3). While the pool drains, a lost child's lookups fall back.
+      if (change.state === 'stopped' || (this.#stopped && change.route !== 'up')) {
         this.#fallBack(gate, 'stopped');
         return;
       }
