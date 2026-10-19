@@ -12,11 +12,17 @@ import {
   type DnsServerSpec,
 } from '@ms/simulators';
 import { GlibcNamePolicy } from '../../src/resolver/system-names.js';
+import { startCapture } from './names-capture.js';
 import {
+  NAMESERVER,
+  STUB,
+  digestOf,
   expectationIn,
   listenerOf,
   nameserversOf,
   pcapQuestions,
+  resolvedObserved,
+  unplayable,
   wireOf,
   type Asked,
   type Expectation,
@@ -56,14 +62,19 @@ import {
  * running, and a row whose server is its stub, 127.0.0.53, is played through it. resolved's
  * upstream is the simulator at 127.0.0.2, answering as the plan says the stub does, and the
  * questions glibc sends the stub are read from a capture on `lo` (`tcpdump`), since no simulator
- * can hold the stub's address. Every other row runs beside resolved as it would on such a host.
+ * can hold the stub's address. Every other row runs beside resolved as it would on such a host. The
+ * run says resolved served the stub only where it saw it: every plan that asked the stub had
+ * resolved ask the simulator (`resolvedObserved`).
+ *
+ * The run carries the sha256 of the rows file and of the policy's build it loaded
+ * (`dist/src/resolver/system-names.js`), which the verdict holds to the files it judges by.
  */
 
 const run = promisify(execFile);
 const logger = pino({ level: 'silent' });
 
 const LOOKUP = fileURLToPath(new URL('./names-lookup.js', import.meta.url));
-const STUB = '127.0.0.53';
+const POLICY = fileURLToPath(new URL('../../src/resolver/system-names.js', import.meta.url));
 const UPSTREAM = '127.0.0.2';
 const SYSTEM_PATHS = ['/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf', '/etc/gai.conf'];
 /** A lookup that has not ended by then is a fault of the run, not a wire. */
@@ -72,6 +83,8 @@ const LOOKUP_BOUND_MS = 120_000;
 const SETTLE_MS = 60;
 /** A capture given time to be on before the lookup, and to write what it saw before it stops. */
 const CAPTURE_SETTLE_MS = 300;
+/** A capture that has not said it is listening, or has not stopped, by then is a fault of the run. */
+const CAPTURE_BOUND_MS = 10_000;
 
 interface Args {
   readonly rows: string;
@@ -186,12 +199,16 @@ async function inImage(row: Row): Promise<{ inImage: InImage; glibc: string | un
       ...(c.kind === 'walk' ? { candidates: c.candidates, types: c.types } : {}),
       servers: conf.servers,
       rotate: conf.options.rotate,
+      timeout: conf.options.timeout,
+      attempts: conf.options.attempts,
     },
     glibc,
   };
 }
 
 interface Servers {
+  /** Every server the row names, canonical, in order. */
+  readonly named: readonly string[];
   readonly specs: DnsServerSpec[];
   /** The simulator server that answers for each row server's address. */
   readonly answering: Map<string, string>;
@@ -216,29 +233,41 @@ async function serversFor(
   for (const address of named) {
     if (viaResolved && address === STUB) {
       throughStub = true;
-      specs.push({ name: `upstream:${UPSTREAM}`, address: UPSTREAM, port: 53, ipv6: false });
+      specs.push({
+        ...NAMESERVER,
+        name: `upstream:${UPSTREAM}`,
+        address: UPSTREAM,
+        port: 53,
+        ipv6: false,
+      });
       answering.set(address, `upstream:${UPSTREAM}`);
       continue;
     }
     const listener = listenerOf(address);
     if (listener.v4 !== undefined) {
       await onLoopback(listener.v4, false);
-      specs.push({ name: address, address: listener.v4, port: 53, ipv6: false });
+      specs.push({ ...NAMESERVER, name: address, address: listener.v4, port: 53, ipv6: false });
     } else if (listener.v6 !== undefined) {
       await onLoopback(listener.v6, true);
-      specs.push({ name: address, address: spareV4(), port: 53, address6: listener.v6 });
+      specs.push({
+        ...NAMESERVER,
+        name: address,
+        address: spareV4(),
+        port: 53,
+        address6: listener.v6,
+      });
     }
     answering.set(address, address);
   }
   const v4s = new Set(specs.map((spec) => spec.address));
   const v6s = new Set(specs.map((spec) => spec.address6).filter((a) => a !== undefined));
   if (!v4s.has('127.0.0.1')) {
-    specs.push({ name: '127.0.0.1', address: '127.0.0.1', port: 53, ipv6: false });
+    specs.push({ ...NAMESERVER, name: '127.0.0.1', address: '127.0.0.1', port: 53, ipv6: false });
   }
   if (ipv6 && !v6s.has('::1')) {
-    specs.push({ name: '::1', address: spareV4(), port: 53, address6: '::1' });
+    specs.push({ ...NAMESERVER, name: '::1', address: spareV4(), port: 53, address6: '::1' });
   }
-  return { specs, answering, throughStub };
+  return { named, specs, answering, throughStub };
 }
 
 function replyOf(reply: Reply | undefined, type: 'A' | 'AAAA'): DnsReply {
@@ -302,47 +331,28 @@ function lookUp(row: Row): Promise<Lookup> {
   });
 }
 
-interface Capture {
+interface StubCapture {
   stop(): Promise<Asked[]>;
 }
 
 /** What glibc sends the stub, read off `lo`: the one server a simulator cannot be. */
-async function captureStub(): Promise<Capture> {
+async function captureStub(): Promise<StubCapture> {
   const file = '/tmp/ms-names-stub.pcap';
   rmSync(file, { force: true });
   const filter = `udp and dst host ${STUB} and dst port 53`;
   // `--immediate-mode`: libpcap otherwise holds packets in its ring until a block fills or times
   // out, and a capture stopped within that time writes none of them.
-  const argv = ['-i', 'lo', '-n', '--immediate-mode', '-U', '-Z', 'root', '-w', file, filter];
-  const child = spawn('tcpdump', argv, { stdio: ['ignore', 'ignore', 'pipe'] });
-  await new Promise<void>((resolve, reject) => {
-    let said = '';
-    const timer = setTimeout(() => {
-      reject(new Error(`tcpdump did not start: ${said}`));
-    }, 10_000);
-    child.stderr.on('data', (chunk: Buffer) => {
-      said += chunk.toString();
-      if (said.includes('listening on')) {
-        clearTimeout(timer);
-        resolve();
-      }
-    });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`tcpdump exited ${String(code)}: ${said}`));
-    });
+  const capture = await startCapture({
+    command: 'tcpdump',
+    argv: ['-i', 'lo', '-n', '--immediate-mode', '-U', '-Z', 'root', '-w', file, filter],
+    ready: 'listening on',
+    startBoundMs: CAPTURE_BOUND_MS,
+    stopBoundMs: CAPTURE_BOUND_MS,
+    settleMs: CAPTURE_SETTLE_MS,
   });
-  await sleep(CAPTURE_SETTLE_MS);
   return {
     async stop(): Promise<Asked[]> {
-      await sleep(CAPTURE_SETTLE_MS);
-      const exited = new Promise<void>((resolve) => {
-        child.once('exit', () => {
-          resolve();
-        });
-      });
-      child.kill('SIGINT');
-      await exited;
+      await capture.stop();
       return pcapQuestions(readFileSync(file)).filter((one) => one.server === STUB);
     },
   };
@@ -359,6 +369,13 @@ async function playRow(
   const read = await inImage(row);
   const servers = await serversFor(rows, row, viaResolved, ipv6);
   if (row.world.ipv6 && !ipv6) setup.push('the row needs IPv6, which this box does not have');
+  const cannot = unplayable(row.question.name, servers.named, viaResolved);
+  if (cannot !== undefined) {
+    return {
+      run: { id: row.id, inImage: read.inImage, plans: [], setup: [...setup, cannot] },
+      glibc: read.glibc,
+    };
+  }
   const plans: PlanRun[] = [];
   const sim = await DnsSimulator.start({ servers: servers.specs, ipv6: false });
   try {
@@ -410,7 +427,8 @@ async function playRow(
 
 async function main(): Promise<void> {
   const a = args(process.argv.slice(2));
-  const rows = JSON.parse(readFileSync(a.rows, 'utf8')) as RowsFile;
+  const rowsBytes = readFileSync(a.rows);
+  const rows = JSON.parse(rowsBytes.toString('utf8')) as RowsFile;
   if (!Object.hasOwn(rows.images, a.image)) throw new Error(`${a.image} is no image of the rows`);
   const ipv6 = enableIpv6();
   const runs: RowRun[] = [];
@@ -434,7 +452,9 @@ async function main(): Promise<void> {
     node: process.version,
     base: process.env['MS_DIFF_BASE'] ?? 'unknown',
     digest: process.env['MS_DIFF_DIGEST'] ?? 'unknown',
-    resolved: a.viaResolved,
+    rowsDigest: digestOf(rowsBytes),
+    policyDigest: digestOf(readFileSync(POLICY)),
+    resolved: a.viaResolved && resolvedObserved(runs),
     rows: runs,
   };
   process.stdout.write(`${JSON.stringify(image)}\n`);

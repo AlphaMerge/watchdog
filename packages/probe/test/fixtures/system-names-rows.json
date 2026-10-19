@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "images": {
     "rocky8": "2.28",
     "debian11": "2.31",
@@ -9,9 +9,11 @@
     "ubuntu2404": "2.39",
     "debian13": "2.41"
   },
+  "resolved": ["ubuntu2404"],
   "texts": {
     "t10d95ec4cdc8": "nameserver 10.0.0.53\noptions timeout:0 attempts:1\n",
     "t1a6c2c25cedd": "nameserver 10.0.0.53\nsearch corp.example\n",
+    "t1db4dafe53c7": "nameserver 10.0.0.53\noptions timeout:1 attempts:9\n",
     "t2ad90a00ddc4": "hosts: files dns\n",
     "t300758bfb844": "nameserver 10.0.0.53\noptions timeout:31 attempts:9\n",
     "t3e7f11a496e2": "nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch corp.example\n",
@@ -33,6 +35,7 @@
     "tabd20aa61be7": "search corp.example\nnameserver 10.0.0.53",
     "tb0aea6b105b1": "nameserver 10.0.0.53\n",
     "tc1dad2273bbd": "nameserver 10.0.0.53\nsearch a.example b.example c.example d.example e.example f.example g.example h.example\n",
+    "td7c7a33ff153": "nameserver 10.0.0.1\nnameserver 10.0.0.2\noptions timeout:1 attempts:2\n",
     "tdafe76d075ff": "hosts: files dns myhostname\n",
     "te3b0c44298fc": "",
     "te86b2c49a9fd": "nameserver 10.0.0.53\noptions \n"
@@ -64,6 +67,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -105,88 +110,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "A": "nxdomain",
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "8921d8802de5d526",
-      "title": "files dns: 192.0.2.1, family 0",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "t2ad90a00ddc4",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "192.0.2.1",
-        "family": 0
-      },
-      "expect": {
-        "class": "local",
-        "via": "numeric",
-        "servers": ["10.0.0.53"],
-        "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "A": "nxdomain",
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "df9586c62caa11f7",
-      "title": "files dns: 192.0.2.1, family 4",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "t2ad90a00ddc4",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "192.0.2.1",
-        "family": 4
-      },
-      "expect": {
-        "class": "local",
-        "via": "numeric",
-        "servers": ["10.0.0.53"],
-        "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -228,6 +153,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -269,6 +196,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -311,6 +240,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -370,6 +301,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -412,6 +345,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -464,6 +399,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -505,6 +442,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -546,6 +485,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -587,6 +528,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -628,6 +571,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -670,6 +615,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -722,6 +669,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -763,6 +712,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -805,6 +756,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -857,6 +810,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -899,6 +854,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -951,6 +908,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -992,6 +951,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1033,6 +994,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1074,6 +1037,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1115,6 +1080,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1156,6 +1123,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1197,6 +1166,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1238,6 +1209,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1279,6 +1252,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1320,6 +1295,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1361,6 +1338,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1403,6 +1382,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1455,6 +1436,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1496,6 +1479,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1537,6 +1522,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1578,6 +1565,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1620,6 +1609,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1680,6 +1671,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1733,6 +1726,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1786,6 +1781,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1846,6 +1843,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1899,6 +1898,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -1952,6 +1953,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2012,6 +2015,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2065,6 +2070,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2117,6 +2124,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2158,6 +2167,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2200,6 +2211,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2252,6 +2265,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2293,6 +2308,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2335,6 +2352,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2385,6 +2404,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2445,6 +2466,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2498,6 +2521,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2551,6 +2576,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2611,6 +2638,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2664,6 +2693,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2717,6 +2748,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2777,6 +2810,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2830,6 +2865,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2883,6 +2920,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2941,6 +2980,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -2991,6 +3032,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3040,6 +3083,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3083,6 +3128,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3126,6 +3173,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3170,6 +3219,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3230,6 +3281,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3283,6 +3336,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3336,6 +3391,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3396,6 +3453,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3449,6 +3508,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3502,6 +3563,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3560,6 +3623,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3610,6 +3675,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3660,6 +3727,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3720,6 +3789,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3773,6 +3844,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3825,6 +3898,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3866,88 +3941,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "A": "nxdomain",
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "9d56cc03c1e5006f",
-      "title": "files dns myhostname: 192.0.2.1, family 0",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "tdafe76d075ff",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "192.0.2.1",
-        "family": 0
-      },
-      "expect": {
-        "class": "local",
-        "via": "numeric",
-        "servers": ["10.0.0.53"],
-        "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "A": "nxdomain",
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "afc99b62d22d52c6",
-      "title": "files dns myhostname: 192.0.2.1, family 4",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "tdafe76d075ff",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "192.0.2.1",
-        "family": 4
-      },
-      "expect": {
-        "class": "local",
-        "via": "numeric",
-        "servers": ["10.0.0.53"],
-        "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -3989,6 +3984,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4030,6 +4027,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4072,6 +4071,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4131,6 +4132,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4173,6 +4176,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4225,6 +4230,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4266,6 +4273,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4307,6 +4316,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4348,6 +4359,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4389,6 +4402,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4431,6 +4446,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4483,6 +4500,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4524,6 +4543,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4566,6 +4587,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4618,6 +4641,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4660,6 +4685,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4712,6 +4739,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4753,6 +4782,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4794,6 +4825,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4835,6 +4868,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4876,6 +4911,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4917,6 +4954,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4958,6 +4997,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -4999,6 +5040,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5040,6 +5083,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5081,6 +5126,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5122,6 +5169,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5164,6 +5213,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5216,6 +5267,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5257,6 +5310,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5298,6 +5353,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5339,6 +5396,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5381,6 +5440,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5441,6 +5502,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5494,6 +5557,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5547,6 +5612,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5607,6 +5674,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5660,6 +5729,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5713,6 +5784,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5773,6 +5846,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5826,6 +5901,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5878,6 +5955,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5919,6 +5998,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -5961,6 +6042,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6013,6 +6096,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6054,6 +6139,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6096,6 +6183,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6146,6 +6235,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6206,6 +6297,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6259,6 +6352,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6312,6 +6407,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6372,6 +6469,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6425,6 +6524,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6478,6 +6579,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6538,6 +6641,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6591,6 +6696,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6644,6 +6751,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6702,6 +6811,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6752,6 +6863,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6801,6 +6914,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6844,6 +6959,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6887,6 +7004,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6931,6 +7050,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -6991,6 +7112,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7044,6 +7167,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7097,6 +7222,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7157,6 +7284,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7210,6 +7339,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7263,6 +7394,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7321,6 +7454,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7371,6 +7506,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7421,6 +7558,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7481,6 +7620,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7534,6 +7675,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7586,6 +7729,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7627,88 +7772,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "A": "nxdomain",
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "f825a84cf1bfc315",
-      "title": "files myhostname dns: 192.0.2.1, family 0",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "t43290385f1b3",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "192.0.2.1",
-        "family": 0
-      },
-      "expect": {
-        "class": "local",
-        "via": "numeric",
-        "servers": ["10.0.0.53"],
-        "rotate": false,
-        "plans": [
-          {
-            "plan": "nxdomain",
-            "answers": {
-              "10.0.0.53": {
-                "A": "nxdomain",
-                "AAAA": "nxdomain"
-              }
-            },
-            "wire": []
-          }
-        ]
-      },
-      "byImage": {}
-    },
-    {
-      "id": "52a5a427f18f6ccc",
-      "title": "files myhostname dns: 192.0.2.1, family 4",
-      "world": {
-        "glibc": "2.39",
-        "hostname": "probe-1",
-        "env": {},
-        "files": {
-          "/etc/hosts": "t993dacab9bdf",
-          "/etc/resolv.conf": "t1a6c2c25cedd",
-          "/etc/nsswitch.conf": "t43290385f1b3",
-          "/etc/gai.conf": "te3b0c44298fc"
-        },
-        "missingModules": [],
-        "addresses": ["10.0.0.53"],
-        "ipv6": false
-      },
-      "question": {
-        "name": "192.0.2.1",
-        "family": 4
-      },
-      "expect": {
-        "class": "local",
-        "via": "numeric",
-        "servers": ["10.0.0.53"],
-        "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7750,6 +7815,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7791,6 +7858,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7833,6 +7902,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7892,6 +7963,8 @@
         "via": "numeric",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7934,6 +8007,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -7986,6 +8061,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8027,6 +8104,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8068,6 +8147,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8109,6 +8190,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8150,6 +8233,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8192,6 +8277,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8244,6 +8331,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8285,6 +8374,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8327,6 +8418,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8379,6 +8472,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8421,6 +8516,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8473,6 +8570,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8514,6 +8613,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8555,6 +8656,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8596,6 +8699,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8637,6 +8742,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8678,6 +8785,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8719,6 +8828,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8760,6 +8871,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8801,6 +8914,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8842,6 +8957,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8883,6 +9000,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8925,6 +9044,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -8977,6 +9098,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9018,6 +9141,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9059,6 +9184,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9100,6 +9227,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9142,6 +9271,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9202,6 +9333,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9255,6 +9388,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9308,6 +9443,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9368,6 +9505,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9421,6 +9560,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9474,6 +9615,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9534,6 +9677,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9587,6 +9732,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9639,6 +9786,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9680,6 +9829,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9722,6 +9873,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9774,6 +9927,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9815,6 +9970,8 @@
         "via": "hosts",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9857,6 +10014,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9907,6 +10066,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -9967,6 +10128,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10020,6 +10183,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10073,6 +10238,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10133,6 +10300,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10186,6 +10355,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10238,6 +10409,8 @@
         "via": "myhostname",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10279,6 +10452,8 @@
         "via": "myhostname",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10320,6 +10495,8 @@
         "via": "myhostname",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10361,6 +10538,8 @@
         "via": "myhostname",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10402,6 +10581,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10445,6 +10626,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10488,6 +10671,8 @@
         "via": "refused",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10532,6 +10717,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10592,6 +10779,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10645,6 +10834,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10698,6 +10889,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10758,6 +10951,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10811,6 +11006,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10864,6 +11061,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10922,6 +11121,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -10972,6 +11173,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11022,6 +11225,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11082,6 +11287,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11135,6 +11342,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11188,6 +11397,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11246,6 +11457,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11296,6 +11509,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11345,6 +11560,8 @@
         "via": "myhostname",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11386,6 +11603,8 @@
         "via": "myhostname",
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11428,6 +11647,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11488,6 +11709,8 @@
         "types": ["A"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11541,6 +11764,8 @@
         "types": ["AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11594,6 +11819,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11652,6 +11879,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11780,6 +12009,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -11908,6 +12139,8 @@
         "types": ["A", "AAAA"],
         "servers": ["::1", "2001:db8::1", "::ffff:a00:1"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12036,6 +12269,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12098,6 +12333,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12156,6 +12393,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12216,6 +12455,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12278,6 +12519,8 @@
         "types": ["A", "AAAA"],
         "servers": ["127.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12336,6 +12579,8 @@
         "types": ["A", "AAAA"],
         "servers": ["127.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12396,6 +12641,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12456,6 +12703,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12526,6 +12775,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12600,6 +12851,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12660,6 +12913,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12695,7 +12950,7 @@
     },
     {
       "id": "f6a706b7e66590b8",
-      "title": "timeout and attempts capped at 30 and 5 (RES_MAXRETRANS, RES_MAXRETRY)",
+      "title": "timeout:31 and attempts:9, read as 30 and 5 (RES_MAXRETRANS, RES_MAXRETRY)",
       "world": {
         "glibc": "2.39",
         "hostname": "probe-1",
@@ -12720,6 +12975,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 30,
+        "attempts": 5,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12753,7 +13010,7 @@
     },
     {
       "id": "2afc407e45ed9f87",
-      "title": "timeout:0, held as 1 since send_dg floors each try at 1 s, and attempts:1",
+      "title": "timeout:0 and attempts:1, read as 1 and 1: a silent server is asked once (send_dg floors each try at 1 s)",
       "world": {
         "glibc": "2.39",
         "hostname": "probe-1",
@@ -12778,6 +13035,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 1,
+        "attempts": 1,
         "plans": [
           {
             "plan": "nxdomain",
@@ -12785,6 +13044,19 @@
               "10.0.0.53": {
                 "A": "nxdomain",
                 "AAAA": "nxdomain"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "sw1", "A", 1],
+              ["10.0.0.53", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "all-silent",
+            "answers": {
+              "10.0.0.53": {
+                "A": "silent",
+                "AAAA": "silent"
               }
             },
             "wire": [
@@ -12803,6 +13075,218 @@
             "wire": [
               ["10.0.0.53", "sw1", "A", 1],
               ["10.0.0.53", "sw1", "AAAA", 1]
+            ]
+          }
+        ]
+      },
+      "byImage": {}
+    },
+    {
+      "id": "2f28f9cd6240cd32",
+      "title": "attempts:9 at timeout:1, read as 5 (RES_MAXRETRY): a silent server is asked five times",
+      "world": {
+        "glibc": "2.39",
+        "hostname": "probe-1",
+        "env": {},
+        "files": {
+          "/etc/hosts": "t993dacab9bdf",
+          "/etc/resolv.conf": "t1db4dafe53c7",
+          "/etc/nsswitch.conf": "t2ad90a00ddc4",
+          "/etc/gai.conf": "te3b0c44298fc"
+        },
+        "missingModules": [],
+        "addresses": ["10.0.0.53"],
+        "ipv6": false
+      },
+      "question": {
+        "name": "sw1",
+        "family": 0
+      },
+      "expect": {
+        "class": "walk",
+        "candidates": ["sw1"],
+        "types": ["A", "AAAA"],
+        "servers": ["10.0.0.53"],
+        "rotate": false,
+        "timeout": 1,
+        "attempts": 5,
+        "plans": [
+          {
+            "plan": "nxdomain",
+            "answers": {
+              "10.0.0.53": {
+                "A": "nxdomain",
+                "AAAA": "nxdomain"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "sw1", "A", 1],
+              ["10.0.0.53", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "all-silent",
+            "answers": {
+              "10.0.0.53": {
+                "A": "silent",
+                "AAAA": "silent"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "sw1", "A", 1],
+              ["10.0.0.53", "sw1", "AAAA", 1],
+              ["10.0.0.53", "sw1", "A", 2],
+              ["10.0.0.53", "sw1", "AAAA", 2],
+              ["10.0.0.53", "sw1", "A", 3],
+              ["10.0.0.53", "sw1", "AAAA", 3],
+              ["10.0.0.53", "sw1", "A", 4],
+              ["10.0.0.53", "sw1", "AAAA", 4],
+              ["10.0.0.53", "sw1", "A", 5],
+              ["10.0.0.53", "sw1", "AAAA", 5]
+            ]
+          },
+          {
+            "plan": "answer",
+            "answers": {
+              "10.0.0.53": {
+                "A": "address",
+                "AAAA": "address"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "sw1", "A", 1],
+              ["10.0.0.53", "sw1", "AAAA", 1]
+            ]
+          }
+        ]
+      },
+      "byImage": {}
+    },
+    {
+      "id": "26f320fa4e698d6f",
+      "title": "two silent servers at timeout:1 attempts:2: each try asks every server in turn",
+      "world": {
+        "glibc": "2.39",
+        "hostname": "probe-1",
+        "env": {},
+        "files": {
+          "/etc/hosts": "t993dacab9bdf",
+          "/etc/resolv.conf": "td7c7a33ff153",
+          "/etc/nsswitch.conf": "t2ad90a00ddc4",
+          "/etc/gai.conf": "te3b0c44298fc"
+        },
+        "missingModules": [],
+        "addresses": ["10.0.0.1", "10.0.0.2"],
+        "ipv6": false
+      },
+      "question": {
+        "name": "sw1",
+        "family": 0
+      },
+      "expect": {
+        "class": "walk",
+        "candidates": ["sw1"],
+        "types": ["A", "AAAA"],
+        "servers": ["10.0.0.1", "10.0.0.2"],
+        "rotate": false,
+        "timeout": 1,
+        "attempts": 2,
+        "plans": [
+          {
+            "plan": "nxdomain",
+            "answers": {
+              "10.0.0.1": {
+                "A": "nxdomain",
+                "AAAA": "nxdomain"
+              },
+              "10.0.0.2": {
+                "A": "nxdomain",
+                "AAAA": "nxdomain"
+              }
+            },
+            "wire": [
+              ["10.0.0.1", "sw1", "A", 1],
+              ["10.0.0.1", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "all-silent",
+            "answers": {
+              "10.0.0.1": {
+                "A": "silent",
+                "AAAA": "silent"
+              },
+              "10.0.0.2": {
+                "A": "silent",
+                "AAAA": "silent"
+              }
+            },
+            "wire": [
+              ["10.0.0.1", "sw1", "A", 1],
+              ["10.0.0.1", "sw1", "AAAA", 1],
+              ["10.0.0.2", "sw1", "A", 1],
+              ["10.0.0.2", "sw1", "AAAA", 1],
+              ["10.0.0.1", "sw1", "A", 2],
+              ["10.0.0.1", "sw1", "AAAA", 2],
+              ["10.0.0.2", "sw1", "A", 2],
+              ["10.0.0.2", "sw1", "AAAA", 2]
+            ]
+          },
+          {
+            "plan": "last-answers-after-servfail",
+            "answers": {
+              "10.0.0.1": {
+                "A": "servfail",
+                "AAAA": "servfail"
+              },
+              "10.0.0.2": {
+                "A": "address",
+                "AAAA": "address"
+              }
+            },
+            "wire": [
+              ["10.0.0.1", "sw1", "A", 1],
+              ["10.0.0.1", "sw1", "AAAA", 1],
+              ["10.0.0.2", "sw1", "A", 1],
+              ["10.0.0.2", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "last-answers-after-refused",
+            "answers": {
+              "10.0.0.1": {
+                "A": "refused",
+                "AAAA": "refused"
+              },
+              "10.0.0.2": {
+                "A": "address",
+                "AAAA": "address"
+              }
+            },
+            "wire": [
+              ["10.0.0.1", "sw1", "A", 1],
+              ["10.0.0.1", "sw1", "AAAA", 1],
+              ["10.0.0.2", "sw1", "A", 1],
+              ["10.0.0.2", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "last-answers-after-silent",
+            "answers": {
+              "10.0.0.1": {
+                "A": "silent",
+                "AAAA": "silent"
+              },
+              "10.0.0.2": {
+                "A": "address",
+                "AAAA": "address"
+              }
+            },
+            "wire": [
+              ["10.0.0.1", "sw1", "A", 1],
+              ["10.0.0.1", "sw1", "AAAA", 1],
+              ["10.0.0.2", "sw1", "A", 1],
+              ["10.0.0.2", "sw1", "AAAA", 1]
             ]
           }
         ]
@@ -12836,6 +13320,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
         "rotate": true,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -13016,6 +13502,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.1", "10.0.0.2"],
         "rotate": true,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -13150,6 +13638,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 3,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -13162,6 +13652,21 @@
             "wire": [
               ["10.0.0.53", "sw1", "A", 1],
               ["10.0.0.53", "sw1", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "all-silent",
+            "answers": {
+              "10.0.0.53": {
+                "A": "silent",
+                "AAAA": "silent"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "sw1", "A", 1],
+              ["10.0.0.53", "sw1", "AAAA", 1],
+              ["10.0.0.53", "sw1", "A", 2],
+              ["10.0.0.53", "sw1", "AAAA", 2]
             ]
           },
           {
@@ -13208,6 +13713,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -13266,6 +13773,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -13326,6 +13835,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",
@@ -13386,6 +13897,8 @@
         "types": ["A", "AAAA"],
         "servers": ["10.0.0.53"],
         "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
         "plans": [
           {
             "plan": "nxdomain",

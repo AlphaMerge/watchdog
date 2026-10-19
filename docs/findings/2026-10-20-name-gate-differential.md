@@ -1,8 +1,8 @@
 # The name gate's policy against glibc, in seven images (`P-432` S8)
 
 2026-10-20, on `feat/p432-s8-diff` (on `f762dfc6`). `scripts/smoke/name-gate-differential.sh`,
-the whole run, twice: first on S4's policy as it landed, then on the policy narrowed by what the
-first run found. Built first, then:
+the whole run three times: first on S4's policy as it landed, then on the policy narrowed by what
+the first run found, and then after the review's fixes (run 3). Built first, then:
 
 ```
 MS_DIFF_WRITE=1 ./scripts/smoke/name-gate-differential.sh
@@ -86,6 +86,41 @@ plan or image without one.
 | `debian12` | 264 | 421 | `debian@sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858` |
 | `ubuntu2404` | 264 | 421 | `ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac` |
 | `debian13` | 264 | 421 | `debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5` |
+
+## Run 3: after the review
+
+The S8 review found the runs not tied to what they ran, and rows that could never disagree
+(`TASKS.md`, `P-432` S8 review). After the fixes, the rows changed in three ways. The 6 rows asking
+for the IP literal `192.0.2.1` are gone: Node answers a literal itself, so glibc was never asked.
+Two rows were added, `attempts:9` at `timeout:1` and two servers at `timeout:1 attempts:2`. And
+four rows with one candidate and a short wait gained an `all-silent` plan, in which every server
+is silent. That leaves 260 rows (251 on Rocky 8) and 2,966 plans. Each image's run now carries the
+sha256 of the rows file and of the policy's build, and the verdict holds both to the files as they
+were. Each base was the digest recorded by run 2, pinned rather than pulled by tag.
+
+**The first attempt was stopped after Rocky 8**, on a fault in the replay, not in glibc. The S5
+simulator models a forwarder, and a question that is never answered holds its slot for 10 s,
+taking in every identical question meanwhile. So in the plan after `all-silent`, glibc's
+questions joined the held ones and went unanswered, and glibc asked every try again: 10
+questions where `answer` expects 2, and 8 where `last-answers-after-servfail` expects 4. Run 2
+never showed this, because its only silent plan came last in each row, and each row starts a
+simulator of its own. Every replay server now holds a slot for 1 ms (`NAMESERVER`), which
+releases it before glibc's next try or the next plan. A box run of the four silent rows in
+`debian12` then agreed on all 14 plans.
+
+**Run 3 passed.** 260 rows in each image (251 on Rocky 8), **2,966 plans, every one
+agreeing**, each image's rows in 107–127 s and the whole run in 830 s. Every image's run named the
+same rows file and the same policy build, and Ubuntu 24.04's run saw resolved serve the stub,
+asking upstream once for each of glibc's questions. The recordings are rewritten (schema 2): 2,966
+of them, each image's entry with the two digests, and the stub plans with what resolved asked
+upstream.
+
+**What the silent plans show**, the same in every image:
+- `timeout:0 attempts:1`: one try, A and AAAA once each, `EAI_AGAIN` after about 1 s.
+- `attempts:9` at `timeout:1`: five tries (RES_MAXRETRY), about 5 s.
+- Two servers at `timeout:1 attempts:2`: server 1 and then server 2 on try 1, and again on try 2,
+  about 4 s: each server for 1 s, the second's `(1 << 1) / 2`.
+- `timeout:3`, two attempts: two tries, about 6 s.
 
 ## Through systemd-resolved
 

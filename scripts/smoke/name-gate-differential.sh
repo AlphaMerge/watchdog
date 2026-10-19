@@ -11,7 +11,14 @@
 # every row to.
 #
 # Build first, from the worktree root: ./scripts/dev.sh "npx tsc -b packages/probe". The worktree
-# is mounted read-only into each box, and the replay runs its build.
+# is mounted read-only into each box, and the replay runs its build, so the run refuses to start
+# while any source the boxes load is newer than its build (`ms_names_diff_stale`). Each image's
+# run carries the sha256 of the rows file and of the policy's build, and the verdict holds them to
+# the files as they are: a run is judged only against what it ran.
+#
+# Each base is the digest the committed recordings were made on, so the same tree gives the same
+# verdict on another day; `MS_DIFF_REFRESH=1` moves to the tags' current images and prints each
+# old and new digest. An image with no recording takes its tag's current image, and says so.
 #
 # Each box is privileged with no network (`--network none`): privileged to put the rows' servers
 # on `lo` and to set the hostname, with nothing to reach but itself. Ubuntu 24.04 boots systemd
@@ -21,13 +28,18 @@
 #
 #   MS_DIFF_IMAGES="debian12 ubuntu2404"   only these (default: all of them)
 #   MS_DIFF_ONLY=<id,id>                   only these rows (a partial run never verifies)
-#   MS_DIFF_OUT=<dir>                      keep each image's run there (default: a temp dir)
+#   MS_DIFF_OUT=<dir>                      keep each image's run there (default: a temp dir); an
+#                                          earlier run's files there are removed first, and the
+#                                          verdict takes only the runs this invocation made
+#   MS_DIFF_REFRESH=1                      the tags' current images, not the recorded digests
 #   MS_DIFF_WRITE=1                        write the recordings on a pass
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../lib/smoke-names.sh
 . "${repo_root}/scripts/lib/smoke-names.sh"
+# shellcheck source=../lib/names-diff.sh
+. "${repo_root}/scripts/lib/names-diff.sh"
 
 rows="packages/probe/test/fixtures/system-names-rows.json"
 recordings="packages/probe/test/fixtures/system-names-recordings.json"
@@ -44,16 +56,20 @@ ubuntu2404 ubuntu:24.04 1 0
 debian13 debian:trixie 0 0
 "
 
-for file in names-replay.js names-lookup.js names-verify.js names-differential.js; do
-  if [ ! -f "${repo_root}/${dist}/${file}" ] || [ "${repo_root}/${dist}/${file}" -ot \
-    "${repo_root}/packages/probe/test/differential/${file%.js}.ts" ]; then
-    echo "==> ${dist}/${file} is missing or older than its source: build first" >&2
-    exit 2
-  fi
-done
+if ! stale="$(ms_names_diff_stale "${repo_root}")"; then
+  echo "==> the boxes load the build, and these sources are newer than it or not built: build first" >&2
+  echo "${stale}" | head -20 | sed 's/^/      /' >&2
+  exit 2
+fi
 
 out="${MS_DIFF_OUT:-$(mktemp -d)}"
 mkdir -p "${out}"
+# The verdict is this invocation's runs and nothing else: an earlier run's files go first.
+while read -r name _; do
+  [ -n "${name}" ] || continue
+  rm -f "${out}/${name}.json" "${out}/${name}.json.partial" "${out}/${name}.log"
+done <<<"${IMAGES}"
+rm -f "${out}/recordings.json" "${out}/verify.log"
 wanted="${MS_DIFF_IMAGES:-$(echo "${IMAGES}" | awk 'NF { print $1 }' | tr '\n' ' ')}"
 only=()
 if [ -n "${MS_DIFF_ONLY:-}" ]; then only=(--only "${MS_DIFF_ONLY}"); fi
@@ -68,21 +84,49 @@ trap cleanup EXIT
 ms_smoke_reap_orphans
 
 failed=0
+runs=()
+verify_image=""
 while read -r name base resolved snapshot; do
   [ -n "${name}" ] || continue
   case " ${wanted} " in *" ${name} "*) ;; *) continue ;; esac
   image="ms-names-diff:${name}"
-  echo "==> ${name}: building ${image} from ${base}"
-  docker pull -q "${base}" >/dev/null
-  docker build -q -t "${image}" --build-arg "BASE=${base}" --build-arg "RESOLVED=${resolved}" \
+  recorded="$(ms_names_diff_recorded "${repo_root}/${recordings}" "${name}" "${base}")"
+  if [ "${MS_DIFF_REFRESH:-0}" = 1 ] || [ -z "${recorded}" ]; then
+    docker pull -q "${base}" >/dev/null
+    digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${base}" |
+      grep "^${base%%:*}@sha256:" | head -1 || true)"
+    if [ -z "${digest}" ]; then
+      echo "    FAILED: ${base} has no digest from ${base%%:*}" >&2
+      failed=1
+      continue
+    fi
+    if [ -z "${recorded}" ]; then
+      echo "    ${base}: no digest recorded for ${name}; the tag is ${digest}"
+    elif [ "${recorded}" != "${digest}" ]; then
+      echo "    ${base}: MOVED, recorded on ${recorded}, the tag is now ${digest}"
+    else
+      echo "    ${base}: the tag is still ${digest}"
+    fi
+  else
+    digest="${recorded}"
+    if ! docker pull -q "${digest}" >/dev/null; then
+      echo "    FAILED: could not pull ${digest}, the recorded ${base}; MS_DIFF_REFRESH=1 takes the tag's current image" >&2
+      failed=1
+      continue
+    fi
+  fi
+  echo "==> ${name}: building ${image} from ${digest}"
+  docker build -q -t "${image}" --build-arg "BASE=${digest}" --build-arg "RESOLVED=${resolved}" \
     --build-arg "APT_SNAPSHOT=${snapshot}" -f "${repo_root}/scripts/smoke/Dockerfile.names" \
     "${repo_root}/scripts/smoke" >/dev/null
-  digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "${base}")"
+  verify_image="${image}"
   container="$(ms_smoke_name "names-${name}")"
   containers+=("${container}")
   docker rm -f "${container}" >/dev/null 2>&1 || true
   started="$(date +%s)"
-  replay=(node "/ms/${dist}/names-replay.js" --rows "/ms/${rows}" --image "${name}" "${only[@]+"${only[@]}"}")
+  # Bounded inside the box, as the Mac has no timeout: an image's rows take about 140 s.
+  replay=(timeout 1500 node "/ms/${dist}/names-replay.js" --rows "/ms/${rows}" --image "${name}"
+    "${only[@]+"${only[@]}"}")
   if [ "${resolved}" = 1 ]; then
     # The labels are two separate arguments by design, so this expansion must split.
     # shellcheck disable=SC2046
@@ -92,7 +136,7 @@ while read -r name base resolved snapshot; do
       -v "${repo_root}:/ms:ro" -e "MS_DIFF_BASE=${base}" -e "MS_DIFF_DIGEST=${digest}" \
       "${image}" /sbin/init >/dev/null
     for _ in $(seq 1 60); do
-      state="$(docker exec "${container}" systemctl is-system-running 2>/dev/null || true)"
+      state="$(docker exec "${container}" timeout 10 systemctl is-system-running 2>/dev/null || true)"
       [ "${state}" = "running" ] || [ "${state}" = "degraded" ] && break
       sleep 1
     done
@@ -102,7 +146,7 @@ while read -r name base resolved snapshot; do
     # network none has (it answers SERVFAIL at once, "network down"): a dummy link with an
     # address from the benchmarking range, 198.18.0.0/15, and the default route, which reach
     # nothing.
-    docker exec "${container}" sh -c 'ip link add ms0 type dummy && ip addr add 198.18.0.1/24 dev ms0 && ip link set ms0 up && ip route add default dev ms0 && mkdir -p /etc/systemd/resolved.conf.d && cat > /etc/systemd/resolved.conf.d/ms-differential.conf <<EOF
+    docker exec "${container}" timeout 120 sh -c 'ip link add ms0 type dummy && ip addr add 198.18.0.1/24 dev ms0 && ip link set ms0 up && ip route add default dev ms0 && mkdir -p /etc/systemd/resolved.conf.d && cat > /etc/systemd/resolved.conf.d/ms-differential.conf <<EOF
 [Resolve]
 DNS=127.0.0.2
 Domains=~.
@@ -114,21 +158,25 @@ MulticastDNS=no
 ResolveUnicastSingleLabel=yes
 EOF
 systemctl restart systemd-resolved'
-    if [ "$(docker exec "${container}" systemctl is-active systemd-resolved)" != active ]; then
+    if [ "$(docker exec "${container}" timeout 10 systemctl is-active systemd-resolved || true)" != active ]; then
       echo "    FAILED: systemd-resolved is not running in ${name}" >&2
       failed=1
       continue
     fi
-    echo "    systemd: ${state}; systemd-resolved: active, $(docker exec "${container}" resolvectl --version | head -1)"
-    # The env reaches `docker exec` only as given here, not from `docker run`.
+    echo "    systemd: ${state}; systemd-resolved: active, $(docker exec "${container}" timeout 10 resolvectl --version | head -1)"
+    # The env reaches `docker exec` only as given here, not from `docker run`. The run is written
+    # aside and kept only whole: a replay that stops leaves no run for the verdict to choke on.
     if ! docker exec -e "MS_DIFF_BASE=${base}" -e "MS_DIFF_DIGEST=${digest}" "${container}" \
-      "${replay[@]}" --via-resolved >"${out}/${name}.json" 2>"${out}/${name}.log"; then
+      "${replay[@]}" --via-resolved >"${out}/${name}.json.partial" 2>"${out}/${name}.log"; then
+      rm -f "${out}/${name}.json.partial"
       echo "    FAILED: the replay stopped in ${name}:" >&2
       tail -5 "${out}/${name}.log" | sed 's/^/      /' >&2
       failed=1
       continue
     fi
-    if [ "$(docker exec "${container}" systemctl is-active systemd-resolved)" != active ]; then
+    mv "${out}/${name}.json.partial" "${out}/${name}.json"
+    runs+=("/out/${name}.json")
+    if [ "$(docker exec "${container}" timeout 10 systemctl is-active systemd-resolved || true)" != active ]; then
       echo "    FAILED: systemd-resolved stopped during the run in ${name}" >&2
       failed=1
     fi
@@ -136,28 +184,28 @@ systemctl restart systemd-resolved'
     # shellcheck disable=SC2046
     if ! docker run --rm --name "${container}" $(ms_smoke_labels) --privileged --network none \
       -v "${repo_root}:/ms:ro" -e "MS_DIFF_BASE=${base}" -e "MS_DIFF_DIGEST=${digest}" \
-      "${image}" "${replay[@]}" >"${out}/${name}.json" 2>"${out}/${name}.log"; then
+      "${image}" "${replay[@]}" >"${out}/${name}.json.partial" 2>"${out}/${name}.log"; then
+      rm -f "${out}/${name}.json.partial"
       echo "    FAILED: the replay stopped in ${name}:" >&2
       tail -5 "${out}/${name}.log" | sed 's/^/      /' >&2
       failed=1
       continue
     fi
+    mv "${out}/${name}.json.partial" "${out}/${name}.json"
+    runs+=("/out/${name}.json")
   fi
   docker rm -f "${container}" >/dev/null 2>&1 || true
   echo "    $(wc -l <"${out}/${name}.log" | tr -d ' ') rows in $(($(date +%s) - started)) s"
 done <<<"${IMAGES}"
 
 echo "==> verifying every image's run against the rows"
-runs=()
-for file in "${out}"/*.json; do
-  [ "$(basename "${file}")" = recordings.json ] || runs+=("/out/$(basename "${file}")")
-done
-if [ "${#runs[@]}" -eq 0 ]; then
+if [ "${#runs[@]}" -eq 0 ] || [ -z "${verify_image}" ]; then
   echo "==> NAME GATE DIFFERENTIAL FAILED: no image ran" >&2
   exit 1
 fi
+# In a box this invocation built: any of them has the Node the verdict needs.
 if docker run --rm --network none -v "${repo_root}:/ms:ro" -v "${out}:/out:ro" \
-  ms-names-diff:debian12 node "/ms/${dist}/names-verify.js" "/ms/${rows}" "${runs[@]}" \
+  "${verify_image}" timeout 300 node "/ms/${dist}/names-verify.js" "/ms/${rows}" "${runs[@]}" \
   >"${out}/recordings.json" 2>"${out}/verify.log"; then
   cat "${out}/verify.log"
 else

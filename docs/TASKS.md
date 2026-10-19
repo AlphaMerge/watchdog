@@ -13322,6 +13322,130 @@ because each is a decision rather than a defect:
             there; `P-461` asks for boxes that show the check off in situ.
           - **S3's end to end is S3's.** The design puts it in S3's tests
             (`support/probe-process.ts`), not on the smoke images.
+        - **S8 review** 2026-10-20: twelve findings, every one fixed; run 3 of the differential
+          passed on the result (`docs/findings/2026-10-20-name-gate-differential.md`).
+          - **A run is judged only against what it ran** (1, 9). Each image's run carries the
+            sha256 of the rows file and of the policy's build it loaded
+            (`dist/src/resolver/system-names.js`), and the verdict fails a run of other rows or
+            another build. It also fails a row played that the rows do not replay in that image,
+            or that is no row. The script removes every image's file left in `MS_DIFF_OUT` by an
+            earlier run before it starts, and hands the verdict only the runs this invocation
+            wrote, so a narrowed run reports every other image "not run".
+          - **The boxes load a build no older than its source** (2, 11).
+            `scripts/lib/names-diff.sh` `ms_names_diff_stale` pairs every `.ts` under the probe's
+            `src`, `test/differential` and `test/support`, and under the simulators', sensors' and
+            shared's `src`, with its `.js`, and the run will not start while one is missing, or
+            is older than the source and than its package's `dist/tsconfig.tsbuildinfo`. The
+            build info is there because `tsc -b` re-emits nothing for a file touched with its
+            text unchanged: it only records that it has seen it, so a `.js` older than its
+            source can be current. The guard runs on the host, with no git and no Node.
+          - **systemd-resolved is seen, not told** (3). An image's `resolved` is true only where
+            every plan that asked the stub had resolved ask the simulator (`resolvedObserved`).
+            The rows file (schema 3) names the images that must go through it
+            (`resolved: ["ubuntu2404"]`), the verdict fails one whose run did not, and
+            `system-names.test` asserts it of the recordings. Each stub plan's recording now keeps
+            what resolved asked upstream (recordings schema 2).
+          - **No IP literal is exported** (4). Node answers `192.0.2.1` without calling
+            `getaddrinfo`, so its 6 rows (families 0 and 4 under each of three nsswitch lines)
+            could never disagree on the wire. The export skips IP literals, and the replay
+            refuses one as a setup problem. The `inet_aton` forms (`10.1`, `0x7f.1`,
+            `1.2.3.256`) stay, as they reach glibc.
+          - **Every wait on tcpdump is bounded** (5). `test/differential/names-capture.ts`
+            listens for the capture's exit from the moment it starts. `stop` fails at once if the
+            capture has already ended, and each wait goes through `within`. In the boxes, the
+            replay runs under `timeout 1500`, the verdict under `timeout 300`, and resolved's
+            setup and probes under `timeout 120` and `timeout 10`.
+          - **glibc's tries are on the wire** (6). Each row's expectation carries `timeout` and
+            `attempts`, and the policy loaded in the box must read them as the export does. A walk
+            with one candidate, no `rotate`, and at most 6 s to wait out every try gets an
+            `all-silent` plan, in which every server is silent and each try asks every server in
+            turn. Two rows are added: `attempts:9` at `timeout:1` (five tries) and two servers at
+            `timeout:1 attempts:2` (server by try). The `timeout:0 attempts:1` row (one try) and
+            the `timeout:3` one get the plan too. The `timeout:31 attempts:9` row is retitled to
+            claim only the policy's reading: no plan waits out a 30 s try.
+          - **Found on the way: a silent plan held the next plan's questions.** The S5 simulator
+            models a forwarder, and an unanswered question holds its slot for 10 s and takes in
+            every identical question meanwhile. In the first attempt at run 3, the plan after
+            `all-silent` found its questions held: `answer` went unanswered and glibc asked
+            every try again (10 questions for 2). Run 2 could not show it, because its one
+            silent plan came last in each row. Every replay server now holds a slot for 1 ms
+            (`NAMESERVER`), and `names-differential.test` asks one question silent and then
+            answered.
+          - **The stub beside another server is not played** (7). Through resolved, the stub's
+            questions come from a capture and every other server's from the simulator. With no
+            clock shared between them, the order across them is not seen, so the replay records
+            such a row as a setup problem. No committed row is one, and
+            `names-differential.test` asserts that.
+          - **A replay that stops leaves no run** (8). Each image's run is written to
+            `<image>.json.partial` and moved into place only once complete. `names-verify` reads
+            each file on its own, names one that is not a run, and judges the rest.
+          - **The verdict runs in a box this invocation built** (10), not always `debian12`.
+          - **Each base is the digest the recordings were made on** (12), read from
+            `system-names-recordings.json` (`ms_names_diff_recorded`). `MS_DIFF_REFRESH=1` moves
+            each image to its tag's current image and prints the old and new digests. An image
+            with no recording takes its tag's current image, and says so.
+          - **Decided 2026-10-20 by Claude, under the user's delegation:**
+            - **For 7, a setup problem, not a merge by time.** The simulator's log carries no
+              timestamps, and a pcap's are the kernel's wall clock. A merge would rest on two
+              clocks agreeing to the millisecond. No row needs the stub beside another server
+              yet, and the suggested fallback is exact.
+            - **For 4, the export skips literals, and the replay refuses one.** Changing
+              `names-lookup` to refuse would have stopped the whole image's run on the first
+              literal. The replay's refusal fails that row alone.
+            - **For 6, the silent plan only where waiting it out takes at most 6 s.** That is
+              4 rows and about 16 s an image. The defaults wait 10 s to 28 s a row, and a
+              30 s `timeout` 150 s, past the lookup's own 120 s bound. The plan has one candidate
+              only, as whether a search walk goes on after a timeout is another question
+              (`__res_context_search` stops on anything but NXDOMAIN, NODATA and SERVFAIL).
+            - **For 12, the digests come from the recordings, not a second table in the
+              script.** A recording names the digest it was made on, so a re-run on the same tree
+              builds on the same images, and a refresh that moves them shows up in the
+              recordings' diff.
+            - **For 1, the digests are held by the verdict, not by `system-names.test`.**
+              Holding the committed recordings to the build's digest would fail the suite on
+              every edit to the policy's source, comments included. The export (the rows) is
+              what the suite holds them to, as before.
+          - **Run 3 passed** (by hand on the VM, gate below 2, ms-server running, not a quiet run
+            and not needing one): 260 rows in each image (251 on Rocky 8), **2,966 plans, every
+            one agreeing**, each image in 107–127 s and the whole run in 830 s. Each base was
+            run 2's digest, pinned. Every image's run named the same rows file and policy build,
+            and Ubuntu 24.04's run saw resolved serve the stub. The silent plans took 1.0 s (one
+            try), 5.0 s (five), 4.0 s (two servers, two tries) and 6.0 s (`timeout:3`, two),
+            each ending `EAI_AGAIN`. The recordings are rewritten: 2,966, schema 2.
+          - **Tests**, each run after the last change:
+            - `names-differential.test.ts`, 30 (14 new): the digests, a row played that is not
+              replayed or is no row, resolved seen, an IP literal and the stub beside another
+              server refused, `timeout` and `attempts` misread, a run file that is not a run
+              (`names-verify` spawned on an empty file and a good one), the capture's bounds, a
+              silent question answered in the next plan, and the script's two helpers run by
+              `bash`, with the recorded digest read off the committed recordings.
+            - `system-names.test.ts`, 440 (4 new): the two new resolv.conf rows, the silent
+              plan's wire and budget, no literal exported, and resolved seen in the recordings.
+            - `name-resolver.test.ts`, 97; `dns-server.test.ts`, 42.
+          - **Mutants: 26, on the toolchain, all killed**, each restored with `shutil.copy` and
+            `os.utime`, checked with `filecmp`, and no marker left in `dist` after the last
+            rebuild:
+            - the verdict: the rows digest, the policy digest, a row played that is not replayed
+              there and one that is no row, resolved required, `resolvedObserved` with no stub
+              plan and with `some` for `every`, the literal and stub refusals, a run file's
+              shape, the upstream kept, `timeout` and `attempts` among the class fields, and
+              `NAMESERVER`'s 1 ms hold;
+            - `names-verify` parsing unguarded;
+            - the capture: the original (exit heard only in `stop`), `stop` not saying the
+              capture ended, and `stop` unbounded;
+            - the export: literals exported, the silent wire server by server rather than try
+              by try, the budget ignored, the second server's share of the timeout, and
+              `attempts` misread;
+            - the script's helpers: a missing `.js`, the build info ignored, a package left out,
+              and the recorded base not compared.
+            - The missing-`.js` mutant first survived, as bash's `-ot` is true when the first file
+              is missing. It was killed once the build info joined the rule.
+            - Not run in the boxes this time: the box-only paths (the replay's wiring of the
+              digests, `resolvedObserved` and `unplayable`) are each one call to a function the
+              toolchain kills mutants of. Run 3 is the box run of the result, and a narrowed run
+              into run 3's out dir (`MS_DIFF_REFRESH=1 MS_DIFF_IMAGES=rocky8
+              MS_DIFF_ONLY=2afc407e45ed9f87`) removed the six other images' files and reported
+              each "not run", and printed that `rockylinux:8` is still the recorded digest.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

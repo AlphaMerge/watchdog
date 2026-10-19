@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { isIPv4, isIPv6 } from 'node:net';
+import { isIP, isIPv4, isIPv6 } from 'node:net';
+import type { DnsServerPolicy } from '@ms/simulators';
 
 /**
  * The differential's judgement (`P-432` S8, the design's D30 and §7.5): what glibc sent for each
@@ -25,7 +27,23 @@ import { isIPv4, isIPv6 } from 'node:net';
  * **Under `rotate`** glibc starts its first send at a server chosen at random
  * (resolv/res_send.c `nameserver_offset`), so a rotating plan's wire is one of `wireByOffset`, and
  * the recording keeps which.
+ *
+ * **A run is tied to what it ran**: each image's run carries the sha256 of the rows file and of the
+ * policy's build (`dist/src/resolver/system-names.js`) it ran, and the verdict fails a run of
+ * other rows or another build, so a run kept from before a change cannot verify after it.
  */
+
+/** systemd-resolved's stub: the one server glibc asks that no simulator can be. */
+export const STUB = '127.0.0.53';
+
+/**
+ * Every simulator server as a row's nameserver: each question answered as the plan says when it
+ * arrives. The S5 simulator models a forwarder by default, whose unanswered question holds a slot
+ * for 10 s and takes in every identical question meanwhile, so the plan after an `all-silent` one
+ * would find its questions still held, and silent. A slot held 1 ms is let go before glibc's next
+ * try or the next plan asks again; a question answered at once never holds one.
+ */
+export const NAMESERVER: DnsServerPolicy = { forwarder: { holdMs: 1 } };
 
 export type QType = 'A' | 'AAAA';
 export type Reply = 'nxdomain' | 'servfail' | 'refused' | 'silent' | 'address';
@@ -48,6 +66,9 @@ export interface Classification {
   readonly types?: readonly string[];
   readonly servers: readonly string[];
   readonly rotate: boolean;
+  /** Each try's wait, in seconds, and the tries of each server (`options timeout:` and `attempts:`). */
+  readonly timeout: number;
+  readonly attempts: number;
 }
 
 export interface Expectation extends Classification {
@@ -77,6 +98,8 @@ export interface Row {
 export interface RowsFile {
   readonly schema: number;
   readonly images: Readonly<Record<string, string>>;
+  /** The images whose stub rows must go through systemd-resolved (`--via-resolved`). */
+  readonly resolved: readonly string[];
   readonly texts: Readonly<Record<string, string>>;
   readonly rows: readonly Row[];
 }
@@ -120,7 +143,13 @@ export interface ImageRun {
   readonly node: string;
   readonly base: string;
   readonly digest: string;
-  /** Whether systemd-resolved served the stub (127.0.0.53) for this run. */
+  /** The sha256 of the rows file the run replayed, and of the policy's build it loaded. */
+  readonly rowsDigest: string;
+  readonly policyDigest: string;
+  /**
+   * Whether systemd-resolved was seen to serve the stub (127.0.0.53): every plan that asked the stub
+   * had resolved ask its upstream (`resolvedObserved`), not only that the run was told to use it.
+   */
   readonly resolved: boolean;
   readonly rows: readonly RowRun[];
 }
@@ -134,10 +163,12 @@ export interface Recording {
   readonly wire: readonly Wire[];
   readonly outcome: string;
   readonly ms: number;
+  /** Through systemd-resolved: what resolved asked the simulator, kept for the record. */
+  readonly upstream?: readonly Wire[];
 }
 
 export interface RecordingsFile {
-  readonly schema: 1;
+  readonly schema: 2;
   readonly images: Readonly<
     Record<
       string,
@@ -147,6 +178,8 @@ export interface RecordingsFile {
         readonly glibc: string;
         readonly node: string;
         readonly resolved: boolean;
+        readonly rowsDigest: string;
+        readonly policyDigest: string;
       }
     >
   >;
@@ -178,6 +211,8 @@ const CLASS_FIELDS = [
   'types',
   'servers',
   'rotate',
+  'timeout',
+  'attempts',
 ] as const;
 
 /** Why the policy in the image read the question otherwise than the row says, or undefined. */
@@ -228,12 +263,26 @@ export interface Verified {
   readonly counts: Record<string, { rows: number; plans: number }>;
 }
 
+/** What a verdict holds every run to: the sha256 of the rows file and of the policy's build now. */
+export interface Current {
+  readonly rowsDigest: string;
+  readonly policyDigest: string;
+}
+
+/** The sha256 of a file's bytes, in hex: how a run names the rows and the build it ran. */
+export function digestOf(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
 /**
  * Every image's run against the rows: a recording for each plan of each row in each image that
  * replays it, or a problem. **A row or plan not played, an image not run, or an image whose glibc
- * is not the one the rows state, is a problem**: an unverified row fails the run (D30).
+ * is not the one the rows state, is a problem**: an unverified row fails the run (D30). So is a run
+ * of other rows or of another build of the policy than `current`, a row played that the rows do not
+ * replay in that image, and an image the rows say goes through systemd-resolved where the run did
+ * not see it serve the stub.
  */
-export function verify(rows: RowsFile, runs: readonly ImageRun[]): Verified {
+export function verify(rows: RowsFile, runs: readonly ImageRun[], current: Current): Verified {
   const problems: string[] = [];
   const recordings: Recording[] = [];
   const counts: Record<string, { rows: number; plans: number }> = {};
@@ -252,6 +301,26 @@ export function verify(rows: RowsFile, runs: readonly ImageRun[]): Verified {
     if (found.length > 1) problems.push(`${image}: run ${String(found.length)} times`);
     if (run.glibc !== glibc) {
       problems.push(`${image}: runs glibc ${String(run.glibc)}, the rows state ${glibc}`);
+    }
+    if (run.rowsDigest !== current.rowsDigest) {
+      problems.push(
+        `${image}: replayed rows ${run.rowsDigest}, the rows file is ${current.rowsDigest}`,
+      );
+    }
+    if (run.policyDigest !== current.policyDigest) {
+      problems.push(
+        `${image}: loaded the policy build ${run.policyDigest}, the build is ${current.policyDigest}`,
+      );
+    }
+    if (rows.resolved.includes(image) && !run.resolved) {
+      problems.push(`${image}: systemd-resolved was not seen to serve the stub rows`);
+    }
+    for (const played of run.rows) {
+      const row = rows.rows.find((each) => each.id === played.id);
+      if (row === undefined) problems.push(`${image}, row ${played.id}: played, and is no row`);
+      else if (expectationIn(row, image) === null) {
+        problems.push(`${image}, row ${row.id} (${row.title}): played, and not replayed there`);
+      }
     }
     const count = { rows: 0, plans: 0 };
     counts[image] = count;
@@ -289,6 +358,7 @@ export function verify(rows: RowsFile, runs: readonly ImageRun[]): Verified {
           wire: ran.wire,
           outcome: ran.outcome,
           ms: Math.round(ran.ms),
+          ...(ran.upstream === undefined ? {} : { upstream: ran.upstream }),
         });
       }
       for (const ran of played.plans) {
@@ -311,9 +381,60 @@ export function recordingsFile(runs: readonly ImageRun[], verified: Verified): R
       glibc: run.glibc ?? 'none',
       node: run.node,
       resolved: run.resolved,
+      rowsDigest: run.rowsDigest,
+      policyDigest: run.policyDigest,
     };
   }
-  return { schema: 1, images, recordings: verified.recordings };
+  return { schema: 2, images, recordings: verified.recordings };
+}
+
+/** One image's run as a file held it: the run, or why it is none (an empty file is a replay that stopped). */
+export function parseRun(
+  path: string,
+  text: string,
+): { readonly run: ImageRun } | { readonly problem: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error: unknown) {
+    return { problem: `${path}: not an image's run (${String(error)})` };
+  }
+  const run = parsed as Partial<ImageRun> | null;
+  if (run === null || typeof run.image !== 'string' || !Array.isArray(run.rows)) {
+    return { problem: `${path}: not an image's run (no image or rows)` };
+  }
+  return { run: run as ImageRun };
+}
+
+/**
+ * Whether systemd-resolved served the stub in a run: some plan asked the stub, and every plan that
+ * did had resolved ask its upstream, the simulator. A stub that a plain simulator stood in for asks
+ * no upstream, so a box that did not run resolved cannot pass for one that did.
+ */
+export function resolvedObserved(rows: readonly RowRun[]): boolean {
+  const asked = rows.flatMap((row) =>
+    row.plans.filter((plan) => plan.wire.some(([server]) => server === STUB)),
+  );
+  return asked.length > 0 && asked.every((plan) => (plan.upstream ?? []).length > 0);
+}
+
+/**
+ * Why a row cannot be played as its world says, before any plan, or undefined:
+ * - **an IP literal**: Node answers it without calling `getaddrinfo`, so glibc is never asked;
+ * - **the stub beside another server**, through systemd-resolved: the stub's questions come from a
+ *   capture and the others' from the simulator, with no one clock between them, so the order
+ *   across them, which the wire is held to, is not seen.
+ */
+export function unplayable(
+  name: string,
+  named: readonly string[],
+  viaResolved: boolean,
+): string | undefined {
+  if (isIP(name) !== 0) return 'an IP literal: Node answers it without asking getaddrinfo';
+  if (viaResolved && named.includes(STUB) && named.length > 1) {
+    return `the stub with another server (${named.join(', ')}): the order across them is not seen`;
+  }
+  return undefined;
 }
 
 // --- setting a world up --------------------------------------------------------------------------

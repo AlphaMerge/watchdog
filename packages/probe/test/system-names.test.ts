@@ -56,9 +56,11 @@ import {
  * (S8) to replay against real glibc: `test/fixtures/system-names-rows.json`, checked here to be the
  * tables' rows as the policy reads them now, and written afresh with `MS_WRITE_S8_ROWS=1` (then
  * `prettier --write` it). A row the check is off for, or cannot vouch for, claims nothing about the
- * wire and is not exported. Its schema (2):
+ * wire and is not exported, and neither is an IP literal, which Node answers without calling
+ * `getaddrinfo`. Its schema (3):
  *
  * - `images`: the images S8 replays in, by name, with their upstream glibc.
+ * - `resolved`: the images whose stub rows go through systemd-resolved, which the run must see.
  * - `texts`: each file's contents, once, by id (`t` and the first 12 hex digits of its sha256).
  * - `rows`, each:
  *   - `id`: the first 16 hex digits of the sha256 of the row's `world` and `question` as JSON with
@@ -71,7 +73,7 @@ import {
  *   - `question`: `name` and `family` (0, 4 or 6), as `getaddrinfo` is asked with hints 0;
  *   - `expect`, at `world.glibc`: `class` (`local` or `walk`), `via` for a local name, and for a
  *     walked one the `candidates` in order and the `types` asked of each, A first; the `servers`
- *     in order, `rotate`, and the `plans`;
+ *     in order, `rotate`, `timeout` and `attempts`, and the `plans`;
  *   - `byImage`: the expectation in an image where it is not `expect`, or null where the check is
  *     off in that image or does not vouch for the name there, which then does not replay the row.
  * - A plan is what the simulator answers and what glibc should send. `answers` gives each server's
@@ -85,15 +87,19 @@ import {
  *   goes on after HOST_NOT_FOUND), and plans in which every server but the last fails, by SERVFAIL,
  *   REFUSED or silence, and the last answers, each server then asked in turn for the first
  *   candidate (resolv/res_send.c `send_dg` goes to the next server on SERVFAIL, NOTIMP or REFUSED,
- *   and on a timeout); with one server, a plan in which it answers.
+ *   and on a timeout); with one server, a plan in which it answers. Where a walk has one candidate,
+ *   no rotation, and waiting every try out takes at most 6 s, a plan in which every server is
+ *   silent: each try then asks every server in turn, `attempts` times (`all-silent`).
  * - S8 sets up each row's world in each image, plays each plan with the S5 simulator, records the
  *   questions glibc sends, and writes what it verified to the recordings file. A row whose
  *   recording disagrees is fixed in the policy, or turns the check off, before the cut.
  *
- * **Recordings** (`test/fixtures/system-names-recordings.json`, schema 1) are S8's, never this
- * test's: each `{ id, image, plan, offset?, wire, outcome, ms }` is the wire glibc sent for a row's
- * plan in an image, how `getaddrinfo` ended and how long it took, and `images` says what each image
- * was (its base and digest, glibc, Node, and whether systemd-resolved served the stub). They are
+ * **Recordings** (`test/fixtures/system-names-recordings.json`, schema 2) are S8's, never this
+ * test's: each `{ id, image, plan, offset?, wire, outcome, ms, upstream? }` is the wire glibc sent
+ * for a row's plan in an image, how `getaddrinfo` ended and how long it took, and through
+ * systemd-resolved what resolved asked upstream; `images` says what each image was (its base and
+ * digest, glibc, Node, whether systemd-resolved was seen to serve the stub, and the sha256 of the
+ * rows file and of the policy's build the run replayed). They are
  * written by `scripts/smoke/name-gate-differential.sh`, only when every row of every image
  * verified. For every one, this test asserts that the row is still exported under that id, is still
  * replayed in that image, and still expects that wire, so a regeneration cannot paper over a
@@ -441,7 +447,8 @@ const RESOLV_ROWS: readonly ResolvRow[] = [
     options: { ndots: 15 },
   },
   {
-    name: 'timeout and attempts capped at 30 and 5 (RES_MAXRETRANS, RES_MAXRETRY)',
+    // The wire cannot show these: no plan here waits out a 30 s try. The attempts:9 row below does.
+    name: 'timeout:31 and attempts:9, read as 30 and 5 (RES_MAXRETRANS, RES_MAXRETRY)',
     resolv: 'nameserver 10.0.0.53\noptions timeout:31 attempts:9\n',
     servers: ['10.0.0.53'],
     search: [],
@@ -449,12 +456,28 @@ const RESOLV_ROWS: readonly ResolvRow[] = [
     options: { timeout: 30, attempts: 5 },
   },
   {
-    name: 'timeout:0, held as 1 since send_dg floors each try at 1 s, and attempts:1',
+    name: 'timeout:0 and attempts:1, read as 1 and 1: a silent server is asked once (send_dg floors each try at 1 s)',
     resolv: 'nameserver 10.0.0.53\noptions timeout:0 attempts:1\n',
     servers: ['10.0.0.53'],
     search: [],
     searchFrom: 'none',
     options: { timeout: 1, attempts: 1 },
+  },
+  {
+    name: 'attempts:9 at timeout:1, read as 5 (RES_MAXRETRY): a silent server is asked five times',
+    resolv: 'nameserver 10.0.0.53\noptions timeout:1 attempts:9\n',
+    servers: ['10.0.0.53'],
+    search: [],
+    searchFrom: 'none',
+    options: { timeout: 1, attempts: 5 },
+  },
+  {
+    name: 'two silent servers at timeout:1 attempts:2: each try asks every server in turn',
+    resolv: 'nameserver 10.0.0.1\nnameserver 10.0.0.2\noptions timeout:1 attempts:2\n',
+    servers: ['10.0.0.1', '10.0.0.2'],
+    search: [],
+    searchFrom: 'none',
+    options: { timeout: 1, attempts: 2 },
   },
   {
     name: 'rotate, edns0 and trust-ad, with three servers',
@@ -2930,6 +2953,25 @@ const IMAGES: Readonly<Record<string, string>> = {
   debian13: '2.41',
 };
 
+/** The images whose stub rows go through systemd-resolved, as an Ubuntu host's do. */
+const RESOLVED_IMAGES: readonly string[] = ['ubuntu2404'];
+
+/** A plan in which every server is silent waits out every try, so it is played only where that is short. */
+const SILENT_BUDGET_S = 6;
+
+/**
+ * How long glibc waits on a question no server answers: each try of each server, the first for
+ * `timeout` and server k for `(timeout << k) / n`, at least 1 s (resolv/res_send.c `send_dg`).
+ */
+function silentSeconds(e: Pick<S8Expect, 'servers' | 'timeout' | 'attempts'>): number {
+  const n = e.servers.length;
+  let each = 0;
+  for (let k = 0; k < n; k += 1) {
+    each += Math.max(1, k === 0 ? e.timeout : Math.floor((e.timeout << k) / n));
+  }
+  return each * e.attempts;
+}
+
 type Reply = 'nxdomain' | 'servfail' | 'refused' | 'silent' | 'address';
 type Wire = readonly [string, string, QType, number];
 
@@ -2948,6 +2990,8 @@ interface S8Expect {
   readonly types?: readonly QType[];
   readonly servers: readonly string[];
   readonly rotate: boolean;
+  readonly timeout: number;
+  readonly attempts: number;
   readonly plans: readonly S8Plan[];
 }
 
@@ -3051,6 +3095,21 @@ function plansOf(e: Omit<S8Expect, 'plans'>): S8Plan[] {
   const plans: S8Plan[] = [
     { plan: 'nxdomain', answers: answersOf(servers, types, () => 'nxdomain'), ...wires(nxdomain) },
   ];
+  // Every server silent: each try asks every server in turn, so the wire shows `attempts` (capped
+  // at RES_MAXRETRY) and the server-by-try order. One candidate only, as a search walk's going on
+  // after a timeout is another question, and only where waiting every try out is short.
+  if (!rotating && candidates.length === 1 && silentSeconds(e) <= SILENT_BUDGET_S) {
+    const tries = Array.from({ length: e.attempts }, (_, t) => t + 1);
+    plans.push({
+      plan: 'all-silent',
+      answers: answersOf(servers, types, () => 'silent'),
+      wire: tries.flatMap((t) =>
+        servers.flatMap((server) =>
+          types.map((type): Wire => [server, candidates[0] ?? '', type, t]),
+        ),
+      ),
+    });
+  }
   if (n === 1) {
     plans.push({
       plan: 'answer',
@@ -3085,6 +3144,8 @@ async function expectationOf(
     ...(c.kind === 'walk' ? { candidates: c.candidates, types: c.types } : {}),
     servers: conf.servers,
     rotate: conf.options.rotate,
+    timeout: conf.options.timeout,
+    attempts: conf.options.attempts,
   };
   return { ...e, plans: plansOf(e) };
 }
@@ -3099,6 +3160,7 @@ const SYSTEM_PATH: Readonly<Record<'hosts' | 'resolv' | 'nsswitch' | 'gai', stri
 interface S8Export {
   readonly schema: number;
   readonly images: Readonly<Record<string, string>>;
+  readonly resolved: readonly string[];
   readonly texts: Readonly<Record<string, string>>;
   readonly rows: readonly S8Row[];
 }
@@ -3115,6 +3177,10 @@ async function buildRows(): Promise<S8Export> {
   const texts = new Map<string, string>();
   const rows: S8Row[] = [];
   for (const source of S8_SOURCES) {
+    // Node answers an IP literal itself, without calling getaddrinfo, so glibc would never be
+    // asked; and the resolver answers one before the policy is consulted. The inet_aton forms
+    // (`10.1`, `0x7f.1`, `1.2.3.256`) are not literals to Node, and do reach glibc.
+    if (isIP(source.name) !== 0) continue;
     const f = source.fixture;
     const expect = await expectationOf(f, source.name, source.family);
     if (expect === null || (expect.class !== 'local' && expect.class !== 'walk')) continue;
@@ -3164,8 +3230,9 @@ async function buildRows(): Promise<S8Export> {
     });
   }
   return {
-    schema: 2,
+    schema: 3,
     images: IMAGES,
+    resolved: RESOLVED_IMAGES,
     texts: Object.fromEntries([...texts].sort(([a], [b]) => (a < b ? -1 : 1))),
     rows,
   };
@@ -3234,6 +3301,29 @@ describe('S8: the rows the check is on for, exported for the differential', () =
     assert.ok(rows.length > 150, String(rows.length));
     assert.equal(new Set(rows.map((row) => row.id)).size, rows.length, 'ids are unique');
     assert.ok(rows.every((row) => row.expect.class === 'walk' || row.expect.class === 'local'));
+    // Node answers an IP literal without getaddrinfo: no such row could fail on the wire.
+    assert.deepEqual(
+      rows.filter((row) => isIP(row.question.name) !== 0).map((row) => row.title),
+      [],
+    );
+    assert.ok(
+      rows.some((row) => row.question.name === '10.1'),
+      'the inet_aton forms stay',
+    );
+    // Every server silent, where waiting it out is short (at most 6 s): the timeout:0, attempts:9,
+    // two-server and timeout:3 rows, so attempts and the server-by-try order are on the wire.
+    const silentRows = rows.filter((row) =>
+      row.expect.plans.some((plan) => plan.plan === 'all-silent'),
+    );
+    assert.deepEqual(
+      silentRows.map((row) => [row.expect.servers.length, row.expect.attempts]).sort(),
+      [
+        [1, 1],
+        [1, 2],
+        [1, 5],
+        [2, 2],
+      ],
+    );
     const walks = rows.filter((row) => row.expect.class === 'walk');
     for (const row of walks) {
       const names = row.expect.plans.map((plan) => plan.plan);
@@ -3265,6 +3355,8 @@ describe('S8: the rows the check is on for, exported for the differential', () =
       types: ['A', 'AAAA'],
       servers: ['10.0.0.1', '10.0.0.2', '10.0.0.3'],
       rotate: false,
+      timeout: 5,
+      attempts: 2,
     });
     assert.deepEqual(
       plans.map((plan) => plan.plan),
@@ -3300,6 +3392,8 @@ describe('S8: the rows the check is on for, exported for the differential', () =
       types: ['A'],
       servers: ['10.0.0.1', '10.0.0.2'],
       rotate: true,
+      timeout: 5,
+      attempts: 2,
     });
     assert.deepEqual(rotated[0]?.wireByOffset, [
       [
@@ -3318,10 +3412,59 @@ describe('S8: the rows the check is on for, exported for the differential', () =
       ],
       [['10.0.0.2', 'sw1.corp', 'A', 1]],
     ]);
-    const local = plansOf({ class: 'local', via: 'hosts', servers: ['10.0.0.1'], rotate: false });
+    const local = plansOf({
+      class: 'local',
+      via: 'hosts',
+      servers: ['10.0.0.1'],
+      rotate: false,
+      timeout: 5,
+      attempts: 2,
+    });
     assert.deepEqual(local, [
       { plan: 'nxdomain', answers: { '10.0.0.1': { A: 'nxdomain', AAAA: 'nxdomain' } }, wire: [] },
     ]);
+  });
+
+  it('a plan with every server silent: each try asks every server in turn, only where it is short', () => {
+    const two = {
+      class: 'walk',
+      candidates: ['sw1'],
+      types: ['A', 'AAAA'],
+      servers: ['10.0.0.1', '10.0.0.2'],
+      rotate: false,
+      timeout: 1,
+      attempts: 2,
+    } as const;
+    const silentOf = (e: Omit<S8Expect, 'plans'>): S8Plan | undefined =>
+      plansOf(e).find((plan) => plan.plan === 'all-silent');
+    assert.deepEqual(silentOf(two), {
+      plan: 'all-silent',
+      answers: {
+        '10.0.0.1': { A: 'silent', AAAA: 'silent' },
+        '10.0.0.2': { A: 'silent', AAAA: 'silent' },
+      },
+      wire: [
+        ['10.0.0.1', 'sw1', 'A', 1],
+        ['10.0.0.1', 'sw1', 'AAAA', 1],
+        ['10.0.0.2', 'sw1', 'A', 1],
+        ['10.0.0.2', 'sw1', 'AAAA', 1],
+        ['10.0.0.1', 'sw1', 'A', 2],
+        ['10.0.0.1', 'sw1', 'AAAA', 2],
+        ['10.0.0.2', 'sw1', 'A', 2],
+        ['10.0.0.2', 'sw1', 'AAAA', 2],
+      ],
+    });
+    // Each try: 1 s at the first server, (1 << 1) / 2 at the second; the defaults wait 5 s and more.
+    assert.equal(silentSeconds(two), 4);
+    assert.equal(silentSeconds({ servers: ['a', 'b', 'c'], timeout: 5, attempts: 2 }), 28);
+    assert.equal(silentOf({ ...two, timeout: 5 }), undefined, 'too long to wait out');
+    assert.equal(silentOf({ ...two, candidates: ['sw1.corp', 'sw1'] }), undefined);
+    assert.equal(silentOf({ ...two, rotate: true }), undefined);
+    const five = silentOf({ ...two, servers: ['10.0.0.53'], types: ['A'], attempts: 5 });
+    assert.deepEqual(
+      five?.wire,
+      [1, 2, 3, 4, 5].map((t) => ['10.0.0.53', 'sw1', 'A', t]),
+    );
   });
 
   it('every recording S8 has made still holds', async () => {
@@ -3331,12 +3474,26 @@ describe('S8: the rows the check is on for, exported for the differential', () =
       readonly schema?: unknown;
       readonly recordings?: unknown;
     };
-    assert.equal(parsed.schema, 1);
+    assert.equal(parsed.schema, 2);
     assert.ok(Array.isArray(parsed.recordings));
     const { rows } = await exportRows();
     for (const recording of parsed.recordings as Recording[]) {
       assert.equal(recordingProblem(rows, recording), undefined);
     }
+  });
+
+  it('the images whose stub rows go through systemd-resolved were seen to', async () => {
+    const parsed = JSON.parse(
+      readFileSync(fixturePath('system-names-recordings.json'), 'utf8'),
+    ) as { readonly images: Readonly<Record<string, { readonly resolved?: unknown }>> };
+    const exported = await exportRows();
+    assert.deepEqual(exported.resolved, ['ubuntu2404']);
+    for (const image of exported.resolved) {
+      assert.equal(parsed.images[image]?.resolved, true, image);
+    }
+    // The stub rows are exported, and so there is a stub for resolved to be seen serving.
+    const stub = exported.rows.filter((row) => row.expect.servers.includes('127.0.0.53'));
+    assert.ok(stub.length >= 2, String(stub.length));
   });
 
   it('every plan of every row is recorded in every image that replays it (D30)', async () => {
