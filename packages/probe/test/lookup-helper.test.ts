@@ -1528,7 +1528,7 @@ describe('the lookup helper: isolation and poison', () => {
     }
   });
 
-  it('U21: a suspect is charged only while isolating, and not once isolation has ended', async () => {
+  it('U21: a suspect is charged only if asked while isolating, and stays one until it settles', async () => {
     const timers = new Timers({ clock: 'real', timeouts: 'fake', ticks: 'fake' });
     const made = make({ timers });
     try {
@@ -1547,8 +1547,8 @@ describe('the lookup helper: isolation and poison', () => {
       assert.equal(early.requeue, true);
       assert.equal(made.helper.stats().poisoned, 0);
       await nextChild(made, 1);
-      // Isolating; a suspect left running when the resolver ends isolation is a lookup like any
-      // other: the next crash is charged to no one, and starts isolation again.
+      // Isolating; a suspect left running when the resolver ends isolation stays one until it
+      // settles (decided 2026-10-19): the next crash is charged to it, whoever was beside it.
       const requeued = settled(made.helper.ask({ host: 'hang.test', family: 6, max: 64 }));
       await within(
         WAIT,
@@ -1569,11 +1569,10 @@ describe('the lookup helper: isolation and poison', () => {
         settled(made.helper.ask({ host: 'crash.test', family: 4, max: 64 })),
       );
       const left = lostError((await within(WAIT, 'the suspect left over', leftOver)).error);
-      assert.equal(left.charged, false);
-      assert.equal(left.requeue, true);
-      assert.equal(made.helper.stats().poisoned, 0);
-      assert.equal(made.helper.isolating(), true, 'the third crash in ten minutes isolates again');
-      assert.equal(left.suspect, true);
+      assert.equal(left.charged, true);
+      assert.equal(left.requeue, false);
+      assert.equal(made.helper.stats().poisoned, 1);
+      assert.ok(made.helper.poison('hang.test', 4) !== undefined);
     } finally {
       await stop(made);
     }
@@ -2491,10 +2490,10 @@ describe('the lookup helper: its windows (scripted process, the test’s clock)'
       assert.equal(said?.isolating, false);
       assert.equal(said.state, 'up');
       assert.equal(said.previous, 'up');
-      // A suspect no more: a crash now is charged to no one.
+      // Still a suspect until it settles (D27, 1(i)): a crash on its slow reply is charged to it.
       child.die();
       child.closeChannel();
-      assert.equal(lostError((await within(WAIT, 'the suspect', suspect)).error).charged, false);
+      assert.equal(lostError((await within(WAIT, 'the suspect', suspect)).error).charged, true);
     } finally {
       await stop(made);
     }
@@ -2519,6 +2518,101 @@ describe('the lookup helper: its windows (scripted process, the test’s clock)'
       assert.equal(lapses().includes(first), false, 'the first lapse cleared, a new one armed');
       made.helper.endIsolation();
       assert.equal(lapses().length, 0, 'and cleared when isolation ends');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('U20: a lapse whose callback still waits for the polls when a later crash arms another ends nothing', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      const child = await fakeUp(made);
+      assert.equal(made.helper.isolating(), true);
+      made.timers.fire(HELPER_ISOLATION_MAX_MS);
+      // Before the polls: a crash during isolation arms its lapse again.
+      child.die();
+      child.closeChannel();
+      assert.equal(made.timers.has(HELPER_ISOLATION_MAX_MS), true, 'a fresh lapse');
+      await polls();
+      assert.equal(made.helper.isolating(), true, 'the old one ended nothing');
+      assert.equal(made.timers.has(HELPER_ISOLATION_MAX_MS), true, 'nor cleared the fresh one');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('U20: a suspect held keeps isolation on until its hold has ended and the child could say it is stuck', async () => {
+    const made = fakeMade({ limits: { stuckMs: 1_000 } });
+    void made.helper.start();
+    try {
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      const second = await crashAsking(made);
+      assert.equal(made.helper.isolating(), true);
+      // Asked again within the lapse: it stays where it was.
+      made.helper.suspectHeld(5_000);
+      assert.equal(made.timers.has(HELPER_ISOLATION_MAX_MS), true);
+      assert.equal(made.timers.has(6_000), false);
+      // Past it: the lapse waits for the hold and the child's bound for stuck.
+      made.helper.suspectHeld(10_000);
+      assert.equal(made.timers.has(11_000), true);
+      assert.equal(made.timers.has(HELPER_ISOLATION_MAX_MS), false);
+      // A crash meanwhile, 8 s before the hold's end: the lapse stays the hold's.
+      made.timers.fire(second.delayMs ?? -1);
+      const third = await crashAsking(made, 'dev-2.example.test');
+      assert.equal(made.helper.isolating(), true);
+      assert.equal(made.timers.has(11_000), true);
+      assert.equal(made.timers.has(HELPER_ISOLATION_MAX_MS), false);
+      made.timers.fire(11_000);
+      await polls();
+      assert.equal(made.helper.isolating(), false);
+      // Not isolating: a hold arms nothing.
+      made.helper.suspectHeld(50_000);
+      assert.equal(made.timers.has(51_000), false);
+      // The next isolation's lapse is its own, 8 s from its crash.
+      made.timers.fire(third.delayMs ?? -1);
+      await crashAsking(made, 'dev-3.example.test');
+      assert.equal(made.helper.isolating(), true);
+      assert.equal(made.timers.has(HELPER_ISOLATION_MAX_MS), true);
+      assert.equal(made.timers.has(11_000), false);
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a poison name’s re-ask beside another lookup: a crash is charged to no one and both are avoided; alone, it is charged (D27)', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      await fakeUp(made);
+      const host = 'bad.example.test';
+      const first = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      let change = await fakeCrash(made);
+      assert.equal(lostError((await first).error).charged, true);
+      made.helper.endIsolation();
+      const mark = made.helper.poison(host, 4);
+      assert.ok(mark !== undefined);
+      const retryMs = mark.retryMs;
+      made.timers.fire(change.delayMs ?? -1);
+      await fakeUp(made);
+      const again = settled(made.helper.ask({ host, family: 4, max: 64 }));
+      const beside = settled(made.helper.ask({ host: 'dev-5.example.test', family: 4, max: 64 }));
+      change = await fakeCrash(made);
+      assert.equal(lostError((await again).error).charged, false);
+      assert.equal(lostError((await beside).error).charged, false);
+      assert.equal(mark.retryMs, retryMs, 'its mark not doubled');
+      assert.equal(made.helper.stats().lastLoss?.chargedTo, undefined);
+      assert.equal(made.helper.avoidsSystem('dev-5.example.test', 4), true, 'kept off the lanes');
+      made.timers.fire(change.delayMs ?? -1);
+      await fakeUp(made);
+      const alone = settled(made.helper.ask({ host, family: 4, max: 64 }));
+      await fakeCrash(made);
+      assert.equal(lostError((await alone).error).charged, true);
+      assert.equal(made.helper.stats().lastLoss?.charged, 'again');
     } finally {
       await stop(made);
     }
@@ -2721,7 +2815,7 @@ describe('the lookup helper: names kept off the probe’s lanes (scripted proces
       made.timers.clock += 1_000;
       await fakeUp(made);
       const both = settled(made.helper.ask({ host: 'dev-0.example.test', family: 0, max: 64 }));
-      await fakeCrash(made);
+      const crashed = await fakeCrash(made);
       await both;
       // Its suspects aside: what stays is each name's crash.
       made.helper.endIsolation();
@@ -2730,12 +2824,21 @@ describe('the lookup helper: names kept off the probe’s lanes (scripted proces
       assert.equal(made.helper.avoidsSystem('dev-1.example.test', 6), false);
       assert.equal(made.helper.avoidsSystem('dev-0.example.test', 6), true, 'asked with 0');
       assert.equal(made.helper.avoidsSystem('dev-2.example.test', 4), false);
-      // dev-1's crash was at 0 on the test's clock, dev-0's at 1 s.
-      made.timers.clock = 600_000 - 1;
+      // dev-1 crashed at 0 on the test's clock, and the helper was next up at 1 s: its ten minutes
+      // run from then. dev-0 crashed at 1 s, and the helper has not been up since.
+      made.timers.clock = 601_000 - 1;
       assert.equal(made.helper.avoidsSystem('dev-1.example.test', 4), true);
-      made.timers.clock = 600_000;
-      assert.equal(made.helper.avoidsSystem('dev-1.example.test', 4), false, 'ten minutes on');
-      assert.equal(made.helper.avoidsSystem('dev-0.example.test', 6), true, 'its crash came later');
+      made.timers.clock = 601_000;
+      assert.equal(made.helper.avoidsSystem('dev-1.example.test', 4), false, 'ten minutes up');
+      made.timers.clock = 5_000_000;
+      assert.equal(made.helper.avoidsSystem('dev-0.example.test', 6), true, 'not up since');
+      made.timers.fire(crashed.delayMs ?? -1);
+      await fakeUp(made);
+      assert.equal(made.helper.avoidsSystem('dev-1.example.test', 4), false, 'its ten minutes ran');
+      made.timers.clock = 5_600_000 - 1;
+      assert.equal(made.helper.avoidsSystem('dev-0.example.test', 6), true);
+      made.timers.clock = 5_600_000;
+      assert.equal(made.helper.avoidsSystem('dev-0.example.test', 6), false, 'ten minutes up');
     } finally {
       await stop(made);
     }
@@ -2760,6 +2863,34 @@ describe('the lookup helper: names kept off the probe’s lanes (scripted proces
       assert.equal(made.helper.avoidsSystem('slow.example.test', 4), true);
       assert.equal(made.helper.avoidsSystem('dev-3.example.test', 6), true);
       assert.equal(made.helper.avoidsSystem('dev-9.example.test', 4), false);
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('U30: a name crashed is avoided through a rest, while the next child starts, and ten minutes after it is up', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      made.timers.fire((await crashes(made, 4)).delayMs ?? -1);
+      await fakeUp(made);
+      const stuck = stuckAsk(made, 'slow.example.test');
+      const rest = await fakeCrash(made);
+      assert.equal(rest.state, 'resting');
+      await stuck;
+      // A rest as long as the ten minutes: they have not run while no child was up.
+      made.timers.clock += rest.delayMs ?? -1;
+      assert.equal(made.helper.avoidsSystem('slow.example.test', 4), true, 'the rest over');
+      made.timers.fire(rest.delayMs ?? -1);
+      assert.equal(made.helper.state, 'starting');
+      made.timers.clock += 30_000;
+      assert.equal(made.helper.avoidsSystem('slow.example.test', 4), true, 'not up yet');
+      await fakeUp(made);
+      const upAt = made.timers.clock;
+      made.timers.clock = upAt + 600_000 - 1;
+      assert.equal(made.helper.avoidsSystem('slow.example.test', 4), true);
+      made.timers.clock = upAt + 600_000;
+      assert.equal(made.helper.avoidsSystem('slow.example.test', 4), false, 'ten minutes up');
     } finally {
       await stop(made);
     }

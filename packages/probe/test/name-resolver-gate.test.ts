@@ -14,7 +14,12 @@ import {
 } from '@ms/sensors';
 import { FORWARD_HOLD_MS, ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
-import { HELPER_LOST, HelperLookupError } from '../src/resolver/lookup-helper.js';
+import {
+  HELPER_LOST,
+  HelperLookupError,
+  LookupHelper,
+  type HelperLimits,
+} from '../src/resolver/lookup-helper.js';
 import {
   ANSWER_MS,
   HELPER_LOST_CODE,
@@ -26,7 +31,8 @@ import {
 } from '../src/resolver/name-resolver.js';
 import { GlibcNamePolicy, SYSTEM_FILES } from '../src/resolver/system-names.js';
 import { FakeHelper, StubPolicy } from './support/fake-helper.js';
-import { pollWithin } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
+import { zoneFork, type ZoneAnswer } from './support/zone-helper.js';
 
 /**
  * The resolver in gate mode with the check off (`P-432` S3): what runs where in each of the
@@ -815,6 +821,7 @@ describe('isolation and poison (P-432 S3, D27)', () => {
       helper.lose('exit', 'rejoining', { suspects: true });
       const held = await slow;
       assert.ok(!held.ok && codeOf(held.error) === RESOLVER_HELD);
+      assert.deepEqual(helper.held, [5_005], 'the helper told: its hold, and a tick to ask it in');
       helper.move('up');
       const [one] = helper.inFlight();
       assert.equal(helper.inFlight().length, 1, 'one suspect alone');
@@ -862,6 +869,24 @@ describe('isolation and poison (P-432 S3, D27)', () => {
     } finally {
       resolver.stop();
     }
+  });
+
+  it('D27: tells the helper how long a suspect is held, and nothing of a name held outside isolation', async () => {
+    const { helper, ask, clock } = make({ tickMs: 5 });
+    const first = outcome(ask('slow.zone-a.test', 4, { waitMs: 60_000 }));
+    helper.last('slow.zone-a.test').stuck();
+    helper.lose('exit', 'rejoining');
+    assert.ok(!(await first).ok);
+    assert.deepEqual(helper.held, [], 'not a suspect');
+    helper.move('up');
+    clock.now += 30_000;
+    const second = outcome(ask('slow.zone-a.test', 4, { waitMs: 60_000 }));
+    helper.last('slow.zone-a.test').stuck();
+    helper.isolatingNow = true;
+    helper.lose('exit', 'rejoining', { suspects: true });
+    assert.ok(!(await second).ok);
+    // Held again, twice as long: 10 s, and the gate's tick to ask it in.
+    assert.deepEqual(helper.held, [10_005]);
   });
 
   it('D27: a suspect let go when the child was judged quiet holds back no other once it is heard again', async () => {
@@ -1079,6 +1104,178 @@ describe('isolation and poison (P-432 S3, D27)', () => {
       assert.ok((await beside).ok);
     } finally {
       resolver.stop();
+    }
+  });
+});
+
+/** The child's bound for stuck in the tests with the real helper: real time, kept short. */
+const REAL_STUCK = 150;
+
+/**
+ * The resolver with the real lookup helper, on real time, its children played in process
+ * (`support/zone-helper.ts`) with short bounds: what the two do together at a crash, a hold and
+ * isolation's lapse, which the fake helper here and the scripted child there cannot show alone.
+ * The helper's liveness tick is out of the way: a zone child beats only when told.
+ */
+function realGate(answer: (host: string) => ZoneAnswer, limits: Partial<HelperLimits> = {}) {
+  /** Each lookup the children began, and whether it was alone in its child as it began. */
+  const asked: { readonly host: string; readonly alone: boolean }[] = [];
+  const { fork, children } = zoneFork({
+    answer,
+    began: (host) => {
+      asked.push({ host, alone: children.at(-1)?.inFlight() === 1 });
+    },
+  });
+  /** Each name asked on the probe's own lanes, with the helper's state and route then. */
+  const probeAsked: string[] = [];
+  const box: { resolver?: NameResolver } = {};
+  const helper = new LookupHelper({
+    logger: silent,
+    fork,
+    limits: {
+      stuckMs: REAL_STUCK,
+      isolationMaxMs: 200,
+      tickMs: 600_000,
+      backoffMs: [0, 0, 0, 0],
+      restFirstMs: 300,
+      ...limits,
+    },
+    onChange: (change) => {
+      box.resolver?.onHelperChange(change);
+    },
+    onLateAnswer: (ref, late) => {
+      box.resolver?.onHelperLateAnswer(ref, late);
+    },
+  });
+  const resolver = new NameResolver({
+    logger: silent,
+    lookup: (host) => {
+      probeAsked.push(`${host}: the helper ${helper.state}, route ${helper.routeState()}`);
+      return Promise.resolve(A);
+    },
+    random: () => 0.5,
+    stuckMs: REAL_STUCK,
+    holdFirstMs: 400,
+    watch: { files: [], everyMs: 60_000 },
+    gate: { helper, policy: new StubPolicy(), tickMs: 5 },
+  });
+  box.resolver = resolver;
+  /** The newest child killed from outside, and the next one up. */
+  const kill = async (): Promise<void> => {
+    const before = children.length;
+    const child = children.at(-1);
+    assert.ok(child?.alive === true && helper.state === 'up', `a child to kill: ${helper.state}`);
+    child.die('SIGSEGV');
+    await pollWithin(
+      5_000,
+      () => `the helper after a kill: ${helper.state}`,
+      () =>
+        helper.state === 'resting' ||
+        (helper.state === 'up' && children.length > before && children.at(-1)?.alive === true),
+      5,
+    );
+  };
+  const start = async (): Promise<void> => {
+    assert.equal(await within(5_000, 'the helper up', helper.start()), true);
+    resolver.start();
+  };
+  const stop = async (): Promise<void> => {
+    resolver.stop();
+    await within(5_000, 'the helper stopped', helper.stop());
+  };
+  return { helper, resolver, children, asked, probeAsked, kill, start, stop };
+}
+
+describe('isolation with the real lookup helper (P-432 S3, D27; real time)', () => {
+  /** Said stuck at `REAL_STUCK`, then the child crashes: a crash on a slow reply. */
+  const slowCrash =
+    (name: string) =>
+    (host: string): ZoneAnswer =>
+      host === name ? { kind: 'crash', afterMs: 3 * REAL_STUCK } : { kind: 'answer', addresses: A };
+
+  it('a suspect held longer than the lapse is still asked alone while isolating, and charged', async () => {
+    const host = 'slow.zone-a.test';
+    const gate = realGate(slowCrash(host));
+    await gate.start();
+    try {
+      await gate.kill();
+      // The second crash, on its slow reply: isolating, and it is held 400 ms, past the lapse.
+      const first = await outcome(gate.resolver.resolve(host, 4, { waitMs: 5_000 }));
+      assert.ok(!first.ok);
+      await pollWithin(5_000, 'isolating', () => gate.helper.isolating(), 5);
+      await pollWithin(
+        5_000,
+        () => `${host} charged: asked ${JSON.stringify(gate.asked)}`,
+        () => gate.helper.poison(host, 4) !== undefined,
+        5,
+      );
+      assert.deepEqual(
+        gate.asked.filter((one) => one.host === host).map((one) => one.alone),
+        [true, true],
+        'asked again alone, once its hold ended',
+      );
+      assert.deepEqual(gate.probeAsked, []);
+    } finally {
+      await gate.stop();
+    }
+  });
+
+  it('the five-crash sequence: a name that crashes the child on a slow reply is charged, and never reaches the probe’s lanes', async () => {
+    const host = 'x.zone-a.test';
+    const other = 'dev-1.zone-b.test';
+    // A lapse longer than its hold: it is asked alone within isolation, and said stuck.
+    const gate = realGate(slowCrash(host), { isolationMaxMs: 2_000 });
+    await gate.start();
+    const neverOnTheLanes = (when: string): void => {
+      assert.deepEqual(
+        gate.probeAsked.filter((line) => line.startsWith(`${host}:`)),
+        [],
+        `${host} on the probe’s lanes ${when}`,
+      );
+    };
+    /** A check of it fails at once: held from its last crash, then poison, in every state. */
+    const failsAtOnce = async (when: string): Promise<void> => {
+      const got = await within(
+        1_000,
+        `${host}’s check ${when}`,
+        outcome(gate.resolver.resolve(host, 4, { waitMs: 5_000 })),
+      );
+      assert.ok(
+        !got.ok && [RESOLVER_HELD, RESOLVER_FAULT].includes(String(codeOf(got.error))),
+        `${when}: ${got.ok ? 'answered' : `${String(codeOf(got.error))} ${messageOf(got.error)}`}`,
+      );
+      neverOnTheLanes(when);
+    };
+    try {
+      await gate.kill();
+      // The second crash isolates; held, it is asked again alone, said stuck, and isolation ends
+      // with it in flight: its crash then is still its own.
+      assert.ok(!(await outcome(gate.resolver.resolve(host, 4, { waitMs: 5_000 }))).ok);
+      await pollWithin(
+        5_000,
+        () => `${host} charged: the helper ${gate.helper.state}`,
+        () => gate.helper.poison(host, 4) !== undefined,
+        5,
+      );
+      assert.equal(gate.asked.filter((one) => one.host === host).length, 2);
+      await pollWithin(5_000, 'the helper up', () => gate.helper.state === 'up', 5);
+      await failsAtOnce('with the helper up');
+      // Three more losses, five not charged in ten minutes: the helper rests.
+      for (let kill = 0; kill < 3; kill += 1) await gate.kill();
+      assert.equal(gate.helper.state, 'resting');
+      await failsAtOnce('while it rests');
+      assert.ok((await gate.resolver.resolve(other, 4, { waitMs: 5_000 })).length > 0);
+      assert.equal(gate.probeAsked.filter((line) => line.startsWith(`${other}:`)).length, 1);
+      // The rest over, a child starting: then up, lost within ten minutes, and resting again.
+      await pollWithin(5_000, 'the rest over', () => gate.helper.state !== 'resting', 5);
+      await failsAtOnce(`as the helper is ${gate.helper.state}`);
+      await pollWithin(5_000, 'the helper up after its rest', () => gate.helper.state === 'up', 5);
+      await gate.kill();
+      assert.equal(gate.helper.state, 'resting');
+      await failsAtOnce('in its second rest');
+      assert.equal(gate.asked.filter((one) => one.host === host).length, 2, 'never asked again');
+    } finally {
+      await gate.stop();
     }
   });
 });

@@ -69,6 +69,8 @@ export class FakeHelper implements HelperPort {
   state: HelperState = 'up';
   isolatingNow = false;
   endedIsolation = 0;
+  /** Each hold the resolver said a suspect has, in ms (`suspectHeld`). */
+  readonly held: number[] = [];
   readonly asks: FakeAsk[] = [];
   readonly poisoned = new Map<string, PoisonMark>();
   readonly avoided = new Set<string>();
@@ -230,6 +232,10 @@ export class FakeHelper implements HelperPort {
     if (!this.isolatingNow) return;
     this.isolatingNow = false;
     this.endedIsolation += 1;
+  }
+
+  suspectHeld(forMs: number): void {
+    this.held.push(forMs);
   }
 
   avoidsSystem(host: string, family: 0 | 4 | 6): boolean {

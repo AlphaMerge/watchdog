@@ -12864,9 +12864,9 @@ because each is a decision rather than a defect:
               lasts at most the child's stuck clock (1 s), and the lapse ends them anyway. A
               fail-fast branch for them could never fire before the child speaks, so none was
               written: no test could reach it, and no mutant could judge it.
-            - The cost: a name that crashes the child only after it was said stuck is not
-              charged once isolation has ended. The five-loss rest still applies, and the names
-              in flight at a crash charged to no one stay off the probe's lanes for ten minutes.
+            - The cost, as first written: a name that crashes the child only after it was said
+              stuck was not charged once isolation had ended. The re-check below found that this
+              broke D27, and it is fixed there.
           - **The check is not built in S3** (`NAME_CHECK_BUILT`, false until S6 sets it).
             - The check-on accrual, the start log's `check:` and Probe Health's
               `nameCheckOnSeconds` say it is off, with the reason `unbuilt`, whatever the shape.
@@ -12899,6 +12899,55 @@ because each is a decision rather than a defect:
             - The admin guide says `nameQuestionsOpen` runs since the last heartbeat the core
               acknowledged, and that isolation lasts at most 8 s after a crash.
             - The latch test sends an `idle` change.
+          - **The re-check of `5ebd1d11`** held (a) no unbounded stall, (b) no stranded or double
+            settle and (d) tests that fail without the fix, and found four defects. Decided by
+            Claude, under the user's delegation:
+            - **(e) A suspect stays one until it settles**, isolation over or not, so a crash
+              while it is in flight is charged to it. Before, isolation ended as the last suspect
+              was said stuck, its flight was no longer a suspect, and a name that crashes the
+              child on a reply slower than 1 s was charged to no one: five such crashes rested
+              the helper. Its ten minutes off the probe's lanes ended as the rest did, so it
+              went to the probe's own `getaddrinfo` at the start after the rest, and during a
+              second, 20-minute rest.
+            - **A name crashed and charged to no one is avoided until ten minutes after the helper
+              is next up**, so its ten minutes live through a rest.
+            - **A poison name's re-ask is charged only if it was the only lookup in flight.**
+              Otherwise no one is charged, and every name in flight is avoided. Before, a crash
+              beside it was charged to it, and the other name could fall back to the probe's
+              lanes.
+            - **The lapse covers the holds.** The resolver tells the helper how long it holds a
+              suspect (`suspectHeld`: the hold and a tick to ask it in). The lapse falls at the
+              later of 8 s after the last crash and that hold's end plus `STUCK_MS`. It is still
+              bounded, since a hold is at most `HOLD_MAX_MS` and its jitter. Before, a suspect
+              held 8 to 12 s (failures 2) was dropped at the lapse and never asked alone.
+            - **The lapse has a generation**, as the rejoin window has (R2-1). A timer that fired
+              before a later crash or hold armed another, its callback still waiting for the
+              polls, ends nothing.
+            - **What (e) costs**: U21 had pinned the opposite rule, and it is rewritten. A suspect
+              still in flight after isolation ends, said stuck, is now charged for a crash of a
+              lookup that started beside it after isolation, so a working name can be made
+              poison for another's crash. That lasts as long as its `getaddrinfo` runs. Two
+              more points are owed a decision. A poison re-ask needs to be alone, but a lingering
+              suspect does not. And the names beside a charged crash get no avoidance, so one of
+              them that crashed the child can still fall back to the probe's lanes at the next
+              `down`.
+            - Tests: the five-crash sequence end to end, on the real helper and in-process
+              children. The name is charged at its third crash, and it never reaches the probe's
+              lanes: up, resting, starting after the rest, or in a second rest. A hold of 400 ms
+              against a lapse of 200 ms, also on the real helper: the suspect is asked again
+              alone, and charged. A poison re-ask beside another lookup. A rest as long as the
+              ten minutes. The lapse's generation, raced with a crash before the polls.
+            - Counts: 1,505 of 1,505 in the targeted files, after a clean rebuild with no marker
+              in dist. That is the probe's unit files 871, its timing files 103, shared 255, core
+              250 and sensors 26, run beside another session's suite. Mutants: 62, every one
+              killed on the final code with its marker in dist. 18 are new: the suspect's mark,
+              the poison re-ask alone, the avoidance from the next up, the hold, the lapse's
+              instant and generation, and the resolver telling the helper. 4 were rewritten for
+              the new lapse, and 40 of the earlier review's were run again. Two redundant
+              guards were removed rather than left as equivalent mutants: `Math.max(0, …)` on a
+              lapse that is always ahead, and on a hold the lapse already covers. One was not
+              run, as equivalent: pruning an entry not yet started at a crash. An `exit` loss
+              needs a child that said `ready`, and that `up` started every pending entry.
           - **Tests**: 1,498 of 1,498 in the targeted files, after the mutants, the last lint and
             a clean rebuild with no marker in dist: the probe's twelve unit files 868, its three
             timing files 99, one file at a time, shared 255 (capabilities, config, messages),

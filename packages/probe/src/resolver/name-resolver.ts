@@ -2373,7 +2373,8 @@ export class NameResolver implements PoolResolver {
    * never answer for the crash; until then nothing else starts, at most the child's bound for
    * stuck. With none to send, the rest go: a suspect held until its hold ends holds nothing back.
    * Isolation ends once no suspect is left to ask (`#suspectsLeft`); the helper also ends it at its
-   * own lapse, so that none of this outlasts 8 s after a crash.
+   * own lapse, so that none of this outlasts 8 s after a crash, or a held suspect's ask
+   * (`suspectHeld`).
    */
   #isolationPick(
     gate: Gate,
@@ -2573,6 +2574,11 @@ export class NameResolver implements PoolResolver {
           `a lookup for ${host} had run past ${String(this.#stuckMs)} ms in the lookup helper ` +
           `when the helper was lost (${error.reason})`,
       });
+      // A suspect held (D27): the helper's lapse waits for its hold, and a tick to ask it in.
+      const hold = pending.entry.hold;
+      if (error.suspect && hold !== undefined) {
+        gate.helper.suspectHeld(hold.until - this.#now() + gate.tickMs);
+      }
       return;
     }
     const why =
@@ -2948,8 +2954,8 @@ export class NameResolver implements PoolResolver {
   /**
    * A poison name due its re-ask (D27), sent now, as nothing is in flight, so that a crash is its
    * alone at the start. It holds nothing back: what is asked meanwhile starts beside it, and a
-   * crash then is still charged to it alone, which costs it no more than a later re-ask. One due
-   * that finds no such moment for a whole period waits for its next (`poisonDue`).
+   * crash then is charged to no one, every name in flight kept off the probe's lanes. One due that
+   * finds no such moment for a whole period waits for its next (`poisonDue`).
    */
   #poisonAsk(gate: Gate): { pending: Pending; token: GaiToken } | undefined {
     for (const mark of gate.helper.poisonDue()) {

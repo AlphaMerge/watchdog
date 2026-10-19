@@ -28,11 +28,14 @@ import {
  * fires when the scenario ticks it, after a beat.
  */
 
-/** What one name does in the child: answers, is silent (`EAI_AGAIN` after `hangMs`), or crashes it. */
+/**
+ * What one name does in the child: answers, is silent (`EAI_AGAIN` after `hangMs`), or crashes it,
+ * at once or `afterMs` into its lookup (a crash on a slow reply, after the child said it was stuck).
+ */
 export type ZoneAnswer =
   | { readonly kind: 'answer'; readonly addresses: readonly ResolvedAddress[] }
   | { readonly kind: 'silent' }
-  | { readonly kind: 'crash' };
+  | { readonly kind: 'crash'; readonly afterMs?: number };
 
 export interface ZoneScript {
   answer(host: string): ZoneAnswer;
@@ -67,6 +70,8 @@ export class ZoneChild extends EventEmitter implements HelperProcess {
     if (typeof parsed === 'string') throw new Error(`the zone child’s arguments: ${parsed}`);
     this.#stuckMs = parsed.stuckMs;
     void (async () => {
+      // Read on a later turn, as from the pipe: never before the helper listens, files or none.
+      await new Promise((resolve) => setImmediate(resolve));
       const digests: Record<string, string> = {};
       for (const file of parsed.digests) digests[file] = await readOnceDigest(file);
       this.#say({
@@ -157,7 +162,7 @@ export class ZoneChild extends EventEmitter implements HelperProcess {
     if (!this.#alive) return;
     this.#asked = Math.max(this.#asked, ask.id);
     const said = this.script.answer(ask.host);
-    if (said.kind === 'crash') {
+    if (said.kind === 'crash' && said.afterMs === undefined) {
       this.die('SIGSEGV');
       return;
     }
@@ -196,6 +201,14 @@ export class ZoneChild extends EventEmitter implements HelperProcess {
         }
       }, this.#stuckMs),
     );
+    if (said.kind === 'crash') {
+      flight.timers.push(
+        setTimeout(() => {
+          this.die('SIGSEGV');
+        }, said.afterMs),
+      );
+      return;
+    }
     const hangMs = this.script.hangMs;
     if (hangMs !== undefined) {
       flight.timers.push(

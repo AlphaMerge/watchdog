@@ -72,24 +72,28 @@ import { afterPolls } from './verdict-timer.js';
  * lookup the child had said was stuck, once its hold ends (a crash on a slow reply comes after the
  * child said so). Isolation ends when the resolver says it has no suspect left (`endIsolation`):
  * none to ask, held or queued, and none in flight the child has not said is stuck. It ends in any
- * case `isolationMaxMs` (8 s) after the crash that began it or the last one during it, whether or
- * not a suspect is in flight, so that a `getaddrinfo` that never returns cannot keep it on; every
- * change says whether it is on. A crash is charged only when it names its culprit: a suspect asked
- * while isolating, or a poison name's re-ask, with no other suspect and no lookup said stuck in
- * flight. With two or more, no one is charged, and each is avoided and asked again alone, so that a
- * working name is never poison for another's crash. A charged name is poison, never asked on a
- * probe lane, and asked again alone here after an hour, then after twice as long at each crash, to
- * a day at most, at a moment nothing else is in flight; one that finds none for a whole period
- * waits for the next. An answer clears the mark; a restart of the probe does too. `memory`, `hung`
- * and `start` losses are never charged to a name. A change and a loss say whether a crash made a
- * `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and not the second.
+ * case at its lapse, whether or not a suspect is in flight, so that a `getaddrinfo` that never
+ * returns cannot keep it on: `isolationMaxMs` (8 s) after the crash that began it or the last one
+ * during it, or later while the resolver holds a suspect (`suspectHeld`), until that suspect's
+ * hold has ended and the child could have said it is stuck. Every change says whether it is on. A
+ * suspect asked while isolating stays one until it settles, isolation over or not. A crash is
+ * charged only when it names its culprit: a suspect, with no other suspect and no lookup said
+ * stuck in flight, or a poison name's re-ask with nothing else in flight at all. Otherwise no one
+ * is charged, and each name in flight is avoided and asked again alone, so that a working name is
+ * never poison for another's crash beside it in isolation. A charged name is poison, never asked
+ * on a probe lane, and asked again alone here after an hour, then after twice as long at each
+ * crash, to a day at most, at a moment nothing else is in flight; one that finds none for a whole
+ * period waits for the next. An answer clears the mark; a restart of the probe does too.
+ * `memory`, `hung` and `start` losses are never charged to a name. A change and a loss say whether
+ * a crash made a `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and
+ * not the second.
  *
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So while the route is `resting` or `down`,
  * the resolver never asks the probe's own `getaddrinfo` for a poison name, a current suspect, or a
- * name in flight at an `exit` loss charged to no one in the last ten minutes: it fails that
- * check at once instead. A helper up for ten minutes avoids only poison names and the suspects of
- * an isolation not yet over: every crash the set counts came before its child was up.
+ * name in flight at an `exit` loss charged to no one: it fails that check at once instead. Such a
+ * name is avoided from its crash until ten minutes after the helper is next up, so that a rest,
+ * or a start that does not come up, never ends its ten minutes before a child has run them.
  */
 
 /** libuv threads in the child: 16 lookup lanes, twice the helper's 8 tokens (D3). */
@@ -132,9 +136,11 @@ export const HELPER_POISON_RETRY_MS = 3_600_000;
 /** The longest a poison name waits for its re-ask. */
 export const HELPER_POISON_RETRY_MAX_MS = 86_400_000;
 /**
- * The longest isolation lasts after the crash that began it, or the last crash during it (D27):
- * at most 8 suspects, each sent alone until the child says it is stuck, at most `STUCK_MS` on the
- * child's clock (§1.11). It ends then whether or not a suspect is in flight.
+ * How long isolation lasts after the crash that began it, or the last crash during it, with no
+ * suspect held (D27): at most 8 suspects, each sent alone until the child says it is stuck, at
+ * most `STUCK_MS` on the child's clock (§1.11). A suspect the resolver holds keeps it on until its
+ * hold has ended and `STUCK_MS` more (`suspectHeld`): still bounded, since a hold is at most the
+ * resolver's `HOLD_MAX_MS` and its jitter. It ends then whether or not a suspect is in flight.
  */
 export const HELPER_ISOLATION_MAX_MS = 8_000;
 /** How much of the child's stderr is kept, and how much of it a loss's log line carries. */
@@ -515,6 +521,8 @@ export interface HelperPort {
   routeState(): RouteState;
   isolating(): boolean;
   endIsolation(): void;
+  /** A suspect is held for `forMs` before it is asked again alone: the lapse waits for it (D27). */
+  suspectHeld(forMs: number): void;
   avoidsSystem(host: string, family: HelperFamily): boolean;
   poison(host: string, family: HelperFamily): PoisonMark | undefined;
   poisonDue(): readonly PoisonMark[];
@@ -813,11 +821,20 @@ export class LookupHelper implements HelperPort {
   #skewed: string | undefined;
   readonly #skewSaid = new Set<string>();
   #isolating = false;
-  /** Isolation's hard lapse (`isolationMaxMs`), from the last crash that began or continued it. */
+  /**
+   * Isolation's lapse (D27): its timer, the instant it falls on the helper's clock, and the
+   * generation of its timer, so that a timer whose callback still waits for the polls when a later
+   * crash or hold arms another never ends isolation (as the rejoin window's, R2-1).
+   */
   #isolationTimer: HelperTimer | undefined;
+  #lapseAt = 0;
+  #lapseGeneration = 0;
   readonly #poison = new Map<string, PoisonMark>();
-  /** Each name in flight at an `exit` loss charged to no one, with when: kept off probe lanes. */
-  readonly #crashed = new Map<string, number>();
+  /**
+   * Each name in flight at an `exit` loss charged to no one, kept off probe lanes: with the time
+   * its ten minutes run from, the helper's next `up`, and undefined until then.
+   */
+  readonly #crashed = new Map<string, number | undefined>();
   /** The current suspects, sent alone until they answer or isolation ends (D27). */
   readonly #suspects = new Set<string>();
   /** The id each lookup was last asked under: a late answer under an older one is dropped. */
@@ -1012,9 +1029,22 @@ export class LookupHelper implements HelperPort {
     return this.#isolating;
   }
 
-  /** The resolver has no suspect left: isolation is over, and nothing more is charged. */
+  /** The resolver has no suspect left: isolation is over, and no new suspect is asked. */
   endIsolation(): void {
     this.#endIsolation('the resolver has no suspect left');
+  }
+
+  /**
+   * A suspect the resolver holds for `forMs` (its hold, and a tick to ask it in) before asking it
+   * again alone (D27): the lapse falls no sooner than that and `stuckMs` more, so that the suspect
+   * is asked alone and the child can say it is stuck before isolation ends.
+   */
+  suspectHeld(forMs: number): void {
+    if (!this.#isolating) return;
+    const at = this.#timers.now() + forMs + this.#limits.stuckMs;
+    if (at <= this.#lapseAt) return;
+    this.#lapseAt = at;
+    this.#armIsolationLapse();
   }
 
   #endIsolation(why: string): void {
@@ -1022,28 +1052,32 @@ export class LookupHelper implements HelperPort {
     this.#isolating = false;
     this.#timers.clearTimeout(this.#isolationTimer);
     this.#isolationTimer = undefined;
-    // Nothing more is charged (D27): a suspect still running is a lookup like any other now.
-    for (const flight of this.#child?.table.values() ?? []) flight.suspect = false;
+    // No new suspect (D27). One still in flight stays one until it settles: a crash on its slow
+    // reply, after the child said it was stuck and isolation ended, is still charged to it.
     this.#suspects.clear();
     this.#logger.info({ why }, 'the lookup helper is no longer isolating suspects');
     this.#emitIsolation();
   }
 
   /**
-   * Isolation's hard lapse, armed again at each crash while it is on (D27): it ends
-   * `isolationMaxMs` after the last, a suspect in flight or not, after the polls, so that an answer
-   * already in the pipe is read first.
+   * Isolation's lapse, armed again at each crash while it is on and at each suspect held (D27): it
+   * ends isolation at `#lapseAt`, a suspect in flight or not, after the polls, so that an answer
+   * already in the pipe is read first. Only its own generation's: a timer that fired before a later
+   * crash or hold armed another, its callback still waiting for the polls, does nothing.
    */
   #armIsolationLapse(): void {
     this.#timers.clearTimeout(this.#isolationTimer);
+    this.#lapseGeneration += 1;
+    const generation = this.#lapseGeneration;
     this.#isolationTimer = this.#timers.setTimeout(() => {
       this.#isolationTimer = undefined;
       afterPolls(() => {
+        if (generation !== this.#lapseGeneration) return;
         this.#endIsolation(
-          `${String(this.#limits.isolationMaxMs)} ms passed since the last crash, a suspect in flight or not`,
+          `its lapse: ${String(this.#limits.isolationMaxMs)} ms since the last crash, and any held suspect's hold, have passed`,
         );
       });
-    }, this.#limits.isolationMaxMs);
+    }, this.#lapseAt - this.#timers.now());
   }
 
   /**
@@ -1057,8 +1091,10 @@ export class LookupHelper implements HelperPort {
     for (const met of meets(family)) {
       const key = poisonKey(host, met);
       if (this.#poison.has(key) || this.#suspects.has(key)) return true;
-      const at = this.#crashed.get(key);
-      if (at !== undefined && now - at < this.#limits.stableMs) return true;
+      if (this.#crashed.has(key)) {
+        const since = this.#crashed.get(key);
+        if (since === undefined || now - since < this.#limits.stableMs) return true;
+      }
     }
     return false;
   }
@@ -1650,18 +1686,21 @@ export class LookupHelper implements HelperPort {
 
     const lost = [...record.table.values()];
     record.table.clear();
-    // Charged only when the crash names its culprit (D27): a suspect asked while isolating, or a
-    // poison name's re-ask, with no other in flight, counting a lookup said stuck as one, since a
-    // crash on a slow reply comes after the child said so. With two or more, no one is charged: a
-    // working name is never made poison for another's crash. Each is avoided, and asked again
-    // alone. `memory`, `hung` and `start` losses are never charged.
+    // Charged only when the crash names its culprit (D27): a suspect asked while isolating, still
+    // in flight whether or not isolation has ended since, with no other in flight counting a
+    // lookup said stuck as one, since a crash on a slow reply comes after the child said so; or a
+    // poison name's re-ask with nothing else in flight at all. Otherwise no one is charged: a
+    // working name is never made poison for another's crash beside it in isolation. Each is
+    // avoided, and asked again alone. `memory`, `hung` and `start` losses are never charged.
     let charged: InFlight | undefined;
     if (reason === 'exit') {
       const named = lost.filter(
         (flight) => flight.suspect || flight.poisonAsk || (flight.stuck && !flight.detached),
       );
       const only = named.length === 1 ? named[0] : undefined;
-      if (only !== undefined && (only.suspect || only.poisonAsk)) charged = only;
+      if (only !== undefined && (only.suspect || (only.poisonAsk && lost.length === 1))) {
+        charged = only;
+      }
     }
     let chargedKind: ChargedKind | undefined;
     if (charged !== undefined) {
@@ -1697,20 +1736,28 @@ export class LookupHelper implements HelperPort {
       // From the second crash in ten minutes that leaves a candidate to ask again (D27).
       if (candidates > 0 && this.#exitLosses.length >= 2 && !this.#isolating) {
         this.#isolating = true;
+        this.#lapseAt = 0;
         this.#logger.info(
           { crashes: this.#exitLosses.length, suspects: candidates },
           'the lookup helper is isolating suspects: the lookups asked again are sent alone',
         );
       }
-      // Its hard lapse runs from this crash, whether it began isolation or came during it.
-      if (this.#isolating) this.#armIsolationLapse();
+      // Its lapse runs from this crash, whether it began isolation or came during it, and no
+      // sooner than a suspect held is asked again.
+      if (this.#isolating) {
+        this.#lapseAt = Math.max(this.#lapseAt, now + this.#limits.isolationMaxMs);
+        this.#armIsolationLapse();
+      }
       // Charged to no one: any of them may be what crashed it, so none goes to the probe's own
-      // getaddrinfo for ten minutes, resting or not.
+      // getaddrinfo until ten minutes after the helper is next up, resting or not.
       if (charged === undefined) {
-        for (const [key, at] of this.#crashed) {
-          if (now - at >= this.#limits.stableMs) this.#crashed.delete(key);
+        for (const [key, since] of this.#crashed) {
+          if (since !== undefined && now - since >= this.#limits.stableMs)
+            this.#crashed.delete(key);
         }
-        for (const flight of lost) this.#crashed.set(poisonKey(flight.host, flight.family), now);
+        for (const flight of lost) {
+          this.#crashed.set(poisonKey(flight.host, flight.family), undefined);
+        }
       }
     }
 
@@ -1964,6 +2011,12 @@ export class LookupHelper implements HelperPort {
     this.#msInState[previous] += now - this.#stateSince;
     this.#stateSince = now;
     this.#state = next;
+    // Up: a name crashed since the helper was last up runs its ten minutes from now.
+    if (next === 'up') {
+      for (const [key, since] of this.#crashed) {
+        if (since === undefined) this.#crashed.set(key, now);
+      }
+    }
     this.#lastRoute = this.routeState();
     this.#emit({
       state: next,
