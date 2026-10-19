@@ -48,7 +48,7 @@ import {
   resolverLanes,
   threadpoolSize,
 } from './resolver/name-resolver.js';
-import { buildNameResolution } from './resolver/name-resolution.js';
+import { buildNameResolution, olderCoreWarning } from './resolver/name-resolution.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -606,6 +606,10 @@ async function main(): Promise<void> {
     lookups: lookupsBesideThePool(queries, resolver),
     // How many answers the resolver loaded from its answer file at start (`P-438`).
     answersLoaded: () => answerFile.loaded(),
+    // Which `probe.nameResolver` runs and, in gate mode, its helper's trouble and the gate's own
+    // counts (`P-432`); the domains not answering, in both modes (`P-441`).
+    names: () => names.health(),
+    ...(names.questionsPeak === undefined ? {} : { questionsPeak: names.questionsPeak }),
     // Only when this probe runs that listener. What the channels are for is `rejected`: a device
     // sending the wrong community has every message dropped before the ring, so the sensor reads
     // a quiet network rather than a receiver turning everything away (`P-64`).
@@ -665,17 +669,26 @@ async function main(): Promise<void> {
     },
   });
 
+  // A gate probe says at each session with a core below 38 that its helper's health does not
+  // reach it (`P-432`, S-F11).
+  const olderCore = olderCoreWarning(logger, names.mode);
   const coreClient = new CoreClient({
     config,
     logger,
     agentVersion: VERSION,
     health: {
-      report: (heartbeat) => health.report(heartbeat),
+      report: (heartbeat) => {
+        olderCore.heartbeat(heartbeat.peerVersion);
+        return health.report(heartbeat);
+      },
       acknowledged: (seq) => {
         health.acknowledged(seq);
       },
     },
-    onStateChange: handlers.onStateChange,
+    onStateChange: (state) => {
+      if (state !== 'connected') olderCore.disconnected();
+      handlers.onStateChange(state);
+    },
     onConfig: handlers.onConfig,
     onSweep: handlers.onSweep,
     onQuery: handlers.onQuery,

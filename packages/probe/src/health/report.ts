@@ -65,6 +65,18 @@ export interface ProbeHealthSources {
    * when there was no file or it could not be used. Absent on a build without the file.
    */
   answersLoaded?: () => number;
+  /**
+   * How the probe resolves names (`P-432`, D29) and the domains its resolver finds not answering
+   * (`P-441`). Absent on a build without `probe.nameResolver`, so every field gaps.
+   */
+  names?: () => NameResolutionHealth;
+  /**
+   * The most DNS questions the probe's `getaddrinfo` calls held open since the last take (gate
+   * mode only): taken once per heartbeat and kept until the core acknowledges it, as memory's lows
+   * are (`P-219`), so `nameQuestionsOpen` covers the time since the last acknowledged heartbeat.
+   * `peek` is what a report outside a heartbeat reads, and takes nothing.
+   */
+  questionsPeak?: { readonly take: () => number; readonly peek: () => number };
   trapListener?: () => TrapListenerStats;
   syslogListener?: () => SyslogListenerStats;
   /**
@@ -113,6 +125,22 @@ export interface ProbeHealthSources {
   };
 }
 
+/** How the probe resolves names, for the heartbeat (`P-432`, `P-441`). */
+export interface NameResolutionHealth {
+  /** 1 `system`; 2 `gate`; 3 `gate` while the lookup helper rests. */
+  readonly mode: 1 | 2 | 3;
+  /** Gate mode only. */
+  readonly gate?: {
+    /** The lookup helper's trouble latch (§1.13). */
+    readonly trouble: 0 | 1;
+    readonly checkOnSeconds: number;
+    readonly passedStuck: number;
+    readonly helperStuck: number;
+  };
+  /** At most three domains not answering, most failing first; `''` for single labels. */
+  readonly notAnswering: readonly string[];
+}
+
 /** What the reporter needs of a `MemorySampler`. */
 interface MemoryReadings {
   readonly machine: MemoryLows;
@@ -139,6 +167,8 @@ interface Unacknowledged {
   readonly seq: number;
   readonly machine: AvailableMemoryLow | null;
   readonly limit: AvailableMemoryLow | null;
+  /** The questions open at their most in the heartbeat's share of time (`P-432`), when counted. */
+  readonly questions: number | undefined;
 }
 
 /**
@@ -214,9 +244,10 @@ export class ProbeHealthReporter {
     const log = this.#sources.log?.();
     const lookups = lookupsOf(pool.lookups, this.#sources.lookups?.());
     const answersLoaded = this.#sources.answersLoaded?.();
+    const names = this.#sources.names?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
     // The lowest headroom is the highest usage, so both are the lowest of what they cover.
-    const { machine, limit } = this.#memoryFor(heartbeat);
+    const { machine, limit, questions } = this.#memoryFor(heartbeat);
 
     return {
       scheduled: scheduler.tasks,
@@ -268,6 +299,24 @@ export class ProbeHealthReporter {
       // `P-438`: the answers loaded at start, the same all the process's life. Absent on a build
       // without the answer file, so the channel gaps. Sent only to a core at protocol 37.
       ...(answersLoaded === undefined ? {} : { answersLoaded }),
+      // `P-432`: which `probe.nameResolver` ran, in both modes, and in gate mode the helper's
+      // trouble and the gate's own counts; `P-441`: the domains not answering, in both. Sent only
+      // to a core at protocol 38. In `system` mode the gate's fields are absent, so they gap.
+      ...(names === undefined
+        ? {}
+        : {
+            nameResolverMode: names.mode,
+            lookupsNotAnswering: [...names.notAnswering],
+            ...(names.gate === undefined
+              ? {}
+              : {
+                  lookupHelperTrouble: names.gate.trouble,
+                  nameCheckOnSeconds: Math.floor(names.gate.checkOnSeconds),
+                  namePassedStuck: names.gate.passedStuck,
+                  nameHelperStuck: names.gate.helperStuck,
+                  ...(questions === undefined ? {} : { nameQuestionsOpen: questions }),
+                }),
+          }),
       // Absent on a build with no child-process runner, so the channels gap rather than reading
       // a confident zero that cannot be told from a probe running no EXE or Script sensors.
       ...(children === undefined
@@ -394,14 +443,21 @@ export class ProbeHealthReporter {
   #memoryFor(heartbeat: HeartbeatContext | undefined): {
     machine: AvailableMemoryLow | null;
     limit: AvailableMemoryLow | null;
+    questions: number | undefined;
   } {
+    const peak = this.#sources.questionsPeak;
     if (heartbeat === undefined) {
-      return { machine: this.#memory.machine.lowest(), limit: this.#memory.limit.lowest() };
+      return {
+        machine: this.#memory.machine.lowest(),
+        limit: this.#memory.limit.lowest(),
+        questions: this.#questionsHeld(peak?.peek()),
+      };
     }
     this.#unacknowledged.push({
       seq: heartbeat.seq,
       machine: this.#memory.machine.takeLow(),
       limit: this.#memory.limit.takeLow(),
+      questions: peak?.take(),
     });
     while (this.#unacknowledged.length > MAX_UNACKNOWLEDGED) {
       const [oldest, next, ...rest] = this.#unacknowledged;
@@ -411,12 +467,19 @@ export class ProbeHealthReporter {
           seq: next.seq,
           machine: lower(oldest.machine, next.machine),
           limit: lower(oldest.limit, next.limit),
+          questions: higher(oldest.questions, next.questions),
         },
         ...rest,
       ];
     }
+    // The questions are 38's, and every core that knows them acknowledges in order (`P-219`).
+    const questions = this.#questionsHeld(undefined);
     if (!capabilitiesFor(heartbeat.peerVersion).memorySinceLastReport) {
-      return { machine: this.#memory.machine.lowest(), limit: this.#memory.limit.lowest() };
+      return {
+        machine: this.#memory.machine.lowest(),
+        limit: this.#memory.limit.lowest(),
+        questions,
+      };
     }
     let machine: AvailableMemoryLow | null = null;
     let limit: AvailableMemoryLow | null = null;
@@ -424,7 +487,14 @@ export class ProbeHealthReporter {
       machine = lower(machine, entry.machine);
       limit = lower(limit, entry.limit);
     }
-    return { machine, limit };
+    return { machine, limit, questions };
+  }
+
+  /** The most questions open over every heartbeat not yet acknowledged, and `now` beside them. */
+  #questionsHeld(now: number | undefined): number | undefined {
+    let most = now;
+    for (const entry of this.#unacknowledged) most = higher(most, entry.questions);
+    return most;
   }
 }
 
@@ -465,6 +535,13 @@ function lookupsOf(
 
 function sumOf(a: LookupCounters, b: LookupCounters): LookupCounters {
   return { inFlight: a.inFlight + b.inFlight, givenUp: a.givenUp + b.givenUp };
+}
+
+/** The higher of two counts, where either may be a gap. */
+function higher(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.max(a, b);
 }
 
 /** The lower of two readings, where either may be a gap. */

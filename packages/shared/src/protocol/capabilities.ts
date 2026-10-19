@@ -238,6 +238,18 @@ export interface ProbeCapabilities {
    * start: one field, `answersLoaded`, stripped below this.
    */
   answerFile: boolean;
+  /**
+   * Reports how it resolves names (`P-432`): `nameResolverMode` in both modes, and in gate mode
+   * its lookup helper's trouble, the time its name check was on, its lookups past the bound for
+   * stuck on either lane set, and the DNS questions its `getaddrinfo` calls held open. Six fields,
+   * stripped below this together.
+   */
+  nameResolver: boolean;
+  /**
+   * Names the domains its resolver finds not answering (`P-441`): one field,
+   * `lookupsNotAnswering`, stripped below this.
+   */
+  lookupsNotAnswering: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -284,6 +296,9 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   failurePhase: 'say where a failed check failed, as a phase and a host beside its message',
   lookupCounters: 'report the name lookups its resolver has not answered, and those it gave up on',
   answerFile: 'report how many name answers it loaded at start from those it kept when it stopped',
+  nameResolver:
+    'report how it resolves names, and the health of its lookup helper when it runs one',
+  lookupsNotAnswering: 'name the domains its resolver finds not answering',
 };
 
 /**
@@ -348,6 +363,22 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.lookupsNotAnswering) {
+    const { lookupsNotAnswering: _domains, ...older } = sent;
+    sent = older;
+  }
+  if (!capabilities.nameResolver) {
+    const {
+      nameResolverMode: _mode,
+      lookupHelperTrouble: _trouble,
+      nameCheckOnSeconds: _checkOn,
+      namePassedStuck: _passed,
+      nameHelperStuck: _helperStuck,
+      nameQuestionsOpen: _questions,
+      ...older
+    } = sent;
+    sent = older;
+  }
   if (!capabilities.answerFile) {
     const { answersLoaded: _loaded, ...older } = sent;
     sent = older;

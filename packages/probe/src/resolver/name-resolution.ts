@@ -1,5 +1,6 @@
-import type { Logger } from '@ms/shared';
+import { capabilitiesFor, versionFor, type Logger } from '@ms/shared';
 import { HelperTroubleLatch } from '../health/latch.js';
+import type { NameResolutionHealth } from '../health/report.js';
 import { AnswerFile, answerFilePath, type AnswerFileOptions } from './answer-file.js';
 import { LookupHelper, type LookupHelperOptions } from './lookup-helper.js';
 import { NameResolver, type NameResolverOptions } from './name-resolver.js';
@@ -55,6 +56,10 @@ export interface NameResolution {
   stop(): Promise<void>;
   /** Probe Health's `nameResolverMode`, in both modes. */
   modeValue(): NameResolverModeValue;
+  /** What Probe Health reports of it (`P-432`, `P-441`). */
+  health(): NameResolutionHealth;
+  /** Gate mode only: the questions open at their most, for `nameQuestionsOpen`. */
+  readonly questionsPeak: { readonly take: () => number; readonly peek: () => number } | undefined;
 }
 
 export function buildNameResolution(options: NameResolutionOptions): NameResolution {
@@ -116,9 +121,60 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
       built.stop();
       await Promise.all([parts?.helper.stop(), answerFile.stop()]);
     },
-    modeValue() {
-      if (parts === undefined) return 1;
-      return parts.helper.routeState() === 'resting' ? 3 : 2;
+    modeValue,
+    health() {
+      const gateHealth = built.gateHealth();
+      return {
+        mode: modeValue(),
+        notAnswering: built.notAnswering(),
+        ...(parts === undefined || gateHealth === undefined
+          ? {}
+          : {
+              gate: {
+                trouble: parts.latch.value(),
+                checkOnSeconds: gateHealth.checkOnSeconds,
+                passedStuck: gateHealth.passedStuck,
+                helperStuck: gateHealth.helperStuck,
+              },
+            }),
+      };
+    },
+    questionsPeak:
+      parts === undefined
+        ? undefined
+        : {
+            take: () => built.takeQuestionsPeak() ?? 0,
+            peek: () => built.questionsPeak() ?? 0,
+          },
+  };
+
+  function modeValue(): NameResolverModeValue {
+    if (parts === undefined) return 1;
+    return parts.helper.routeState() === 'resting' ? 3 : 2;
+  }
+}
+
+/**
+ * The warning a gate probe gives at each session with a core older than protocol 38 (`P-432`,
+ * S-F11): the lookup helper's health does not reach that core, so its trouble cannot alarm. Once
+ * a session, from its first heartbeat; `disconnected` starts the next.
+ */
+export function olderCoreWarning(
+  logger: Logger,
+  mode: NameResolverMode,
+): { heartbeat(peerVersion: number): void; disconnected(): void } {
+  let said = false;
+  return {
+    heartbeat(peerVersion) {
+      if (mode !== 'gate' || said || capabilitiesFor(peerVersion).nameResolver) return;
+      said = true;
+      logger.warn(
+        { coreProtocol: peerVersion, needs: versionFor('nameResolver') },
+        `this core is older than protocol ${String(versionFor('nameResolver'))}: the lookup helper’s health does not reach it`,
+      );
+    },
+    disconnected() {
+      said = false;
     },
   };
 }

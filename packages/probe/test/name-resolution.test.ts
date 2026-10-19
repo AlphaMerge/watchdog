@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { ResolvedAddress } from '@ms/sensors';
-import { buildNameResolution } from '../src/resolver/name-resolution.js';
+import { buildNameResolution, olderCoreWarning } from '../src/resolver/name-resolution.js';
 import type { SystemFiles } from '../src/resolver/system-names.js';
 import { within } from './support/within.js';
 
@@ -73,6 +73,8 @@ describe('probe.nameResolver as main.ts builds it (P-432 S3)', () => {
     assert.equal(names.resolver.gateHealth(), undefined);
     assert.equal(names.resolver.takeQuestionsPeak(), undefined);
     assert.equal(names.modeValue(), 1);
+    assert.deepEqual(names.health(), { mode: 1, notAnswering: [] }, 'no gate fields to send');
+    assert.equal(names.questionsPeak, undefined);
     await names.stop();
     assert.equal(forked, 0);
     assert.equal(read, 0);
@@ -141,10 +143,40 @@ describe('probe.nameResolver as main.ts builds it (P-432 S3)', () => {
       assert.deepEqual(far, [{ address: '192.0.2.1', family: 4 }]);
       assert.deepEqual(asked, ['gw.test'], 'never on the probe’s lanes');
       assert.equal(names.resolver.gateHealth()?.mode, 2);
+      const health = names.health();
+      assert.equal(health.mode, 2);
+      assert.equal(health.gate?.trouble, 0);
+      assert.deepEqual(health.notAnswering, []);
+      assert.ok(names.questionsPeak !== undefined);
+      assert.ok(names.questionsPeak.peek() >= 1, 'the helper’s lookup held a question');
+      assert.ok(names.questionsPeak.take() >= 1);
+      assert.equal(names.questionsPeak.take(), 0, 'nothing open since');
     } finally {
       await within(WAIT, 'the stop', names.stop());
     }
     assert.equal(gate.helper.state, 'stopped');
     assert.equal(gate.helper.pid(), undefined, 'the child is gone');
+  });
+});
+
+describe('a gate probe meeting a core below protocol 38 (P-432, S-F11)', () => {
+  it('warns once a session that the helper’s health does not reach it, and never in system mode', () => {
+    const { logger, lines } = logged();
+    const warned = (): string[] =>
+      lines.filter((line) => line['level'] === 40).map((line) => String(line['msg']));
+    const gate = olderCoreWarning(logger, 'gate');
+    gate.heartbeat(37);
+    gate.heartbeat(37);
+    assert.deepEqual(warned(), [
+      'this core is older than protocol 38: the lookup helper’s health does not reach it',
+    ]);
+    gate.disconnected();
+    gate.heartbeat(37);
+    assert.equal(warned().length, 2, 'the next session says it again');
+    gate.disconnected();
+    gate.heartbeat(38);
+    assert.equal(warned().length, 2, 'a core at 38 is told');
+    olderCoreWarning(logger, 'system').heartbeat(30);
+    assert.equal(warned().length, 2, 'system mode has no helper to report');
   });
 });

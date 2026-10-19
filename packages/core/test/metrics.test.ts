@@ -499,6 +499,43 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_name_answers_loaded${label}`), false);
     });
 
+    it('exports how a probe resolves names, gate mode’s own beside it, and nothing for one that sent none (`P-432`)', async () => {
+      const label = `{probe="${String(probeId)}"}`;
+      const gate = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          nameResolverMode: 2,
+          lookupHelperTrouble: 1,
+          nameCheckOnSeconds: 3_600,
+          namePassedStuck: 4,
+          nameHelperStuck: 9,
+          nameQuestionsOpen: 12,
+        },
+      });
+      const metrics = parse((await varying(gate).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_name_resolver_mode${label}`), 2);
+      assert.equal(metrics.get(`ms_probe_lookup_helper_trouble${label}`), 1);
+      assert.equal(metrics.get(`ms_probe_name_check_on_seconds_total${label}`), 3_600);
+      assert.equal(metrics.get(`ms_probe_name_lookups_passed_stuck_total${label}`), 4);
+      assert.equal(metrics.get(`ms_probe_lookup_helper_stuck_total${label}`), 9);
+      assert.equal(metrics.get(`ms_probe_dns_questions_open${label}`), 12);
+      // `system` mode sends its mode alone.
+      const system = parse(
+        (
+          await varying(() => ({
+            ...connected,
+            health: { ...connected.health, nameResolverMode: 1 },
+          })).scrape()
+        ).body,
+      );
+      assert.equal(system.get(`ms_probe_name_resolver_mode${label}`), 1);
+      assert.equal(system.has(`ms_probe_lookup_helper_trouble${label}`), false);
+      assert.equal(system.has(`ms_probe_dns_questions_open${label}`), false);
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_name_resolver_mode${label}`), false);
+    });
+
     it('exports the readings a probe could not send, and nothing for a probe that sent none', async () => {
       // `P-283`. Distinct values, so a series reading its neighbour's field is seen.
       const label = `{probe="${String(probeId)}"}`;

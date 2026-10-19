@@ -71,6 +71,8 @@ describe('what a protocol version can do', () => {
       failurePhase: false,
       lookupCounters: false,
       answerFile: false,
+      nameResolver: false,
+      lookupsNotAnswering: false,
     });
   });
 
@@ -144,6 +146,8 @@ describe('what a protocol version can do', () => {
       failurePhase: 35,
       lookupCounters: 36,
       answerFile: 37,
+      nameResolver: 38,
+      lookupsNotAnswering: 38,
     };
     const names = Object.keys(ARRIVED) as (keyof ProbeCapabilities)[];
     assert.deepEqual(
@@ -300,9 +304,27 @@ describe('the health a peer can be sent', () => {
     lookupsInFlight: 37,
     lookupsGivenUp: 1_250,
     answersLoaded: 450,
+    nameResolverMode: 2,
+    lookupHelperTrouble: 1,
+    nameCheckOnSeconds: 3_600,
+    namePassedStuck: 4,
+    nameHelperStuck: 9,
+    nameQuestionsOpen: 12,
+    lookupsNotAnswering: ['zone-b.test', ''],
   };
-  /** `health` as a core at 36 is sent it: everything but 37's one field (`P-438`). */
-  const { answersLoaded: _answersLoaded, ...withoutAnswers } = health;
+  /** `health` as a core at 37 is sent it: everything but 38's seven fields (`P-432`, `P-441`). */
+  const {
+    nameResolverMode: _mode,
+    lookupHelperTrouble: _trouble,
+    nameCheckOnSeconds: _checkOn,
+    namePassedStuck: _passedStuck,
+    nameHelperStuck: _helperStuck,
+    nameQuestionsOpen: _questions,
+    lookupsNotAnswering: _notAnswering,
+    ...withoutNames
+  } = health;
+  /** `health` as a core at 36 is sent it: that, less 37's one field (`P-438`). */
+  const { answersLoaded: _answersLoaded, ...withoutAnswers } = withoutNames;
   /** `health` as a core at 32 to 35 is sent it: that, less 36's two fields (`A-66`). */
   const {
     lookupsInFlight: _inFlight,
@@ -796,9 +818,88 @@ describe('the health a peer can be sent', () => {
     assert.equal(read('450'), undefined);
   });
 
+  it('leaves 38’s name resolution out for a core at 37, and keeps 37’s', () => {
+    // `P-432` and `P-441`: two capabilities, seven fields, each capability's stripped on its own.
+    const resolution = [
+      'nameResolverMode',
+      'lookupHelperTrouble',
+      'nameCheckOnSeconds',
+      'namePassedStuck',
+      'nameHelperStuck',
+      'nameQuestionsOpen',
+    ];
+    for (const version of [16, 26, 31, 32, 35, 36, 37]) {
+      const sent = healthForPeer(health, version);
+      for (const field of [...resolution, 'lookupsNotAnswering']) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    assert.deepEqual(healthForPeer(health, 37), withoutNames);
+    assert.equal(healthForPeer(health, 37).answersLoaded, 450);
+    const sent = healthForPeer(health, 38);
+    assert.equal(sent.nameResolverMode, 2);
+    assert.equal(sent.nameQuestionsOpen, 12);
+    assert.deepEqual(sent.lookupsNotAnswering, ['zone-b.test', '']);
+    // Alone, each is stripped below 38 and kept at it, a zero and an empty list included.
+    for (const [field, value] of [
+      ...resolution.map((field) => [field, 0] as const),
+      ['nameResolverMode', 1] as const,
+      ['lookupsNotAnswering', []] as const,
+    ]) {
+      assert.deepEqual(healthForPeer({ memoryMb: 1, [field]: value }, 37), { memoryMb: 1 }, field);
+      assert.deepEqual(
+        healthForPeer({ memoryMb: 1, [field]: value }, 38),
+        { memoryMb: 1, [field]: value },
+        field,
+      );
+    }
+  });
+
+  it('knows 38’s name resolution in this build’s health schema, each value in its range', () => {
+    const read = (field: string, sent: unknown): unknown => {
+      const parsed = parseProbeToCore({
+        type: 'heartbeat',
+        seq: 1,
+        sentAt: 'now',
+        health: { memoryMb: 12, [field]: sent },
+      });
+      if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+      assert.equal(parsed.health?.memoryMb, 12, `${field} cost the heartbeat its health`);
+      return (parsed.health as Record<string, unknown>)[field];
+    };
+    for (const mode of [1, 2, 3]) assert.equal(read('nameResolverMode', mode), mode);
+    // A value outside the field's range is a gap on its channel, and the heartbeat is kept.
+    for (const mode of [0, 4, 1.5]) assert.equal(read('nameResolverMode', mode), undefined);
+    assert.equal(read('lookupHelperTrouble', 0), 0);
+    assert.equal(read('lookupHelperTrouble', 1), 1);
+    assert.equal(read('lookupHelperTrouble', 2), undefined);
+    for (const field of [
+      'nameCheckOnSeconds',
+      'namePassedStuck',
+      'nameHelperStuck',
+      'nameQuestionsOpen',
+    ]) {
+      assert.equal(read(field, 7), 7, field);
+      assert.equal(read(field, 0), 0, field);
+      assert.equal(read(field, -1), undefined, field);
+      assert.equal(read(field, 1.5), undefined, field);
+    }
+    const three = ['zone-b.test', 'zone-c.test', ''];
+    assert.deepEqual(read('lookupsNotAnswering', three), three);
+    assert.deepEqual(read('lookupsNotAnswering', []), []);
+    assert.equal(
+      read('lookupsNotAnswering', [...three, 'zone-d.test']),
+      undefined,
+      'three at most',
+    );
+    assert.equal(read('lookupsNotAnswering', ['x'.repeat(254)]), undefined, 'a name DNS allows');
+    assert.equal(read('lookupsNotAnswering', [3]), undefined);
+    assert.equal(read('lookupsNotAnswering', 'zone-b.test'), undefined);
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 37);
-    assert.deepEqual(healthForPeer(health, 37), health);
+    assert.equal(PROTOCOL_VERSION, 38);
+    assert.deepEqual(healthForPeer(health, 38), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -862,6 +963,14 @@ describe('the health a peer can be sent', () => {
       lookupsGivenUp: 36,
       // `P-438`: one new field under one capability, at the version that adds it.
       answersLoaded: 37,
+      // `P-432` and `P-441`: seven new fields under two capabilities, at the version that adds them.
+      nameResolverMode: 38,
+      lookupHelperTrouble: 38,
+      nameCheckOnSeconds: 38,
+      namePassedStuck: 38,
+      nameHelperStuck: 38,
+      nameQuestionsOpen: 38,
+      lookupsNotAnswering: 38,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -891,7 +1000,7 @@ describe('the health a peer can be sent', () => {
   it('names the listeners’ counters at 13, and strips them for no core it can meet (P-294)', () => {
     // Named after the fact: protocol 13 added them, and only a comment on `P-64` held the number
     // until the add-sensor form needed it. Nothing on the wire changes for the name.
-    assert.equal(PROTOCOL_VERSION, 37, 'naming an old version does not bump the protocol');
+    assert.equal(PROTOCOL_VERSION, 38, 'naming an old version does not bump the protocol');
     assert.equal(versionFor('listenerCounters'), 13);
     assert.equal(capabilitiesFor(12).listenerCounters, false);
     assert.equal(capabilitiesFor(13).listenerCounters, true);
@@ -1008,6 +1117,8 @@ describe('the health a peer can be sent', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -1046,6 +1157,8 @@ describe('the child start-up counters (`P-260`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 });
@@ -1066,6 +1179,8 @@ describe('the check workers not started (`P-263`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 });
@@ -1088,6 +1203,8 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
     assert.deepEqual(missingCapabilities(31), [
       'report the readings it dropped because they could not be sent, and the results its spool discarded',
@@ -1096,6 +1213,8 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 });
@@ -1112,6 +1231,8 @@ describe('the readings a probe could not send (`P-283`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 });
@@ -1126,6 +1247,8 @@ describe('a check the probe could not start (`P-265`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 });
@@ -1139,6 +1262,8 @@ describe('a certificate other than the bound one (`P-326`)', () => {
       'say where a failed check failed, as a phase and a host beside its message',
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 
@@ -1175,9 +1300,13 @@ describe('the name lookups a probe counts (`A-66`)', () => {
     assert.deepEqual(missingCapabilities(35), [
       'report the name lookups its resolver has not answered, and those it gave up on',
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
     assert.deepEqual(missingCapabilities(36), [
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
   });
 });
@@ -1189,8 +1318,25 @@ describe('the name answers a probe loads at start (`P-438`)', () => {
     assert.equal(capabilitiesFor(37).answerFile, true);
     assert.deepEqual(missingCapabilities(36), [
       'report how many name answers it loaded at start from those it kept when it stopped',
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
     ]);
-    assert.deepEqual(missingCapabilities(37), []);
+    assert.deepEqual(missingCapabilities(37), [
+      'report how it resolves names, and the health of its lookup helper when it runs one',
+      'name the domains its resolver finds not answering',
+    ]);
+  });
+});
+
+describe('how a probe resolves names, and the domains it finds not answering (`P-432`, `P-441`)', () => {
+  it('are reported from 38, and by nothing older', () => {
+    assert.equal(versionFor('nameResolver'), 38);
+    assert.equal(versionFor('lookupsNotAnswering'), 38);
+    assert.equal(capabilitiesFor(37).nameResolver, false);
+    assert.equal(capabilitiesFor(37).lookupsNotAnswering, false);
+    assert.equal(capabilitiesFor(38).nameResolver, true);
+    assert.equal(capabilitiesFor(38).lookupsNotAnswering, true);
+    assert.deepEqual(missingCapabilities(38), []);
   });
 });
 

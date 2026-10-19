@@ -729,6 +729,40 @@ const PROBE_METRICS: readonly Metric[] = [
     name: 'ms_probe_name_answers_loaded',
     help: 'Name answers the probe’s resolver loaded at start from those it kept when it last stopped, each served while it is asked again. Zero is a cold start: no file, one it could not use, or one past the grace.',
   },
+  // `P-432`. How the probe resolves names, in both modes, and in gate mode its lookup helper.
+  {
+    key: 'nameResolverMode',
+    name: 'ms_probe_name_resolver_mode',
+    help: 'How the probe resolves names: 1 probe.nameResolver system, 2 gate, 3 gate with its lookup helper resting, every name asked as with system.',
+  },
+  {
+    key: 'lookupHelperTrouble',
+    name: 'ms_probe_lookup_helper_trouble',
+    help: '1 while a gate probe’s lookup helper is failing: not up for 30 s, three failures in ten minutes, out of memory, or resting. Cleared after ten minutes up with no failure.',
+  },
+  {
+    key: 'nameCheckOnSeconds',
+    name: 'ms_probe_name_check_on_seconds_total',
+    help: 'Seconds a gate probe’s name check was on with its lookup helper up.',
+    counter: true,
+  },
+  {
+    key: 'namePassedStuck',
+    name: 'ms_probe_name_lookups_passed_stuck_total',
+    help: 'Lookups a gate probe ran on its own lanes that were still running past the bound for stuck, judged after polls.',
+    counter: true,
+  },
+  {
+    key: 'nameHelperStuck',
+    name: 'ms_probe_lookup_helper_stuck_total',
+    help: 'Lookups in a gate probe’s lookup helper that its child said were stuck: each would have held one of the probe’s own lanes under system.',
+    counter: true,
+  },
+  {
+    key: 'nameQuestionsOpen',
+    name: 'ms_probe_dns_questions_open',
+    help: 'The most DNS questions a gate probe’s getaddrinfo calls held open at its forwarder since the last heartbeat the core acknowledged.',
+  },
   {
     key: 'spoolCorrupt',
     name: 'ms_probe_spool_corrupt_total',

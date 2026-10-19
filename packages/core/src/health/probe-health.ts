@@ -287,6 +287,11 @@ const RECENT_TOTALS = {
     health.spoolRejected === undefined && health.spoolOversized === undefined
       ? undefined
       : (health.spoolRejected ?? 0) + (health.spoolOversized ?? 0),
+  /**
+   * `P-441`: the checks the probe's resolver gave up, since protocol 36. Counted here rather than
+   * read as a rate, so the burst a restart cold into an outage gives up is not lost to the reset.
+   */
+  lookupsGivenUpRecently: (health: ProbeHealthReport): number | undefined => health.lookupsGivenUp,
 } as const;
 
 type RecentKey = keyof typeof RECENT_TOTALS;
@@ -676,6 +681,17 @@ export class ProbeHealthService {
       // either end below protocol 36, never a zero that reads as a resolver answering everything.
       lookupsInFlight: health?.lookupsInFlight ?? null,
       lookupsGivenUp: health?.lookupsGivenUp ?? null,
+      // `P-441`. The checks given up in the last five minutes, which carries the Warning: counted
+      // across a restart and a link gap, which the counter's rate is not. A gap where the total is.
+      lookupsGivenUpRecently: this.#recentCount(probeObjectId, health, 'lookupsGivenUpRecently'),
+      // `P-432`. Which `probe.nameResolver` ran, in both modes, and gate mode's own: a gap for
+      // either end below protocol 38, and the gate's in `system` mode, where a gap makes no state.
+      nameResolverMode: health?.nameResolverMode ?? null,
+      lookupHelperTrouble: health?.lookupHelperTrouble ?? null,
+      nameCheckOnSeconds: health?.nameCheckOnSeconds ?? null,
+      namePassedStuck: health?.namePassedStuck ?? null,
+      nameHelperStuck: health?.nameHelperStuck ?? null,
+      nameQuestionsOpen: health?.nameQuestionsOpen ?? null,
       // `P-438`. The answers the probe's resolver loaded at start from those it kept when it last
       // stopped: a gap for a build without the file and for either end below protocol 37.
       answersLoaded: health?.answersLoaded ?? null,
@@ -749,6 +765,7 @@ export class ProbeHealthService {
           ? -link.clockOffsetMs / 1_000
           : undefined,
         flap ?? undefined,
+        health?.lookupsNotAnswering,
       ),
     };
   }
@@ -1231,6 +1248,8 @@ function describe(
   aheadOfCoreSeconds?: number,
   /** The flap the probe's protocol version is in, which the sentence names (`A-72`). */
   flap?: ProtocolFlap,
+  /** The domains the probe's resolver finds not answering, most failing first (`P-441`). */
+  notAnswering?: readonly string[],
 ): string {
   const parts: string[] = [];
   const scheduled = reading['scheduled'];
@@ -1335,6 +1354,22 @@ function describe(
       `${String(discarded)} result${discarded === 1 ? '' : 's'} discarded unsent in the last ` +
         '5 minutes',
     );
+  }
+  // `P-441`: the resolver named, and the domains it is failing for, which no one check can say.
+  const givenUp = reading['lookupsGivenUpRecently'];
+  if (givenUp !== null && givenUp !== undefined && givenUp > 0) {
+    const domains = (notAnswering ?? []).map((domain) =>
+      domain === '' ? 'names of a single label' : domain,
+    );
+    parts.push(
+      `its resolver gave up ${String(givenUp)} check${givenUp === 1 ? '' : 's'} for want of an ` +
+        'answer in the last 5 minutes' +
+        (domains.length === 0 ? '' : `, with DNS not answering for ${domains.join(', ')}`),
+    );
+  }
+  // `P-432`: gate mode's one alarm, said in words beside the lookup's.
+  if (reading['lookupHelperTrouble'] === 1) {
+    parts.push('its lookup helper is failing: the probe log’s lookup helper lines say why');
   }
   const refusedGroups = reading['scriptGroupsRefusedRecently'];
   if (refusedGroups !== null && refusedGroups !== undefined && refusedGroups > 0) {

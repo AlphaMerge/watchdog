@@ -173,6 +173,54 @@ const PROBE_CHECKS: LookupDefinition = {
   ],
 };
 
+/**
+ * How a probe resolves names (`P-432`): `probe.nameResolver`, and whether gate mode's lookup
+ * helper rests. **Every entry Up**, and Up for a value it does not list: a mode is a setting, not
+ * a fault, and a resting helper is `ms.probe.lookup-helper`'s to alarm on, once. This is the
+ * record of which mode ran, read raw by the field test.
+ */
+const PROBE_NAME_RESOLVER: LookupDefinition = {
+  id: 'ms.probe.name-resolver',
+  name: 'Probe name resolver',
+  description:
+    'How this probe resolves names: its probe.nameResolver, and whether its lookup helper rests.',
+  type: 'singleInt',
+  undefinedState: 'up',
+  entries: [
+    { value: 1, state: 'up', text: 'system' },
+    { value: 2, state: 'up', text: 'gate' },
+    {
+      value: 3,
+      state: 'up',
+      text: 'gate, with its lookup helper resting: names are asked as with system',
+    },
+  ],
+};
+
+/**
+ * Whether gate mode's lookup helper is in trouble (`P-432` §1.13): the probe's latch, set when
+ * the helper was not up for 30 s, failed three times in ten minutes, ran out of memory, or rests,
+ * and cleared after ten minutes up with no loss, or at the probe's restart after a skew. **The
+ * gate's one alarm, and a Warning**: names are still answered, as with `system` while it rests. A
+ * zone that stops answering never sets it.
+ */
+const PROBE_LOOKUP_HELPER_TROUBLE: LookupDefinition = {
+  id: 'ms.probe.lookup-helper',
+  name: 'Probe lookup helper',
+  description:
+    'Whether the lookup helper of a probe with probe.nameResolver set to gate is answering.',
+  type: 'singleInt',
+  undefinedState: 'warning',
+  entries: [
+    { value: 0, state: 'up', text: 'answering' },
+    {
+      value: 1,
+      state: 'warning',
+      text: 'failing: not up for 30 s, 3 failures in 10 minutes, out of memory, or resting (until a restart, after a skew); read the probe log’s lookup helper lines',
+    },
+  ],
+};
+
 export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   IF_OPER_STATUS,
   IF_ADMIN_STATUS,
@@ -181,4 +229,6 @@ export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   PROBE_POOL,
   PROBE_DELIVERY,
   PROBE_CHECKS,
+  PROBE_NAME_RESOLVER,
+  PROBE_LOOKUP_HELPER_TROUBLE,
 ];

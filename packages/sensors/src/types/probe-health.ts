@@ -246,6 +246,52 @@ const CHANNELS: readonly ChannelDef[] = [
   // older than the grace. Not an outage by itself, so no limit; it is what an operator reads to
   // see whether a probe restarted in an outage kept its names.
   { key: 'answersLoaded', name: 'Name answers loaded at start', unit: 'answers' },
+  // **The checks given up over the last five minutes, and the one Warning for a resolver not
+  // keeping up (`P-441`).** The core counts it from `lookupsGivenUp`'s running total, as
+  // `scriptGroupsRefusedRecently` is counted, so a restart's burst is not lost to the counter
+  // reset and the Warning clears five minutes after the last. Each of those checks already fails
+  // naming the resolver; what none of them says is that the probe's resolver is the one fault
+  // under them all, so this says it once, for the probe, with the domains not answering named in
+  // the sensor's message. A hundred is past one device's names: a zone that stops answering, a
+  // probe restarted cold into an outage, or every name failing; never a slow resolver that
+  // answers. The same signal in both modes of `probe.nameResolver`, so neither warns more.
+  {
+    key: 'lookupsGivenUpRecently',
+    name: 'Name lookups given up (5 min)',
+    unit: 'lookups',
+    limits: {
+      upperWarning: 99.5,
+      warningMessage:
+        'the probe’s resolver is giving checks up for want of an answer: DNS is not answering it',
+    },
+  },
+  // **How the probe resolves names (`P-432`), sent in both modes**, so a record says positively
+  // which ran: every entry Up, since a mode is a setting and resting is the latch's to alarm on.
+  { key: 'nameResolverMode', name: 'Name resolver', lookup: 'ms.probe.name-resolver' },
+  // **Gate mode only: they gap in `system` mode, and a gap makes no state.** The latch is the one
+  // that alarms, once for a helper that fails, never for a zone that stops answering: the helper
+  // is there to carry those lookups, so one outage stays its sensors' alarm and `P-441`'s.
+  {
+    key: 'lookupHelperTrouble',
+    name: 'Lookup helper',
+    lookup: 'ms.probe.lookup-helper',
+  },
+  // The rest have no limit: what the field test reads to tell a gate that worked from one that
+  // never routed anything.
+  { key: 'nameCheckOnSeconds', name: 'Name check on', unit: 's', counter: { bits: 64 } },
+  {
+    key: 'namePassedStuck',
+    name: 'Name lookups past stuck on the probe’s lanes',
+    unit: 'lookups',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'nameHelperStuck',
+    name: 'Lookup helper lookups stuck',
+    unit: 'lookups',
+    counter: { bits: 64 },
+  },
+  { key: 'nameQuestionsOpen', name: 'DNS questions open, most', unit: 'questions' },
   // **How far memory lets the pool grow** (`P-236`). `P-34` derives the ceiling from the work
   // alone, and checks that hang to their timeout made it about 540 workers against a 4 GiB box
   // that held about a hundred: the probe grew until the kernel killed it, six times, while

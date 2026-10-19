@@ -146,6 +146,67 @@ describe('the self-monitoring sensor types', () => {
     assert.equal(keys.indexOf('answersLoaded'), keys.indexOf('lookupsGivenUp') + 1);
   });
 
+  it('warns on the checks given up over five minutes, at a hundred, after the answers loaded (`P-441`)', () => {
+    // One Warning for the probe, beside every check that already fails naming the resolver.
+    const channels = probeHealth.channels({});
+    const recent = channels.find((one) => one.key === 'lookupsGivenUpRecently');
+    assert.deepEqual(recent, {
+      key: 'lookupsGivenUpRecently',
+      name: 'Name lookups given up (5 min)',
+      unit: 'lookups',
+      limits: {
+        upperWarning: 99.5,
+        warningMessage:
+          'the probe’s resolver is giving checks up for want of an answer: DNS is not answering it',
+      },
+    });
+    // A count the core takes, never a counter: a rate would gap on a restart's burst.
+    assert.equal('counter' in recent, false);
+    const keys = channels.map((one) => one.key);
+    assert.equal(keys.indexOf('lookupsGivenUpRecently'), keys.indexOf('answersLoaded') + 1);
+  });
+
+  it('carries how the probe resolves names, its one alarm through the helper’s latch (`P-432`)', () => {
+    const channels = probeHealth.channels({});
+    const find = (key: string) => channels.find((one) => one.key === key);
+    assert.deepEqual(find('nameResolverMode'), {
+      key: 'nameResolverMode',
+      name: 'Name resolver',
+      lookup: 'ms.probe.name-resolver',
+    });
+    assert.deepEqual(find('lookupHelperTrouble'), {
+      key: 'lookupHelperTrouble',
+      name: 'Lookup helper',
+      lookup: 'ms.probe.lookup-helper',
+    });
+    // The rest have no limit and no lookup: what the field test reads, never an alarm.
+    for (const [key, unit, counter] of [
+      ['nameCheckOnSeconds', 's', true],
+      ['namePassedStuck', 'lookups', true],
+      ['nameHelperStuck', 'lookups', true],
+      ['nameQuestionsOpen', 'questions', false],
+    ] as const) {
+      const channel = find(key);
+      assert.ok(channel !== undefined, key);
+      assert.equal(channel.unit, unit, key);
+      assert.equal(channel.limits, undefined, key);
+      assert.equal(channel.lookup, undefined, key);
+      assert.deepEqual(channel.counter, counter ? { bits: 64 } : undefined, key);
+    }
+    const keys = channels.map((one) => one.key);
+    assert.deepEqual(
+      keys.slice(keys.indexOf('nameResolverMode'), keys.indexOf('nameResolverMode') + 6),
+      [
+        'nameResolverMode',
+        'lookupHelperTrouble',
+        'nameCheckOnSeconds',
+        'namePassedStuck',
+        'nameHelperStuck',
+        'nameQuestionsOpen',
+      ],
+    );
+  });
+
   it('carries what each listener kept out of a first scan as a counter, without limits (`P-270`)', () => {
     // Not a loss: the sensor's message names it, and a limit would alarm on every reconnect after
     // an outage the link channels already alarm on. Each beside its listener's overwritten count.

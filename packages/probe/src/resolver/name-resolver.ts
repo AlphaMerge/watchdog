@@ -2945,6 +2945,11 @@ export class NameResolver implements PoolResolver {
     return this.#gate?.budget.takePeak();
   }
 
+  /** The same peak, read without taking it: undefined in `system` mode. */
+  questionsPeak(): number | undefined {
+    return this.#gate?.budget.stats().peak;
+  }
+
   /**
    * The domains with the most names failing now, most first (`P-441`): what Probe Health names as
    * not answering. A name of one label is in the domain `''`. In either mode.

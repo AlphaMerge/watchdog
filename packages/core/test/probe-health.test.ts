@@ -823,6 +823,54 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(older['lookupsGivenUp'], null);
     });
 
+    it('carries how a probe resolves names in both modes, and gate mode’s own, and gaps them for one that cannot say (`P-432`)', () => {
+      // Distinct values, so a channel reading its neighbour's field is seen.
+      const gate = {
+        ...FULL,
+        nameResolverMode: 2,
+        lookupHelperTrouble: 1,
+        nameCheckOnSeconds: 3_600,
+        namePassedStuck: 4,
+        nameHelperStuck: 9,
+        nameQuestionsOpen: 12,
+      };
+      const { reading, message } = build(() => connected({ health: gate })).read(probeId);
+      assert.equal(reading['nameResolverMode'], 2);
+      assert.equal(reading['lookupHelperTrouble'], 1);
+      assert.equal(reading['nameCheckOnSeconds'], 3_600);
+      assert.equal(reading['namePassedStuck'], 4);
+      assert.equal(reading['nameHelperStuck'], 9);
+      assert.equal(reading['nameQuestionsOpen'], 12);
+      assert.match(
+        message,
+        /its lookup helper is failing: the probe log’s lookup helper lines say why/u,
+      );
+      // `system` mode sends the mode alone: the gate's channels gap, and a gap makes no state.
+      const { reading: system, message: said } = build(() =>
+        connected({ health: { ...FULL, nameResolverMode: 1 } }),
+      ).read(probeId);
+      assert.equal(system['nameResolverMode'], 1);
+      for (const key of [
+        'lookupHelperTrouble',
+        'nameCheckOnSeconds',
+        'namePassedStuck',
+        'nameHelperStuck',
+        'nameQuestionsOpen',
+      ]) {
+        assert.equal(system[key], null, key);
+      }
+      assert.doesNotMatch(said, /lookup helper/u);
+      // A probe or a core below 38 sends none of them.
+      const { reading: older } = build(() => connected()).read(probeId);
+      assert.equal(older['nameResolverMode'], null);
+      assert.equal(older['lookupHelperTrouble'], null);
+      // The latch at 0 says nothing in words.
+      const { message: answering } = build(() =>
+        connected({ health: { ...gate, lookupHelperTrouble: 0 } }),
+      ).read(probeId);
+      assert.doesNotMatch(answering, /lookup helper/u);
+    });
+
     it('carries the answers a probe loaded at start, a zero as a zero, and gaps for one that cannot say (`P-438`)', () => {
       const { reading } = build(() =>
         connected({ health: { ...FULL, lookupsGivenUp: 1_250, answersLoaded: 450 } }),
@@ -1300,7 +1348,11 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           return Object.fromEntries(
             (mine?.channels ?? [])
               .filter((one) =>
-                ['scriptGroupsRefusedRecently', 'resultsDiscarded'].includes(one.key),
+                [
+                  'scriptGroupsRefusedRecently',
+                  'resultsDiscarded',
+                  'lookupsGivenUpRecently',
+                ].includes(one.key),
               )
               .map((one) => [one.key, one.value]),
           );
@@ -1447,6 +1499,52 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(restarted['resultsDiscarded'], 41, 'a restart, and one too large');
       // Not the refused groups' count, and not theirs in it.
       assert.equal(restarted['scriptGroupsRefusedRecently'], 0);
+    });
+
+    it('counts the checks the resolver gave up, a restart’s burst included, and names the domains (`P-441`)', async () => {
+      const c = counter(1_000);
+      const givingUp = (
+        lookupsGivenUp: number,
+        uptime: number,
+        lookupsNotAnswering?: string[],
+      ): ProbeLink =>
+        refusing(0, uptime, {
+          lookupsGivenUp,
+          ...(lookupsNotAnswering === undefined ? {} : { lookupsNotAnswering }),
+        });
+      const givenUp = async (): Promise<number | undefined> =>
+        (await c.sweep())['lookupsGivenUpRecently'];
+      c.link.current = givingUp(900, 5_000);
+      assert.equal(await givenUp(), undefined, 'the baseline');
+      c.link.current = givingUp(1_150, 5_030, ['zone-b.test', '']);
+      assert.equal(await givenUp(), 250);
+      assert.match(
+        c.message(),
+        /its resolver gave up 250 checks for want of an answer in the last 5 minutes, with DNS not answering for zone-b\.test, names of a single label/u,
+      );
+      // **The counter reset** (`P-441`): restarted cold into the outage, the probe gave up 2,251
+      // in its first seconds. Its total fell from 1,150 to 2,251's start, which a rate reads as a
+      // reset and gaps; this counts all of it.
+      c.link.current = givingUp(2_251, 31, ['zone-b.test']);
+      assert.equal(await givenUp(), 2_501);
+      assert.match(
+        c.message(),
+        /gave up 2501 checks .*, with DNS not answering for zone-b\.test$/u,
+      );
+      // None not answering: the count is said, and no domain.
+      c.link.current = givingUp(2_251, 61, []);
+      assert.equal(await givenUp(), 2_501);
+      assert.match(c.message(), /in the last 5 minutes(,|$)/u);
+      assert.doesNotMatch(c.message(), /DNS not answering/u);
+      // Not the other counts, and not theirs in it.
+      assert.equal((await c.sweep())['scriptGroupsRefusedRecently'], 0);
+    });
+
+    it('says nothing of the resolver while it gives nothing up (`P-441`)', async () => {
+      const c = counter(10_000);
+      c.link.current = refusing(0, 40, { lookupsGivenUp: 0, lookupsNotAnswering: ['zone-b.test'] });
+      assert.equal((await c.sweep())['lookupsGivenUpRecently'], 0);
+      assert.doesNotMatch(c.message(), /resolver/u);
     });
 
     it('gaps each for a probe that sends no total, and for one that is gone', async () => {

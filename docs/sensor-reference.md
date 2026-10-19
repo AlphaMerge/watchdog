@@ -1070,6 +1070,13 @@ cost: **light** · evaluated by the core, never by a probe
 | `lookupsInFlight` | Name lookups in flight | lookups | — |
 | `lookupsGivenUp` | Name lookups given up | lookups | 64-bit counter → rate |
 | `answersLoaded` | Name answers loaded at start | answers | — |
+| `lookupsGivenUpRecently` | Name lookups given up (5 min) | lookups | default limits: warn above 99.5 |
+| `nameResolverMode` | Name resolver | — | lookup `ms.probe.name-resolver` |
+| `lookupHelperTrouble` | Lookup helper | — | lookup `ms.probe.lookup-helper` |
+| `nameCheckOnSeconds` | Name check on | s | 64-bit counter → rate |
+| `namePassedStuck` | Name lookups past stuck on the probe’s lanes | lookups | 64-bit counter → rate |
+| `nameHelperStuck` | Lookup helper lookups stuck | lookups | 64-bit counter → rate |
+| `nameQuestionsOpen` | DNS questions open, most | questions | — |
 | `poolCeiling` | Worker pool ceiling | workers | — |
 | `poolMemoryCap` | Workers memory can hold | workers | — |
 | `poolHeldBack` | Workers held back by memory | workers | — |

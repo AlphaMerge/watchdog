@@ -87,6 +87,20 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * closed schema: a core below 37 is sent the report without it, and a probe below 37 sends none
  * and the channel gaps.
  *
+ * Version 38 adds how the probe resolves names, under `nameResolver` (`P-432`), and the domains
+ * its resolver finds not answering, under `lookupsNotAnswering` (`P-441`). `nameResolverMode` is
+ * sent in both of `probe.nameResolver`'s modes: 1 `system`, 2 `gate`, 3 `gate` while its lookup
+ * helper rests and the probe routes as `system`. In gate mode only: `lookupHelperTrouble`, the
+ * helper's latched trouble (0 or 1); `nameCheckOnSeconds`, a running total of the seconds the name
+ * check was on with the helper up; `namePassedStuck`, the lookups on the probe's own lanes past
+ * the bound for stuck, judged after polls; `nameHelperStuck`, the helper's lookups its child said
+ * were stuck; and `nameQuestionsOpen`, the most DNS questions the probe's `getaddrinfo` calls held
+ * open at the forwarder since the last heartbeat the core acknowledged. `lookupsNotAnswering`, in
+ * both modes: at most three domains with the most names the resolver is failing, most first, `''`
+ * for names of one label. Seven new fields in a closed schema under two capabilities: a core
+ * below 38 is sent none of them, and a probe below 38 sends none and their channels gap. In
+ * `system` mode the five gate fields are absent, so their channels gap too.
+ *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
@@ -217,7 +231,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 37;
+export const PROTOCOL_VERSION = 38;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -662,6 +676,34 @@ export interface ProbeHealthReport {
    * a build without the file. Sent only to a core at protocol 37.
    */
   answersLoaded?: number;
+  /**
+   * How the probe resolves names (`P-432`): 1 `probe.nameResolver: system`; 2 `gate`; 3 `gate`
+   * while its lookup helper rests and the probe routes every name as `system` does. Sent in both
+   * modes, so a record says positively which ran. Sent only to a core at protocol 38.
+   */
+  nameResolverMode?: number;
+  /**
+   * Gate mode only, each absent in `system` mode (`P-432`, D29). `lookupHelperTrouble`: 1 while
+   * the lookup helper's trouble latch is set (it failed three times in ten minutes, ran out of
+   * memory, was not up for 30 s, or rests), 0 otherwise. `nameCheckOnSeconds`: a running total of
+   * the seconds the name check was on and the helper up. `namePassedStuck`: a running total of the
+   * lookups on the probe's own lanes past the bound for stuck, judged after polls.
+   * `nameHelperStuck`: a running total of the helper's lookups its child said were stuck, each
+   * one `system` would have held a probe lane for. `nameQuestionsOpen`: the most DNS questions the
+   * probe's `getaddrinfo` calls held open at the forwarder since the last heartbeat the core
+   * acknowledged. Sent only to a core at protocol 38.
+   */
+  lookupHelperTrouble?: number;
+  nameCheckOnSeconds?: number;
+  namePassedStuck?: number;
+  nameHelperStuck?: number;
+  nameQuestionsOpen?: number;
+  /**
+   * The domains the probe's resolver finds not answering (`P-441`): at most three, those with the
+   * most names failing first, `''` for names of a single label. Empty when none is. Sent in both
+   * modes, only to a core at protocol 38.
+   */
+  lookupsNotAnswering?: string[];
   /**
    * The child-process runner (`P-61`).
    *
@@ -1212,6 +1254,18 @@ const PROBE_HEALTH_SCHEMA = {
     lookupsInFlight: { type: 'integer', minimum: 0 },
     lookupsGivenUp: { type: 'integer', minimum: 0 },
     answersLoaded: { type: 'integer', minimum: 0 },
+    nameResolverMode: { type: 'integer', minimum: 1, maximum: 3 },
+    lookupHelperTrouble: { type: 'integer', minimum: 0, maximum: 1 },
+    nameCheckOnSeconds: { type: 'integer', minimum: 0 },
+    namePassedStuck: { type: 'integer', minimum: 0 },
+    nameHelperStuck: { type: 'integer', minimum: 0 },
+    nameQuestionsOpen: { type: 'integer', minimum: 0 },
+    // A domain name, or '' for single labels: 253 characters at most, as DNS allows.
+    lookupsNotAnswering: {
+      type: 'array',
+      maxItems: 3,
+      items: { type: 'string', maxLength: 253 },
+    },
     childSlots: { type: 'integer', minimum: 0 },
     childBusy: { type: 'integer', minimum: 0 },
     childQueued: { type: 'integer', minimum: 0 },

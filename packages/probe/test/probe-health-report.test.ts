@@ -8,7 +8,11 @@ import {
   PROTOCOL_VERSION,
   type AvailableMemoryLow,
 } from '@ms/shared';
-import { PROCESS_INSTANCE, ProbeHealthReporter } from '../src/health/report.js';
+import {
+  PROCESS_INSTANCE,
+  ProbeHealthReporter,
+  type NameResolutionHealth,
+} from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
 import type { LookupCounters } from '../src/runner/types.js';
@@ -123,6 +127,10 @@ function reporter(options: {
   mainLookups?: LookupCounters;
   /** The answers loaded at start (`P-438`). Absent, no such source. */
   answersLoaded?: number;
+  /** How the probe resolves names (`P-432`, `P-441`). Absent, no such source. */
+  names?: () => NameResolutionHealth;
+  /** The questions open at their most, taken per heartbeat (`P-432`). Absent, no such source. */
+  questionsPeak?: { take: () => number; peek: () => number };
 }): ProbeHealthReporter {
   let cpuCall = 0;
   let clockCall = 0;
@@ -140,6 +148,8 @@ function reporter(options: {
     ...(options.answersLoaded === undefined
       ? {}
       : { answersLoaded: (): number => options.answersLoaded ?? 0 }),
+    ...(options.names === undefined ? {} : { names: options.names }),
+    ...(options.questionsPeak === undefined ? {} : { questionsPeak: options.questionsPeak }),
     ...(options.children === false ? {} : { children: () => options.childStats ?? CHILDREN }),
     ...(options.spool === false ? {} : { spool: () => SPOOL }),
     ...(options.drain === false
@@ -220,6 +230,76 @@ describe('the probe’s own health report', () => {
     assert.equal(reporter({ answersLoaded: 0 }).report().answersLoaded, 0);
     // A build without the answer file says nothing, and the channel gaps.
     assert.equal('answersLoaded' in reporter({}).report(), false);
+  });
+
+  it('reports system mode as its mode and the domains not answering, and none of the gate’s fields (P-432, P-441)', () => {
+    const report = reporter({
+      names: () => ({ mode: 1, notAnswering: ['zone-b.test', ''] }),
+    }).report();
+    assert.equal(report.nameResolverMode, 1);
+    assert.deepEqual(report.lookupsNotAnswering, ['zone-b.test', '']);
+    for (const field of [
+      'lookupHelperTrouble',
+      'nameCheckOnSeconds',
+      'namePassedStuck',
+      'nameHelperStuck',
+      'nameQuestionsOpen',
+    ]) {
+      assert.equal(field in report, false, `${field} sent in system mode`);
+    }
+    // None not answering is said, as an empty list: a gap would say nothing is known.
+    assert.deepEqual(
+      reporter({ names: () => ({ mode: 1, notAnswering: [] }) }).report().lookupsNotAnswering,
+      [],
+    );
+    // A build without it says nothing at all.
+    const none = reporter({}).report();
+    assert.equal('nameResolverMode' in none, false);
+    assert.equal('lookupsNotAnswering' in none, false);
+  });
+
+  it('reports gate mode’s fields, each from its own source (P-432, D29)', () => {
+    const report = reporter({
+      names: () => ({
+        mode: 3,
+        notAnswering: ['zone-b.test'],
+        gate: { trouble: 1, checkOnSeconds: 3_599.7, passedStuck: 4, helperStuck: 9 },
+      }),
+      questionsPeak: { take: () => 12, peek: () => 11 },
+    }).report({ seq: 1, peerVersion: PROTOCOL_VERSION });
+    assert.equal(report.nameResolverMode, 3);
+    assert.equal(report.lookupHelperTrouble, 1);
+    assert.equal(report.nameCheckOnSeconds, 3_599, 'whole seconds, as the schema takes');
+    assert.equal(report.namePassedStuck, 4);
+    assert.equal(report.nameHelperStuck, 9);
+    assert.equal(report.nameQuestionsOpen, 12);
+  });
+
+  it('reports the questions open at their most since the last heartbeat the core acknowledged (P-432)', () => {
+    const peaks = [5, 9, 2, 3, 1];
+    let taken = 0;
+    const health = reporter({
+      names: () => ({
+        mode: 2,
+        notAnswering: [],
+        gate: { trouble: 0, checkOnSeconds: 0, passedStuck: 0, helperStuck: 0 },
+      }),
+      questionsPeak: { take: () => peaks[taken++] ?? 0, peek: () => 4 },
+    });
+    const beat = (seq: number) =>
+      health.report({ seq, peerVersion: PROTOCOL_VERSION }).nameQuestionsOpen;
+    assert.equal(beat(1), 5);
+    assert.equal(beat(2), 9, 'the second take was higher');
+    // Neither acknowledged yet: the 9 is carried, as a report the core never got must be.
+    assert.equal(beat(3), 9);
+    health.acknowledged(3);
+    assert.equal(beat(4), 3, 'from the acknowledged one on, only what came after');
+    health.acknowledged(4);
+    assert.equal(beat(5), 1);
+    assert.equal(taken, 5, 'one take a heartbeat');
+    // A report outside a heartbeat takes nothing, and reads the peak beside what is held.
+    assert.equal(health.report().nameQuestionsOpen, 4);
+    assert.equal(taken, 5);
   });
 
   it('reports the child-process runner, which is a second runner and a second set of counters', () => {
