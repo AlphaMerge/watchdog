@@ -13954,8 +13954,11 @@ because each is a decision rather than a defect:
           recovery grew five at once to `heldAt`, where the floor did not bind.
         - Per-worker memory before and after `P-426`, which this ticket asked for, was not
           measured (`P-440`).
-        - `ms-server`'s pool counts after landing, against those before it, are the
-          coordinator's, after the push.
+        - On `ms-server` at `f762dfc6` (2026-10-19 18:39–19:39Z), 60 minutes had 10 holds (2,200
+          before, at `04411fff`), 9 releases, 154 grows (about 490 an hour before), 459 shrinks
+          (idle give-backs between bursts, `P-26`'s, not memory churn), 0 idle-timeout link closes
+          (24 before) and 0 error lines; the first 10 minutes, including the start ramp, had 2
+          holds, 3 releases, 8 shrinks and 7 grows (382, 381, 117 and 82 before).
       - **The quiet re-take** (2026-10-19, 17:18–18:25Z, at `0c4c1391` on `integ/r4-1019` with
         `P-432` S1 and S4 beside it; `ms-server` stopped, the other project's containers paused,
         nothing else connected to the database, load 0.04–1.7): `check-pool` 20 of 20 runs at 83
