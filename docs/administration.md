@@ -1314,8 +1314,9 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
 - `namePassedStuck`, `nameHelperStuck`: probe-lane lookups past their bound, and helper lookups
   the child said were stuck.
 - `nameQuestionsOpen`: the most DNS questions the probe held unanswered at once since the last
-  report: one for each helper lookup of one family and two for one of both, the questions a lost
-  child's lookups leave at the forwarder for 10 s, and the probe's own lookups past their bound.
+  heartbeat the core acknowledged: one for each helper lookup of one family and two for one of
+  both, the questions a lost child's lookups leave at the forwarder for 10 s, and the probe's own
+  lookups past their bound.
   What a forwarder such as dnsmasq, with a limit on the queries it forwards, sees of the probe.
 
 Each is a gap in `system` mode but the first, and a gap from a core or a probe older than

@@ -134,6 +134,11 @@ describe('the lookup helper’s trouble latch (P-432 S3, §1.13)', () => {
     to('stopped');
     clock.now = 20 * TROUBLE_NOT_UP_MS;
     assert.equal(latch.value(), 0);
+    // A helper the probe never started says `idle`, and is no trouble however long it stays so.
+    const idle = make();
+    idle.to('idle');
+    idle.clock.now = 10 * TROUBLE_NOT_UP_MS;
+    assert.equal(idle.latch.value(), 0, 'never started');
   });
 
   it('sets at the third loss in ten minutes, each child back up at once', () => {

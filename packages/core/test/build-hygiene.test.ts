@@ -5,6 +5,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { coreHealth, CREDENTIAL_KINDS, probeHealth } from '@ms/sensors';
+import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
 import { notificationMethods } from '../src/notifications/methods.js';
 import { coreCatalogue } from '../src/profile.js';
 import { sortedAliases, templateLiterals } from './support/sql-order-aliases.js';
@@ -974,9 +975,20 @@ describe('the field-test runbook', () => {
     ['Probe Health', probeHealth],
   ]);
 
-  /** `| \`key\` | Core Health | yes |` — the three columns this test can check. */
+  /**
+   * `| \`key\` | Core Health | yes |` — the three columns this test can check. `yes (lookup)` is a
+   * channel whose lookup moves its sensor's state (`P-432`'s `lookupHelperTrouble`): no limit, and
+   * a state trigger sees it all the same.
+   */
   const ROW =
-    /^\|\s*`([a-zA-Z]+)`\s*\|\s*(Core Health|Probe Health)\s*\|\s*\*{0,2}(yes|no)\*{0,2}\s*\|/gm;
+    /^\|\s*`([a-zA-Z]+)`\s*\|\s*(Core Health|Probe Health)\s*\|\s*\*{0,2}(yes \(lookup\)|yes|no)\*{0,2}\s*\|/gm;
+
+  /** A lookup the core ships, with an entry that is not Up: a value of it moves the state. */
+  const moves = (lookup: string | undefined): boolean =>
+    BUILT_IN_LOOKUPS.some(
+      (definition) =>
+        definition.id === lookup && definition.entries.some((entry) => entry.state !== 'up'),
+    );
 
   it('names channels that exist, on the sensor it says, with the limits it claims', async () => {
     const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
@@ -985,7 +997,7 @@ describe('the field-test runbook', () => {
     const rows = [...runbook.matchAll(ROW)].map(([, key, sensor, limit]) => ({
       key: key ?? '',
       sensor: sensor ?? '',
-      claimsLimit: limit === 'yes',
+      claims: limit === 'yes' ? 'limit' : limit === 'no' ? 'nothing' : 'lookup',
     }));
     // A regex that matched nothing would make every assertion below vacuous — the table is seven
     // rows and the failure mode is somebody reformatting it, not emptying it.
@@ -1010,10 +1022,12 @@ describe('the field-test runbook', () => {
           limits.upperWarning !== undefined ||
           limits.lowerWarning !== undefined ||
           limits.lowerError !== undefined);
-      if (hasLimit !== row.claimsLimit) {
+      // Or a lookup with an entry that is not Up, which moves the state as a limit does.
+      const has = hasLimit ? 'limit' : moves(channel.lookup) ? 'lookup' : 'nothing';
+      if (has !== row.claims) {
         wrong.push(
-          `${row.key}: the runbook says "${row.claimsLimit ? 'yes' : 'no'}" and the channel ` +
-            `${hasLimit ? 'has' : 'has no'} declared limit`,
+          `${row.key}: the runbook claims ${row.claims === 'nothing' ? 'nothing' : `a ${row.claims}`} ` +
+            `that moves the state, and the channel has ${has === 'nothing' ? 'neither' : `a ${has}`}`,
         );
       }
     }

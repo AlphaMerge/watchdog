@@ -157,8 +157,9 @@ something was watching.
 **There are two kinds of trigger and the difference decides how many you create.** A *state*
 trigger is attached to a sensor and fires when that sensor enters a state; a *threshold* trigger
 is attached to a channel and carries its own value, without changing the sensor's state (`M-04`).
-A channel with a declared limit already moves its sensor's state, so a state trigger picks it up;
-a channel without one never will, whatever it reads.
+A channel with a declared limit already moves its sensor's state, so a state trigger picks it up,
+and so does one whose lookup says Warning or Down for a value, marked `yes (lookup)`; a channel
+with neither never will, whatever it reads.
 
 | Channel | Sensor | Declared limit? | Why it matters |
 | --- | --- | --- | --- |
@@ -169,11 +170,12 @@ a channel without one never will, whatever it reads.
 | `notifyOldest` | Core Health | yes | notifications queued and undelivered |
 | `sessionOverflows` | Probe Health | yes | SNMP or SSH sessions opened past the pool bound (`P-36`) — sustained, this is a probe heading for `EMFILE`, and a week is long enough to get there |
 | `lookupsGivenUpRecently` | Probe Health | yes | the probe's resolver gave up 100 checks in five minutes for want of an answer (`P-441`): DNS is not answering the probe, and the message names the domains |
-| `lookupHelperTrouble` | Probe Health | yes | only on a probe set to `probe.nameResolver: gate` (`P-432`): its lookup helper is failing, and the probe's log says why ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)) |
+| `lookupHelperTrouble` | Probe Health | yes (lookup) | only on a probe set to `probe.nameResolver: gate` (`P-432`): its lookup helper is failing, and the probe's log says why ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)) |
 | `probesDown` | Core Health | **no** | a probe is not connected |
 
-**So eight of the nine need no threshold at all.** Their limits ship declared (`S-18`), which means
-Core Health and Probe Health already go Down or Warning on their own. *State* triggers on those
+**So eight of the nine need no threshold at all.** Their limits ship declared (`S-18`), or for
+`lookupHelperTrouble` its lookup, which means Core Health and Probe Health already go Down or
+Warning on their own. *State* triggers on those
 two sensors deliver all eight: **two on each, one for Down and one for Warning**, because a state
 trigger watches exactly one state. Give each a template whose body carries `%lastmessage`, which
 names the channel. What you are adding is delivery, not thresholds.

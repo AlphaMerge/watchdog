@@ -386,7 +386,7 @@ does not start ([the gate](administration.md#the-gate-a-lookup-helper-for-the-na
   file does not give in a child process of the probe's, the lookup helper, whose lanes hold a
   zone that stops answering to 4 of its 6, so a cold start in the middle of one zone's outage
   answers the other zones from its first scan, with or without the file, and the probe's own
-  thread pool is never the silent zone's. A helper that fails is replaced, rests after five
+  thread pool is not the silent zone's while the helper is up. A helper that fails is replaced, rests after five
   failures in ten minutes while the probe resolves as `system` does, and raises one Probe Health
   Warning, `lookupHelperTrouble`; a zone that stops answering raises none of its own. In this
   build the gate's name check, which would let names it finds answering run on the probe's own

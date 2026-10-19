@@ -752,11 +752,12 @@ export interface ProbeConfig {
     targetPolicy: 'link-local' | 'private' | 'none';
     /**
      * Where the probe's resolver runs `getaddrinfo` (`P-432`). Every answer is the system's either
-     * way. `system`, the default: `P-426`'s resolver with `P-438`'s kept answers, exactly. `gate`: a
-     * name glibc answers without the network runs on the probe's own lookup lanes, and every other
-     * name is asked in the probe's lookup helper, a child process (`ms-probe: lookups`) with lanes
-     * of its own, where a zone that is not answering holds at most 3 of them. Nothing changes
-     * unless this is set; the default is decided again after the field test.
+     * way. `system`, the default: `P-426`'s resolver with `P-438`'s kept answers, exactly. `gate`:
+     * a name glibc answers without the network runs on the probe's own lookup lanes, and every
+     * other name is asked in the probe's lookup helper, a child process (`ms-probe: lookups`) with
+     * lanes of its own, where a zone that is not answering holds at most 4 of them, 3 once one of
+     * its lookups has been reported stuck. Nothing changes unless this is set; the default is
+     * decided again after the field test.
      */
     nameResolver: 'system' | 'gate';
   };
