@@ -304,6 +304,80 @@ describe('the helper’s lanes (P-432 S3, §1.8)', () => {
     for (const got of await Promise.all(firsts)) assert.ok(got.ok);
   });
 
+  it('K1: a warm zone of 500 names gone silent, check off: at most 4 of its refreshes run, 3 once it has given up, and another zone’s first lookup starts at once', async () => {
+    const { helper, ask, clock, keys } = make();
+    const names = Array.from({ length: 500 }, (_, i) => `dev-${String(i)}.zone-b.test`);
+    // Warm: every name asked and answered in the helper.
+    const warm = names.map((name) => outcome(ask(name, 4, { waitMs: 60_000 })));
+    for (let round = 0; round < 1_000 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.answer();
+      await settled();
+    }
+    for (const got of await Promise.all(warm)) assert.ok(got.ok);
+    // Silent: past their answers' life, each is served what it had while it is refreshed.
+    clock.now = ANSWER_MS + 1;
+    let most = 0;
+    for (const name of names) {
+      assert.deepEqual(await ask(name), A, `${name} served its kept answer`);
+      most = Math.max(most, helper.inFlight().length);
+    }
+    assert.equal(most, 4, 'the 4 refresh lanes, and never a fifth');
+    // The child says each has run past its bound: the zone's key is quiet again and its refresh
+    // unit capped. One gives up, EAI_AGAIN after stuck, and none starts in its place: a quiet key
+    // runs 3.
+    for (const sent of helper.inFlight()) sent.stuck();
+    assert.equal(keys.capped('d:zone-b.test', 'refresh'), true);
+    const [first, second] = helper.inFlight();
+    first?.fail('EAI_AGAIN');
+    await settled();
+    assert.equal(keys.quiet('d:zone-b.test'), true);
+    assert.equal(helper.inFlight().length, 3, 'none starts for the one that gave up');
+    second?.fail('EAI_AGAIN');
+    await settled();
+    assert.equal(helper.inFlight().length, 3, 'one starts for the next, to 3 and no more');
+    const other = ask('dev-1.zone-a.test');
+    assert.ok(
+      helper.inFlight().some((sent) => sent.host === 'dev-1.zone-a.test'),
+      'another zone’s first lookup starts at once',
+    );
+    helper.last('dev-1.zone-a.test').answer();
+    assert.deepEqual(await other, A);
+  });
+
+  it('K4: single labels, check off: each is a key of its own, so 3 silent ones do not hold a fourth label back; a fourth silent one fills the first lanes, as system mode’s rule does', async () => {
+    const { helper, ask } = make();
+    const silentOnes = ['sw-b1', 'sw-b2', 'sw-b3'].map((name) =>
+      outcome(ask(name, 4, { waitMs: 60_000 })),
+    );
+    assert.equal(helper.inFlight().length, 3);
+    // Were single labels one key (the design's `''`), the key rule would hold this one back as
+    // its fourth lookup.
+    const answering = ask('sw-a1');
+    assert.equal(helper.inFlight().length, 4, 'sw-a1 is asked beside them at once');
+    helper.last('sw-a1').answer();
+    assert.deepEqual(await answering, A);
+    // A fourth silent label takes the last first lane, and a never-seen label waits for one: in
+    // `system` mode every single label is the domain `''`, held to 3, and waits as well.
+    void outcome(ask('sw-b4', 4, { waitMs: 60_000 }));
+    assert.equal(helper.inFlight().length, 4);
+    const waiting = outcome(ask('sw-a2', 4, { waitMs: 60_000 }));
+    assert.equal(
+      helper.inFlight().some((sent) => sent.host === 'sw-a2'),
+      false,
+      'the first lookups’ cap of 4',
+    );
+    helper.last('sw-b1').fail('EAI_AGAIN');
+    await settled();
+    assert.ok(
+      helper.inFlight().some((sent) => sent.host === 'sw-a2'),
+      'asked once a lane is free',
+    );
+    helper.last('sw-a2').answer();
+    assert.ok((await waiting).ok);
+    for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+    for (const got of await Promise.all(silentOnes)) assert.ok(!got.ok);
+  });
+
   it('a zone never seen that does not answer holds at most 3 of the helper’s lanes, and another zone is asked beside it', async () => {
     const { helper, ask } = make();
     const silentZone = Array.from({ length: 6 }, (_, i) =>
@@ -1049,7 +1123,7 @@ describe('the domains not answering, for Probe Health (P-441)', () => {
 });
 
 describe('system mode builds none of it (P-432 S3)', () => {
-  it('has no gate health, no peak, and calls nothing of a helper', async () => {
+  it('K14: has no gate health, no peak, and calls nothing of a helper; P-426’s and P-438’s cases are name-resolver.test.ts’s, unchanged', async () => {
     const resolver = new NameResolver({
       logger: silent,
       lookup: () => Promise.resolve(A),

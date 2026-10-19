@@ -37,9 +37,11 @@ import {
   threadpoolSize,
   WATCH_EVERY_MS,
   type Family,
+  type GateParts,
   type NameResolverOptions,
 } from '../src/resolver/name-resolver.js';
 import { RESOLVE_FAULT, type ResolveAck, type ResolveReply } from '../src/resolver/protocol.js';
+import { FakeHelper, StubPolicy } from './support/fake-helper.js';
 import { pollWithin, within } from './support/within.js';
 
 /**
@@ -66,6 +68,22 @@ interface Call {
 const A: readonly ResolvedAddress[] = [{ address: '192.0.2.10', family: 4 }];
 const B: readonly ResolvedAddress[] = [{ address: '192.0.2.11', family: 4 }];
 
+/**
+ * `P-432` S3's N7: set by `name-resolver-resting.test.ts`, every case here runs again in gate mode
+ * with the lookup helper resting, where the probe asks every name as `system` does (§1.3), and
+ * must give `system`'s result.
+ */
+const RESTING_GATE = process.env['MS_RESOLVER_GATE'] === 'resting';
+
+/** A gate whose helper rests, its check off: everything on the probe's own lanes. */
+function restingGate(clock: { readonly now: number }): { readonly gate?: GateParts } {
+  if (!RESTING_GATE) return {};
+  const helper = new FakeHelper(() => clock.now);
+  helper.route = 'resting';
+  helper.state = 'resting';
+  return { gate: { helper, policy: new StubPolicy(), tickMs: 3_600_000 } };
+}
+
 /** A resolver over hand-settled lookups and a hand-moved clock. */
 function make(options: Partial<NameResolverOptions> = {}) {
   const calls: Call[] = [];
@@ -90,6 +108,7 @@ function make(options: Partial<NameResolverOptions> = {}) {
     random: () => 0.5,
     stuckMs: STUCK,
     watch: { files: [], everyMs: 60_000 },
+    ...restingGate(clock),
     ...options,
   });
   /** The calls made for a name, oldest first. */
@@ -1527,6 +1546,7 @@ describe('a resolver that answers every lookup, slowly (P-438’s narrow check)'
     let turn = 0;
     const resolver = new NameResolver({
       logger: silent,
+      ...restingGate(clock),
       now: () => clock.now,
       random: () => 0.5,
       stuckMs: 50,

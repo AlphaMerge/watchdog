@@ -99,6 +99,30 @@ describe('lookup validation', () => {
     }
   });
 
+  it('says how a probe resolves names, every mode Up, and Warns only for its lookup helper failing (`P-432`)', () => {
+    const named = (id: string): LookupDefinition => {
+      const found = BUILT_IN_LOOKUPS.find((definition) => definition.id === id);
+      assert.ok(found !== undefined, id);
+      return found;
+    };
+    // A mode is a setting, and a resting helper is the latch's to alarm on: Up, even unlisted.
+    const mode = named('ms.probe.name-resolver');
+    assert.deepEqual(
+      [1, 2, 3, 4].map((value) => applyLookup(mode, value).state),
+      ['up', 'up', 'up', 'up'],
+    );
+    assert.deepEqual(
+      [1, 2, 3].map((value) => applyLookup(mode, value).text),
+      ['system', 'gate', 'gate, with its lookup helper resting: names are asked as with system'],
+    );
+    const trouble = named('ms.probe.lookup-helper');
+    assert.deepEqual(applyLookup(trouble, 0), { state: 'up', text: 'answering', defined: true });
+    const failing = applyLookup(trouble, 1);
+    assert.equal(failing.state, 'warning', 'a Warning: names are still answered');
+    assert.match(failing.text, /^failing: .*read the probe log’s lookup helper lines$/u);
+    assert.equal(applyLookup(trouble, 2).state, 'warning', 'a value it does not know warns');
+  });
+
   it('refuses a value listed twice, because which entry wins is authoring order', () => {
     const problems = validateLookup({
       ...status,

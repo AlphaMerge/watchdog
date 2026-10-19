@@ -18,8 +18,8 @@ import { pollWithin } from './support/within.js';
 /**
  * `probe.nameResolver` in the probe as a service manager runs it (`P-432` S3, the end to end):
  * in gate mode the probe starts one lookup helper child, `ms-probe: lookups`, before it reports,
- * and the child is gone after the probe stops: within 500 ms of its exit after SIGTERM, and within
- * 1 s after SIGKILL (§7.4). In `system` mode there is none. The heartbeat says which mode ran, and
+ * and the child is gone after the probe stops: within 500 ms of its exit after SIGTERM, its
+ * shutdown having stopped it, and within 1 s after SIGKILL (§7.4). In `system` mode there is none. The heartbeat says which mode ran, and
  * a gate probe meeting a core below 38 says that core cannot be told its helper's health.
  */
 
@@ -125,6 +125,18 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
       const [helper] = helpers;
       assert.ok(helper !== undefined);
       assert.equal(await probe.stop(), 0);
+      // The shutdown stopped the names: the resolver, then the helper and the answer file, which
+      // says so as it saves. A child never stopped would still die by its own backstop.
+      assert.ok(
+        probe
+          .logs()
+          .some(
+            (line) =>
+              line['msg'] === 'the probe’s resolver saved the answers it keeps' &&
+              line['when'] === 'stop',
+          ),
+        'the shutdown stopped the names',
+      );
       // The design's bound (§7.4): gone within 500 ms of the probe's exit.
       await pollWithin(500, 'the helper gone within 500 ms of the probe', () => dead(helper), 10);
       assert.equal(core.refused.length, 0, core.refused.join('\n'));

@@ -1255,6 +1255,14 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
       [],
       'zone A answered at every scan, the first included',
     );
+    // At once, not after a silent lookup ended (1.5 s): answered on a lane of its own.
+    for (const { sensorId, durationMs } of answering) {
+      assert.ok(
+        durationMs < BOUND_MS / 2,
+        `sensor ${String(sensorId)} took ${String(durationMs)} ms: it waited for a lane; ` +
+          running.state(),
+      );
+    }
     const changesA = scan.changes.filter(({ sensorId }) => inZoneA(sensorId));
     assert.deepEqual(changesA, [], `zone A never changed state: ${scan.why(changesA)}`);
     const silentDevices = Array.from({ length: devices }, (_, device) => device).filter(
@@ -1398,6 +1406,13 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
       [],
       'zone A answered, its new names included',
     );
+    for (const { sensorId, durationMs } of answering) {
+      assert.ok(
+        durationMs < BOUND_MS / 2,
+        `sensor ${String(sensorId)} took ${String(durationMs)} ms: it waited for a lane; ` +
+          running.state(),
+      );
+    }
     const changesA = scan.changes.filter(({ sensorId }) => sensorId >= 1_000 || inZoneA(sensorId));
     assert.deepEqual(changesA, [], `zone A never changed state: ${scan.why(changesA)}`);
     assert.equal(firstScanPeak, 3, `zone B on 3 of the 4 first lanes: ${running.state()}`);
@@ -1468,6 +1483,15 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
     const few = await singleLabels('gate', 44, 11);
     const fewA = few.scan.changes.filter(({ sensorId }) => few.inA(sensorId));
     assert.deepEqual(fewA, [], `sw-a never changed state: ${few.scan.why(fewA)}`);
+    for (const { sensorId, durationMs, outcome } of few.scan.results) {
+      if (!few.inA(sensorId)) continue;
+      assert.equal(outcome, 'ok');
+      assert.ok(
+        durationMs < BOUND_MS / 2,
+        `sw-a${String(sensorId - 1)} took ${String(durationMs)} ms: it waited for a lane; ` +
+          few.running.state(),
+      );
+    }
     assert.deepEqual(few.running.probeAsked, [], 'nothing on the probe’s lanes');
 
     const gate = await singleLabels('gate', 80, 2);

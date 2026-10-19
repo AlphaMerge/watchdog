@@ -12741,6 +12741,111 @@ because each is a decision rather than a defect:
           quiet, and in the quiet window of 2026-10-19 (17:18Z, on `integ/r4-1019` with S1 and
           `P-437` beside it) `system-names` passed 433 of 433 and the four resolver files 113 of
           113, `pool-resolve` among them.
+      - **S3 built** 2026-10-19, on `feat/p432-s3-gate` (S1 and S4's final `34c0a996` under it),
+        for the coordinator to land: **the gate, with its name check off.** `probe.nameResolver:
+        system | gate`, `system` by default, in the config schema (no `shadow`, and c-ares never
+        answers). `main.ts` builds it with `buildNameResolution` (`name-resolution.ts`) before the
+        check pool: in `system` mode nothing of the gate is built, read or forked (N9); in gate
+        mode the resolver's first look loads the policy, its description is logged, the helper
+        starts on its snapshot, and the shutdown stops the resolver, then the helper and the
+        answer file. `ms-probe config check` notes the gate with its check off (exit 0).
+        - **What S3 carries**, as the design's S3 row lists it: the helper's lane set (6 lanes:
+          retries 1, first lookups and refreshes 4 each and 5 together, Check now outside the
+          caps); `HelperKeys` and `ForwardBudget`'s tokens (5 shared, 1 kept, 2 urgent), the
+          kept token and the ghosts; the policy (S4's `GlibcNamePolicy`, whose check is off until
+          S6, so every name the hosts file does not give goes to the helper); routing while the
+          helper is unavailable (rejoining waits up to 2 s, down asks on the probe's lanes under
+          D24, resting asks every name as `system` does); detach, isolation, poison and the skew
+          rest; D24 (`gateFirstRule` is `P-438`'s); the trouble latch (`health/latch.ts`);
+          protocol 38 and the core's two lookups.
+        - **Protocol 38**, by the coordinator's decision: two capabilities. `nameResolver` strips
+          the six `P-432` fields together: `nameResolverMode` (1 `system`, 2 `gate`, 3 resting,
+          sent in both modes), `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`,
+          `nameHelperStuck` and `nameQuestionsOpen` (the peak since the last acknowledged
+          heartbeat). `lookupsNotAnswering` strips `P-441`'s one field. The check's own fields
+          (the design's other eight) come with S6. A gate probe warns once a session that a core
+          below 38 is not told its helper's health (S-F11). The core: lookups
+          `ms.probe.name-resolver` (every entry Up) and `ms.probe.lookup-helper` (1 Warning),
+          seven Probe Health channels, six `/metrics` series, and the trouble said in the
+          sensor's message.
+        - **Found and fixed in S3:**
+          - **LR7, seed 1696 of a 30,000-seed exploration:** an isolation suspect was sent past
+            its class's cap, and two retries ran at once. A suspect now goes alone and within
+            its class's cap; N11 has a directed test (`name-resolver-gate.test.ts`).
+          - **SC10, at the probe's stop:** the helper's stop takes its child before it says
+            `stopped`, with the route `down` between, and the resolver moved what was queued for
+            the helper to the probe's lanes after the pool had drained: five of the silent
+            zone's names were asked there. Once the resolver has stopped, a helper going down now
+            settles what is queued for it, `the probe is stopping`; while the pool drains, a lost
+            child's queued lookups still fall back (two N14 tests).
+          - **S4's `slow`** is counted off in `nameCheckOnSeconds`, as every other off code.
+        - **Decided 2026-10-19 by Claude, under the user's delegation:**
+          - **LR7 runs on an in-house seeded PRNG** (mulberry32), 1,000 runs of 200 commands by
+            default (`MS_LR7_RUNS`, `MS_LR7_COMMANDS`, `MS_LR7_SEED`), rather than a
+            property-testing package: no new dependency, and a failing seed replays alone.
+          - **The lookups are `ms.probe.name-resolver` and `ms.probe.lookup-helper`**, where the
+            design wrote `ms.probe.nameResolver`: a lookup id is lower case and hyphens. The
+            trouble entry's text fits the 200 characters an entry has.
+          - **`P-441`'s Warning is at 100 checks given up in five minutes**, judged against the
+            finding's arms: 0 in the slow arm, 0 for the warm arm's answering zone, 738 for its
+            silent zone past the grace, 5,751 in the cold arm, 5,000 with every name silent. The
+            message names up to three domains, `''` as `names of a single label`. The same in
+            both modes, so neither warns more.
+          - **`config check` says the check is off without reading the system's files**: in this
+            build it is always off, and the reasons the files give are logged at start, where
+            the policy reads them.
+          - **The latch counts a stretch not up that ended between two reads**, judged when the
+            helper comes up; and the older-core warning is once a connection, not once a
+            process.
+          - **`lookupsNotAnswering` is sent in both modes**, and the example `probe.json` gains
+            no `nameResolver` key: the default is `system`.
+          - **The scenarios run the real `LookupHelper` on in-process children**
+            (`test/support/zone-helper.ts`) on the scenario's clock, rather than real children:
+            SC7 and SC17 need half an hour of clock, which a child's real timers cannot
+            compress. Short timers (backoff, start, stop) are real; a rest runs on the clock.
+            The real child is the end to end's.
+          - **SC10's "equal Warnings in both modes" is judged from the probe's numbers**: the
+            core's five-minute count modelled over the scans, with the limit the type declares,
+            and the latch. Not through the core's evaluation: the scenario has no core.
+          - **The end to end holds the design's bounds**: the child gone within 500 ms of the
+            probe's exit after SIGTERM, its shutdown having stopped the names (the answer file's
+            save at stop says so), and within 1 s after SIGKILL.
+          - **K4 as the lanes allow it**: each single label is a key of its own, so 3 silent labels
+            do not hold a fourth back; but the design's K4 has one answered beside four silent ones,
+            and four hold the helper's 4 first lanes, so a fifth waits for one. `system` mode waits
+            too, every single label being the domain `''`, held to 3. The test pins both.
+        - **Done of S4's "Left for S3":** one `glibcRuntime` (the child's, with the report's
+          network section left out), used by the policy and `helperSelf`; glibc `null` off glibc
+          throughout; one digest function, the child's, re-exported by `system-names.ts`; P-438's
+          `hostsFileFirst` takes `readNsswitch`'s rules; `SystemFiles.ldSoPreload` wired and
+          `watchedFiles()` in the watch; the child inherits `LD_PRELOAD` and `LD_AUDIT`, pinned
+          by a test.
+        - **Tests**: 1,461 of 1,461 in the targeted files, rebuilt from clean sources: the probe's
+          twelve unit files 859, among them `name-resolver.test.ts`'s 92 cases twice (N7: the second
+          time in gate mode with the helper resting, every case `system`'s result); its three timing
+          files 96, one file at a time (`lookup-helper`, the outage scenarios, the end to end);
+          shared 255; core 225; sensors 26. After the mutants, the last lint and a clean rebuild,
+          the unit files again, 1,365 of 1,365, and the end to end 4 of 4 with its shutdown
+          assertion. Run beside another session's suite, not in a quiet window: the scenarios' and
+          the end to end's times, the name-lookup `test:perf` arms and LR7 at 30,000 runs are left
+          for one.
+        - **Mutants**: 51, every one killed in the end, each carrying a marker its build was checked
+          for, and the sources restored and compared byte for byte: the latch 10, the resolver 10,
+          the lane rule 2, `name-resolution.ts` 7, the config 2, protocol 38 5, the heartbeat 3, the
+          core 7, the sensor type 2, `main.ts` 3. Two survived a first run and were killed after a
+          test was added: the not-up stretch timed from the first change rather than the latch's
+          start (a test for the time before the first change), and `main.ts` not stopping the names
+          at shutdown (the end to end now asks for the answer file's save at stop, which a child
+          left to its own backstop never makes). Rewritten before they counted: one equivalent as
+          first written (a resting route fell through to the probe's lanes anyway; now it asks the
+          resting helper), two that did not compile, and one whose marker the build dropped.
+        - **For S6, S7 and S8:**
+          - S6: the check's eight fields need a protocol of their own, after 38; turning the check
+            on changes `nameCheckOnSeconds` from 0, and SC1 (with its `system` twin) is S6's.
+          - S7: the gate's `test:perf` arms, cold and warm, beside `P-426`'s, in a quiet window;
+            the scenarios' helper ticks once a scan where a real one ticks each second, so the
+            liveness judgement is the unit tests', not the scenarios'.
+          - S8: the end to end on the smoke images, and the field test's choice of mode.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
@@ -12765,13 +12870,28 @@ because each is a decision rather than a defect:
       back without touching a reading's words; or the type guide says a build cannot take a name
       or a unit away from existing sensors, and why.
 
-- [ ] **P-441 — Probe Health does not flag a resolver that is not keeping up** · S · P-426, A-66 ·
+- [x] **P-441 — Probe Health does not flag a resolver that is not keeping up** · S · P-426, A-66 ·
       Found 2026-10-18 in `P-426`'s quiet window
       (`docs/findings/2026-10-18-name-lookups-through-the-resolver.md`).
       - **What Probe Health showed.** `lookupsInFlight` reached 449 to 483 in both zone arms, and `lookupsGivenUp` counted every check that failed for want of an answer. Neither channel has a limit, so Probe Health stayed Up through a restart that put about 2,250 sensors on healthy devices into Warning. The resolver was named only in those sensors' messages and in the probe's log.
       - **The counter can hide the burst.** `lookupsGivenUp` is stored as a rate and a counter that falls reads as a reset, so the burst after a restart can hide behind the first record.
       - **Done when** Probe Health goes Warning while the resolver is giving checks up, and says so in a message that names the resolver and the domains not answering. Judge the defaults against this finding's arms: Warning in the cold zone arm and the every-name-silent arm, not in the warm zone arm's answering zone, and not on the slow arm's first scan.
       - **Done when, also:** a restart's given-up checks are not lost to the counter reset, with a test for each.
+
+      **P-441 outcome** (with `P-432` S3's protocol 38, 2026-10-19). Probe Health gains
+      `lookupsGivenUpRecently`, **Warning from 100**: the checks given up in the last five
+      minutes, which the core counts from `lookupsGivenUp`'s running total as it counts
+      `scriptGroupsRefusedRecently`, so a restart's burst is counted whole and the Warning clears
+      five minutes after the last. The sensor's message names the resolver and up to three
+      domains not answering, from the probe's `lookupsNotAnswering` (`names of a single label`
+      for those), at protocol 38. The limit against the finding's arms: the slow arm gives up 0
+      and does not warn; the warm arm's answering zone gives up 0, and its silent zone 738 once
+      its grace is over, which warns, as that zone's outage; the cold arm 5,751 and every name
+      silent 5,000, which warn. The same signal in both modes of `probe.nameResolver`
+      (`P-432`'s SC10 holds them to one Warning each). Tests: `probe-health.test.ts` in the
+      core (the count across a restart's reset, the domains, and nothing said while nothing is
+      given up), `health-types.test.ts` (the limit), `probe-health-report.test.ts` (the domains
+      in both modes) and the capabilities' strip below 38.
 - [x] **P-442 — a TLS identity test reads no server name under load and says nothing about why** · XS ·
       A-71 · Found 2026-10-18 in `S4`'s second full suite, on a host at a load near 270. In
       `packages/sensors/test/tls-address-identity.test.ts`, 'tls.security on a device given by
@@ -13030,6 +13150,18 @@ because each is a decision rather than a defect:
       not on the behaviour, and it is the start bound a loaded host exceeds. **Done when** the
       start bound is 15–20 s, the 200 ms "no result" window it then times is unchanged, and the
       file passes twenty runs in a row at a load near 20.
+- [ ] **P-453 — a lookup helper child killed from outside while isolating poisons a working name** · XS ·
+      P-432 · Found 2026-10-19 by `P-432` S3, writing its scenarios. While the helper isolates
+      (D27), a suspect is sent alone, and any `exit` loss with it alone in flight charges it
+      (`lookup-helper.ts`, `#lose`), as it charges a poison name's hourly re-ask: the name is
+      marked poison, its checks fail at once for an hour, and it is never asked on the probe's
+      own lanes. The loss's signal is not looked at. An exit says nothing of the name when the
+      child was ended by SIGKILL, SIGTERM or SIGINT from outside (an operator, the kernel's OOM
+      killer, a cgroup kill), or exited with a code: `getaddrinfo` crashing raises a signal of
+      its own. A channel that closes before the exit is read says neither, so the charge waits
+      for the exit. The scenarios kill the child only between scans, so none ran into it. **Done when** only a signal a crash raises (SIGSEGV, SIGBUS, SIGABRT, SIGILL,
+      SIGFPE, SIGTRAP, SIGSYS) charges a suspect or a re-ask, and any other end is an `exit` loss
+      charged to no one, its suspects asked again alone, with a test for each and a mutant.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

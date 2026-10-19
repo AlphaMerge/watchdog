@@ -74,6 +74,15 @@ describe('the lookup helper’s trouble latch (P-432 S3, §1.13)', () => {
     assert.equal(latch.reason(), undefined);
   });
 
+  it('counts the time before the helper says anything as not up', () => {
+    // From the latch's own start: a helper whose first change never comes is not up either.
+    const { clock, latch, to } = make();
+    clock.now = TROUBLE_NOT_UP_MS;
+    to('starting');
+    assert.equal(latch.value(), 1);
+    assert.equal(latch.reason(), 'not-up');
+  });
+
   it('sets at 30 s not up from the start, and not a millisecond before', () => {
     const { clock, latch, to } = make();
     to('starting');
