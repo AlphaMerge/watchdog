@@ -122,7 +122,7 @@ spells its version `1.0.0~rc.3`, so that `1.0.0` upgrades it.
 upgrade*, *Every probe host* and *After the upgrade*. From anything older, including every build
 that says `0.1.0`, read *From a build older than rc.2* as well. From rc.2, the core's first start
 applies migrations 071 to 084 (there is no 083) while `database.autoMigrate` is on, the default,
-and the protocol between core and probe moves from 28 to 37.
+and the protocol between core and probe moves from 28 to 38.
 
 ### Before you upgrade
 
@@ -275,6 +275,11 @@ From rc.2 or anything older:
   worker's worth (40 MiB) inside its reserve before it gives one back, and a few checks behind a
   large pool wait up to 200 ms before it grows for them
   ([a probe held back by memory](administration.md#a-probe-held-back-by-memory)).
+- **Probe Health warns while its resolver gives checks up** (`P-441`): 100 in five minutes for
+  want of an answer, from DNS not answering, puts it in Warning with the domains not answering
+  in its message, where it stayed Up through any outage. A trigger on Probe Health's Warning now
+  fires once for such an outage, beside the sensors that fail in it
+  ([Probe Health](administration.md#probe-health--msprobehealth)).
 - **A probe left on rc.2 keeps working, and its newer channels gap.** Core and probe negotiate down
   to the older version
   ([ADR-001 Decision 13](ADR-001-architecture.md#decision-13--protocol-versions-negotiate-down-they-do-not-gate-admission)).
@@ -343,6 +348,10 @@ the **new** build first, then install the old release
 ([going back, after a tarball upgrade](installation.md#going-back-after-a-tarball-upgrade), which
 also says what taking back 064 and 073 does).
 
+**A probe set to `probe.nameResolver`** (`P-432`): take the key out of `/etc/ms/probe.json` before
+installing rc.2 or older on its host. Those builds refuse a key they do not know, and the probe
+does not start ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
+
 ## Known limits, and what comes next
 
 - **Windows is release 1.1** (`H-10`): the four `windows.*` types, a probe on Windows, and the MSI
@@ -372,10 +381,21 @@ also says what taking back 064 and 073 does).
   ([the second](findings/2026-10-18-name-lookups-through-the-resolver.md)): a resolver taking
   100 ms a lookup, or one zone in ten not answering on a running probe, no longer fails the
   answering devices' checks. Before `P-438`, a cold start in the middle of an outage failed about
-  half the answering devices' sensors for one scan. `P-432`, an option that moves lookups off the
-  thread pool every check shares, is decided for 1.0 and still to land. A device given by address
-  is not looked up at all. **Before `v1.0.0`**: add what `P-432` carries, and the restart's
-  measurement (the cold start and the restart from the file), to this item.
+  half the answering devices' sensors for one scan. A device given by address is not looked up
+  at all. **`probe.nameResolver: gate`** (`P-432`), off by default, asks every name the hosts
+  file does not give in a child process of the probe's, the lookup helper, whose lanes hold a
+  zone that stops answering to 4 of its 6, so a cold start in the middle of one zone's outage
+  answers the other zones from its first scan, with or without the file, and the probe's own
+  thread pool is never the silent zone's. A helper that fails is replaced, rests after five
+  failures in ten minutes while the probe resolves as `system` does, and raises one Probe Health
+  Warning, `lookupHelperTrouble`; a zone that stops answering raises none of its own. In this
+  build the gate's name check, which would let names it finds answering run on the probe's own
+  lanes, is off: every such name is asked in the helper
+  ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
+  And in either mode Probe Health now warns once for the probe when its resolver gives up 100
+  checks in five minutes for want of an answer, naming the domains not answering (`P-441`,
+  `lookupsGivenUpRecently`). **Before `v1.0.0`**: add the gate's measurement, and the restart's
+  (the cold start and the restart from the file), to this item.
 - **Slipped to 1.0.1:**
   - `A-84`: when a probe's protocol flap ends, the core should push that probe its configuration
     and let go what the flap held, and no test has run that step. If Probe Health's

@@ -1240,6 +1240,88 @@ the probe stops it.
 device's IP version), and the probe's own connection to the core. Each of those asks
 `getaddrinfo` itself, every time.
 
+### The gate: a lookup helper for the names DNS answers (`probe.nameResolver`)
+
+**`probe.nameResolver: gate` asks every name DNS answers in a child process of the probe's,
+the lookup helper** (`P-432`), so that a zone that stops answering holds the helper's threads and
+never the probe's. `system`, the default, is everything above, exactly: nothing of the gate is
+built, read or started. Set it in the probe's configuration file (`/etc/ms/probe.json`):
+
+```json
+"probe": {
+  "nameResolver": "gate"
+}
+```
+
+and restart the probe. `ms-probe config check` then says, on its standard output and with exit
+status 0, that the name check is off in this build (below). At start the probe logs what the
+system's name settings say (`probe.nameResolver is gate: the name policy the probe routes its
+lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its first scan.
+
+- **What changes, and what does not.** The helper is the probe's own Node with 32 libuv threads,
+  and asks the same `getaddrinfo` in the probe's environment, `LD_PRELOAD` included (less only
+  the probe's own `MS_` and Node settings and systemd's notify variables), so a name resolves to
+  what it resolves to in `system` mode; the cache, the holds, the grace, the answer file and
+  Check now are the ones above. What moves is where a lookup runs. A name the hosts file gives (as
+  `nsswitch.conf` has glibc read it) is answered without the network and stays on the probe's
+  own lanes. **Every other name is asked in the helper: in this build its name check is off**,
+  so no DNS name is vouched for to run on the probe's lanes, and none does while the helper is
+  up. The check, which will vouch for names its own queries find answering, is `P-432`'s `S6`.
+- **The helper's lanes keep a silent zone to its share.** At most 6 of its lookups run at once:
+  4 for names with nothing kept, 4 for refreshes, 5 for the two together, and 1 for held
+  names' retries, with `P-438`'s rule for a domain not known to answer (3 of the first 4) and 2
+  more for Check now. So a zone that stops answering, warm or cold, holds at most 4 of them,
+  and the zones that answer are asked beside it from the first scan, a probe started cold in
+  the middle of the outage included. A lookup the helper's child has run a second without an
+  answer is stuck, held as above.
+- **A helper that fails is replaced, and the probe never waits on it.** The probe judges it
+  every second by its beats: quiet for 3 seconds, its lookups in flight are let go and asked
+  elsewhere; quiet for 20, or past 256 MiB resident, it is killed. A lost child is followed by a
+  new one after 0, 250, 500 or 1,000 ms. Meanwhile, for up to 2 s, names wait for it; after that
+  they are asked on the probe's own lanes, a domain not known to answer held to 3 of the first 4
+  as in `system` mode. **The fifth loss in ten minutes rests it**, as does a loss within ten
+  minutes of a rest's end, for ten minutes, doubling to an hour (ten minutes up resets it), and
+  the probe resolves every name as `system` does until the rest ends
+  (`nameResolverMode` 3). If its child reports another Node, another glibc, or other contents
+  for a file glibc reads only once (`gai.conf`, `/etc/ld.so.preload`, and `nsswitch.conf` below
+  glibc 2.33), or such a file changes
+  under a running probe, the next loss rests it until the probe restarts.
+- **A name that crashes `getaddrinfo` is found and kept off every lane.** After the second crash
+  in ten minutes the names in flight are asked again one at a time; the one that crashes again
+  is poison: its checks fail at once, saying the lookup helper failed while asking for it, and
+  it is never asked on the probe's own lanes, resting included, where it would crash the probe.
+  It is asked again, alone, after an hour, then after twice as long at each crash, to a day. An
+  answer, or a restart of the probe, clears it.
+- **Stopping.** The helper serves the check pool until the pool has drained, then stops with the
+  probe. A probe killed outright takes it with it: the child exits within a second of its channel
+  to the probe closing.
+- **A core older than protocol 38** is not told how the probe resolves names or how its helper
+  is: the probe warns once a connection, `this core is older than protocol 38: the lookup
+  helper’s health does not reach it`. Upgrade the core first.
+
+**What Probe Health says of it** (the channels are in the table in
+[What to watch](#probe-health--msprobehealth)):
+
+- `nameResolverMode`: 1 `system`, 2 `gate`, 3 `gate` resting. Sent in both modes, every entry Up.
+- `lookupHelperTrouble`: **Warning at 1.** The helper has not been up for 30 s, has failed 3
+  times in ten minutes (a poison name's hourly ask is not counted), ran out of memory, or is
+  resting. It clears after ten minutes up with no failure; a rest until restart holds it until
+  the probe restarts. **It is the helper's alarm, never an outage's**: a zone that stops
+  answering is the helper's job to carry, and leaves it at 0. The probe's log says why, in the
+  lines of its `lookup-helper` component.
+- `nameCheckOnSeconds`: the seconds with the name check on and the helper up. 0 in this build.
+- `namePassedStuck`, `nameHelperStuck`: probe-lane lookups past their bound, and helper lookups
+  the child said were stuck.
+- `nameQuestionsOpen`: the most DNS questions the probe held unanswered at once since the last
+  report: one for each helper lookup of one family and two for one of both, the questions a lost
+  child's lookups leave at the forwarder for 10 s, and the probe's own lookups past their bound.
+  What a forwarder such as dnsmasq, with a limit on the queries it forwards, sees of the probe.
+
+Each is a gap in `system` mode but the first, and a gap from a core or a probe older than
+protocol 38. **Before downgrading a probe to a build without the setting, take
+`probe.nameResolver` out of its `probe.json`**: an older probe refuses a key it does not know,
+and does not start.
+
 ### A device's IP version
 
 **A device's IP version decides which of its name's addresses its sensors may use** (`A-85`).
@@ -1502,8 +1584,10 @@ alarm.
 | `sessionOverflows` | **Any value above zero is an error.** SNMP or SSH sessions were opened past the pool's bound because every existing one was in use — the pools do that rather than fail a check, and sustained overflow is a probe heading for `EMFILE`. Lengthen `idleMs`, move devices to another probe, or raise the bound |
 | `sessionsOpen` | Device sessions held right now. No threshold — how many is a property of your catalogue, not of health. Summed over the probe's check workers, each of which keeps its own: one device can have a session on every worker that has run its checks inside `idleMs`, so the count rises when its checks spread over more workers — while it hangs, or under load — and falls again as the workers it no longer reaches close theirs. A close is reported within five seconds, from an idle worker too (`P-256`); before that a worker reported only when it finished a check, so one that was sent no more checks kept its last count on this channel for good |
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |
-| `lookupsInFlight`, `lookupsGivenUp` | The probe's resolver (`A-66`, `P-426`). A sensor on a device given by host name has it resolved by [the probe's resolver](#how-a-probe-resolves-its-devices-names), to check it against [the target policy](#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not) or a credential set's targets, and waits at most half the transport's timeout, ten seconds at the most. The resolver keeps answers 30 s and runs `getaddrinfo` at most six at a time on a thread pool the whole probe shares, where a lookup cannot be cancelled. `lookupsInFlight` is how many lookups the probe has asked and not had answered, waited for or not: those running, those queued for a lane, and the resolver's own refreshes and retries. `lookupsGivenUp` counts the checks that failed for want of an answer: at their bound, cancelled, or failed at once because `getaddrinfo` said `EAI_AGAIN`, the resolver holds the name, every lane the lookup could use is stuck, or its queue is full; each fails saying `the probe’s resolver is not answering`. A check that fails because the probe's own main thread was too busy to take the lookup says that instead, and is not counted. **No limits**: those sensors already say it, Down or Unknown, and a limit here would be a second alarm for the same outage. A climb in flight that does not fall is the system's resolver not answering. Counted, on a scan and on **Check now** alike: SNMP, SSH (when a connection is opened), HTTP, mail, the port and TLS sensors and the database sensors, under the default `link-local` or `private` policy, and any device whose credential set pins an address; a listener sensor's sender, under any policy; and discovery's identification. Not counted: [what still resolves for itself](#how-a-probe-resolves-its-devices-names). A gap for a probe or a core older than protocol 36 |
+| `lookupsInFlight`, `lookupsGivenUp` | The probe's resolver (`A-66`, `P-426`). A sensor on a device given by host name has it resolved by [the probe's resolver](#how-a-probe-resolves-its-devices-names), to check it against [the target policy](#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not) or a credential set's targets, and waits at most half the transport's timeout, ten seconds at the most. The resolver keeps answers 30 s and runs `getaddrinfo` at most six at a time on a thread pool the whole probe shares, where a lookup cannot be cancelled. `lookupsInFlight` is how many lookups the probe has asked and not had answered, waited for or not: those running, those queued for a lane, and the resolver's own refreshes and retries. `lookupsGivenUp` counts the checks that failed for want of an answer: at their bound, cancelled, or failed at once because `getaddrinfo` said `EAI_AGAIN`, the resolver holds the name, every lane the lookup could use is stuck, or its queue is full; each fails saying `the probe’s resolver is not answering`. A check that fails because the probe's own main thread was too busy to take the lookup says that instead, and is not counted. **No limits on these two**: those sensors already say it, Down or Unknown; `lookupsGivenUpRecently`, below, says it once for the probe. A climb in flight that does not fall is the system's resolver not answering. Counted, on a scan and on **Check now** alike: SNMP, SSH (when a connection is opened), HTTP, mail, the port and TLS sensors and the database sensors, under the default `link-local` or `private` policy, and any device whose credential set pins an address; a listener sensor's sender, under any policy; and discovery's identification. Not counted: [what still resolves for itself](#how-a-probe-resolves-its-devices-names). A gap for a probe or a core older than protocol 36 |
 | `answersLoaded` | The answers the probe's resolver loaded at start from [the file it wrote when it last stopped](#how-a-probe-resolves-its-devices-names) (`P-438`), each served while it is asked again: the same all the process's life. **No limits**: zero is a cold start, not an outage, and the checks it cannot answer already say so. It is zero for the first start, a file the probe could not use (its log says why, in one line), or one written more than 5½ minutes before. A gap for a probe or a core older than protocol 37 |
+| `lookupsGivenUpRecently` | **Warns from 100.** The checks the probe's resolver gave up for want of an answer in the last five minutes (`P-441`), counted by the core from `lookupsGivenUp` as `scriptGroupsRefusedRecently` is, so a restart's burst is not lost to the counter starting again, and it clears five minutes after the last. Each of those checks already fails naming the resolver; this says once, for the probe, that its resolver is the fault under them all, and the sensor's message names up to three domains the resolver finds not answering (`names of a single label` for those). A hundred is past one device's names: a zone that stops answering once its kept answers run out, a probe restarted cold into an outage, or every name failing; never a slow resolver that answers (0 given up in `P-426`'s 100 ms arm, 738 in its warm zone arm past the grace, 5,751 in the cold one). The same in both modes of [`probe.nameResolver`](#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver), so neither warns more. A gap for a probe older than protocol 36; a probe older than 38 sends no domains, and the message names none |
+| `nameResolverMode`, `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck`, `nameQuestionsOpen` | How the probe resolves names, and the health of its lookup helper when it runs one (`P-432`): see [the gate](#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver). **`lookupHelperTrouble` warns at 1**, for a helper that fails, never for a zone that stops answering. `nameResolverMode` is sent in both modes, every entry Up; the others gap in `system` mode. A gap for a probe or a core older than protocol 38 |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
 | `spoolRejected`, `spoolOversized`, `resultsDiscarded` | **`resultsDiscarded` is an error on any discard in the last five minutes.** Spooled results the drain threw away on their way to the core, each a reading that exists nowhere, as `spoolDropped`'s are (`P-277`, `P-283`). `spoolRejected`: the core refused their batch as invalid, which it answers only to a probe it has not approved — a probe whose approval was withdrawn with results still in its spool. `spoolOversized`: one result alone was larger than a frame can carry; a result this build made is fitted to the wire first and never is, so a count here is a record an earlier build spooled. Both are running totals recorded as rates, with no limit; `resultsDiscarded` is the two over the last five minutes, counted by the core from those totals, so it sees the first record after a restart or a long outage, when a draining spool is likeliest to discard (with the exceptions in the `scriptGroups` row above). The probe logs each discard. Both gap for a probe without a spool drain, and all three for a probe or a core older than protocol 32 |

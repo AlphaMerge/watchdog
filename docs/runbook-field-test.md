@@ -168,11 +168,13 @@ a channel without one never will, whatever it reads.
 | `alarmOverdue` | Core Health | yes | the alarm sweep stopped; everything downstream is stale |
 | `notifyOldest` | Core Health | yes | notifications queued and undelivered |
 | `sessionOverflows` | Probe Health | yes | SNMP or SSH sessions opened past the pool bound (`P-36`) — sustained, this is a probe heading for `EMFILE`, and a week is long enough to get there |
+| `lookupsGivenUpRecently` | Probe Health | yes | the probe's resolver gave up 100 checks in five minutes for want of an answer (`P-441`): DNS is not answering the probe, and the message names the domains |
+| `lookupHelperTrouble` | Probe Health | yes | only on a probe set to `probe.nameResolver: gate` (`P-432`): its lookup helper is failing, and the probe's log says why ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)) |
 | `probesDown` | Core Health | **no** | a probe is not connected |
 
-**So six of the seven need no threshold at all.** Their limits ship declared (`S-18`), which means
+**So eight of the nine need no threshold at all.** Their limits ship declared (`S-18`), which means
 Core Health and Probe Health already go Down or Warning on their own. *State* triggers on those
-two sensors deliver all six: **two on each, one for Down and one for Warning**, because a state
+two sensors deliver all eight: **two on each, one for Down and one for Warning**, because a state
 trigger watches exactly one state. Give each a template whose body carries `%lastmessage`, which
 names the channel. What you are adding is delivery, not thresholds.
 
