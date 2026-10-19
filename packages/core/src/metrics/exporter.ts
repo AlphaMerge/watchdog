@@ -761,7 +761,7 @@ const PROBE_METRICS: readonly Metric[] = [
   {
     key: 'nameQuestionsOpen',
     name: 'ms_probe_dns_questions_open',
-    help: 'The most DNS questions a gate probe’s getaddrinfo calls held open at its forwarder since the last heartbeat the core acknowledged.',
+    help: 'The most DNS questions a gate probe held open at its forwarder since the last heartbeat the core acknowledged: its getaddrinfo calls’, and the name check’s own, each until its first reply or 10 s.',
   },
   // `P-432` S6: the name check's, and the rest of the lookup helper's, at protocol 39.
   {

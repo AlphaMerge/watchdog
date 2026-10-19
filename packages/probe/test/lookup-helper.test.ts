@@ -2339,6 +2339,30 @@ describe('the lookup helper: the order the resolver hears things in (scripted pr
     }
   });
 
+  it('U12: says no resident set while there is no child, from a loss or a stop to the next child’s first beat', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await fakeUp(made);
+      child.beat({ rss: 5_000 });
+      await polls();
+      assert.equal(made.helper.stats().rss, 5_000);
+      await fakeCrash(made);
+      assert.equal(made.helper.stats().rss, undefined, 'lost: no child, no resident set');
+      assert.equal(made.helper.stats().rssPeak, 5_000, 'the most seen is kept');
+      made.timers.fire(made.changes.at(-1)?.delayMs ?? -1);
+      await polls();
+      const next = await fakeUp(made);
+      assert.equal(made.helper.stats().rss, undefined, 'up, before its first beat');
+      next.beat({ rss: 6_000 });
+      await polls();
+      assert.equal(made.helper.stats().rss, 6_000);
+    } finally {
+      await stop(made);
+    }
+    assert.equal(made.helper.stats().rss, undefined, 'stopped');
+  });
+
   it('U9b: a late answer read in the same chunk as the loss reaches the resolver after the lookup’s rejection', async () => {
     const log: string[] = [];
     const made = fakeMade({ log });

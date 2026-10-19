@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { pino } from 'pino';
-import { notAnswered, RESOLVER_FAULT, type ResolvedAddress } from '@ms/sensors';
+import { notAnswered, RESOLVER_FAULT, RESOLVER_HELD, type ResolvedAddress } from '@ms/sensors';
+import type { Logger } from '@ms/shared';
 import { ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
 import { ANSWER_MS, NameResolver, STALE_MS, type Family } from '../src/resolver/name-resolver.js';
@@ -33,11 +34,48 @@ interface Call {
 
 const A: readonly ResolvedAddress[] = [{ address: '192.0.2.10', family: 4 }];
 
+/** A log line, by the fields the test reads. */
+interface Line {
+  readonly level?: unknown;
+  readonly host?: unknown;
+  readonly route?: unknown;
+  readonly key?: unknown;
+  readonly keys?: unknown;
+  readonly walkKeys?: unknown;
+  readonly why?: unknown;
+  readonly server?: unknown;
+  readonly pool?: unknown;
+  readonly deferred?: unknown;
+}
+
+/** A logger whose lines the test reads. */
+function captured() {
+  const lines: Line[] = [];
+  const logger = pino(
+    { level: 'info' },
+    { write: (line: string) => lines.push(JSON.parse(line) as Line) },
+  );
+  return { logger, lines };
+}
+
+/** What a check that failed was told: its code and words. */
+const failed = (got: Promise<unknown>): Promise<{ code: unknown; message: string }> =>
+  got.then(
+    () => ({ code: undefined, message: 'answered' }),
+    (error: unknown) => ({
+      code: (error as { code?: unknown }).code,
+      message: error instanceof Error ? error.message : String(error),
+    }),
+  );
+
 async function make(
   setup: {
     readonly route?: 'up' | 'down';
     readonly files?: readonly string[];
     readonly stuckMs?: number;
+    readonly tickMs?: number;
+    readonly maxQueued?: number;
+    readonly logger?: Logger;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -49,7 +87,7 @@ async function make(
   asker.rule = (_server, name) => (name.endsWith('zone-b.test') ? 'silent' : 'answer');
   const budget = new ForwardBudget({ now: () => clock.now });
   const resolver = new NameResolver({
-    logger: silent,
+    logger: setup.logger ?? silent,
     lookup: (host) =>
       new Promise((resolve) => {
         calls.push({
@@ -62,13 +100,14 @@ async function make(
     now: () => clock.now,
     random: () => 0.5,
     stuckMs: setup.stuckMs ?? STUCK,
+    ...(setup.maxQueued === undefined ? {} : { maxQueued: setup.maxQueued }),
     watch: { files: [...(setup.files ?? [])], everyMs: 60_000 },
     gate: {
       helper,
       policy,
       budget,
       keys: new HelperKeys(),
-      tickMs: 3_600_000,
+      tickMs: setup.tickMs ?? 3_600_000,
       check: { asker, routeMs: ROUTE, missMs: MISS },
     },
   });
@@ -182,10 +221,19 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
   });
 
   it('marks every key a heard walk asked unsafe when its lookup sticks on a lane, and sends the zone’s next name to the helper (D25)', async () => {
-    const { resolver, helper, callsFor, ask } = await make();
+    const { logger, lines } = captured();
+    const { resolver, helper, callsFor, ask } = await make({ logger });
     const stuck = ask('dev-6.zone-a.test', { waitMs: 2_000 });
     await pollWithin(1_000, 'on a lane', () => callsFor('dev-6.zone-a.test').length === 1, 2);
     await pollWithin(1_000, 'passed stuck', () => resolver.gateHealth()?.passedStuck === 1, 5);
+    const said = lines.find(
+      (line) => line.level === 40 && line.host === 'dev-6.zone-a.test' && line.route !== undefined,
+    );
+    assert.deepEqual(
+      said === undefined ? undefined : [said.route, said.key, said.walkKeys],
+      ['heard', 'd:zone-a.test', ['d:zone-a.test']],
+      'a warn naming the host, its key and the keys its walk asked',
+    );
     void ask('dev-7.zone-a.test', { waitMs: 2_000 }).catch(() => undefined);
     await pollWithin(1_000, 'the next name in the helper', () => helper.asks.length === 1, 2);
     assert.equal(helper.last('dev-7.zone-a.test').host, 'dev-7.zone-a.test');
@@ -207,7 +255,8 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
   });
 
   it('takes a sampled refresh stuck on a lane as its zone not heard, so the zone’s next refresh walks (D20, D25)', async () => {
-    const { resolver, asker, callsFor, clock, ask } = await make();
+    const { logger, lines } = captured();
+    const { resolver, asker, callsFor, clock, ask } = await make({ logger });
     const names = ['dev-11.zone-a.test', 'dev-12.zone-a.test'];
     const first = names.map((name) => ask(name));
     await pollWithin(1_000, 'both on lanes', () => names.every((n) => callsFor(n).length === 1), 2);
@@ -229,6 +278,14 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
     assert.equal(callsFor('dev-11.zone-a.test').length, 2, 'refreshed on a lane');
     assert.equal(asker.askedFor('dev-11.zone-a.test').length, 1, 'sampled: no walk of its own');
     await pollWithin(1_000, 'passed stuck', () => resolver.gateHealth()?.passedStuck === 1, 5);
+    const said = lines.find(
+      (line) => line.level === 40 && line.host === 'dev-11.zone-a.test' && line.route !== undefined,
+    );
+    assert.deepEqual(
+      said === undefined ? undefined : [said.route, said.key],
+      ['sampled', 'd:zone-a.test'],
+      'a warn naming the host and its zone',
+    );
     // The second's refresh no longer rides: the zone is not heard as of the stuck one's start.
     const walked = asker.askedFor('dev-12.zone-a.test').length;
     assert.deepEqual(await ask('dev-12.zone-a.test'), A);
@@ -357,5 +414,169 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('gate mode with the name check keeps an avoided name off the probe’s lanes (P-432 S6, D27)', () => {
+  it('asks a held suspect again in the helper once its hold ends, unwalked, though its servers now answer', async () => {
+    const { resolver, helper, asker, callsFor, clock, ask } = await make({ tickMs: 5 });
+    asker.rule = () => 'silent';
+    const slow = failed(ask('slow.zone-b.test', { waitMs: 60_000 }));
+    const fine = ask('fine.zone-b.test', { waitMs: 60_000 });
+    await pollWithin(1_000, 'both in the helper', () => helper.asks.length === 2, 2);
+    helper.last('slow.zone-b.test').stuck();
+    // The second crash: the stuck lookup held, the other asked again, both suspects.
+    helper.isolatingNow = true;
+    helper.lose('exit', 'rejoining', { suspects: true });
+    assert.equal((await slow).code, RESOLVER_HELD);
+    helper.move('up');
+    await pollWithin(
+      1_000,
+      'the other alone',
+      () => helper.asksFor('fine.zone-b.test').length === 2,
+      2,
+    );
+    helper.last('fine.zone-b.test').answer(A);
+    assert.deepEqual(await fine, A);
+    // Its servers answer now: a walk would hear it, and run it on the probe's lanes.
+    asker.rule = () => 'answer';
+    const walks = asker.askedFor('slow.zone-b.test').length;
+    clock.now += 5_000;
+    await pollWithin(
+      1_000,
+      'the held suspect asked again',
+      () => helper.asksFor('slow.zone-b.test').length === 2,
+      5,
+    );
+    assert.equal(helper.last('slow.zone-b.test').suspect, true, 'alone, as a suspect');
+    assert.equal(asker.askedFor('slow.zone-b.test').length, walks, 'not walked');
+    assert.equal(callsFor('slow.zone-b.test').length, 0, 'never on the probe’s lanes');
+    helper.last('slow.zone-b.test').answer(A);
+    resolver.stop();
+  });
+
+  it('sends a name the probe must not ask, poison in a family a lookup of it asks, to the helper unwalked while it is up', async () => {
+    const { resolver, helper, asker, callsFor, ask } = await make();
+    // The helper's word for family 0 covers a mark under family 4 (`avoidsSystem`).
+    helper.avoided.add('0:dev-30.zone-a.test');
+    const got = ask('dev-30.zone-a.test', { waitMs: 2_000 }, 0);
+    await pollWithin(
+      1_000,
+      'in the helper',
+      () => helper.asksFor('dev-30.zone-a.test').length === 1,
+      2,
+    );
+    assert.equal(asker.askedFor('dev-30.zone-a.test').length, 0, 'not walked');
+    assert.equal(callsFor('dev-30.zone-a.test').length, 0, 'never on the probe’s lanes');
+    helper.last('dev-30.zone-a.test').answer(A);
+    assert.deepEqual(await got, A);
+    resolver.stop();
+  });
+
+  it('sends a name its walk heard to the helper when a crash during the walk made it one the probe must not ask', async () => {
+    const { resolver, helper, asker, callsFor, ask } = await make();
+    asker.rule = () => ({ reply: 'answer', delayMs: 20 });
+    const got = ask('dev-31.zone-a.test', { waitMs: 2_000 });
+    await pollWithin(1_000, 'walked', () => asker.askedFor('dev-31.zone-a.test').length === 1, 2);
+    helper.avoided.add('4:dev-31.zone-a.test');
+    await pollWithin(
+      1_000,
+      'in the helper',
+      () => helper.asksFor('dev-31.zone-a.test').length === 1,
+      2,
+    );
+    assert.equal(callsFor('dev-31.zone-a.test').length, 0, 'never on the probe’s lanes');
+    helper.last('dev-31.zone-a.test').answer(A);
+    assert.deepEqual(await got, A);
+    resolver.stop();
+  });
+
+  it('fails the check of a name avoided during its walk at once when the helper went down meanwhile', async () => {
+    const { resolver, helper, asker, callsFor, ask } = await make();
+    asker.rule = () => ({ reply: 'answer', delayMs: 20 });
+    const got = failed(ask('dev-32.zone-a.test', { waitMs: 2_000 }));
+    await pollWithin(1_000, 'walked', () => asker.askedFor('dev-32.zone-a.test').length === 1, 2);
+    helper.avoided.add('4:dev-32.zone-a.test');
+    helper.move('down');
+    const said = await got;
+    assert.equal(said.code, RESOLVER_FAULT);
+    assert.match(said.message, /does not ask its own getaddrinfo for dev-32\.zone-a\.test/u);
+    await wait(ROUTE);
+    assert.equal(callsFor('dev-32.zone-a.test').length, 0, 'never on the probe’s lanes');
+    assert.equal(resolver.gateHealth()?.lookupsHeard, 0);
+    resolver.stop();
+  });
+});
+
+describe('gate mode with the name check: a rest, a full queue and a silent name’s words (P-432 S6)', () => {
+  it('moves a silent lookup queued on the probe’s lanes in a rest into the helper once it is up', async () => {
+    const { resolver, helper, calls, callsFor, ask } = await make({ stuckMs: 5_000 });
+    // Four heard names, each of its own zone, hold the probe's first lanes.
+    const held = [0, 1, 2, 3].map((zone) => ask(`dev-1.zone-c${String(zone)}.test`));
+    await pollWithin(1_000, 'four on lanes', () => calls.length === 4, 2);
+    const quiet = ask('dev-50.zone-b.test', { waitMs: 2_000 });
+    // The helper rests during the walk: its silent verdict queues on the probe's lanes.
+    helper.move('resting');
+    // Its verdict taken: queued on the probe's lanes, behind the four.
+    await wait(ROUTE * 3);
+    assert.equal(resolver.stats().queued, 1, 'queued on a probe lane');
+    assert.equal(helper.asksFor('dev-50.zone-b.test').length, 0);
+    helper.move('up');
+    await pollWithin(
+      1_000,
+      'in the helper',
+      () => helper.asksFor('dev-50.zone-b.test').length === 1,
+      2,
+    );
+    for (const call of [...calls]) call.answer();
+    await Promise.all(held);
+    helper.last('dev-50.zone-b.test').answer(A);
+    assert.deepEqual(await quiet, A);
+    assert.equal(callsFor('dev-50.zone-b.test').length, 0, 'never on the probe’s lanes');
+    resolver.stop();
+  });
+
+  it('walks nothing for a lookup a full queue may refuse: it goes unwalked, to a lane free now', async () => {
+    const { resolver, helper, asker, ask } = await make({ maxQueued: 1 });
+    asker.rule = () => 'silent';
+    // Walking, the queue's one.
+    const first = ask('dev-40.zone-b.test', { waitMs: 2_000 });
+    assert.equal(resolver.stats().queued, 1);
+    const next = ask('dev-41.zone-b.test', { waitMs: 2_000 });
+    await pollWithin(
+      1_000,
+      'in the helper',
+      () => helper.asksFor('dev-41.zone-b.test').length === 1,
+      2,
+    );
+    await wait(ROUTE * 2);
+    assert.equal(asker.askedFor('dev-41.zone-b.test').length, 0, 'never walked');
+    for (const asked of helper.inFlight()) asked.answer(A);
+    await pollWithin(1_000, 'both asked', () => helper.asks.length === 2, 2);
+    for (const asked of helper.inFlight()) asked.answer(A);
+    assert.deepEqual(await next, A);
+    assert.deepEqual(await first, A);
+    resolver.stop();
+  });
+
+  it('says what a silent name’s failed check rests on: the wait its own walk had, or its zone found silent before', async () => {
+    const { resolver, helper, asker, ask } = await make();
+    helper.move('down');
+    await wait(0);
+    // A check of 220 ms: a routing wait of 55.
+    const own = await failed(ask('dev-60.zone-b.test', { waitMs: 220 }));
+    assert.equal(own.code, RESOLVER_FAULT);
+    assert.match(own.message, /no DNS server answered the name within 55 ms/u);
+    // The zone's own verdict, at its step's 60 ms.
+    await wait(ROUTE);
+    // The zone is silent, its walk again not due: the next name is not asked at all.
+    const zone = await failed(ask('dev-61.zone-b.test', { waitMs: 2_000 }));
+    assert.equal(zone.code, RESOLVER_FAULT);
+    assert.match(
+      zone.message,
+      /its zone zone-b\.test did not answer the check 0 s ago, and the name was not asked/u,
+    );
+    assert.equal(asker.askedFor('dev-61.zone-b.test').length, 0);
+    resolver.stop();
   });
 });

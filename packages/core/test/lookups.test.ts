@@ -146,7 +146,10 @@ describe('lookup validation', () => {
       ['up', 'up', 'up', 'up', 'up', 'up', 'up'],
     );
     assert.equal(applyLookup(check, 1).text, 'on');
-    assert.match(applyLookup(check, 2).text, /^off for this system’s resolver settings/u);
+    assert.match(
+      applyLookup(check, 2).text,
+      /^off for this system’s name settings or platform: the probe log says why \(at start, or when the settings moved\)$/u,
+    );
     assert.match(applyLookup(check, 4).text, /^stood down after misses/u);
   });
 

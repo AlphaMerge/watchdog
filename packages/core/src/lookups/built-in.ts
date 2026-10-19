@@ -260,7 +260,7 @@ const PROBE_NAME_CHECK: LookupDefinition = {
     {
       value: 2,
       state: 'up',
-      text: 'off for this system’s resolver settings or platform: the probe’s start log says why',
+      text: 'off for this system’s name settings or platform: the probe log says why (at start, or when the settings moved)',
     },
     { value: 3, state: 'up', text: 'not proven: no DNS server has answered it yet' },
     { value: 4, state: 'up', text: 'stood down after misses: the probe log says which zones' },

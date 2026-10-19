@@ -104,6 +104,8 @@ export const MAX_KEYS = 20_000;
 export const CANARY_NAME = 'localhost.';
 const STUCK_MS = 1_000;
 const LOG_EVERY_MS = 60_000;
+/** A walk deferred after this long with none for the same reason (and server) starts an episode. */
+export const DEFER_QUIET_MS = 60_000;
 /** A step's verdict within this of the lookup's deadline is taken at it. */
 const SAME_DEADLINE_MS = 2;
 
@@ -223,7 +225,22 @@ export type UnvouchedWhy =
   | 'budget'
   | 'rate'
   | 'stall'
-  | 'scoutWait';
+  | 'scoutWait'
+  /**
+   * The resolver's word, never the check's: a name the probe's own `getaddrinfo` must not be asked
+   * for now (a suspect, poison, or in flight at a crash), sent to the helper whatever DNS said.
+   */
+  | 'avoided';
+
+/**
+ * What a silent route rests on, for the words of a check failed while the helper is down: this
+ * name's own step, unanswered within its routing wait, or its zone found silent before, with
+ * nothing asked for this name (its walk again not due).
+ */
+export type SilentEvidence =
+  | { readonly kind: 'asked'; readonly waitMs: number }
+  /** `since`: when the zone was last not heard, on the resolver's clock. */
+  | { readonly kind: 'zone'; readonly since: number };
 
 /** A silent walk's unanswered question, watched for a miss (§1.10). */
 export interface MissWatch {
@@ -243,7 +260,12 @@ export type CheckRoute =
       readonly keys: readonly string[];
     }
   | { readonly route: 'sampled'; readonly key: string }
-  | { readonly route: 'silent'; readonly key: string; readonly miss: MissWatch | undefined }
+  | {
+      readonly route: 'silent';
+      readonly key: string;
+      readonly miss: MissWatch | undefined;
+      readonly evidence: SilentEvidence;
+    }
   | { readonly route: 'unvouched'; readonly key: string; readonly why: UnvouchedWhy };
 
 /** The check's state for Probe Health's `nameCheckState` (§5), less the helper's rest (0). */
@@ -315,7 +337,13 @@ interface Question {
 type ServerSaid =
   | { readonly kind: 'replies'; readonly replies: readonly DnsReplyKind[] }
   | { readonly kind: 'silent' | 'stall' }
-  | { readonly kind: 'deferred'; readonly why: 'budget' | 'rate' };
+  | { readonly kind: 'deferred'; readonly why: 'budget' | 'rate'; readonly at: DeferredAt };
+
+/** Where a walk was deferred: the pool short of room, or the server whose rate was spent. */
+interface DeferredAt {
+  readonly pool?: WalkPool;
+  readonly server?: string;
+}
 
 /** How a step ended (§1.4): its key heard, or not, and what the walk does next. */
 type StepEnd =
@@ -328,7 +356,7 @@ type StepEnd =
   /** Not answered by the deadline: the question still out is what a miss watches. */
   | { readonly kind: 'silent'; readonly question: Question | undefined }
   | { readonly kind: 'stall' | 'bad' }
-  | { readonly kind: 'deferred'; readonly why: 'budget' | 'rate' };
+  | { readonly kind: 'deferred'; readonly why: 'budget' | 'rate'; readonly at: DeferredAt };
 
 /** A step waiting for room in its pool (§1.4). */
 interface RoomWait {
@@ -376,6 +404,8 @@ export class DnsCheck {
   #canaryTimer: NodeJS.Timeout | undefined;
   #stopped = true;
   readonly #lastLog = new Map<string, number>();
+  /** The last deferral of each episode kind (`why`, or `rate` and its server), for S-F10's warn. */
+  readonly #lastDeferred = new Map<string, number>();
 
   constructor(options: DnsCheckOptions) {
     this.#logger = options.logger.child({ component: 'dns-check' });
@@ -503,7 +533,7 @@ export class DnsCheck {
     const keyOf = (candidate: string): string =>
       marked ? `n:${withoutDot(ask.host)}` : candidateKey(candidate);
     if (
-      this.#marked(this.#nameSkips, ask.host, now) ||
+      this.#marked(this.#nameSkips, withoutDot(ask.host), now) ||
       candidates.some((candidate) => this.#marked(this.#keySkips, keyOf(candidate), now))
     ) {
       return this.#unvouched(own, 'skip');
@@ -521,7 +551,7 @@ export class DnsCheck {
       const sampled = this.#sample(keyOf(first), ask, now);
       if (sampled !== undefined) return sampled;
     }
-    return this.#walk(ask, candidates, types, keyOf, this.#realNow() + waitMs).catch(
+    return this.#walk(ask, candidates, types, keyOf, this.#realNow() + waitMs, waitMs).catch(
       (error: unknown) => {
         this.#logger.error({ err: error, host: ask.host }, 'the DNS check failed on a walk');
         return this.#unvouched(own, 'cannotVouch');
@@ -556,10 +586,11 @@ export class DnsCheck {
   markUnsafe(keys: readonly string[]): void {
     const until = this.#now() + UNSAFE_MS;
     for (const key of keys) this.#unsafe.set(key, until);
-    this.#say(
-      'unsafe',
-      'warn',
-      { keys },
+    // Once a minute a key, never one line for every zone: a second zone is said as the first was.
+    const said = keys.filter((key) => this.#due(`unsafe:${key}`));
+    if (said.length === 0) return;
+    this.#logger.warn(
+      { keys: said },
       'a name the DNS check heard ran past the bound for stuck on the probe’s lanes: its zone is walked by none for 5 minutes',
     );
   }
@@ -593,11 +624,38 @@ export class DnsCheck {
 
   // --- The walk ---------------------------------------------------------------------------------
 
-  #unvouched(key: string, why: UnvouchedWhy, counted = false): CheckRoute {
+  #unvouched(key: string, why: UnvouchedWhy, counted = false, at: DeferredAt = {}): CheckRoute {
     if (counted && (why === 'budget' || why === 'rate' || why === 'stall' || why === 'scoutWait')) {
-      this.#budget.deferred(why);
+      this.#deferredWalk(why, this.#budget.deferred(why), at);
     }
     return { route: 'unvouched', key, why };
+  }
+
+  /**
+   * A walk deferred (S-F10): a warn at the start of each episode, a deferral after
+   * `DEFER_QUIET_MS` with none for the same reason (and, for `rate`, the same server), with the
+   * count so far. The hourly summary has the totals.
+   */
+  #deferredWalk(why: DeferReason, total: number, at: DeferredAt): void {
+    const kind = why === 'rate' ? `rate:${at.server ?? ''}` : why;
+    const now = this.#now();
+    const last = this.#lastDeferred.get(kind);
+    this.#lastDeferred.set(kind, now);
+    if (last !== undefined && now - last < DEFER_QUIET_MS) return;
+    if (this.#lastDeferred.size > 1_000) {
+      const [oldest] = this.#lastDeferred.keys();
+      if (oldest !== undefined) this.#lastDeferred.delete(oldest);
+    }
+    this.#logger.warn(
+      {
+        why,
+        ...(at.server === undefined ? {} : { server: at.server }),
+        ...(at.pool === undefined ? {} : { pool: at.pool }),
+        deferred: total,
+      },
+      `the DNS check is deferring walks to the lookup helper: ${DEFER_WORDS[why]}; ` +
+        'said once an episode, and counted in nameWalksDeferred',
+    );
   }
 
   #sample(key: string, ask: CheckAsk, now: number): CheckRoute | undefined {
@@ -620,6 +678,7 @@ export class DnsCheck {
     types: readonly QType[],
     keyOf: (candidate: string) => string,
     deadline: number,
+    waitMs: number,
   ): Promise<CheckRoute> {
     this.#walked += 1;
     const generation = this.#generation;
@@ -638,7 +697,11 @@ export class DnsCheck {
       let kind: 'key' | 'name';
       let scout = false;
       if (phase === 'silent') {
-        if (now < state.rewalkAt) return { route: 'silent', key, miss: undefined };
+        if (now < state.rewalkAt) {
+          // Nothing asked for this name: its zone's silence is the evidence (finding 10).
+          const since = state.lastNotHeardAt ?? now;
+          return { route: 'silent', key, miss: undefined, evidence: { kind: 'zone', since } };
+        }
         // Its walk again: the next one is a step further off, whatever this one finds.
         state.step = Math.min(state.step + 1, 4);
         state.rewalkAt = now + this.#backoff(state.step);
@@ -667,13 +730,18 @@ export class DnsCheck {
       const end = await this.#step(state, key, candidate, types, pool, kind, deadline, scout);
       switch (end.kind) {
         case 'silent':
-          return { route: 'silent', key, miss: this.#watchMiss(ask.host, key, end.question) };
+          return {
+            route: 'silent',
+            key,
+            miss: this.#watchMiss(ask.host, key, end.question),
+            evidence: { kind: 'asked', waitMs },
+          };
         case 'stall':
           return this.#unvouched(key, 'stall', true);
         case 'bad':
           return this.#unvouched(key, 'cannotVouch');
         case 'deferred':
-          return this.#unvouched(key, end.why, true);
+          return this.#unvouched(key, end.why, true, end.at);
         case 'answered':
           return { route: 'heard', key, keys: asked };
         case 'next':
@@ -752,11 +820,13 @@ export class DnsCheck {
     });
     if (deadline >= verdictAt) return chain;
     // The lookup's own deadline is the nearer: it routes then, and the key's verdict comes later.
-    const own = this.#deadline(deadline).then((late): StepEnd =>
-      late
-        ? { kind: 'stall' }
-        : { kind: 'silent', question: questions.find((asked) => asked.reply === undefined) },
-    );
+    const own = this.#deadline(deadline).then((late): StepEnd => {
+      if (late) return { kind: 'stall' };
+      const question = questions.find((asked) => asked.reply === undefined);
+      // Nothing of the step sent and still unanswered: it was waiting for room, not on a server.
+      if (question === undefined) return { kind: 'deferred', why: 'budget', at: { pool } };
+      return { kind: 'silent', question };
+    });
     return Promise.race([chain, own]);
   }
 
@@ -803,7 +873,7 @@ export class DnsCheck {
       return { kind: 'silent', question: questions.find((asked) => asked.reply === undefined) };
     }
     if (one.kind === 'stall') return { kind: 'stall' };
-    if (one.kind === 'deferred') return { kind: 'deferred', why: one.why };
+    if (one.kind === 'deferred') return { kind: 'deferred', why: one.why, at: one.at };
     return undefined;
   }
 
@@ -885,9 +955,11 @@ export class DnsCheck {
     if (joined !== undefined && joined.reply === undefined && !joined.ledger.closed) return joined;
     if (!this.#budget.admit(pool, 1)) {
       const room = await this.#room(pool, verdictAt);
-      if (!room) return { kind: 'deferred', why: 'budget' };
+      if (!room) return { kind: 'deferred', why: 'budget', at: { pool } };
     }
-    if (!this.#budget.serverTake(server, 1, kind)) return { kind: 'deferred', why: 'rate' };
+    if (!this.#budget.serverTake(server, 1, kind)) {
+      return { kind: 'deferred', why: 'rate', at: { server } };
+    }
     return this.#send(server, name, type, pool, channelOf(), open, id);
   }
 
@@ -1214,17 +1286,30 @@ export class DnsCheck {
     fields: Record<string, unknown>,
     message: string,
   ): void {
+    if (this.#due(kind)) this.#logger[level](fields, message);
+  }
+
+  /** Whether a line of this kind may be said now: once a minute at most, and from now not again. */
+  #due(kind: string): boolean {
     const now = this.#now();
     const last = this.#lastLog.get(kind);
-    if (last !== undefined && now - last < LOG_EVERY_MS) return;
+    if (last !== undefined && now - last < LOG_EVERY_MS) return false;
     this.#lastLog.set(kind, now);
     if (this.#lastLog.size > 1_000) {
       const [oldest] = this.#lastLog.keys();
       if (oldest !== undefined) this.#lastLog.delete(oldest);
     }
-    this.#logger[level](fields, message);
+    return true;
   }
 }
+
+/** Why walks are deferred, in the episode's warn. */
+const DEFER_WORDS: Readonly<Record<DeferReason, string>> = {
+  budget: 'the check had no room for its questions',
+  rate: 'a server’s rate of questions was spent',
+  stall: 'a timer fired late, or a verdict was dropped',
+  scoutWait: 'a zone’s scouts had no verdict by the lookup’s deadline',
+};
 
 /** A question's reply as it is now, read through a call: an await may have set it. */
 function replyOf(question: Question): DnsReplyKind | undefined {

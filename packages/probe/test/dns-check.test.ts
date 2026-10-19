@@ -4,6 +4,7 @@ import { pino } from 'pino';
 import { DnsSimulator, replies } from '@ms/simulators';
 import {
   caresAsker,
+  DEFER_QUIET_MS,
   DnsCheck,
   KEY_FRESH_MS,
   KEY_SAMPLE_MS,
@@ -28,6 +29,34 @@ import { pollWithin, within } from './support/within.js';
 
 const silent = pino({ level: 'silent' });
 const ROUTE = 60;
+
+/** A log line, by the fields the test reads. */
+interface Line {
+  readonly level?: unknown;
+  readonly host?: unknown;
+  readonly route?: unknown;
+  readonly key?: unknown;
+  readonly keys?: unknown;
+  readonly walkKeys?: unknown;
+  readonly why?: unknown;
+  readonly server?: unknown;
+  readonly pool?: unknown;
+  readonly deferred?: unknown;
+}
+
+/** A logger whose lines the test reads. */
+function captured() {
+  const lines: Line[] = [];
+  const logger = pino(
+    { level: 'info' },
+    { write: (line: string) => lines.push(JSON.parse(line) as Line) },
+  );
+  return { logger, lines };
+}
+
+/** The warn lines said, by a field of theirs. */
+const warns = (lines: readonly Line[], field: keyof Line): unknown[] =>
+  lines.filter((line) => line.level === 40 && field in line).map((line) => line[field]);
 
 function make(options: Partial<DnsCheckOptions> = {}, setup: { proven?: boolean } = {}) {
   const clock = { now: 1_000_000 };
@@ -82,6 +111,11 @@ describe('the name check routes by the walk’s verdict (P-432 S6, §1.3)', () =
     const quiet = await route('dev-1.zone-b.test');
     assert.equal(quiet.route, 'silent');
     assert.equal(quiet.key, 'd:zone-b.test');
+    assert.deepEqual(
+      quiet.evidence,
+      { kind: 'asked', waitMs: ROUTE },
+      'its own step, unanswered within its routing wait',
+    );
     assert.ok(performance.now() - started >= ROUTE - 5, 'not heard is judged at the deadline');
     assert.deepEqual(asker.names(), ['dev-1.zone-a.test A', 'dev-1.zone-b.test A']);
     check.stop();
@@ -151,7 +185,12 @@ describe('the name check routes by the walk’s verdict (P-432 S6, §1.3)', () =
     await Promise.all([route('dev-1.zone-b.test'), route('dev-2.zone-b.test')]);
     const before = asker.asked.length;
     const later = await route('dev-3.zone-b.test');
-    assert.deepEqual(later, { route: 'silent', key: 'd:zone-b.test', miss: undefined });
+    assert.deepEqual(later, {
+      route: 'silent',
+      key: 'd:zone-b.test',
+      miss: undefined,
+      evidence: { kind: 'zone', since: clock.now },
+    });
     assert.equal(asker.asked.length, before, 'keySilent: nothing sent');
     // Two NotHeards: the second a step further, 10 s; a minute is past any step.
     clock.now += REWALK_MAX_MS + 1;
@@ -387,6 +426,63 @@ describe('the budgets: the pools and each server’s rate (§1.6, D19)', () => {
     await Promise.all(scouts);
     check.stop();
   });
+
+  it('routes a step still short of room at its lookup’s own, nearer deadline budget, never silent: nothing was asked', async () => {
+    const { logger, lines } = captured();
+    const { check, asker, route, budget, ready } = make({ logger });
+    await ready;
+    asker.rule = () => 'silent';
+    const scouts = ['i', 'j'].flatMap((zone) => [
+      route(`dev-1.zone-${zone}.test`),
+      route(`dev-2.zone-${zone}.test`),
+    ]);
+    await pollWithin(1_000, 'four scouts', () => budget.walkOpen('discovery') === 4, 2);
+    // A routing wait of 55 ms: the lookup's deadline comes before its step's 60.
+    const short = await route('dev-1.zone-k.test', { boundMs: 220 });
+    assert.deepEqual(short, { route: 'unvouched', key: 'd:zone-k.test', why: 'budget' });
+    assert.equal(asker.askedFor('dev-1.zone-k.test').length, 0, 'nothing asked for it');
+    assert.equal(budget.stats().deferred.budget, 1, 'counted in nameWalksDeferred');
+    assert.deepEqual(warns(lines, 'pool'), ['discovery'], 'the episode said, with its pool');
+    await Promise.all(scouts);
+    check.stop();
+  });
+
+  it('warns at the start of each episode of deferred walks, per server for its rate, with the count so far (S-F10)', async () => {
+    const { logger, lines } = captured();
+    const { check, asker, policy, route, clock, budget, ready } = make({ logger });
+    await ready;
+    asker.rule = () => 'answer';
+    const burst = async (from: number): Promise<void> => {
+      for (let device = from; device < from + 20; device++) {
+        await route(`dev-${String(device)}.zone-g.test`);
+      }
+    };
+    await route('dev-0.zone-g.test');
+    await burst(1);
+    assert.equal(budget.stats().deferred.rate, 7);
+    const rated = (): Line[] => lines.filter((line) => line.level === 40 && line.why === 'rate');
+    assert.deepEqual(
+      rated().map((line) => [line.server, line.deferred]),
+      [['10.0.0.53', 1]],
+      'one line for the episode, at its first',
+    );
+    // Another server's rate within the minute: an episode of its own.
+    policy.conf = { ...policy.conf, servers: ['10.0.0.54'] };
+    await burst(100);
+    assert.deepEqual(
+      rated().map((line) => line.server),
+      ['10.0.0.53', '10.0.0.54'],
+    );
+    // A minute with none for the first server: its next deferral starts another.
+    policy.conf = { ...policy.conf, servers: ['10.0.0.53'] };
+    clock.now += DEFER_QUIET_MS;
+    await burst(200);
+    const said = rated();
+    assert.equal(said.length, 3);
+    assert.equal(said[2]?.server, '10.0.0.53');
+    assert.ok(Number(said[2].deferred) > 7, 'the count so far');
+    check.stop();
+  });
 });
 
 describe('refresh sampling (D20)', () => {
@@ -561,6 +657,25 @@ describe('proven, misses and the stand-down (§1.10, N8)', () => {
     check.stop();
   });
 
+  it('skips a missed name asked with a trailing dot, as the resolver keys it', async () => {
+    const { check, asker, route, clock, ready } = make();
+    await ready;
+    asker.rule = () => 'silent';
+    const routed = await route('dev-1.zone-t.test.');
+    assert.ok(routed.route === 'silent' && routed.miss !== undefined, 'walked');
+    check.helperAnswered(routed.miss, 5);
+    await pollWithin(1_000, 'missed', () => check.stats().misses === 1, 5);
+    clock.now += REWALK_MAX_MS + 1;
+    const walks = asker.asked.length;
+    assert.deepEqual(await route('dev-1.zone-t.test.'), {
+      route: 'unvouched',
+      key: 'd:zone-t.test',
+      why: 'skip',
+    });
+    assert.equal(asker.asked.length, walks, 'not walked again');
+    check.stop();
+  });
+
   it('counts no miss when the walk’s question was answered after all, or the helper was slow', async () => {
     const { check, asker, route, ready } = make();
     await ready;
@@ -592,6 +707,17 @@ describe('the OS’s own evidence and the gate’s marks (§1.5, D25)', () => {
     await route('dev-1.zone-r.test');
     check.helperStuck('dev-2.zone-r.test', 4, false);
     assert.equal(check.stats().silentKeys, 1);
+    check.stop();
+  });
+
+  it('says each zone marked unsafe, a second zone within the minute as well as the first', async () => {
+    const { logger, lines } = captured();
+    const { check, ready } = make({ logger });
+    await ready;
+    check.markUnsafe(['d:zone-u.test']);
+    check.markUnsafe(['d:zone-v.test', 'd:zone-u.test']);
+    check.markUnsafe(['d:zone-u.test']);
+    assert.deepEqual(warns(lines, 'keys'), [['d:zone-u.test'], ['d:zone-v.test']]);
     check.stop();
   });
 

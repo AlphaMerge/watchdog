@@ -392,8 +392,10 @@ does not start ([the gate](administration.md#the-gate-a-lookup-helper-for-the-na
   check asks each name's DNS servers first, as glibc would, and a name they answer within
   250 ms runs on the probe's own lanes, one they do not in the helper; the reply only decides
   where `getaddrinfo` runs and is never an answer. It is off, and every name goes to the
-  helper, where the system's name settings are ones it cannot vouch for, and it stands down for
-  an hour after three zones in ten minutes where it found silent names the helper answered.
+  helper, where the system's name settings are ones it cannot vouch for. A name it found silent
+  that the helper answered within a second is skipped for an hour, its zone after three such
+  names in ten minutes, and the check stands down for an hour after three zones are skipped in
+  ten minutes.
   Probe Health reports what it routed where in eight more channels, at protocol 39
   ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
   And in either mode Probe Health now warns once for the probe when its resolver gives up 100

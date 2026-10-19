@@ -13122,6 +13122,74 @@ because each is a decision rather than a defect:
           `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-resolution-process.test.js"`.
           `P-426`'s arms are unchanged in `system` mode (the default), so the fourth window's
           numbers stand; the gate's arms are S7's.
+        - **S6 review, fixed** 2026-10-20, on `feat/p432-s6-check` (fourteen findings, one high):
+          - **An avoided name never reaches the probe's own `getaddrinfo`, in any state (D27,
+            high).** A suspect, a name poison in a family a lookup of it asks, or one in flight at
+            a crash was walked, heard or sampled, and run on the probe's lanes while the helper
+            was up: a held suspect re-asked by the tick, a family-0 lookup of a name poisoned
+            under 4, a refresh of a name in flight at a crash. Now `#start` sends such a name as
+            S3 did, unwalked and unvouched, to the helper while it is up or rejoining, and a
+            walk's verdict is judged again as the ask was (`#gateRefusal`, then the avoided
+            test): a name that became avoided during its walk goes to the helper, and one the
+            helper cannot ask (down, resting) fails its check at once with `RESOLVER_FAULT`, as
+            S3's fall-back would have. `HelperPort`'s rule now reads "before any name goes to the
+            probe's own `getaddrinfo`, in any state".
+          - **Back up from a rest, silent lookups queued on the probe's lanes move into the
+            helper** with the unvouched ones (`#rejoin`): outside a rest a silent name is asked
+            only there, and a silent zone does not hold probe lanes again.
+          - **A step still short of room at its lookup's own, nearer deadline routes `budget`**,
+            counted, not `silent`: nothing of it was asked, so it is neither held to the helper's
+            silent-zone rule nor failed at once while the helper is down.
+          - **A full queue walks nothing**: a lookup arriving at `maxQueued` goes unwalked, as S3
+            routes it, queued only if its lane can run it now, so no walk is spent on a lookup
+            the queue refuses.
+          - **A failed check for a silent name says what the route rests on**: "no DNS server
+            answered the name within N ms" with the routing wait it had, or "its zone Z did not
+            answer the check T ago, and the name was not asked" when its zone's walk again was
+            not due.
+          - **Logs**: a heard or sampled lookup passed-stuck on the probe's lanes warns with its
+            host, family, route, key (and a heard one's walk keys), every time, as a local one
+            does; the check's unsafe line is throttled per key, so a second zone within the
+            minute is said; deferred walks warn at the start of each episode (S-F10), a deferral
+            after a minute with none for its reason (and server, for `rate`), with the pool or
+            server and the count so far.
+          - **Smaller**: a name skip is looked up as it is stored, without the trailing dot;
+            `lookupHelperMemory` gaps while there is no child (the resident set is cleared at a
+            loss and at stop); `nameQuestionsOpen`'s three descriptions (the guide, `/metrics`,
+            the wire) include the check's own questions; `nameCheckState` 2's text and the guide
+            send the operator to the probe log at start or at a settings move; the guide and the
+            release notes give the miss rule's three steps (a name for an hour after one miss, a
+            zone after three in ten minutes, a stand-down after three zones skipped in ten
+            minutes) and `nameWalksDeferred`'s four reasons.
+          - **Decided 2026-10-20 by Claude, under the user's delegation:**
+            - An avoided `local` name goes to the helper too while it is up, not to the probe's
+              lanes as in S3: the rule is "none goes to the probe's own `getaddrinfo`", and the
+              hosts file's names reach glibc's NSS as any other's do.
+            - A walk's verdict is re-judged by `#gateRefusal` in every state, not only down or
+              resting: a name that became poison during its walk fails at once while the helper
+              is up too, as a new ask for it would; poison is asked only alone.
+            - At a full queue the lookup goes unwalked rather than refused outright, so one whose
+              lane is free still runs; a `local` name marked to be walked (D25) runs unwalked
+              then, under the same bound.
+            - Lookups already queued on the probe's lanes when a crash makes their name avoided
+              are not moved: the walk's re-judging covers a crash during the walk, and a name
+              is in the helper's flight and on the probe's queue at once only after a detach.
+        - **Tests**: `dns-check.test.ts` 32 (the own deadline's `budget`, the trailing dot's skip,
+          the unsafe line per key, the episodes per server, the silent evidence),
+          `name-resolver-check.test.ts` 19 (a held suspect re-asked in the helper, a family-0
+          avoided name, a name avoided during its walk with the helper up and down, silent
+          lookups back from a rest, the full queue, the silent words, the two passed-stuck
+          warns), `lookup-helper.test.ts` (the resident set cleared at a loss and at stop), the
+          core's lookup text; with the S3 and S6 resolver files around them, 845 and the core's
+          `lookups.test.ts` 54, all pass, and the outage scenarios 14 of 14 (SC12 failed once while
+          the VM ran a second suite, its run 9 s against 42 s alone, and passed alone and in a
+          second whole run). 19 mutants, each with its marker in dist (one's read from the failure
+          its words gave, as `tsc` dropped the marker), all killed: the avoided test at the ask and
+          at the verdict, the verdict's re-judging, the rejoin's silent lookups, the own
+          deadline's `budget`, the trailing dot, the full queue's walk, the two passed-stuck warns,
+          the unsafe line per key, the resident set at a loss and at stop, the silent words' two
+          kinds, the episode warn, its quiet minute, its server and its count, and the core's text.
+          The quiet-window runs listed for S6 stand as they are.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

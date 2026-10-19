@@ -89,11 +89,12 @@ import { afterPolls } from './verdict-timer.js';
  * not the second.
  *
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
- * crashes `getaddrinfo` cannot take the probe down. So while the route is `resting` or `down`,
- * the resolver never asks the probe's own `getaddrinfo` for a poison name, a current suspect, or a
- * name in flight at an `exit` loss: it fails that check at once instead. Such a
- * name is avoided from its crash until ten minutes after the helper is next up, so that a rest,
- * or a start that does not come up, never ends its ten minutes before a child has run them.
+ * crashes `getaddrinfo` cannot take the probe down. So in any state the resolver never asks the
+ * probe's own `getaddrinfo` for a poison name, a current suspect, or a name in flight at an `exit`
+ * loss: it sends it to the helper while the helper can ask it, and fails that check at once
+ * while the route is `resting` or `down`. Such a name is avoided from its crash until ten minutes
+ * after the helper is next up, so that a rest, or a start that does not come up, never ends its
+ * ten minutes before a child has run them.
  */
 
 /** libuv threads in the child: 16 lookup lanes, twice the helper's 8 tokens (D3). */
@@ -424,7 +425,10 @@ export interface LookupHelperStats {
   readonly losses: number;
   readonly lossesByReason: Readonly<Record<LossReason, number>>;
   readonly lastLoss: Readonly<HelperLoss> | undefined;
-  /** The child's resident set at its last beat, and the most seen. */
+  /**
+   * The live child's resident set at its last beat, undefined while there is no child (lost,
+   * resting, stopped) or before its first beat; and the most seen.
+   */
   readonly rss: number | undefined;
   readonly rssPeak: number;
   /** The child's event loop's worst delay at its last beat, and the most seen. */
@@ -511,9 +515,10 @@ export const REAL_TIMERS: HelperTimers = {
  *   the state moves before its change is handed on, and a child judged quiet while the probe stops
  *   routes `down` at once. An ask refused for it rejects with reason `unavailable`: nothing was
  *   sent, so the lookup is kept and routed again, never faulted (`requeue` does not say so).
- * - **Ask `avoidsSystem(host, family)` before any name goes to the probe's own `getaddrinfo`**
- *   while the route is `resting` or `down`: a name it names fails its check at once
- *   (`RESOLVER_FAULT`) instead, since it may be what crashed the helper.
+ * - **Ask `avoidsSystem(host, family)` before any name goes to the probe's own `getaddrinfo`, in
+ *   any state**: a name it names may be what crashed the helper, so it is asked in the helper
+ *   while the route is `up` or `rejoining`, and fails its check at once (`RESOLVER_FAULT`) while
+ *   it is `resting` or `down`. The name check never walks it, so it is never heard or sampled.
  */
 export interface HelperPort {
   start(snapshot?: HelperSnapshot): Promise<boolean>;
@@ -1084,7 +1089,8 @@ export class LookupHelper implements HelperPort {
    * Whether the probe's own `getaddrinfo` must not be asked for this name now: it is poison, a
    * current suspect, or was in flight at an `exit` loss, until `stableMs` after the helper was next
    * up, in its family or one a lookup of it would also ask for. The resolver asks before routing a
-   * name to the probe's lanes while the route is `resting` or `down`, and fails its check instead.
+   * name to the probe's lanes in any state: in the helper instead while it can ask, and otherwise
+   * its check fails.
    */
   avoidsSystem(host: string, family: HelperFamily): boolean {
     const now = this.#timers.now();
@@ -1185,6 +1191,7 @@ export class LookupHelper implements HelperPort {
     this.#closeRejoin();
     const record = this.#child;
     this.#child = undefined;
+    this.#rss = undefined;
     if (this.#state !== 'stopping') this.#setState('stopping');
     if (record !== undefined && record.lost === undefined) {
       record.lost = 'stop';
@@ -1680,6 +1687,8 @@ export class LookupHelper implements HelperPort {
     if (current) {
       this.#child = undefined;
       this.#answering = false;
+      // No child, no resident set: the channel gaps until the next child's first beat.
+      this.#rss = undefined;
     }
     this.#killProcess(record);
     const now = this.#timers.now();

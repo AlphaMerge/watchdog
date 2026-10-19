@@ -18,12 +18,12 @@ import {
 import type { Logger } from '@ms/shared';
 import {
   DnsCheck,
-  ROUTE_MS,
   type CheckRoute,
   type CheckState,
   type DnsAsker,
   type DnsCheckOptions,
   type MissWatch,
+  type SilentEvidence,
 } from './dns-check.js';
 import { ForwardBudget, questionsOf, type GaiToken, type TokenKind } from './forward-budget.js';
 import {
@@ -440,6 +440,8 @@ interface Pending {
   walkKeys: readonly string[];
   /** Gate mode: its walk's unanswered question, watched for a miss (§1.10). */
   miss: MissWatch | undefined;
+  /** Gate mode: what its silent route rests on, for the words of a check failed meanwhile. */
+  silent: SilentEvidence | undefined;
   /** Gate mode: it was walked, so the helper's stuck word is not the OS's evidence of its key. */
   walked: boolean;
   /** Gate mode: the helper token it holds, carried across a loss (D7). */
@@ -1816,16 +1818,21 @@ export class NameResolver implements PoolResolver {
   #start(entry: Entry, cls: LaneClass, urgent = false, boundMs?: number): Pending | undefined {
     const gate = this.#gate;
     const check = gate?.check;
+    // A name the probe's own getaddrinfo must not be asked for is outside the check (D27): it goes
+    // as S3 sends it, unvouched, to the helper while the helper can ask it.
+    const avoided = gate !== undefined && this.#avoided(gate, entry);
     if (
       gate !== undefined &&
       check !== undefined &&
       !urgent &&
-      gate.helper.routeState() !== 'resting'
+      !avoided &&
+      gate.helper.routeState() !== 'resting' &&
+      // A full queue walks nothing: the lookup goes unwalked, queued only if it can run now.
+      this.#queuedCount() < this.#maxQueued
     ) {
       const pending = this.#pendingFor(entry, cls, urgent, 'helper', 'unvouched');
       const verdict = this.#checkRoute(check, pending, cls, boundMs);
       if (verdict instanceof Promise) {
-        if (this.#queuedCount() >= this.#maxQueued) return undefined;
         pending.state = 'scouting';
         pending.walked = true;
         entry.pending = pending;
@@ -1849,16 +1856,13 @@ export class NameResolver implements PoolResolver {
         return pending;
       }
       pending.pool = this.#poolFor(gate, verdict.route);
-      if (this.#queuedCount() >= this.#maxQueued && !this.#canRun(this.#setOf(pending), cls)) {
-        if (verdict.route === 'sampled') check.sampledEnded(verdict.key, pending);
-        return undefined;
-      }
       entry.pending = pending;
       this.#routed(gate, pending, verdict);
       this.#enqueue(pending);
       return pending;
     }
-    const route = gate === undefined ? 'unvouched' : this.#routeOf(gate, entry);
+    const route =
+      gate === undefined || avoided ? ('unvouched' as const) : this.#routeOf(gate, entry);
     const pool = gate === undefined ? 'probe' : this.#poolFor(gate, route);
     const set = pool === 'helper' && gate !== undefined ? gate.lanes : this.#probe;
     if (this.#queuedCount() >= this.#maxQueued && !this.#canRun(set, cls)) return undefined;
@@ -1894,6 +1898,7 @@ export class NameResolver implements PoolResolver {
       key: gate === undefined ? '' : candidateKey(entry.host),
       walkKeys: [],
       miss: undefined,
+      silent: undefined,
       walked: false,
       token: undefined,
       detached: false,
@@ -1938,7 +1943,10 @@ export class NameResolver implements PoolResolver {
       pending.route = verdict.route;
       pending.key = verdict.key;
       if (verdict.route === 'heard') pending.walkKeys = verdict.keys;
-      if (verdict.route === 'silent') pending.miss = verdict.miss;
+      if (verdict.route === 'silent') {
+        pending.miss = verdict.miss;
+        pending.silent = verdict.evidence;
+      }
     }
     const { entry, pool, route } = pending;
     gate.routed[pool === 'helper' ? 'helper' : route === 'local' ? 'local' : 'probe'] += 1;
@@ -1969,10 +1977,25 @@ export class NameResolver implements PoolResolver {
    * at once what a check asking now would be told, a silent name while the helper is down or
    * lanes every one stuck. Once the probe is stopping, one with no helper to ask it is settled.
    */
-  #scouted(gate: Gate, pending: Pending, verdict: CheckRoute): void {
+  #scouted(gate: Gate, pending: Pending, walked: CheckRoute): void {
     gate.scouting.delete(pending);
     if (pending.state !== 'scouting') return;
     pending.state = 'queued';
+    const entry = pending.entry;
+    // Judged again as the ask was (§1.3 row 0): the walk took time, and a crash in it, a rest or
+    // the helper going down may have made the name one the probe's own getaddrinfo must not ask.
+    const refusal = this.#stopped ? undefined : this.#gateRefusal(entry);
+    if (refusal !== undefined) {
+      gate.routed.faulted += 1;
+      this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
+      return;
+    }
+    // Avoided, and not refused: the helper can ask it, and alone may (D27). A walk's verdict is
+    // never `sampled`, which is routed at once, so no sample is out for it.
+    const verdict: CheckRoute =
+      this.#poolFor(gate, walked.route) === 'probe' && this.#avoided(gate, entry)
+        ? { route: 'unvouched', key: walked.key, why: 'avoided' }
+        : walked;
     pending.pool = this.#poolFor(gate, verdict.route);
     this.#routed(gate, pending, verdict);
     if (this.#stopped && pending.pool === 'helper' && gate.helper.routeState() !== 'up') {
@@ -2016,8 +2039,27 @@ export class NameResolver implements PoolResolver {
     if (gate.helper.routeState() !== 'down') return undefined;
     return (
       `the probe could not ask getaddrinfo for ${pending.entry.host}: its lookup helper is not ` +
-      `answering, and no DNS server answered the name within ${String(ROUTE_MS)} ms, so it is ` +
-      `asked only in the helper; it stays queued`
+      `answering, and ${this.#silentWords(pending)}, so it is asked only in the helper; it stays ` +
+      `queued`
+    );
+  }
+
+  /** What a silent route rests on, in words: the name's own step, or its zone's silence before. */
+  #silentWords(pending: Pending): string {
+    const evidence = pending.silent;
+    if (evidence?.kind === 'asked') {
+      return `no DNS server answered the name within ${String(evidence.waitMs)} ms`;
+    }
+    const zone = pending.key.startsWith('d:')
+      ? `its zone ${keyWords(pending.key)}`
+      : `the name ${keyWords(pending.key)}`;
+    // No evidence of its own: a sampled lookup moved when its zone stopped answering every name.
+    if (evidence === undefined) {
+      return `${zone} stopped answering every name the check asks, and the name was not asked`;
+    }
+    return (
+      `${zone} did not answer the check ${seconds(this.#now() - evidence.since)} ago, and the ` +
+      `name was not asked`
     );
   }
 
@@ -2544,6 +2586,15 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
+   * Whether the probe's own `getaddrinfo` must not be asked for a name now, in any state (D27): a
+   * suspect, poison in a family a lookup of it asks, or a name in flight at a crash until ten
+   * minutes after the helper is next up. Such a name is never walked and never heard.
+   */
+  #avoided(gate: Gate, entry: Entry): boolean {
+    return entry.suspect || gate.helper.avoidsSystem(entry.host, entry.family);
+  }
+
+  /**
    * Why gate mode fails a name's check at once rather than queue a lookup for it, or undefined
    * (§1.3 row 0, S2's names kept off the probe's lanes): a poison name in any state, and while the
    * helper rests or is down, a name the probe's own `getaddrinfo` must not be asked for.
@@ -2608,10 +2659,19 @@ export class NameResolver implements PoolResolver {
         // Passed-stuck, walked: every candidate key its walk asked is unsafe (O-OS-10).
         gate.passedStuck += 1;
         gate.check?.markUnsafe(pending.walkKeys);
+        // Each named, as a local one is: the field test explains every passed-stuck from it.
+        this.#logger.warn(
+          { host, family, route: 'heard', key: pending.key, walkKeys: pending.walkKeys },
+          'a name the DNS check heard ran past the bound for stuck on the probe’s lanes: the zones its walk asked are walked by none for 5 minutes',
+        );
       } else if (late <= LATE_MS && pending.route === 'sampled') {
         // Passed-stuck, sampled: NotHeard for its zone as of its start, never unsafe (D20).
         gate.passedStuck += 1;
         gate.check?.sampledStuck(pending.key, pending.startedAt, host);
+        this.#logger.warn(
+          { host, family, route: 'sampled', key: pending.key },
+          'a refresh that rode its zone’s heard walk ran past the bound for stuck on the probe’s lanes: its zone is taken as not heard',
+        );
       }
       pending.untokened = true;
       gate.budget.untokenedStuck(pending, questionsOf(family));
@@ -3046,13 +3106,19 @@ export class NameResolver implements PoolResolver {
     gate.keys.detach(pending);
   }
 
-  /** Back up (§1.11): the queued lookups that fell back to the probe's lanes move into the helper. */
+  /**
+   * Back up (§1.11): the queued lookups that fell back to the probe's lanes move into the helper,
+   * unvouched ones and, from a rest, silent ones, which outside a rest are asked only there.
+   */
   #rejoin(gate: Gate): void {
     for (const cls of ['first', 'refresh', 'retry'] as const) {
       const queue = this.#probe.queues[cls];
       for (let at = 0; at < queue.length;) {
         const pending = queue[at];
-        if (pending === undefined || pending.route !== 'unvouched') {
+        if (
+          pending === undefined ||
+          (pending.route !== 'unvouched' && pending.route !== 'silent')
+        ) {
           at += 1;
           continue;
         }
@@ -3067,8 +3133,9 @@ export class NameResolver implements PoolResolver {
 
   /**
    * The helper's queued lookups leave it (§1.11): to their `P-426` class on the probe's lanes, with
-   * a carried token released, at `down` (`vouched`: S3 has only unvouched lookups there) and at a
-   * rest (`all`); failed at once for a name the probe's own `getaddrinfo` must not be asked for.
+   * a carried token released, at `down` (`vouched`: the unvouched ones, D24's; a silent one stays
+   * for the helper) and at a rest (`all`); failed at once for a name the probe's own `getaddrinfo`
+   * must not be asked for.
    * When the helper has stopped, every one fails: the probe is stopping.
    */
   #fallBack(gate: Gate, which: 'vouched' | 'all' | 'stopped'): void {
@@ -3369,6 +3436,7 @@ export class NameResolver implements PoolResolver {
         key: candidateKey(entry.host),
         walkKeys: [],
         miss: undefined,
+        silent: undefined,
         walked: false,
         token: undefined,
         detached: false,

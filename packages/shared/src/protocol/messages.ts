@@ -95,7 +95,8 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * check was on with the helper up; `namePassedStuck`, the lookups on the probe's own lanes past
  * the bound for stuck, judged after polls; `nameHelperStuck`, the helper's lookups its child said
  * were stuck; and `nameQuestionsOpen`, the most DNS questions the probe's `getaddrinfo` calls held
- * open at the forwarder since the last heartbeat the core acknowledged. `lookupsNotAnswering`, in
+ * open at the forwarder since the last heartbeat the core acknowledged (and from 39 the name
+ * check's own questions too). `lookupsNotAnswering`, in
  * both modes: at most three domains with the most names the resolver is failing, most first, `''`
  * for names of one label. Seven new fields in a closed schema under two capabilities: a core
  * below 38 is sent none of them, and a probe below 38 sends none and their channels gap. In
@@ -110,7 +111,9 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * walk, or their zone's sample, was heard), `nameLookupsToHelper` (run in the helper),
  * `nameCheckMisses` and `nameWalksDeferred`. Eight new fields in a closed schema under one
  * capability: a core below 39 is sent none of them, and a probe below 39 sends none and their
- * channels gap, as they do in `system` mode.
+ * channels gap, as they do in `system` mode. `lookupHelperMemory` is absent too while the helper
+ * has no child. From 39, `nameQuestionsOpen` also counts the name check's own questions, each
+ * until its first reply or 10 s; it is not stripped below 39, so a core at 38 receives that too.
  *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
@@ -701,8 +704,9 @@ export interface ProbeHealthReport {
    * lookups on the probe's own lanes past the bound for stuck, judged after polls.
    * `nameHelperStuck`: a running total of the helper's lookups its child said were stuck, each
    * one `system` would have held a probe lane for. `nameQuestionsOpen`: the most DNS questions the
-   * probe's `getaddrinfo` calls held open at the forwarder since the last heartbeat the core
-   * acknowledged. Sent only to a core at protocol 38.
+   * probe held open at the forwarder since the last heartbeat the core acknowledged: its
+   * `getaddrinfo` calls' and, from 39, the name check's own, each until its first reply or 10 s.
+   * Sent only to a core at protocol 38.
    */
   lookupHelperTrouble?: number;
   nameCheckOnSeconds?: number;

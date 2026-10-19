@@ -253,9 +253,10 @@ export class ForwardBudget {
     return true;
   }
 
-  /** A walk deferred, for `nameWalksDeferred`. */
-  deferred(reason: DeferReason): void {
+  /** A walk deferred, for `nameWalksDeferred`: the reason's running total, this one counted. */
+  deferred(reason: DeferReason): number {
     this.#deferred[reason] += 1;
+    return this.#deferred[reason];
   }
 
   #walkOf(pool: WalkPool): number {

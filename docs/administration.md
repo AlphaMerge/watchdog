@@ -1278,11 +1278,19 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   a name past either goes to the helper. Check now goes to the helper without a walk.
 - **When the check is off, every name not the hosts file's is asked in the helper.** It is off
   while the system's name settings say it cannot vouch for what glibc would do (`nscd`, an NSS
-  module it does not model, `LD_PRELOAD`, `RES_OPTIONS`, and the like: the start log says
-  which); until a server has answered it (it asks `localhost.` of the first server every minute
-  until one does); and, stood down, for an hour, doubling to eight within a day, after three
-  zones in ten minutes in which the helper answered names the check had found silent. A change
-  to `resolv.conf`, `nsswitch.conf` or the hosts file starts it again from nothing.
+  module it does not model, `LD_PRELOAD`, `RES_OPTIONS`, and the like: the probe's log says
+  which, at start, or when the settings move or are slow to read under a running probe, which
+  turns it off until the probe restarts); and until a server has answered it (it asks
+  `localhost.` of the first server every minute until one does). A change to `resolv.conf`,
+  `nsswitch.conf` or the hosts file starts it again from nothing.
+- **A name the check misses is skipped, then its zone, then the check stands down.** A miss is
+  a name the helper answered within a second whose walk the check had found silent, its
+  question still unanswered 3 s after it was sent. **One miss** skips that name's walk for an
+  hour; **three missed names of one zone in ten minutes** skip the zone for an hour; **three
+  zones skipped in ten minutes** stand the check down for an hour, doubling to eight within a
+  day, so a stand-down takes nine misses at least. A skipped name or zone, and every name while
+  the check stands down, is asked in the helper, unwalked. A rising `nameCheckMisses` with no
+  stand-down is these skips; the probe's log names each name and zone skipped.
 - **The helper's lanes keep a silent zone to its share.** At most 6 of its lookups run at once:
   4 for names with nothing kept, 4 for refreshes, 5 for the two together, and 1 for held
   names' retries, with `P-438`'s rule for a domain not known to answer (3 of the first 4) and 2
@@ -1330,12 +1338,17 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   answering is the helper's job to carry, and leaves it at 0. The probe's log says why, in the
   lines of its `lookup-helper` component.
 - `nameCheckOnSeconds`: the seconds with the name check on and the helper up.
-- `nameCheckState`: 1 on, 2 off for the system's settings, 3 not proven, 4 stood down, 0 the
-  helper resting. Every entry Up: off, the helper carries every name.
+- `nameCheckState`: 1 on, 2 off for the system's name settings or platform (the probe's log
+  says why: at start, or when the settings moved), 3 not proven, 4 stood down, 0 the helper
+  resting. Every entry Up: off, the helper carries every name.
 - `nameLookupsHeard`, `nameLookupsToHelper`: the lookups the check sent to the probe's own lanes,
   and those asked in the helper. `nameCheckMisses`: names the helper answered that the check had
-  found silent. `nameWalksDeferred`: names sent to the helper unwalked, for a server's rate or
-  the check's questions.
+  found silent. `nameWalksDeferred`: names sent to the helper unwalked, for any of four
+  reasons: the check had no room for its questions, a server's rate of questions was spent, a
+  timer fired late or a verdict was dropped (the probe's main thread stalled), or a zone's two
+  scouts had no verdict by the lookup's deadline. The probe's log warns at the start of each
+  episode, a deferral after a minute with none for the same reason (and server, for its rate),
+  with the count so far; the hourly summary has the totals.
 - `lookupHelperState`: 1 up, 2 starting, 3 not answering, 4 restarting, 5 resting, 6 stopping.
   Every entry Up: `lookupHelperTrouble` is its alarm. `lookupHelperLosses`: the children lost
   since the probe started. `lookupHelperMemory`: the child's resident memory at its last beat,
@@ -1344,8 +1357,9 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   the child said were stuck.
 - `nameQuestionsOpen`: the most DNS questions the probe held unanswered at once since the last
   heartbeat the core acknowledged: one for each helper lookup of one family and two for one of
-  both, the questions a lost child's lookups leave at the forwarder for 10 s, and the probe's own
-  lookups past their bound.
+  both, the questions a lost child's lookups leave at the forwarder for 10 s, the probe's own
+  lookups past their bound, and the name check's own questions, each open until its first reply
+  or 10 s.
   What a forwarder such as dnsmasq, with a limit on the queries it forwards, sees of the probe.
 
 Each is a gap in `system` mode but the first, and a gap from a core or a probe older than
