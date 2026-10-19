@@ -1081,6 +1081,44 @@ describe('a domain not known to answer, or with a lookup stuck, takes at most 3 
     assert.deepEqual(await Promise.all([...three, other]), [A, A, A, A]);
   });
 
+  it('names the limit that held it: a domain not known to answer, whose lookups are slow rather than silent, by its unacked', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { ask, last, callsFor, clock } = make();
+    const warm = ask(b(9));
+    last(b(9)).answer();
+    await warm;
+    // Known to answer, with nothing stuck: its first lookups may take all four first lanes.
+    const four = [1, 2, 3, 4].map((n) => ask(b(n), 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      [1, 2, 3, 4].map((n) => callsFor(b(n)).length),
+      [1, 1, 1, 1],
+    );
+    t.mock.timers.tick(STUCK);
+    // One answers past STUCK_MS: its resolver is slow, and the three still in flight, which
+    // started before that answer, are not silent, so the domain is not capped.
+    last(b(1)).answer();
+    await settled();
+    // And that answer is ANSWER_MS old: the domain is no longer known to answer.
+    clock.now += ANSWER_MS;
+    const behind = ask(b(5), 4, { waitMs: 60_000 });
+    assert.equal(await isSettled(behind), true, 'at once');
+    await assert.rejects(behind, (error: Error) => {
+      assert.equal(codeOf(error), RESOLVER_STUCK);
+      assert.match(
+        error.message,
+        /\(b2\.zone-b\.test, b3\.zone-b\.test, b4\.zone-b\.test\), its own domain’s, which holds the 3 first lanes a domain may while none of its names has answered within 30 s; it stays queued/u,
+      );
+      assert.doesNotMatch(error.message, /while one of its lookups has/u);
+      return true;
+    });
+    assert.equal(callsFor(b(5)).length, 0, 'it stays queued');
+    for (const n of [2, 3, 4]) last(b(n)).answer();
+    await settled();
+    assert.equal(callsFor(b(5)).length, 1, 'and runs once its domain answers again');
+    last(b(5)).answer();
+    assert.deepEqual(await Promise.all(four), [A, A, A, A]);
+  });
+
   it('fails a held-back check already waiting the moment the last of its domain’s 3 is stuck', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { ask, last } = make();

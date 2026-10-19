@@ -17,6 +17,7 @@ import {
   type ResolveOptions,
 } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
+import { firstLoad, heldBy, probeFirstRule, type HeldBy, type KeyRule } from './lane-rule.js';
 import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './protocol.js';
 
 /**
@@ -79,9 +80,10 @@ import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './p
  * silent: its lookups past `STUCK_MS` keep answering, and its first lookups are not held for them
  * (`P-438`'s narrow check). The `STUCK_MS` after an end is timed: when it is over, the queue is
  * looked at again, as it is when a check asks. Otherwise it takes at most 3 (`P-432` calls it
- * "unacked: 3"). A domain is keyed as the ranking below keys one, so a sub-zone is a domain of its own. So a
- * probe started cold in the middle of a zone's outage gives that zone 3 lanes from its first tick,
- * before any of its lookups is stuck, since none of its names has answered, and the answering
+ * "unacked: 3", and `lane-rule.ts`'s `probeFirstRule` is the rule). A domain is keyed as the
+ * ranking below keys one, so a sub-zone is a domain of its own. So a probe started cold in the
+ * middle of a zone's outage gives that zone 3 lanes from its first tick, before any of its
+ * lookups is stuck, since none of its names has answered, and the answering
  * zones are asked on the fourth; a zone answering for some names while others hang is held to 3
  * while they hang, and through the `STUCK_MS` after its hanging lookups end together, by when
  * those started as they ended are stuck in turn; and a domain that answers is held to 3 only until
@@ -467,19 +469,6 @@ export function domainOf(host: string): string {
   return dot === -1 ? '' : name.slice(dot + 1);
 }
 
-/**
- * Whether a lookup in flight says its domain is silent: it has run past `STUCK_MS`, and no lookup
- * of its domain that ran as long has answered since it started (`P-438`'s narrow check). A
- * resolver that answers every lookup in 5 s, as glibc does behind a first nameserver that is
- * down, has every lookup past `STUCK_MS`: counted as silent, its one domain's refreshes kept the
- * last shared lane from its own first lookups, and most of its names never resolved. An answer
- * that came quickly is no such evidence: a zone answering some names from a cache while others
- * hang is still held for those (`P-432`'s attack round).
- */
-function silentSoFar(running: Pending, count: DomainCount | undefined): boolean {
-  return running.stuck && (count === undefined || count.slowSeq <= running.startedSeq);
-}
-
 /** Whether a watched file is read as a hosts file: by its name, on any platform. */
 function isHostsFile(file: string): boolean {
   return file.split(/[\\/]/u).at(-1)?.toLowerCase() === 'hosts';
@@ -563,10 +552,12 @@ export class NameResolver implements PoolResolver {
   readonly #firstCap: number;
   readonly #refreshCap: number;
   /**
-   * The first lanes a domain not known to answer, or with a lookup stuck, may hold: one fewer than
-   * all, and never none (`P-438`).
+   * What a domain's first lookups may hold (`P-438`, written on `P-432`'s lane rule): one fewer
+   * than all, and never none, while it is not known to answer or has a lookup stuck.
    */
-  readonly #domainFirstCap: number;
+  readonly #firstRule: KeyRule;
+  /** `#answering`, as `firstLoad` asks it. */
+  readonly #answeringOf = (count: DomainCount, now: number): boolean => this.#answering(count, now);
   /** How long a failing name no check asks about counts against its domain. */
   readonly #countFailingMs: number;
   readonly #watch: { readonly files: readonly string[]; readonly everyMs: number };
@@ -623,7 +614,7 @@ export class NameResolver implements PoolResolver {
     this.#sharedCap = lanes - 1;
     this.#firstCap = lanes - 2;
     this.#refreshCap = lanes - 2;
-    this.#domainFirstCap = Math.max(1, this.#firstCap - 1);
+    this.#firstRule = probeFirstRule(this.#firstCap, this.#sharedCap);
     // Past the longest hold, an answer's life and its grace: a name a scan still checks has been
     // asked within it.
     this.#countFailingMs = this.#holdMaxMs + this.#answerMs + this.#staleMs;
@@ -1114,43 +1105,34 @@ export class NameResolver implements PoolResolver {
 
   /**
    * Why a queued first lookup must wait though its class may run another (`P-438`), or undefined
-   * when it need not. Its domain may hold `#domainFirstCap` first lanes unless it is known to
-   * answer (`#answering`) and has no lookup stuck lately: none ended stuck lately
-   * (`#stuckLately`), and none in flight silent so far (`silentSoFar`): `domain` when it holds
-   * them, and the lookup waits for one of them to end. And `shared` when it has a lookup stuck
-   * lately and this would take the last shared lane, counting as taken every lane the refreshes
-   * running and queued may hold, since a lane freed goes to a first lookup before a refresh:
-   * that lane is left to the other domains. "Check now" waits for neither, nor does a name the
-   * hosts file gives for its family (`hostsGive`): the operator's fix for a device of a silent
-   * zone is asked at its next check.
+   * when it need not: `P-432`'s lane rule (`mayStart`, here `heldBy` for why), with the domain's
+   * load (`firstLoad`) and `probeFirstRule`. Its domain may hold `#firstRule.cappedLanes` first
+   * lanes while it has a lookup stuck lately: one ended stuck lately (`stuckLately`), or one in
+   * flight silent so far (`silentSoFar`): `cappedLanes` when it holds them; and otherwise
+   * `#firstRule.unacked` unless it is known to answer (`#answering`): `unacked` when it holds them.
+   * Either way the lookup waits for one of its domain's to end. And `shared` when it has a lookup
+   * stuck lately and this would take the last shared lane, counting as taken every lane the
+   * refreshes running and queued may hold, since a lane freed goes to a first lookup before a
+   * refresh: that lane is left to the other domains. "Check now" waits for neither, nor does a
+   * name the hosts file gives for its family (`hostsGive`): the operator's fix for a device of a
+   * silent zone is asked at its next check.
    */
-  #heldBack(pending: Pending): 'domain' | 'shared' | undefined {
+  #heldBack(pending: Pending): HeldBy | undefined {
     if (pending.cls !== 'first' || pending.urgent) return undefined;
     const entry = pending.entry;
     if (hostsGive(this.#view, entry.host, entry.family)) return undefined;
-    const now = this.#now();
-    const count = this.#domains.get(entry.domain);
-    let held = 0;
-    let stuck = count !== undefined && this.#stuckLately(count, now);
-    for (const running of this.#running.first) {
-      if (running.entry.domain !== entry.domain) continue;
-      held += 1;
-      if (silentSoFar(running, count)) stuck = true;
-    }
-    for (const cls of ['refresh', 'retry'] as const) {
-      for (const running of this.#running[cls]) {
-        if (running.entry.domain === entry.domain && silentSoFar(running, count)) stuck = true;
-      }
-    }
-    if (!stuck && count !== undefined && this.#answering(count, now)) return undefined;
-    if (held >= this.#domainFirstCap) return 'domain';
-    if (!stuck) return undefined;
-    const refreshes = Math.min(
-      this.#refreshCap,
-      this.#running.refresh.size + this.#queues.refresh.length,
-    );
-    if (this.#running.first.size + 1 + refreshes >= this.#sharedCap) return 'shared';
-    return undefined;
+    const load = firstLoad({
+      domain: entry.domain,
+      history: this.#domains.get(entry.domain),
+      now: this.#now(),
+      stuckMs: this.#stuckMs,
+      running: this.#running,
+      refreshQueued: this.#queues.refresh.length,
+      refreshCap: this.#refreshCap,
+      helperStuck: 0,
+      answering: this.#answeringOf,
+    });
+    return heldBy(load, this.#firstRule);
   }
 
   /**
@@ -1166,18 +1148,6 @@ export class NameResolver implements PoolResolver {
       count.loaded.delete(entry);
     }
     return false;
-  }
-
-  /**
-   * Whether a domain had a lookup stuck lately (`P-438`'s review): one ended stuck without an
-   * answer within `STUCK_MS`, or since the last of its names answered from DNS; those in flight
-   * are counted apart. A domain's hanging lookups start together and end together, and those
-   * started as they end are not stuck for another `STUCK_MS`: without this, it took every lane
-   * again in between.
-   */
-  #stuckLately(count: DomainCount, now: number): boolean {
-    if (count.stuckSeq > count.answeredSeq) return true;
-    return count.stuckAt !== undefined && now - count.stuckAt < this.#stuckMs;
   }
 
   /** A lookup of a domain ended stuck without an answer, under the current configuration. */
@@ -1305,14 +1275,22 @@ export class NameResolver implements PoolResolver {
       .slice(0, 3)
       .map((blocker) => blocker.entry.host);
     const held = this.#heldBack(pending);
+    const rule = this.#firstRule;
+    // The limit that held it, named as `heldBy` found it: a capped domain's, or the one a domain
+    // not known to answer is held to.
     const whose =
-      held === 'domain'
-        ? `, its own domain’s, which holds the ${String(this.#domainFirstCap)} first lanes a ` +
-          `domain may while one of its lookups has`
-        : held === 'shared'
-          ? ', and the one lane left is kept for other domains while its own domain has a ' +
-            'lookup stuck lately'
-          : '';
+      held === 'cappedLanes'
+        ? `, its own domain’s, which holds the ${String(rule.cappedLanes)} first lanes a domain ` +
+          `may while one of its lookups has`
+        : held === 'unacked'
+          ? `, its own domain’s, which holds the ${String(rule.unacked)} first lanes a domain ` +
+            `may while none of its names has answered within ${seconds(this.#answerMs)}`
+          : held === 'lanes'
+            ? `, its own domain’s, which holds the ${String(rule.lanes)} first lanes a domain may`
+            : held === 'shared'
+              ? ', and the one lane left is kept for other domains while its own domain has a ' +
+                'lookup stuck lately'
+              : '';
     return (
       `every lane a lookup for ${host} could use is held by a lookup that has run past ` +
       `${String(this.#stuckMs)} ms (${lanes.join(', ')})${whose}; it stays queued`
@@ -1445,7 +1423,8 @@ export class NameResolver implements PoolResolver {
   #blockers(pending: Pending): Pending[] {
     const cls = pending.cls;
     if (cls === 'retry') return [...this.#running.retry];
-    if (this.#heldBack(pending) === 'domain') return this.#domainRunning(pending);
+    const held = this.#heldBack(pending);
+    if (held !== undefined && held !== 'shared') return this.#domainRunning(pending);
     if (this.#running[cls].size >= this.#capOf(cls)) return [...this.#running[cls]];
     return [...this.#running.first, ...this.#running.refresh];
   }
