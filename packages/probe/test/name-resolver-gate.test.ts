@@ -948,6 +948,17 @@ describe('gate mode’s start, watch and health (P-432 S3)', () => {
     resolver.gateHealth();
     clock.now = 30_000;
     assert.equal(resolver.gateHealth()?.checkOnSeconds, 7, 'not while the check is off');
+    // S4's 'slow': a look past its bound turns the check off until the next look, and that
+    // stretch is off too, though the view keeps load's reading.
+    policy.off = undefined;
+    resolver.gateHealth();
+    clock.now = 32_000;
+    assert.equal(resolver.gateHealth()?.checkOnSeconds, 9, 'on again once the check is');
+    policy.off = { code: 'slow', why: 'a look past its bound' };
+    resolver.gateHealth();
+    clock.now = 40_000;
+    assert.equal(resolver.gateHealth()?.checkOnSeconds, 9, 'not while the look is slow');
+    policy.off = { code: 'nsswitch', why: 'test' };
     assert.equal(resolver.gateHealth()?.mode, 2);
     const waiting = outcome(ask('dev.zone-b.test', 4, { waitMs: 60_000 }));
     helper.last('dev.zone-b.test').stuck();
