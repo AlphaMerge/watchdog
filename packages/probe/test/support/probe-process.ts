@@ -402,6 +402,8 @@ export function startProbe(options: {
   corePort: number;
   config: Record<string, unknown>;
   profile?: 'v1' | 'full';
+  /** Set in the probe's environment, after the caller's. */
+  env?: Readonly<Record<string, string>>;
 }): RunningProbe {
   const { dir, corePort, config, profile } = options;
   const file = join(dir, `probe-${String(process.hrtime.bigint())}.json`);
@@ -443,6 +445,7 @@ export function startProbe(options: {
     if (!name.startsWith('MS_') && name !== 'NOTIFY_SOCKET') env[name] = value;
   }
   if (profile !== undefined) env['MS_BUILD_PROFILE'] = profile;
+  for (const [name, value] of Object.entries(options.env ?? {})) env[name] = value;
 
   const child: ChildProcessByStdio<null, Readable, Readable> = spawn(
     process.execPath,

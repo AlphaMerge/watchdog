@@ -13045,6 +13045,83 @@ because each is a decision rather than a defect:
             the scenarios' helper ticks once a scan where a real one ticks each second, so the
             liveness judgement is the unit tests', not the scenarios'.
           - S8: the end to end on the smoke images, and the field test's choice of mode.
+      - **S6 built** 2026-10-19, on `feat/p432-s6-check` (on S3's branch), for the coordinator to
+        land: **the name check.** `DnsCheck` (`dns-check.ts`) asks a name's servers what glibc
+        would ask, with c-ares (`caresAsker`: one fresh channel per candidate and server, one
+        try), and its replies decide only where `getaddrinfo` runs: heard within the routing wait
+        (250 ms, or a quarter of the check's bound if less) on the probe's lanes; silent in the
+        helper, and only there; unvouched (off, cannot vouch, unproven, stood down, skipped,
+        unsafe, deferred) in the helper as S3 routes it. `NAME_CHECK_BUILT` is true, so the check
+        is on for every shape S4's allowlist takes.
+        - **What S6 carries**, as the design's S6 row lists it, less the cuts below: the walk
+          (`__res_context_search` and `res_send`: candidates, fast failures, `rotate`, the name
+          as it is asked last); keys and their derived phases (D18: heard, silent, mixed,
+          unknown), two scouts, the walk again at 5 s doubling to 60 s; the ledger's three pools
+          (heard 8, discovery 4, urgent 2) and each server's bucket (D19: 10 a second, 20 at
+          once, 5 kept for key walks) in `ForwardBudget`; sampling (D20); the canary, misses,
+          skips and the stand-down (N8: an hour, doubling to 8 h within a day); D25's marks
+          (unsafe keys, a stuck local name walked for an hour, a stuck sample NotHeard, a
+          never-walked helper lookup said stuck NotHeard); a verdict whose timer fired late
+          dropped (D31). In the resolver: a lookup being walked is `scouting`, counted as
+          queued; a silent name's check fails at once while the helper is down, and the name
+          stays queued for it; a zone going silent moves its queued samples to the helper; a
+          watched-file change resets the check.
+        - **Protocol 39**: one capability, `nameCheck`, strips eight fields together:
+          `lookupHelperState`, `lookupHelperLosses`, `lookupHelperMemory` (bytes on the wire,
+          MB on the channel), `nameCheckState`, `nameLookupsHeard`, `nameLookupsToHelper`,
+          `nameCheckMisses`, `nameWalksDeferred`. The core: lookups `ms.probe.lookup-helper-state`
+          and `ms.probe.name-check`, every entry Up (the latch stays the helper's one alarm), eight
+          Probe Health channels and eight `/metrics` series. `ms-probe config check`'s gate note
+          now says where names are asked.
+        - **Decided 2026-10-19 by Claude, under the user's delegation:**
+          - **Cut, by the design's cut order**: overflow (1), the pressure detector (3:
+            `nameCheckState` never reads 5), per-name walks of a key's queued helper lookups when
+            it is heard again (4), and Check now's walk path (5: Check now goes to the helper on
+            an urgent token, as with the check off). Each cut sends names to the helper, the safe
+            side, and S6 was already past its size.
+          - A silent key's walk again walks the name that asked, not a stored one: the zone is
+            judged by a name someone wants.
+          - The routing wait is fixed by the lookup's first waiting check's bound; a later,
+            shorter check waits on the same walk rather than starting another.
+          - A server's rate refused routes `rate` at once, as D19 says; only pool room is waited
+            for, to the step's deadline.
+          - A step sent as its lookup was asked takes its key's verdict at the lookup's deadline
+            (`SAME_DEADLINE_MS`, 2 ms), so the two never disagree about the same silence; a scout
+            wait whose timer fired late routes `stall`, as D31 drops a late verdict.
+          - A name error for one type with fast failures for the rest moves to the next
+            candidate, as glibc keeps the name error's buffer; under `rotate` every server is
+            asked at once and each must reply.
+          - The canary is a key walk's question: discovery pool, the key side of the bucket.
+          - `lookupHelperState` reads a helper not started yet (`idle`) as 2, starting.
+          - The end-to-end test sets `RES_OPTIONS=ndots:1` for its probe, so the check is off
+            for the environment (`nameCheckState` 2) and no test sends DNS off the machine.
+            The S3 scenarios run with `checkBuilt: false`, so they keep measuring what S3
+            measured; SC1 builds the check with an asker that answers as the zones do.
+          - **SC1 runs 30 silent names, not 10.** At 10, six scans give up 50 checks in five
+            minutes, under `P-441`'s limit of 100, so "one Warning in both modes" would assert
+            0 = 0. At 30 both modes give exactly one.
+        - **Open, for S8's differential**: c-ares sends no OPT record, and glibc sends one only
+          under `options edns0`; a server that answers the two differently would make the
+          check's verdict differ from `getaddrinfo`'s. The policy does not turn the check off
+          for `edns0` today; the differential decides.
+        - **Tests**: `dns-check.test.ts` 28 (the c-ares asker against the DNS simulator among
+          them), `forward-budget.test.ts` 12, `name-resolver-check.test.ts` 12, SC1 and its
+          `system` twin in the outage scenario (14 cases, all pass), `name-resolution.test.ts`
+          5 (main.ts's build over c-ares and the simulator), the e2e at protocol 39, and the
+          protocol, core and sensor files. 52 mutants, each with its marker in dist, all killed:
+          30 in `DnsCheck`, 3 in the budget, 14 in the resolver's wiring, the state value, the
+          strip below 39, the core's MB and the exporter's scale, and the report's memory. One,
+          the stand-down's doubling, was a no-op as first written and was run again rewritten.
+          One path is not tested: the default asker is c-ares on port 53, which no test may
+          reach.
+        - **Quiet window, not run here.** The scenario file and the e2e passed in ordinary runs
+          (the VM shared); in a quiet window, `ms-server` stopped, after
+          `./scripts/dev.sh "timeout 600 npx tsc -b"`:
+          `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-lookup-outage-scenario.test.js"`
+          and
+          `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-resolution-process.test.js"`.
+          `P-426`'s arms are unchanged in `system` mode (the default), so the fourth window's
+          numbers stand; the gate's arms are S7's.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

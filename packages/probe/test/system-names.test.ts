@@ -2874,8 +2874,8 @@ describe('the description logged at start', () => {
       },
     );
   });
-  it('in a build without the check, says it is off as not built, on the stock shape too (P-432 S3)', async () => {
-    assert.equal(NAME_CHECK_BUILT, false, 'S6 builds the check');
+  it('in a build without the check, says it is off as not built, on the stock shape too; this build has it (P-432 S3, S6)', async () => {
+    assert.equal(NAME_CHECK_BUILT, true, 'S6 builds the check');
     const policy = await loaded({ checkBuilt: false });
     assert.equal(policy.view().off, undefined, 'a shape the check takes');
     assert.equal(policy.checkOn(), false);

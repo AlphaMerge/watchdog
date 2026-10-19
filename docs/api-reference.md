@@ -1488,6 +1488,14 @@ How one probe is doing, right now
 | `channels.namePassedStuck` | number | nullable |  |
 | `channels.nameHelperStuck` | number | nullable |  |
 | `channels.nameQuestionsOpen` | number | nullable |  |
+| `channels.lookupHelperState` | number | nullable |  |
+| `channels.lookupHelperLosses` | number | nullable |  |
+| `channels.lookupHelperMemory` | number | nullable |  |
+| `channels.nameCheckState` | number | nullable |  |
+| `channels.nameLookupsHeard` | number | nullable |  |
+| `channels.nameLookupsToHelper` | number | nullable |  |
+| `channels.nameCheckMisses` | number | nullable |  |
+| `channels.nameWalksDeferred` | number | nullable |  |
 | `channels.poolCeiling` | number | nullable |  |
 | `channels.poolMemoryCap` | number | nullable |  |
 | `channels.poolHeldBack` | number | nullable |  |

@@ -388,9 +388,13 @@ does not start ([the gate](administration.md#the-gate-a-lookup-helper-for-the-na
   answers the other zones from its first scan, with or without the file, and the probe's own
   thread pool is not the silent zone's while the helper is up. A helper that fails is replaced, rests after five
   failures in ten minutes while the probe resolves as `system` does, and raises one Probe Health
-  Warning, `lookupHelperTrouble`; a zone that stops answering raises none of its own. In this
-  build the gate's name check, which would let names it finds answering run on the probe's own
-  lanes, is off: every such name is asked in the helper
+  Warning, `lookupHelperTrouble`; a zone that stops answering raises none of its own. Its name
+  check asks each name's DNS servers first, as glibc would, and a name they answer within
+  250 ms runs on the probe's own lanes, one they do not in the helper; the reply only decides
+  where `getaddrinfo` runs and is never an answer. It is off, and every name goes to the
+  helper, where the system's name settings are ones it cannot vouch for, and it stands down for
+  an hour after three zones in ten minutes where it found silent names the helper answered.
+  Probe Health reports what it routed where in eight more channels, at protocol 39
   ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
   And in either mode Probe Health now warns once for the probe when its resolver gives up 100
   checks in five minutes for want of an answer, naming the domains not answering (`P-441`,

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { dispatchTables, probeCatalogue } from '../src/catalogue.js';
-import { buildFindings, carriesFlow, GATE_CHECK_OFF_NOTE } from '../src/config-problems.js';
+import { buildFindings, carriesFlow, GATE_NOTE } from '../src/config-problems.js';
 
 /**
  * `ms-probe config check` and a setting this build does nothing with (`B-08`).
@@ -82,9 +82,13 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
         'full',
       );
     const gate = at('gate');
-    assert.deepEqual(gate.notes, [GATE_CHECK_OFF_NOTE]);
-    assert.match(GATE_CHECK_OFF_NOTE, /^probe\.nameResolver: is gate, with its name check off/);
-    assert.match(GATE_CHECK_OFF_NOTE, /lookup helper \(ms-probe: lookups\)/);
+    assert.deepEqual(gate.notes, [GATE_NOTE]);
+    assert.match(
+      GATE_NOTE,
+      /^probe\.nameResolver: is gate: a name its DNS servers answer within 250 ms is asked on the probe's own lookup lanes/u,
+    );
+    assert.match(GATE_NOTE, /reports it as nameCheckState$/u);
+    assert.match(GATE_NOTE, /lookup helper \(ms-probe: lookups\)/);
     assert.deepEqual(gate.warnings ?? [], [], 'it starts, and an upgrade is not held');
     assert.deepEqual(gate.problems ?? [], []);
     assert.deepEqual(at('system').notes ?? [], []);
@@ -146,7 +150,10 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
       () => {
         const gate = check({ probe: { nameResolver: 'gate' } }, 'full');
         assert.equal(gate.status, 0, gate.stderr);
-        assert.match(gate.stdout, /^note: probe\.nameResolver: is gate, with its name check off/m);
+        assert.match(
+          gate.stdout,
+          /^note: probe\.nameResolver: is gate: a name its DNS servers answer within 250 ms/m,
+        );
         assert.doesNotMatch(gate.stderr, /warning/);
 
         const system = check({ probe: { nameResolver: 'system' } }, 'full');

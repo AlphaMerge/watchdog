@@ -104,6 +104,22 @@ const DRAIN: DrainStats = {
   stalledForMs: 0,
 };
 
+/** Gate mode's own (`NameResolutionHealth.gate`), distinct values, the check's eight among them. */
+const GATE = {
+  trouble: 0,
+  checkOnSeconds: 0,
+  passedStuck: 0,
+  helperStuck: 0,
+  helperState: 5,
+  helperLosses: 6,
+  helperMemory: 50_000_000,
+  checkState: 0,
+  lookupsHeard: 700,
+  lookupsToHelper: 80,
+  misses: 1,
+  walksDeferred: 23,
+} as const;
+
 function reporter(options: {
   children?: boolean;
   /** The child runner's numbers, when a test needs other than `CHILDREN`. */
@@ -263,7 +279,7 @@ describe('the probe’s own health report', () => {
       names: () => ({
         mode: 3,
         notAnswering: ['zone-b.test'],
-        gate: { trouble: 1, checkOnSeconds: 3_599.7, passedStuck: 4, helperStuck: 9 },
+        gate: { ...GATE, trouble: 1, checkOnSeconds: 3_599.7, passedStuck: 4, helperStuck: 9 },
       }),
       questionsPeak: { take: () => 12, peek: () => 11 },
     }).report({ seq: 1, peerVersion: PROTOCOL_VERSION });
@@ -273,6 +289,24 @@ describe('the probe’s own health report', () => {
     assert.equal(report.namePassedStuck, 4);
     assert.equal(report.nameHelperStuck, 9);
     assert.equal(report.nameQuestionsOpen, 12);
+    // The check's eight (protocol 39), each from its own source.
+    assert.equal(report.lookupHelperState, 5);
+    assert.equal(report.lookupHelperLosses, 6);
+    assert.equal(report.lookupHelperMemory, 50_000_000);
+    assert.equal(report.nameCheckState, 0);
+    assert.equal(report.nameLookupsHeard, 700);
+    assert.equal(report.nameLookupsToHelper, 80);
+    assert.equal(report.nameCheckMisses, 1);
+    assert.equal(report.nameWalksDeferred, 23);
+    // Before the child's first beat its memory gaps, never a zero.
+    const early = reporter({
+      names: () => {
+        const { helperMemory: _memory, ...gate } = GATE;
+        return { mode: 2, notAnswering: [], gate };
+      },
+    }).report({ seq: 1, peerVersion: PROTOCOL_VERSION });
+    assert.equal('lookupHelperMemory' in early, false);
+    assert.equal(early.lookupHelperState, 5);
   });
 
   it('reports the questions open at their most since the last heartbeat the core acknowledged (P-432)', () => {
@@ -282,7 +316,7 @@ describe('the probe’s own health report', () => {
       names: () => ({
         mode: 2,
         notAnswering: [],
-        gate: { trouble: 0, checkOnSeconds: 0, passedStuck: 0, helperStuck: 0 },
+        gate: { ...GATE, trouble: 0, checkOnSeconds: 0, passedStuck: 0, helperStuck: 0 },
       }),
       questionsPeak: { take: () => peaks[taken++] ?? 0, peek: () => 4 },
     });

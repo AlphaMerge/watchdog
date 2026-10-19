@@ -2,8 +2,9 @@ import { capabilitiesFor, versionFor, type Logger } from '@ms/shared';
 import { HelperTroubleLatch } from '../health/latch.js';
 import type { NameResolutionHealth } from '../health/report.js';
 import { AnswerFile, answerFilePath, type AnswerFileOptions } from './answer-file.js';
-import { LookupHelper, type LookupHelperOptions } from './lookup-helper.js';
-import { NameResolver, type NameResolverOptions } from './name-resolver.js';
+import { caresAsker, type DnsAsker } from './dns-check.js';
+import { LookupHelper, type HelperState, type LookupHelperOptions } from './lookup-helper.js';
+import { NameResolver, type GateParts, type NameResolverOptions } from './name-resolver.js';
 import { GlibcNamePolicy, type GlibcNamePolicyOptions } from './system-names.js';
 
 /**
@@ -36,6 +37,8 @@ export interface NameResolutionOptions {
   readonly answerFile?: Partial<Omit<AnswerFileOptions, 'resolver' | 'logger'>>;
   readonly helper?: Partial<Omit<LookupHelperOptions, 'logger' | 'onChange' | 'onLateAnswer'>>;
   readonly policy?: Partial<Omit<GlibcNamePolicyOptions, 'logger'>>;
+  /** The name check's: c-ares on port 53 (`caresAsker`) unless a test hands an asker in. */
+  readonly check?: Partial<NonNullable<GateParts['check']>> & { readonly asker?: DnsAsker };
   /** The latch's clock: `performance.now` unless a test says. */
   readonly now?: () => number;
 }
@@ -89,7 +92,15 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
     logger,
     lanes: options.lanes,
     ...options.resolver,
-    ...(gate === undefined ? {} : { gate: { helper: gate.helper, policy: gate.policy } }),
+    ...(gate === undefined
+      ? {}
+      : {
+          gate: {
+            helper: gate.helper,
+            policy: gate.policy,
+            check: { ...options.check, asker: options.check?.asker ?? caresAsker() },
+          },
+        }),
   });
   late.resolver = built;
   const answerFile = new AnswerFile({
@@ -124,10 +135,11 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
     modeValue,
     health() {
       const gateHealth = built.gateHealth();
+      const helper = parts?.helper.stats();
       return {
         mode: modeValue(),
         notAnswering: built.notAnswering(),
-        ...(parts === undefined || gateHealth === undefined
+        ...(parts === undefined || gateHealth === undefined || helper === undefined
           ? {}
           : {
               gate: {
@@ -135,6 +147,14 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
                 checkOnSeconds: gateHealth.checkOnSeconds,
                 passedStuck: gateHealth.passedStuck,
                 helperStuck: gateHealth.helperStuck,
+                helperState: helperStateValue(helper.state),
+                helperLosses: helper.losses,
+                ...(helper.rss === undefined ? {} : { helperMemory: helper.rss }),
+                checkState: gateHealth.checkState,
+                lookupsHeard: gateHealth.lookupsHeard,
+                lookupsToHelper: gateHealth.lookupsToHelper,
+                misses: gateHealth.misses,
+                walksDeferred: gateHealth.walksDeferred,
               },
             }),
       };
@@ -151,6 +171,29 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
   function modeValue(): NameResolverModeValue {
     if (parts === undefined) return 1;
     return parts.helper.routeState() === 'resting' ? 3 : 2;
+  }
+}
+
+/**
+ * Probe Health's `lookupHelperState` (§5): 1 up, 2 starting (or not started yet), 3 not
+ * answering, 4 restarting, 5 resting, 6 stopping.
+ */
+export function helperStateValue(state: HelperState): 1 | 2 | 3 | 4 | 5 | 6 {
+  switch (state) {
+    case 'up':
+      return 1;
+    case 'idle':
+    case 'starting':
+      return 2;
+    case 'unresponsive':
+      return 3;
+    case 'backoff':
+      return 4;
+    case 'resting':
+      return 5;
+    case 'stopping':
+    case 'stopped':
+      return 6;
   }
 }
 

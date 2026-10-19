@@ -82,6 +82,9 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
     const probe = startProbe({
       dir,
       corePort,
+      // The name check off for the environment, whatever the container's resolver is: an end to
+      // end with no live DNS. `RES_OPTIONS` is the policy's rule 3, and asks glibc nothing new.
+      env: { RES_OPTIONS: 'ndots:1' },
       config: {
         probe: {
           displayName: 'probe under test',
@@ -113,7 +116,7 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
     { skip },
     async () => {
       assert.ok(core !== undefined);
-      core.protocolVersion = 38;
+      core.protocolVersion = 39;
       const from = core.received.length;
       const probe = start('gate');
       const health = await heartbeat(from, (one) => one.nameResolverMode !== undefined);
@@ -124,14 +127,23 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
       assert.equal(helpers.length, 1, `one ${HELPER_TITLE} child of the probe`);
       const [helper] = helpers;
       assert.ok(helper !== undefined);
-      // No check in this build: off at start, whatever this system's shape, and no time on.
+      // The check is built (S6): off at start for this environment's `RES_OPTIONS`, so the reason
+      // is the system's and not the build's, and no time on.
       const said = probe
         .logs()
         .find((line) => String(line['msg']).startsWith('probe.nameResolver is gate'));
       assert.equal(said?.['check'], 'off');
-      assert.equal((said['off'] as { code?: unknown } | undefined)?.code, 'unbuilt');
+      assert.equal((said['off'] as { code?: unknown } | undefined)?.code, 'env');
       const later = await heartbeat(from, (one) => (one.uptimeSeconds ?? 0) >= 3);
-      assert.equal(later.nameCheckOnSeconds, 0, 'the helper up 3 s, the check never on');
+      assert.equal(later.nameCheckOnSeconds, 0, 'the helper up 3 s, the check off throughout');
+      // Protocol 39's eight: the check off for the system (2), the helper up, nothing walked.
+      assert.equal(later.nameCheckState, 2);
+      assert.equal(later.lookupHelperState, 1);
+      assert.equal(later.lookupHelperLosses, 0);
+      assert.ok((later.lookupHelperMemory ?? 0) > 0, 'the child’s memory from its beat');
+      assert.equal(later.nameLookupsHeard, 0);
+      assert.equal(later.nameCheckMisses, 0);
+      assert.equal(later.nameWalksDeferred, 0);
       assert.equal(await probe.stop(), 0);
       // The shutdown stopped the names: the resolver, then the helper and the answer file, which
       // says so as it saves. A child never stopped would still die by its own backstop.
@@ -180,6 +192,11 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
         'namePassedStuck',
         'nameHelperStuck',
         'nameQuestionsOpen',
+        'lookupHelperState',
+        'lookupHelperMemory',
+        'nameCheckState',
+        'nameLookupsHeard',
+        'nameLookupsToHelper',
       ]) {
         assert.equal(field in health, false, `${field} in system mode`);
       }
@@ -216,7 +233,7 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
         );
         assert.equal(await probe.stop(), 0);
       } finally {
-        core.protocolVersion = 38;
+        core.protocolVersion = 39;
       }
     },
   );

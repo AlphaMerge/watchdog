@@ -4,10 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
+import { DnsSimulator, replies } from '@ms/simulators';
 import type { ResolvedAddress } from '@ms/sensors';
-import { buildNameResolution, olderCoreWarning } from '../src/resolver/name-resolution.js';
+import { caresAsker } from '../src/resolver/dns-check.js';
+import {
+  buildNameResolution,
+  helperStateValue,
+  olderCoreWarning,
+} from '../src/resolver/name-resolution.js';
 import type { SystemFiles } from '../src/resolver/system-names.js';
-import { within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * `probe.nameResolver` as `main.ts` builds it (`P-432` S3, §1.2): in `system` mode nothing of the
@@ -101,7 +107,8 @@ describe('probe.nameResolver as main.ts builds it (P-432 S3)', () => {
       lanes: 6,
       spoolDir: base,
       helper: { childModule: CHILD },
-      policy: { files, platform: 'linux', env: {} },
+      // The check not built, as S3 had it: every name not the hosts file's goes to the helper.
+      policy: { files, platform: 'linux', env: {}, checkBuilt: false },
       resolver: {
         lookup: (host) => {
           asked.push(host);
@@ -156,6 +163,102 @@ describe('probe.nameResolver as main.ts builds it (P-432 S3)', () => {
     }
     assert.equal(gate.helper.state, 'stopped');
     assert.equal(gate.helper.pid(), undefined, 'the child is gone');
+  });
+});
+
+describe('probe.nameResolver gate with its name check built (P-432 S6)', () => {
+  it('asks DNS with c-ares first: a name its server answers runs on the probe’s lanes, one it does not in the helper, and Probe Health counts each', async (t) => {
+    const sim = await DnsSimulator.start({
+      zones: {
+        'zone-a.test': { reply: replies.addresses('192.0.2.10') },
+        'ok.test': { reply: replies.silent },
+      },
+      ipv6: false,
+    });
+    t.after(() => sim.stop());
+    const { port, ipv4 } = sim.server();
+    const { logger } = logged();
+    const base = mkdtempSync(join(dir, 'check-'));
+    const files: SystemFiles = {
+      hosts: join(base, 'hosts'),
+      resolvConf: join(base, 'resolv.conf'),
+      nsswitchConf: join(base, 'nsswitch.conf'),
+      gaiConf: join(base, 'gai.conf'),
+      ldSoPreload: join(base, 'ld.so.preload'),
+      nscdSocket: join(base, 'nscd.socket'),
+    };
+    writeFileSync(files.hosts, '127.0.0.1 localhost\n');
+    writeFileSync(files.resolvConf, `nameserver ${ipv4}\n`);
+    writeFileSync(files.nsswitchConf, 'hosts: files dns\n');
+    const asked: string[] = [];
+    const names = buildNameResolution({
+      mode: 'gate',
+      logger,
+      lanes: 6,
+      spoolDir: base,
+      helper: { childModule: CHILD },
+      policy: { files, platform: 'linux', env: {} },
+      check: { asker: caresAsker({ port }) },
+      resolver: {
+        lookup: (host) => {
+          asked.push(host);
+          return Promise.resolve(PROBE_LANES);
+        },
+        watch: { files: [files.hosts, files.resolvConf, files.nsswitchConf], everyMs: 60_000 },
+      },
+    });
+    try {
+      await within(WAIT, 'the start', names.start());
+      await pollWithin(
+        WAIT,
+        'the canary answered',
+        () => names.resolver.gateHealth()?.checkState === 1,
+        5,
+      );
+      assert.deepEqual(
+        await within(WAIT, 'the heard name', names.resolver.resolve('dev-1.zone-a.test', 4, {})),
+        PROBE_LANES,
+        'getaddrinfo on the probe’s lanes',
+      );
+      assert.deepEqual(
+        await within(WAIT, 'the silent name', names.resolver.resolve('delay-5.ok.test', 4, {})),
+        [{ address: '192.0.2.1', family: 4 }],
+        'the helper’s child’s answer',
+      );
+      assert.deepEqual(asked, ['dev-1.zone-a.test'], 'the silent name never on the probe’s lanes');
+      const said = names.health().gate;
+      assert.ok(said !== undefined);
+      assert.equal(said.checkState, 1);
+      assert.equal(said.lookupsHeard, 1);
+      assert.equal(said.lookupsToHelper, 1);
+      assert.equal(said.helperState, 1, 'up');
+      assert.equal(said.helperLosses, 0);
+      const log = await sim.log();
+      assert.deepEqual(
+        log.filter((entry) => !entry.qname.startsWith('localhost')).map((entry) => entry.qname),
+        ['dev-1.zone-a.test', 'delay-5.ok.test'],
+        'each name walked once, on port 53’s stand-in',
+      );
+    } finally {
+      await within(WAIT, 'the stop', names.stop());
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('lookupHelperState (P-432 S6)', () => {
+  it('reads each of the helper’s states as Probe Health’s lookup names it', () => {
+    const states = [
+      'idle',
+      'starting',
+      'up',
+      'unresponsive',
+      'backoff',
+      'resting',
+      'stopping',
+      'stopped',
+    ] as const;
+    assert.deepEqual(states.map(helperStateValue), [2, 2, 1, 3, 4, 5, 6, 6]);
   });
 });
 

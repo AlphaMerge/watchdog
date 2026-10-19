@@ -16,6 +16,7 @@ import {
   type NameResolverOptions,
 } from '../src/resolver/name-resolver.js';
 import { CheckPool } from '../src/runner/index.js';
+import { ScriptedAsker } from './support/fake-dns.js';
 import { pollWithin, within } from './support/within.js';
 import {
   ScenarioTimers,
@@ -161,6 +162,8 @@ interface GateRun {
   readonly timers: ScenarioTimers;
   /** The helper's lookups by zone, as its children saw them, with the most each ran at once. */
   readonly helperLookups: Map<string, Lookups>;
+  /** What the name check asked DNS, when the case built it. */
+  readonly asker: ScriptedAsker;
   /** The latch's value at every look the scenario took, with the clock then. */
   readonly trouble: { readonly at: number; readonly value: 0 | 1 }[];
   /** The child killed from outside, then the helper settled: up again, or resting. */
@@ -178,6 +181,8 @@ async function probe(
   size = 2,
   stuckMs = 50,
   mode: 'system' | 'gate' = 'system',
+  /** In gate mode, the name check built (`P-432` S6), asking DNS as the zones answer. */
+  checked = false,
 ) {
   const lookups = new Map<string, Lookups>();
   /** One more lookup asked, counted by its zone, or as the hosts file's. */
@@ -232,9 +237,17 @@ async function probe(
   if (mode === 'system') {
     resolver = new NameResolver({ ...resolverOptions, watch: { files: watch, everyMs: 60_000 } });
   } else {
-    gate = await gateRun(zones, clock, watch, stuckMs, resolverOptions, (dir) => {
-      gateDir = dir;
-    });
+    gate = await gateRun(
+      zones,
+      clock,
+      watch,
+      stuckMs,
+      resolverOptions,
+      (dir) => {
+        gateDir = dir;
+      },
+      checked,
+    );
     resolver = gate.names.resolver;
   }
   const results: CheckResult[] = [];
@@ -323,10 +336,12 @@ async function probe(
 
 /**
  * Gate mode's parts, built as `main.ts` builds them (`buildNameResolution`): the real name policy
- * over the scenario's own system files (`hosts: files dns`, two search domains), with its name
- * check off in this build, so every name not in the hosts file is asked in the lookup helper; the
- * real `LookupHelper` and its trouble latch, on the scenario's clock; and children that answer as
- * the zones do (`support/zone-helper.ts`).
+ * over the scenario's own system files (`hosts: files dns`, two search domains); the real
+ * `LookupHelper` and its trouble latch, on the scenario's clock; and children that answer as the
+ * zones do (`support/zone-helper.ts`). The name check is built as S3 had it, off (`checkBuilt`),
+ * so every name not in the hosts file is asked in the lookup helper, unless the case says
+ * `checked`: then it is on (`P-432` S6), and asks DNS with an asker that answers as the zones do,
+ * at once, and never for a silent name, in place of c-ares on port 53.
  */
 async function gateRun(
   zones: Zones,
@@ -335,6 +350,7 @@ async function gateRun(
   stuckMs: number,
   resolverOptions: Partial<NameResolverOptions>,
   made: (dir: string) => void,
+  checked = false,
 ): Promise<GateRun> {
   const dir = mkdtempSync(join(tmpdir(), 'ms-outage-gate-'));
   made(dir);
@@ -388,6 +404,8 @@ async function gateRun(
     },
   });
   const timers = new ScenarioTimers(clock);
+  const asker = new ScriptedAsker();
+  asker.rule = (_server, name) => (isSilent(zones, name) ? 'silent' : 'answer');
   const names = buildNameResolution({
     mode: 'gate',
     logger: silent,
@@ -409,13 +427,23 @@ async function gateRun(
       },
     },
     helper: { fork, timers, limits: { stuckMs } },
-    policy: { files, platform: 'linux', env: {} },
+    policy: { files, platform: 'linux', env: {}, checkBuilt: checked },
+    check: { asker },
   });
   const parts = names.gate;
   assert.ok(parts !== undefined);
   const { helper, latch } = parts;
   await within(30_000, () => `the gate to start: the helper ${helper.state}`, names.start());
   assert.equal(helper.state, 'up', 'the helper up before the first scan');
+  if (checked) {
+    // The canary answered: the check is proven, and on, before the first scan.
+    await pollWithin(
+      5_000,
+      () => `the name check proven: ${String(names.resolver.gateHealth()?.checkState)}`,
+      () => names.resolver.gateHealth()?.checkState === 1,
+      5,
+    );
+  }
   const trouble: { at: number; value: 0 | 1 }[] = [];
   const look = (): 0 | 1 => {
     const value = latch.value();
@@ -437,6 +465,7 @@ async function gateRun(
     children,
     timers,
     helperLookups,
+    asker,
     trouble,
     look,
     kill: async () => {
@@ -1568,5 +1597,97 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
     const health = healthWarnings(scan.health);
     assert.equal(health.warnings, 1, `one Probe Health Warning: ${health.said}`);
     assert.equal(running.pool.stats().workerCrashes, 0, 'the probe never crashed');
+  });
+});
+
+/**
+ * **The gate with its name check on** (`P-432` S6, §7.4's SC1): a name whose DNS servers answer
+ * within the routing wait is asked on the probe's own lanes, and one they do not in the lookup
+ * helper, so a cold start into one zone's outage answers the other zone from its first scan on
+ * either set of lanes, and puts none of the silent zone on the probe's. The check asks DNS with
+ * an asker that answers as the zones do (`gateRun`'s `checked`); the rest is as above.
+ */
+describe('the gate with its name check on: one zone stops answering (P-432 S6)', () => {
+  /** The latch's readings, each kept only where it differs from the one before. */
+  const transitions = (
+    readings: readonly { readonly at: number; readonly value: 0 | 1 }[],
+  ): { readonly at: number; readonly value: 0 | 1 }[] =>
+    readings.filter((reading, i) => i === 0 || readings[i - 1]?.value !== reading.value);
+
+  /** SC1's script, in either mode: a cold start into zone B's outage, six scans. */
+  async function coldOutage(mode: 'system' | 'gate') {
+    // Thirty silent names, so that six scans' give-ups cross P-441's limit once in either mode.
+    const devices = 300;
+    const zones: Zones = { bSilent: true, hangMs: HANG_MS };
+    const clock = { now: 0 };
+    const running = await probe(zones, clock, [], 8, 1_000, mode, mode === 'gate');
+    const scan = scanner(running, clock, devices);
+    try {
+      for (let at = 0; at <= 5 * INTERVAL_MS; at += INTERVAL_MS) await scan.scanAt(at);
+      return { running, scan, devices, health: running.gate?.names.health() };
+    } finally {
+      await running.stop();
+    }
+  }
+
+  it('SC1: a cold start into an outage of 30 names, check on: zone A is answered from the first scan, on the probe’s lanes where its walk was heard, and never changes state; zone B goes Down once, only ever in the helper; one Probe Health Warning, as system mode gives', async () => {
+    const { running, scan, devices, health } = await coldOutage('gate');
+    const gate = running.gate;
+    assert.ok(gate !== undefined);
+    const inA = (sensorId: number): boolean => zoneOf(sensorId - 1) === 'a';
+    const answering = scan.results.filter(({ sensorId }) => inA(sensorId));
+    assert.equal(answering.length, 6 * 270);
+    assert.deepEqual(
+      answering
+        .filter(({ outcome }) => outcome !== 'ok')
+        .map(
+          (result) =>
+            `${String(result.sensorId)}: ${result.message}; then ${String(running.stateAt.get(result))}`,
+        ),
+      [],
+      'zone A answered at every scan, the first included',
+    );
+    const changesA = scan.changes.filter(({ sensorId }) => inA(sensorId));
+    assert.deepEqual(changesA, [], `zone A never changed state: ${scan.why(changesA)}`);
+    const silentDevices = Array.from({ length: devices }, (_, device) => device).filter(
+      (device) => zoneOf(device) === 'b',
+    );
+    assert.equal(silentDevices.length, 30);
+    for (const device of silentDevices) {
+      const its = scan.changes.filter(({ sensorId }) => sensorId - 1 === device);
+      assert.deepEqual(
+        its,
+        [{ sensorId: device + 1, at: INTERVAL_MS, from: 'warning', to: 'down' }],
+        `device ${String(device)}: ${scan.history(device + 1)}; ${scan.why(its)}`,
+      );
+    }
+    // Where each zone was asked: zone A on the probe's lanes once heard, zone B never there.
+    const onProbe = (zone: string): string[] =>
+      running.probeAsked.filter((line) => line.includes(`.zone-${zone}.test `));
+    assert.ok(onProbe('a').length > 0, `zone A on the probe’s lanes: ${running.state()}`);
+    assert.deepEqual(onProbe('b'), [], 'zone B never on the probe’s lanes');
+    const zoneB = gate.helperLookups.get('zone b');
+    assert.ok(zoneB !== undefined && zoneB.asked > 0, `zone B in the helper: ${running.state()}`);
+    assert.ok(zoneB.peak <= 4, `zone B on at most 4 helper lanes at once: ${running.state()}`);
+    // The walk asked zone B's names and was not answered; it asked zone A's and was.
+    assert.ok(gate.asker.askedFor('dev-0.zone-b.test').length > 0, 'zone B was walked');
+    assert.ok(gate.asker.askedFor('dev-1.zone-a.test').length > 0, 'zone A was walked');
+    const said = health?.gate;
+    assert.ok(said !== undefined);
+    assert.equal(said.checkState, 1, 'on throughout: a silent zone is no reason to stand down');
+    assert.equal(said.misses, 0, 'the helper answered nothing the walk missed');
+    assert.ok(said.lookupsHeard > 0 && said.lookupsToHelper > 0, JSON.stringify(said));
+    assert.deepEqual(transitions(gate.trouble), [{ at: 0, value: 0 }], 'the latch stays 0');
+    const gateHealth = healthWarnings(scan.health);
+    assert.equal(gateHealth.warnings, 1, `one Probe Health Warning: ${gateHealth.said}`);
+
+    // The same script in system mode (S-F9): the same one Warning, from P-441's count.
+    const system = await coldOutage('system');
+    const systemHealth = healthWarnings(system.scan.health);
+    assert.equal(
+      systemHealth.warnings,
+      gateHealth.warnings,
+      `as many in system mode: ${systemHealth.said}`,
+    );
   });
 });

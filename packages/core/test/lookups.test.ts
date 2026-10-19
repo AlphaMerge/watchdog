@@ -123,6 +123,33 @@ describe('lookup validation', () => {
     assert.equal(applyLookup(trouble, 2).state, 'warning', 'a value it does not know warns');
   });
 
+  it('says what the lookup helper and the name check are doing, every state Up (`P-432` S6)', () => {
+    const named = (id: string): LookupDefinition => {
+      const found = BUILT_IN_LOOKUPS.find((definition) => definition.id === id);
+      assert.ok(found !== undefined, id);
+      return found;
+    };
+    // The latch is the helper's one alarm: its state, and the check's, raise nothing more.
+    const helper = named('ms.probe.lookup-helper-state');
+    assert.deepEqual(
+      [1, 2, 3, 4, 5, 6, 7].map((value) => applyLookup(helper, value).state),
+      ['up', 'up', 'up', 'up', 'up', 'up', 'up'],
+    );
+    assert.deepEqual(
+      [1, 2, 4, 6].map((value) => applyLookup(helper, value).text),
+      ['up', 'starting', 'restarting', 'stopping'],
+    );
+    assert.match(applyLookup(helper, 5).text, /^resting: names are asked as with system$/u);
+    const check = named('ms.probe.name-check');
+    assert.deepEqual(
+      [0, 1, 2, 3, 4, 5, 6].map((value) => applyLookup(check, value).state),
+      ['up', 'up', 'up', 'up', 'up', 'up', 'up'],
+    );
+    assert.equal(applyLookup(check, 1).text, 'on');
+    assert.match(applyLookup(check, 2).text, /^off for this system’s resolver settings/u);
+    assert.match(applyLookup(check, 4).text, /^stood down after misses/u);
+  });
+
   it('refuses a value listed twice, because which entry wins is authoring order', () => {
     const problems = validateLookup({
       ...status,

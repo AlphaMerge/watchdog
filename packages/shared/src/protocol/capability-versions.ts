@@ -50,6 +50,7 @@ const SINCE = {
   answerFile: 37,
   nameResolver: 38,
   lookupsNotAnswering: 38,
+  nameCheck: 39,
 } as const satisfies Readonly<Record<keyof ProbeCapabilities, number>>;
 
 /** Every capability with the version it arrived in, oldest first. */

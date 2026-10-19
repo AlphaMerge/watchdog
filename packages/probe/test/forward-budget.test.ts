@@ -5,13 +5,17 @@ import {
   ForwardBudget,
   GAI_TOKENS,
   questionsOf,
+  WALK_BURST,
+  WALK_KEY_RESERVE,
+  WALK_QUESTIONS,
+  WALK_RATE,
   type GaiToken,
 } from '../src/resolver/forward-budget.js';
 
 /**
  * The question budget's tokens (`P-432` §1.6, S3): what a helper `getaddrinfo` holds, what a loss
- * leaves behind, U, and the peak of the questions open at the forwarder. The walk's ledger is
- * `S6`'s.
+ * leaves behind, U, and the peak of the questions open at the forwarder; and the walk's ledger
+ * and each server's rate (S6).
  */
 
 function make() {
@@ -149,5 +153,70 @@ describe('the question budget’s tokens (P-432 S3)', () => {
     clock.now = FORWARD_HOLD_MS;
     assert.equal(budget.takePeak(), 3, 'a ghost gone counts while it was there');
     assert.equal(budget.takePeak(), 1);
+  });
+});
+
+describe('the walk’s ledger and each server’s rate (P-432 S6, §1.6, D19)', () => {
+  it('is built to the numbers decided: heard 8, discovery 4, urgent 2; 10 a second, 20 at once, 5 kept for key walks', () => {
+    assert.deepEqual(WALK_QUESTIONS, { heard: 8, discovery: 4, urgent: 2 });
+    assert.equal(WALK_RATE, 10);
+    assert.equal(WALK_BURST, 20);
+    assert.equal(WALK_KEY_RESERVE, 5);
+  });
+
+  it('FB-walk: holds a question open in its pool until its first reply or its hold, and counts it in questionsOpen', () => {
+    const { budget, clock } = make();
+    const opened = Array.from({ length: 4 }, () => budget.open('discovery'));
+    assert.equal(budget.admit('discovery', 1), false, 'discovery’s 4 are open');
+    assert.equal(budget.admit('heard', 8), true, 'each pool its own');
+    assert.equal(budget.questionsOpen(), 4);
+    const [first, second] = opened;
+    assert.ok(first !== undefined && second !== undefined);
+    budget.reply(first);
+    budget.reply(first);
+    assert.equal(first.closed, true);
+    assert.equal(budget.walkOpen('discovery'), 3, 'a reply closes it, once');
+    assert.equal(budget.admit('discovery', 1), true);
+    clock.now = FORWARD_HOLD_MS - 1;
+    assert.equal(budget.walkOpen(), 3);
+    clock.now = FORWARD_HOLD_MS;
+    assert.equal(budget.walkOpen(), 0, 'past its hold the forwarder has dropped it');
+    assert.equal(second.closed, true);
+    assert.equal(budget.stats().peak, 4, 'the peak saw them');
+    assert.deepEqual(budget.stats().walk, { heard: 0, discovery: 0, urgent: 0 });
+  });
+
+  it('FB11: gives each server 20 at once and 10 a second, key walks to the last and name walks while more than 5 are left', () => {
+    const { budget, clock } = make();
+    let names = 0;
+    while (budget.serverTake('10.0.0.53', 1, 'name')) names += 1;
+    assert.equal(names, WALK_BURST - WALK_KEY_RESERVE);
+    let keys = 0;
+    while (budget.serverTake('10.0.0.53', 1, 'key')) keys += 1;
+    assert.equal(keys, WALK_KEY_RESERVE, 'key walks take the last 5');
+    assert.equal(budget.serverTake('10.0.0.54', 1, 'name'), true, 'each server its own');
+    clock.now += 100;
+    assert.equal(budget.serverTake('10.0.0.53', 1, 'key'), true, 'one more after 100 ms');
+    assert.equal(budget.serverTake('10.0.0.53', 1, 'key'), false);
+    clock.now += 1_000;
+    assert.equal(budget.serverTake('10.0.0.53', 1, 'name'), true, 'ten more after a second');
+    assert.equal(
+      budget.serverTake('10.0.0.53', 5, 'name'),
+      false,
+      '9 left: not 5 past the reserve',
+    );
+    assert.equal(budget.serverTake('10.0.0.53', 4, 'name'), true);
+    clock.now += 60_000;
+    let refilled = 0;
+    while (budget.serverTake('10.0.0.53', 1, 'key')) refilled += 1;
+    assert.equal(refilled, WALK_BURST, 'never more than the burst');
+  });
+
+  it('counts the walks deferred by reason', () => {
+    const { budget } = make();
+    budget.deferred('rate');
+    budget.deferred('rate');
+    budget.deferred('stall');
+    assert.deepEqual(budget.stats().deferred, { budget: 0, rate: 2, stall: 1, scoutWait: 0 });
   });
 });

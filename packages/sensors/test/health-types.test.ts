@@ -207,6 +207,48 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
+  it('carries the name check’s and the lookup helper’s own, every state Up and no limit (`P-432` S6)', () => {
+    const channels = probeHealth.channels({});
+    const find = (key: string) => channels.find((one) => one.key === key);
+    assert.deepEqual(find('lookupHelperState'), {
+      key: 'lookupHelperState',
+      name: 'Lookup helper state',
+      lookup: 'ms.probe.lookup-helper-state',
+    });
+    assert.deepEqual(find('nameCheckState'), {
+      key: 'nameCheckState',
+      name: 'Name check',
+      lookup: 'ms.probe.name-check',
+    });
+    for (const [key, unit, counter] of [
+      ['lookupHelperLosses', 'losses', true],
+      ['lookupHelperMemory', 'MB', false],
+      ['nameLookupsHeard', 'lookups', true],
+      ['nameLookupsToHelper', 'lookups', true],
+      ['nameCheckMisses', 'misses', true],
+      ['nameWalksDeferred', 'walks', true],
+    ] as const) {
+      const channel = find(key);
+      assert.ok(channel !== undefined, key);
+      assert.equal(channel.unit, unit, key);
+      assert.equal(channel.limits, undefined, key);
+      assert.equal(channel.lookup, undefined, key);
+      assert.deepEqual(channel.counter, counter ? { bits: 64 } : undefined, key);
+    }
+    const keys = channels.map((one) => one.key);
+    const at = keys.indexOf('nameQuestionsOpen');
+    assert.deepEqual(keys.slice(at + 1, at + 9), [
+      'lookupHelperState',
+      'lookupHelperLosses',
+      'lookupHelperMemory',
+      'nameCheckState',
+      'nameLookupsHeard',
+      'nameLookupsToHelper',
+      'nameCheckMisses',
+      'nameWalksDeferred',
+    ]);
+  });
+
   it('carries what each listener kept out of a first scan as a counter, without limits (`P-270`)', () => {
     // Not a loss: the sensor's message names it, and a limit would alarm on every reconnect after
     // an outage the link channels already alarm on. Each beside its listener's overwritten count.

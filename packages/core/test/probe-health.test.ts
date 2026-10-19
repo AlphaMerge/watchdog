@@ -871,6 +871,48 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.doesNotMatch(answering, /lookup helper/u);
     });
 
+    it('carries gate mode’s name check and its helper in full, the memory in megabytes, and gaps them for one that cannot say (`P-432` S6)', () => {
+      // Distinct values, so a channel reading its neighbour's field is seen.
+      const check = {
+        ...FULL,
+        nameResolverMode: 2,
+        lookupHelperState: 4,
+        lookupHelperLosses: 3,
+        lookupHelperMemory: 50 * 1024 * 1024,
+        nameCheckState: 1,
+        nameLookupsHeard: 31_200,
+        nameLookupsToHelper: 3_800,
+        nameCheckMisses: 2,
+        nameWalksDeferred: 14,
+      };
+      const { reading, message } = build(() => connected({ health: check })).read(probeId);
+      assert.equal(reading['lookupHelperState'], 4);
+      assert.equal(reading['lookupHelperLosses'], 3);
+      assert.equal(reading['lookupHelperMemory'], 50);
+      assert.equal(reading['nameCheckState'], 1);
+      assert.equal(reading['nameLookupsHeard'], 31_200);
+      assert.equal(reading['nameLookupsToHelper'], 3_800);
+      assert.equal(reading['nameCheckMisses'], 2);
+      assert.equal(reading['nameWalksDeferred'], 14);
+      // None of them says anything in words: the latch is the helper's one alarm.
+      assert.doesNotMatch(message, /lookup helper|name check/u);
+      const fields = [
+        'lookupHelperState',
+        'lookupHelperLosses',
+        'lookupHelperMemory',
+        'nameCheckState',
+        'nameLookupsHeard',
+        'nameLookupsToHelper',
+        'nameCheckMisses',
+        'nameWalksDeferred',
+      ];
+      // `system` mode, and a probe or a core below 39, send none of them: each gaps.
+      for (const health of [{ ...FULL, nameResolverMode: 1 }, FULL]) {
+        const { reading: none } = build(() => connected({ health })).read(probeId);
+        for (const key of fields) assert.equal(none[key], null, key);
+      }
+    });
+
     it('carries the answers a probe loaded at start, a zero as a zero, and gaps for one that cannot say (`P-438`)', () => {
       const { reading } = build(() =>
         connected({ health: { ...FULL, lookupsGivenUp: 1_250, answersLoaded: 450 } }),

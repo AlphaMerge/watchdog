@@ -101,6 +101,17 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * below 38 is sent none of them, and a probe below 38 sends none and their channels gap. In
  * `system` mode the five gate fields are absent, so their channels gap too.
  *
+ * Version 39 adds gate mode's name check and the rest of its lookup helper's health, under
+ * `nameCheck` (`P-432` S6, D29), each in gate mode only: `lookupHelperState` (1 up, 2 starting, 3
+ * not answering, 4 restarting, 5 resting, 6 stopping), `lookupHelperLosses` (a running total),
+ * `lookupHelperMemory` (the child's resident set at its last beat, in bytes), `nameCheckState` (0
+ * resting, 1 on, 2 off for the system's shape or platform, 3 not proven, 4 stood down, 5 walks off
+ * at a server), and the running totals `nameLookupsHeard` (run on the probe's lanes because their
+ * walk, or their zone's sample, was heard), `nameLookupsToHelper` (run in the helper),
+ * `nameCheckMisses` and `nameWalksDeferred`. Eight new fields in a closed schema under one
+ * capability: a core below 39 is sent none of them, and a probe below 39 sends none and their
+ * channels gap, as they do in `system` mode.
+ *
  * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
  * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
@@ -231,7 +242,7 @@ import { isProtocolCompatible, MIN_PROTOCOL_VERSION } from './capability-version
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 38;
+export const PROTOCOL_VERSION = 39;
 
 /**
  * The floor, and the one test against it, live in `capability-versions.ts` so that the browser
@@ -698,6 +709,26 @@ export interface ProbeHealthReport {
   namePassedStuck?: number;
   nameHelperStuck?: number;
   nameQuestionsOpen?: number;
+  /**
+   * Gate mode only, each absent in `system` mode (`P-432` S6, D29). `lookupHelperState`: 1 up, 2
+   * starting, 3 not answering, 4 restarting, 5 resting, 6 stopping. `lookupHelperLosses`: a running
+   * total of the helper's losses. `lookupHelperMemory`: the child's resident set at its last beat,
+   * in bytes, absent before its first. `nameCheckState`: 0 resting (names asked as `system`
+   * asks them), 1 on, 2 off for the system's shape or platform, 3 not proven, 4 stood down, 5 walks
+   * off at a server. Running totals: `nameLookupsHeard`, the lookups run on the probe's own lanes
+   * because their walk, or their zone's sample, was heard; `nameLookupsToHelper`, those run in the
+   * helper, any route; `nameCheckMisses`, walks unanswered whose name the helper answered at once;
+   * `nameWalksDeferred`, walks not sent for want of room, rate or a verdict. Sent only to a core at
+   * protocol 39.
+   */
+  lookupHelperState?: number;
+  lookupHelperLosses?: number;
+  lookupHelperMemory?: number;
+  nameCheckState?: number;
+  nameLookupsHeard?: number;
+  nameLookupsToHelper?: number;
+  nameCheckMisses?: number;
+  nameWalksDeferred?: number;
   /**
    * The domains the probe's resolver finds not answering (`P-441`): at most three, those with the
    * most names failing first, `''` for names of a single label. Empty when none is. Sent in both
@@ -1260,6 +1291,14 @@ const PROBE_HEALTH_SCHEMA = {
     namePassedStuck: { type: 'integer', minimum: 0 },
     nameHelperStuck: { type: 'integer', minimum: 0 },
     nameQuestionsOpen: { type: 'integer', minimum: 0 },
+    lookupHelperState: { type: 'integer', minimum: 1, maximum: 6 },
+    lookupHelperLosses: { type: 'integer', minimum: 0 },
+    lookupHelperMemory: { type: 'integer', minimum: 0 },
+    nameCheckState: { type: 'integer', minimum: 0, maximum: 5 },
+    nameLookupsHeard: { type: 'integer', minimum: 0 },
+    nameLookupsToHelper: { type: 'integer', minimum: 0 },
+    nameCheckMisses: { type: 'integer', minimum: 0 },
+    nameWalksDeferred: { type: 'integer', minimum: 0 },
     // A domain name, or '' for single labels: 253 characters at most, as DNS allows.
     lookupsNotAnswering: {
       type: 'array',

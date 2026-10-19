@@ -1538,7 +1538,7 @@ describe('gate mode’s start, watch and health (P-432 S3)', () => {
     }
   });
 
-  it('counts no time with the check on in this build: the real policy on a stock shape says not built', async () => {
+  it('counts the time with the check on in this build: the real policy on a stock shape says on, and not built where a test says so', async () => {
     const stock: Record<string, string | null> = {
       [SYSTEM_FILES.resolvConf]: 'nameserver 192.0.2.53\n',
       [SYSTEM_FILES.nsswitchConf]: 'hosts: files dns\n',
@@ -1577,8 +1577,8 @@ describe('gate mode’s start, watch and health (P-432 S3)', () => {
       clock.now = 60_000;
       return resolver.gateHealth()?.checkOnSeconds;
     };
-    assert.equal(await seconds(undefined), 0, 'this build: off, the helper up a minute');
-    assert.equal(await seconds(true), 60, 'a build with the check: on');
+    assert.equal(await seconds(undefined), 60, 'this build (S6): on, the helper up a minute');
+    assert.equal(await seconds(false), 0, 'a build without the check: off');
   });
 
   it('takes the peak of the questions open since the last take', async () => {

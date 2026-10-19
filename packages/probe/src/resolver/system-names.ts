@@ -1058,12 +1058,12 @@ export function typesFor(family: Family): readonly QType[] {
 const NOT_LOADED: CheckOff = { code: 'unloaded', why: 'the system’s files have not been read yet' };
 
 /**
- * Whether this build has the name check (`P-432` S6, which sets it): until then the check is off
- * whatever the system's shape, and every name glibc does not answer from local files is asked in
- * the lookup helper. `checkOn`, the description logged at start and Probe Health's
- * `nameCheckOnSeconds` say so. The view is the shape's, and routes `local` names as ever.
+ * Whether this build has the name check (`P-432` S6 built it, `dns-check.ts`). A build without it
+ * had the check off whatever the system's shape, and asked every name glibc does not answer from
+ * local files in the lookup helper; `checkOn`, the description logged at start and Probe Health's
+ * `nameCheckOnSeconds` said so. A test may still build a policy without it (`checkBuilt`).
  */
-export const NAME_CHECK_BUILT = false;
+export const NAME_CHECK_BUILT = true;
 
 /** Why the check is off in a build without it (`NAME_CHECK_BUILT`). */
 export const CHECK_NOT_BUILT: CheckOff = {
