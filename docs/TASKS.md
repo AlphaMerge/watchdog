@@ -40250,6 +40250,67 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       **H-37 outcome.** Said, with the check and both fixes, in `docs/release-notes-1.0.md` →
       *Every probe host: ICMP needs this release's package*.
 
+- [ ] **H-50 — cut `v1.0.0-rc.3`** · M · P-432, H-14 · Filed 2026-10-19 for the rc.3 track. The
+      user's 1.0 queue cuts rc.3 once `P-432` has landed whole and its differential against
+      `getaddrinfo` has passed in the smoke images, `systemd-resolved` included (decided
+      2026-10-18). **Done when** `docs/findings/2026-10-19-rc3-cut-checklist.md` has been run to
+      its end: the version commit and the tag pushed, the arm64 and x86_64 tarballs, `.deb` and
+      `.rpm` (the probe host's included) built from the tag and checked, the four smokes passed
+      on each (Ubuntu on x86_64 excepted, `H-29`), and the record committed with the documents
+      that point at it.
+      - **Prepared** 2026-10-19 (`prep/rc3-docs`), before `P-432`'s S3, S6, S7 and S8 had
+        landed:
+        - `docs/release-notes-1.0.md`: brought up to `f762dfc6`. `P-425` and `P-432`'s
+          `probe.nameResolver` are new upgrade items, and `P-445`'s move of the local flag
+          replaces "no tested path yet". *Name resolution* gains `P-438`'s measurement from the
+          fourth quiet window and the gate. Going back says to remove the key before installing
+          rc.2, whose probe section refuses an unknown key (exit 78; read from `v1.0.0-rc.2`'s
+          `schema.ts`). *Also open* gains `P-441` and `A-87`. The protocol line reads 28 to 38.
+        - `docs/runbook-field-test.md`: step 1 sets `"nameResolver": "gate"` on every probe,
+          local and remote, with both ends on the candidate, and recommends a second probe
+          pointed straight at the site's resolver. Step 2 restarts the remote probes too. Step 4
+          records `nameResolverMode` for each probe at each reading, with pass criteria for the
+          gate's channels written before the week. A gate drill follows the end reading.
+        - `docs/findings/2026-10-19-rc3-cut-checklist.md`: rc.2's procedure with every command
+          written out, and checks at each artefact for what rc.1 got wrong.
+        - `scripts/package.sh`, `package-deb.sh` and `package-rpm.sh`, read with no package
+          built: they produce `1.0.0-rc.3` and `1.0.0~rc.3` correctly with no change.
+          `package-msi.sh` does not, which is 1.1's (`H-49`).
+        - Every claim that depends on unlanded code carries an HTML comment opening with
+          `TODO(rc3-cut):`, which names the slice and what to check. The checklist's step 0.3
+          greps for them, and the cut does not start while one is left.
+        - **Tests**: `build-hygiene` and `candidate-surface` (core), 34 of 34, on the finished
+          documents. The runbook's new criteria are a list and not a table, because its
+          channel table is held to the Probe Health type and the six channels are not there
+          yet. Three mutants of the documents, each restored and compared byte for byte, were
+          killed: a table row for `nameResolverMode` (*names channels that exist*), the
+          checklist named nowhere outside `findings/` (*leave no findings document
+          unreachable*), and a misspelt link to it (*all resolve to a file that exists*).
+      - **Decided 2026-10-19 by Claude, under the user's delegation:**
+        - **The markers are HTML comments.** The documents ship as Markdown in `/opt/ms/docs`
+          and are read rendered as well, and a comment cannot be mistaken for part of the text
+          if one is missed. The checklist's grep pattern is written so that it does not find
+          itself.
+        - **The Probe Health channels in the documents are the six-field set** the user chose
+          on 2026-10-18 (the mode, the helper-trouble latch, time with the check on,
+          passed-stuck, helper lookups stuck, and peak open questions), named as the design
+          names them. The design's `lookupHelperMemory` is not among them, so the runbook reads
+          the helper's memory with `ps` on each probe's host.
+        - **The x86_64 build runs in its own compose project** (`COMPOSE_PROJECT_NAME=ms-amd64`).
+          `H-14` rebuilt the shared toolchain image for amd64. Every other session's `dev.sh`
+          then ran the amd64 image under emulation until it was rebuilt. A second project
+          leaves the arm64 image alone, and its runs are named so that the VM count still
+          includes them.
+        - **The tag stays local until the arm64 build, smokes and package checks have
+          passed.** rc.1 was pushed and then could not be packaged, and stands as a tag with
+          no packages. A tag that never left the machine can be deleted and the cut run again
+          under the same number. Once anything built from it has left the machine, a re-cut is
+          rc.4.
+        - **The record lists the probe host's packages too.** The runbook now installs remote
+          probes, and rc.2's record had checksums only for the full package.
+        - **Quiet-machine runs: none.** The cut measures nothing. Its smokes are pass or fail
+          and are bounded, so they need the VM gate, not a quiet window.
+
 ## Release 1.1 — Windows
 
 **Decided 2026-09-28 (`H-10`): 1.0 is Linux-only, and Windows is 1.1.** Nothing here is
@@ -41075,6 +41136,18 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `ms-enrol`'s and both `install-probe` scripts' messages point there. The README,
       `dev-token.sh` and `lib/api-auth.sh` say a token is issued from a signed-in session, not
       the UI, and `api-auth.sh` no longer prints a refused `MS_TOKEN`.
+
+- [ ] **H-49 — `package-msi.sh` cannot package a pre-release** · XS · H-06 · Found 2026-10-19 by
+      `H-50`'s reading of the packaging scripts. `package-msi.sh:127` writes
+      `Version="${version}.0"`, and `:137` the same as the upgrade's `Maximum`. For `1.0.0-rc.3`
+      that is `1.0.0-rc.3.0`. Windows Installer's `ProductVersion` is numeric only,
+      `major.minor.build`, each at most 255, 255 and 65,535, so `wixl` refuses the candidate's
+      version or writes one Windows will not compare. The `.deb` and `.rpm` had the same defect
+      at rc.1 (`7960f035`). Windows is release 1.1, so no 1.0 candidate is affected. **Done when**
+      the MSI's version is numeric for a pre-release and sorts before the release it precedes
+      (for example `1.0.0` with the candidate in `Description` only, or a build field below the
+      release's), the file name keeps the tag's spelling, and a test of the generated `.wxs`
+      covers both.
 
 ---
 

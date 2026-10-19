@@ -106,8 +106,9 @@ the root object and nothing else, so none of this is optional:
 - **The listeners**, in `/etc/ms/probe.json`, if your devices send syslog or traps:
   `syslogListener.enabled` (UDP and TCP 10514 by default) and `trapListener.enabled` (UDP 162).
   Restart the probe afterwards, after `reset-failed`.
-- **A Core Health sensor and a Probe Health sensor** (`ms.core.health`, `ms.probe.health`),
-  on a device under the probe. Nothing creates them for you, and steps 2 to 4 read both.
+- **A Core Health sensor, and a Probe Health sensor for every probe** (`ms.core.health`,
+  `ms.probe.health`), each on a device under its probe. Nothing creates them for you, and steps 2
+  to 4 read them all.
 - **The devices**, and their credentials.
 - **A token for the setting up.** Everything after the install is the UI or the API. For the
   API, sign in and make a `full`-scope token for steps 1 to 3 (`POST /api/v1/auth/tokens`
@@ -116,6 +117,56 @@ the root object and nothing else, so none of this is optional:
 - **A new password for the first administrator.** Signing in with the generated one works,
   and the API does not insist on the change (`mustChangePassword` is the client's to enforce),
   so a week can run on the password in `first-admin-password` unless you change it.
+
+### Every probe resolves names with the gate (`P-432`)
+
+**Set `"nameResolver": "gate"` on every probe in the test**: the local probe on the core's host,
+and every remote probe. The default is `"system"`, and the field test is where the gate is
+tried on real devices and a real resolver before 1.0's default is decided
+([release notes → Name resolution](release-notes-1.0.md#known-limits-and-what-comes-next)).
+A probe left on `"system"` tests nothing of it, and step 4 records that it did not.
+
+- **Both ends run this build.** A remote probe is the `ms-probe` package of the same candidate,
+  `ms-probe_<version>_amd64.deb` (or `.rpm`), checked against the record the same way. An older
+  probe refuses the key and stays stopped (exit 78), and under an older core the gate's health
+  never reaches Probe Health.
+- **A second probe pointed straight at the site's resolver, if you can.** Ubuntu's own probe asks
+  `systemd-resolved`'s stub at `127.0.0.53`, which stands between the gate and the site's DNS
+  servers, so it cannot show what the gate's questions cost them. A probe on Debian or RHEL whose
+  `resolv.conf` names the site's servers can. If there is none, the write-up says that the load
+  on the site's resolver was not observed.
+
+On each probe's host, add the key to the `probe` section of `/etc/ms/probe.json`, beside what is
+there:
+
+```json
+"probe": {
+  "nameResolver": "gate",
+  …
+}
+```
+
+```bash
+sudo nano /etc/ms/probe.json                    # "nameResolver": "gate" in the probe section
+sudo /opt/ms/bin/ms-probe config check          # refuses a misspelt key or value
+```
+
+Nothing applies it but a restart. On the core's host step 2's restart does it; on a remote
+probe's host restart that probe now, and do it again in step 2:
+
+```bash
+sudo systemctl reset-failed ms-probe
+sudo systemctl restart ms-probe
+sudo journalctl -u ms-probe -b --no-pager | grep -i 'name resolver'
+```
+
+The start line names the mode asked for and the mode in effect, and why. **`gate` asked and
+`gate` in effect is the pass.** A check that is off names the first setting of the host it could
+not vouch for, and asks every name in the lookup helper: still the gate, and the write-up says
+which setting, since nothing the week records then tests the walk.
+<!-- TODO(rc3-cut): P-432 S3 writes the start line (design p432-r2-final.md §5, "Logs"). Check
+the grep and the words against the landed code, and run this block once against a packaged
+probe before the week, as the dress rehearsal did for the rest of step 1. -->
 
 ## 2. Restart everything, once, before you start counting
 
@@ -137,6 +188,10 @@ included, and the sixth is refused and leaves the unit `failed`. `reset-failed` 
 count and changes nothing else (`administration.md`, *Your own starts count too*, measured it).
 That is why every start in this runbook follows one: `installation.md` §3's start, and the
 restart here. A restart of the core also restarts the probe, so both counts move together.
+
+**Restart every remote probe too**, on its own host, the same way (`sudo systemctl reset-failed
+ms-probe`, then `sudo systemctl restart ms-probe`), and run step 1's `journalctl` check again on
+each: the mode in effect after this restart is the one the week runs.
 
 Then check `connected` on Probe Health, and that `scheduled` matches what the core assigned:
 every sensor under that probe **except Core Health and Probe Health**, which the core evaluates
@@ -286,6 +341,28 @@ libraries are not part of what this test is about. `lock` names the dependency v
 was installed with (`H-20`). A candidate cut before `H-20` has no `lock`, and it shipped
 dependency versions no suite ran against, so re-cut that one too.
 
+**And, at each of the three readings, which name resolver each probe ran** (`P-432`), from that
+probe's Probe Health sensor. `nameResolverMode` is `1` for `"system"`, `2` for `"gate"`, and `3`
+for `"gate"` resting, which resolves as `"system"` does. Its lookup reads every value as Up, so
+no state changes when it moves: read the number. In the hourly history since the start reading,
+every hour's `min` and `max` of it must both be `2`, on every probe, and an hour with none is a
+gap the write-up explains:
+
+```bash
+for id in <probe-health-id> <another-probe-health-id>; do
+  curl -s -G -H "Authorization: Bearer $MS_TOKEN" \
+    --data-urlencode "from=<start-reading-time>" --data-urlencode "resolutionSeconds=3600" \
+    "localhost:8080/api/v1/sensors/$id/history"
+done
+```
+
+The write-up's second line, after the build, names each probe, its host's OS, which resolver its
+host asks (`systemd-resolved`'s stub or the site's servers), and the mode it ran. A probe that
+ran anything but `2` for the week did not test the gate, whatever else it shows.
+<!-- TODO(rc3-cut): nameResolverMode and the five channels below are P-432 S3's (protocol 38,
+the user's six-field set of 2026-10-18), named as the design names them. Check each name, value
+and lookup against packages/sensors/src/types/probe-health.ts once S3 has landed. -->
+
 The numbers that decide the criterion:
 
 - **`memory` on both health sensors.** Flat is the pass. The 24-hour soak measured +1.10 MB/h on
@@ -323,6 +400,53 @@ The numbers that decide the criterion:
   each with its own sessions, so `open` rises during an outage and falls back within `idleMs` of
   the workers it no longer reaches going quiet (`P-256`). Still high an `idleMs` after the checks
   stopped is a finding.
+- **The gate's five channels, on every probe** (`P-432`), written down here before the week so
+  that nobody judges them after it. Only the trouble latch moves Probe Health's state (its
+  lookup reads `1` as Warning, so step 3's Warning trigger delivers it); read the others. A
+  counter is judged by its difference between two readings, not by its value:
+  - `lookupHelperTrouble` is `0` throughout. Each Warning, and any time the probe's log says the
+    lookup helper ran out of memory, is a finding, explained by the probe log's `lookup helper`
+    lines.
+  - `namePassedStuck` does not move: a lookup the gate sent to the probe's own lanes that then
+    ran past 1 s. Each one is explained from the log line naming its host, or it is a finding.
+  - `nameCheckOnSeconds` grows by at least 95% of what `uptime` grows by. Less, and the
+    write-up says the walk was not tested for that share of the week, and why, from the start
+    line and the log.
+  - `nameHelperStuck` is recorded, not judged: each is a lookup that `"system"` would have held
+    one of the probe's own lanes for.
+  - `nameQuestionsOpen`'s highest value at each reading is recorded beside the release notes'
+    bound (about 24 in an outage, 42 at most).
+  - **The helper's memory**, at each reading, on each probe's host. Flat is the pass, judged as
+    `memory` is; an elapsed time shorter than the probe's own means the helper was replaced, and
+    that must match a loss in the probe's log:
+
+    ```bash
+    ps -o pid=,rss=,etimes= -p "$(pgrep -f 'ms-probe: lookups')"
+    ```
+  <!-- TODO(rc3-cut): the process title, the log's wording and the 95% rule are P-432 S3 and
+  S6's (design §5, "The field test's record"). Check them against the landed code. -->
+
+### After the end reading: the gate drill (`P-432`)
+
+**Not part of the week, and not a condition of `H-09`**: an intervention, so it starts only after
+the end reading is taken. A clean week shows that the gate did no harm; it cannot show that the
+gate helps, because a week with no DNS outage never routes a name to the helper for the reason
+the gate exists. So, on the same installation, once with `"gate"` and once with `"system"`:
+
+1. Pick one DNS zone that some of the devices are in, and make the site's resolver drop its
+   questions without answering (a blackhole, not a refusal). Note the time.
+2. Restart the probe that serves those devices (`reset-failed`, then `restart`), and add one new
+   device in the zone that still answers.
+3. Wait two scan intervals, then record every sensor state change since the zone went silent,
+   from `GET /api/v1/state-log`, and the six Probe Health channels above.
+4. Restore the zone; set the other mode on that probe and restart it; repeat from 1.
+
+The pass: under `"gate"`, no sensor on a device in the zone that answers changes state, the new
+device's sensors come Up at their first scan, and `lookupHelperTrouble` stays `0`. Under
+`"system"` some of them may not, which is the comparison the drill exists to make. Put both
+records in the write-up. If the gate has to come off during the week instead, that is an
+intervention and the week has failed: set `"system"`, restart the probe after `reset-failed`,
+and record why.
 
 ## 5. What counts as a failure
 
