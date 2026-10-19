@@ -12734,7 +12734,9 @@ because each is a decision rather than a defect:
           a late look that has ended, which a later look would clear anyway; `.then(settle,
           settle)` against `.then(settle)`, since a load or look never rejects; and
           `timer.unref()`. The four resolver files passed 112 of 112 in a run that was not
-          quiet, and are to be run once in a quiet window.
+          quiet, and in the quiet window of 2026-10-19 (17:18Z, on `integ/r4-1019` with S1 and
+          `P-437` beside it) `system-names` passed 433 of 433 and the four resolver files 113 of
+          113, `pool-resolve` among them.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
@@ -13015,6 +13017,16 @@ because each is a decision rather than a defect:
       counters rather than a window of wall-clock time, so that a failure says which was slow;
       with a mutant per test that still fails it when the behaviour is removed, and twenty runs
       of the file in a row at a load near 20 with none of the six failing.
+- [ ] **P-450 — `pool-resolve`'s "replies on its port are not checks" bounds a worker's start at
+      5 s** · XS · P-432, P-446 · Found 2026-10-19 by `P-432` S1. The test failed 6 of 7 twice at a
+      host load of 16–22, timing out on the worker's 'ready' message (`until` → `pollWithin`, 5 s
+      by default); in the quiet window of 2026-10-19 the file passed 7 of 7. Its worker loads
+      `check-worker.ts` and the lookup registry only, never the resolver, so neither S1 nor any
+      resolver change can cause it. Not `P-446`'s kind exactly: the bound is already on the start,
+      not on the behaviour, and it is the start bound a loaded host exceeds. **Done when** the
+      start bound is 15–20 s, the 200 ms "no result" window it then times is unchanged, and the
+      file passes twenty runs in a row at a load near 20.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
@@ -13722,8 +13734,13 @@ because each is a decision rather than a defect:
           recovery grew five at once to `heldAt`, where the floor did not bind.
         - Per-worker memory before and after `P-426`, which this ticket asked for, was not
           measured (`P-440`).
-        - The quiet re-take of `check-pool` twenty times in a row, and `ms-server`'s pool counts
-          after landing against those before it, are the coordinator's, after the close.
+        - `ms-server`'s pool counts after landing, against those before it, are the
+          coordinator's, after the push.
+      - **The quiet re-take** (2026-10-19, 17:18–18:25Z, at `0c4c1391` on `integ/r4-1019` with
+        `P-432` S1 and S4 beside it; `ms-server` stopped, the other project's containers paused,
+        nothing else connected to the database, load 0.04–1.7): `check-pool` 20 of 20 runs at 83
+        of 83, each in its own process with exit 0, and `pool-memory-cap` 20 of 20 at 53 of 53;
+        the VM's OOM-kill count 0 throughout. None of `P-448`'s six failed on the quiet VM.
 - [x] **P-439 — a loading worker is counted twice in what the pool holds** · XS · P-437, P-271 ·
       Found 2026-10-18 by `P-437`, by reading the code; not measured. `#grow`'s `held` is
       `#slots.length + #growing`. A spawn is in both from the moment `#start` pushes its slot until
