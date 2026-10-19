@@ -747,7 +747,8 @@ export type OffCode =
   | 'nscd'
   | 'skew'
   | 'slow'
-  | 'fault';
+  | 'fault'
+  | 'unbuilt';
 
 /** Why the check is off: the first rule that failed. No name is walked, and none is `local`. */
 export interface CheckOff {
@@ -1057,6 +1058,22 @@ export function typesFor(family: Family): readonly QType[] {
 const NOT_LOADED: CheckOff = { code: 'unloaded', why: 'the system’s files have not been read yet' };
 
 /**
+ * Whether this build has the name check (`P-432` S6, which sets it): until then the check is off
+ * whatever the system's shape, and every name glibc does not answer from local files is asked in
+ * the lookup helper. `checkOn`, the description logged at start and Probe Health's
+ * `nameCheckOnSeconds` say so. The view is the shape's, and routes `local` names as ever.
+ */
+export const NAME_CHECK_BUILT = false;
+
+/** Why the check is off in a build without it (`NAME_CHECK_BUILT`). */
+export const CHECK_NOT_BUILT: CheckOff = {
+  code: 'unbuilt',
+  why:
+    'the name check is not in this build: every name glibc does not answer from local files is ' +
+    'asked in the lookup helper',
+};
+
+/**
  * Where the policy sends a name, asked as the resolver keys it (trimmed, lower case, a trailing dot
  * kept), for a family. While the check is off, nowhere it vouches for. What `getaddrinfo` settles
  * before NSS and nscd comes first: an `inet_aton` form (sysdeps/posix/getaddrinfo.c,
@@ -1113,8 +1130,12 @@ export interface PolicyChange {
 }
 
 export interface PolicyDescription {
+  /** On only in a build with the check (`NAME_CHECK_BUILT`) and a shape it takes. */
   readonly check: 'on' | 'off';
+  /** Why it is off: `CHECK_NOT_BUILT` in a build without it, else the shape's own reason. */
   readonly off: CheckOff | undefined;
+  /** What the system's shape says of the check: the first rule it fails, or none. */
+  readonly shapeOff: CheckOff | undefined;
   readonly platform: string;
   readonly glibc: string | null;
   readonly servers: readonly string[];
@@ -1151,6 +1172,8 @@ export interface SystemNamePolicy {
   looked(readings: readonly WatchedReading[]): Promise<PolicyChange>;
   classify(host: string, family: Family): NameClass;
   view(): PolicyView;
+  /** Whether the check is on: built (`NAME_CHECK_BUILT`), and the shape one it takes. */
+  checkOn(): boolean;
   snapshot(): PolicySnapshot;
   /** A read-once file now says otherwise than this process's glibc read: a new helper would differ. */
   skewed(): boolean;
@@ -1186,6 +1209,8 @@ export interface GlibcNamePolicyOptions {
   readonly lookMs?: number;
   /** How long a load may take: `POLICY_LOAD_MS` unless a test says. */
   readonly loadMs?: number;
+  /** Whether the check is built: `NAME_CHECK_BUILT` unless a test says. */
+  readonly checkBuilt?: boolean;
 }
 
 type FileKey = SystemFileKey;
@@ -1389,6 +1414,7 @@ export class GlibcNamePolicy implements SystemNamePolicy {
   readonly #moduleLook: (name: string) => Promise<ModuleLook>;
   readonly #lookMs: number;
   readonly #loadMs: number;
+  readonly #checkBuilt: boolean;
   #loaded = false;
   /** A load or look past its bound, no longer waited on; `settled` once it has ended. */
   #late: { readonly what: 'load' | 'look'; readonly ms: number; settled: boolean } | undefined;
@@ -1441,6 +1467,7 @@ export class GlibcNamePolicy implements SystemNamePolicy {
     this.#moduleLook = options.moduleLook ?? ((name) => nssModuleLook(name));
     this.#lookMs = options.lookMs ?? POLICY_LOOK_MS;
     this.#loadMs = options.loadMs ?? POLICY_LOAD_MS;
+    this.#checkBuilt = options.checkBuilt ?? NAME_CHECK_BUILT;
     this.#view = this.#offView(NOT_LOADED);
   }
 
@@ -1573,6 +1600,10 @@ export class GlibcNamePolicy implements SystemNamePolicy {
     return this.#view;
   }
 
+  checkOn(): boolean {
+    return this.#checkBuilt && this.#view.off === undefined;
+  }
+
   snapshot(): PolicySnapshot {
     const digests: Record<string, string> = {};
     for (const key of FILE_KEYS) {
@@ -1594,8 +1625,9 @@ export class GlibcNamePolicy implements SystemNamePolicy {
   describe(): PolicyDescription {
     const view = this.#view;
     return {
-      check: view.off === undefined ? 'on' : 'off',
-      off: view.off,
+      check: this.checkOn() ? 'on' : 'off',
+      off: this.#checkBuilt ? view.off : CHECK_NOT_BUILT,
+      shapeOff: view.off,
       platform: view.platform,
       glibc: this.#glibc,
       servers: view.conf?.servers ?? [],

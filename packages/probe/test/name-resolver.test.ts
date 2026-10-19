@@ -2542,7 +2542,7 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     });
   }
 
-  it('does not count an answer the answer file gave for a name the hosts file lists as its domain answering, DNS asked first or not (P-438’s narrow check)', async (t) => {
+  it('never restores an answer for a name the hosts file lists, DNS asked first or not, so it never counts its domain answering (P-438, P-432 S3)', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { resolver, ask, last, callsFor, hosts } = watched({}, 'hosts: dns files\n');
     writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
@@ -2556,18 +2556,39 @@ describe('the hosts file and resolv.conf (P-426)', () => {
         expiresInMs: ANSWER_MS - 1_000,
       },
     ]);
-    assert.equal(counts.loaded, 1, 'kept: getaddrinfo asks DNS for it first');
+    assert.equal(counts.loaded, 0, 'whatever nsswitch.conf is read to say of the order');
+    assert.equal(counts.hostsFile, 1);
     const names = [1, 2, 3, 4].map((n) => `b${String(n)}.zone-b.test`);
     const asked = names.map((name) => ask(name, 4, { waitMs: 60_000 }));
     assert.deepEqual(
       names.map((name) => callsFor(name).length),
       [1, 1, 1, 0],
-      'three: an answer the hosts file lists says nothing of whether DNS answers zone B',
+      'three: a name the hosts file lists says nothing of whether DNS answers zone B',
     );
     for (const name of names.slice(0, 3)) last(name).answer();
     await settled();
     last('b4.zone-b.test').answer();
     assert.deepEqual(await Promise.all(asked), [A, A, A, A]);
+  });
+
+  it('never saves an answer for a name the hosts file lists, though DNS answered it first (P-432 S3)', async () => {
+    const { resolver, ask, last, callsFor, hosts } = watched({}, 'hosts: dns files\n');
+    writeFileSync(hosts, '127.0.0.1 localhost\n192.0.2.200 fixed.zone-b.test\n');
+    await resolver.checkFiles();
+    const listed = ask('fixed.zone-b.test', 4, { waitMs: 60_000 });
+    const other = ask('other.zone-b.test', 4, { waitMs: 60_000 });
+    assert.equal(callsFor('fixed.zone-b.test').length, 1, 'asked of DNS first, as glibc would');
+    last('fixed.zone-b.test').answer(B);
+    last('other.zone-b.test').answer();
+    assert.deepEqual(await listed, B);
+    assert.deepEqual(await other, A);
+    assert.deepEqual(
+      resolver
+        .answersToSave()
+        .take(10)
+        .map((kept) => kept.host),
+      ['other.zone-b.test'],
+    );
   });
 
   it('compares a name with the hosts file’s as glibc does, a trailing dot kept (P-438’s narrow check)', async (t) => {
@@ -2686,9 +2707,6 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     ['the hosts file not on its hosts line', 'passwd: files\nhosts: dns myhostname\n'],
     ['no hosts line, glibc’s default', 'passwd: files\n'],
     ['no nsswitch.conf at all', null],
-    // A line the probe's one nsswitch reader does not take is DNS first (P-432 S3).
-    ['a line with an action group', 'hosts: files mdns4_minimal [NOTFOUND=return] dns\n'],
-    ['two hosts lines', 'hosts: files dns\nhosts: files dns\n'],
   ] as const) {
     it(`holds back a name the hosts file gives when nsswitch.conf asks DNS before it: ${order} (P-438)`, async (t) => {
       t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -2708,35 +2726,127 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     });
   }
 
-  it('reads nsswitch.conf’s hosts line by the policy’s one reader: the file first only on the lines it takes (P-432 S3)', () => {
-    // One nsswitch reader in the probe (decided 2026-10-19): `readNsswitch`'s rules, which glibc
-    // 2.28 to 2.42 read alike. A line it does not take is DNS first, glibc's default, so no name is
-    // exempted from its domain's first lanes on a line read one way by one glibc and another by
-    // the next.
+  it('reads nsswitch.conf’s hosts line as glibc does: the hosts file first or not, its actions left out (P-438)', () => {
     const lines: [string, boolean, string][] = [
       ['hosts: files dns\n', true, 'Debian’s'],
       ['hosts:     files dns myhostname\n', true, 'Rocky’s'],
-      ['hosts:\tfiles myhostname dns\n', true, 'myhostname before DNS'],
-      ['  hosts: files dns\n', true, 'blanks before it'],
-      ['# hosts: dns files\nhosts: files dns\n', true, 'a comment line before it'],
+      ['# hosts: dns files\nhosts:\tfiles mdns4_minimal [NOTFOUND=return] dns\n', true, 'Ubuntu’s'],
       ['hosts: dns files\n', false, 'DNS first'],
       ['hosts: dns\n', false, 'DNS alone'],
       ['passwd: files\n', false, 'no hosts line: glibc’s default, DNS first'],
-      ['', false, 'an empty file, or none'],
-      // Lines the reader does not take, which P-438's own reader read as the file first.
-      ['hosts:\tfiles mdns4_minimal [NOTFOUND=return] dns\n', false, 'an action group'],
-      ['hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n', false, 'resolve'],
-      ['hosts: myhostname files dns\n', false, 'myhostname ahead of the file'],
-      ['hosts: dns\nhosts: files dns\n', false, 'two hosts lines, read apart by glibc versions'],
-      ['hosts: files dns', false, 'its last line with no newline, which 2.33 never reads'],
-      ['hosts files dns\n', false, 'no colon'],
-      ['hosts: files dns # comment\n', false, 'a #, read apart by glibc versions'],
-      ['Hosts: files dns\n', false, 'not the hosts line: glibc reads names as written'],
+      ['', false, 'an empty file'],
+      // `P-438`'s narrow check: sources that never ask DNS ahead of the file, and resolve, which
+      // answers the hosts file's names itself.
+      ['hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n', true, 'nss-resolve’s'],
+      ['hosts: mymachines files dns\n', true, 'mymachines ahead'],
+      ['hosts: myhostname files dns\n', true, 'myhostname ahead'],
+      ['hosts: myhostname dns files\n', false, 'DNS ahead of the file, myhostname first'],
+      ['hosts: mdns4_minimal [NOTFOUND=return] files dns\n', false, 'another network source first'],
+      // The last hosts line is the one in force.
+      ['hosts: dns\nhosts: files\n', true, 'the last line, the file first'],
+      ['hosts: files dns\nhosts: dns\n', false, 'the last line, DNS alone'],
+      // The name ends at a blank or a colon.
+      ['hosts files dns\n', true, 'no colon'],
+      ['hosts dns\n', false, 'no colon, DNS'],
+      ['hosts:files dns\n', true, 'no blank'],
+      ['  hosts: files\n', true, 'blanks before it'],
+      ['hosts: files[NOTFOUND=return] dns\n', true, 'an action against the name'],
+      ['hosts: [NOTFOUND=return] files dns\n', false, 'a list that starts with an action'],
+      ['Hosts: files\n', false, 'not the hosts line: glibc reads names as written'],
       ['hosts: Files dns\n', false, 'nor `Files` as files'],
+      ['hosts: dns # files\n', false, 'a comment'],
     ];
     for (const [text, first, why] of lines) {
       assert.equal(hostsFileFirst(text), first, `${why}: ${JSON.stringify(text)}`);
     }
+  });
+
+  it('reads every nsswitch.conf as P-438 read it, in both modes: the same answer as its own reader, line for line (P-432 S3)', () => {
+    // P-438's reader as d94ac497 shipped it, kept here word for word: `system` mode is unchanged
+    // only while this resolver's reader gives what it gave for every line.
+    const sources = new Set(['myhostname', 'mymachines']);
+    const p438 = (text: string): boolean => {
+      let list: string | undefined;
+      for (const raw of text.split(/\r?\n/u)) {
+        const match = /^\s*([^\s:]+)[\s:]*(.*)$/u.exec(raw.replace(/#.*$/u, ''));
+        if (match?.[1] === 'hosts') list = match[2] ?? '';
+      }
+      if (list === undefined || list.trimStart().startsWith('[')) return false;
+      for (const source of list
+        .replace(/\[[^\]]*\]/gu, ' ')
+        .trim()
+        .split(/\s+/u)) {
+        if (source === 'files' || source === 'resolve') return true;
+        if (!sources.has(source)) return false;
+      }
+      return false;
+    };
+    const stock: [string, string, boolean][] = [
+      ['Debian and Ubuntu server', 'passwd: files\ngroup: files\nhosts: files dns\n', true],
+      ['Ubuntu desktop, mDNS', 'hosts:          files mdns4_minimal [NOTFOUND=return] dns\n', true],
+      [
+        'Ubuntu with mymachines',
+        'hosts: files mdns4_minimal [NOTFOUND=return] dns mymachines\n',
+        true,
+      ],
+      ['openSUSE', 'hosts:\tfiles mdns_minimal [NOTFOUND=return] dns\n', true],
+      ['Fedora', 'hosts: files myhostname resolve [!UNAVAIL=return] dns\n', true],
+      ['systemd-resolved first', 'hosts: resolve [!UNAVAIL=return] files myhostname dns\n', true],
+      ['Arch', 'hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n', true],
+      ['mymachines first', 'hosts: mymachines files dns\n', true],
+      ['myhostname first', 'hosts: myhostname files dns\n', true],
+      ['RHEL with sss', 'hosts: files dns myhostname\nnetgroup: sss files\n', true],
+      ['an action group first', 'hosts: [NOTFOUND=return] files dns\n', false],
+      ['an action against files', 'hosts: files[NOTFOUND=return] dns\n', true],
+      ['DNS first', 'hosts: dns files\n', false],
+      ['mDNS first', 'hosts: mdns4_minimal [NOTFOUND=return] files dns\n', false],
+      ['NIS first', 'hosts: nis files dns\n', false],
+      ['a commented line before', '# hosts: dns files\nhosts: files dns\n', true],
+      ['a comment in the line', 'hosts: dns # files\n', false],
+      ['a comment after files', 'hosts: files dns # mdns\n', true],
+      ['the last of two lines', 'hosts: dns\nhosts: files dns\n', true],
+      ['the last of two lines, DNS', 'hosts: files dns\nhosts: dns\n', false],
+      ['no colon', 'hosts files dns\n', true],
+      ['no blank', 'hosts:files dns\n', true],
+      ['no newline at the end', 'hosts: files dns', true],
+      ['CRLF', 'hosts: files dns\r\n', true],
+      ['no hosts line', 'passwd: files\n', false],
+      ['an empty file, or none', '', false],
+      ['an empty hosts line', 'hosts:\n', false],
+      ['upper case', 'Hosts: files dns\n', false],
+      ['Files', 'hosts: Files dns\n', false],
+      ['a comment glued to a source', 'hosts: files#dns\n', true],
+      ['a comment that ends a later line’s name', 'hosts: files dns\nhosts# was here\n', false],
+    ];
+    for (const [why, text, first] of stock) {
+      assert.equal(p438(text), first, `the copy: ${why}`);
+      assert.equal(hostsFileFirst(text), first, `${why}: ${JSON.stringify(text)}`);
+    }
+    // And every line made of these parts, against the copy.
+    const parts = [
+      'files',
+      'dns',
+      'myhostname',
+      'mymachines',
+      'resolve',
+      'mdns4_minimal',
+      '[NOTFOUND=return]',
+      '[!UNAVAIL=return]',
+      '#',
+    ];
+    let compared = 0;
+    for (const a of parts) {
+      for (const b of parts) {
+        for (const c of parts) {
+          for (const lead of ['hosts: ', 'hosts:', '  hosts:\t', 'hosts ']) {
+            const text = `${lead}${a} ${b} ${c}\n`;
+            assert.equal(hostsFileFirst(text), p438(text), JSON.stringify(text));
+            compared += 1;
+          }
+        }
+      }
+    }
+    assert.equal(compared, parts.length ** 3 * 4);
   });
 
   it('looks on its timer once started, and a file that appears is a change too', async () => {

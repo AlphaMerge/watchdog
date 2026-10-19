@@ -124,6 +124,14 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
       assert.equal(helpers.length, 1, `one ${HELPER_TITLE} child of the probe`);
       const [helper] = helpers;
       assert.ok(helper !== undefined);
+      // No check in this build: off at start, whatever this system's shape, and no time on.
+      const said = probe
+        .logs()
+        .find((line) => String(line['msg']).startsWith('probe.nameResolver is gate'));
+      assert.equal(said?.['check'], 'off');
+      assert.equal((said['off'] as { code?: unknown } | undefined)?.code, 'unbuilt');
+      const later = await heartbeat(from, (one) => (one.uptimeSeconds ?? 0) >= 3);
+      assert.equal(later.nameCheckOnSeconds, 0, 'the helper up 3 s, the check never on');
       assert.equal(await probe.stop(), 0);
       // The shutdown stopped the names: the resolver, then the helper and the answer file, which
       // says so as it saves. A child never stopped would still die by its own backstop.

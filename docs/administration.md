@@ -1287,10 +1287,11 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   glibc 2.33), or such a file changes
   under a running probe, the next loss rests it until the probe restarts.
 - **A name that crashes `getaddrinfo` is found and kept off every lane.** After the second crash
-  in ten minutes the names in flight are asked again one at a time; the one that crashes again
-  is poison: its checks fail at once, saying the lookup helper failed while asking for it, and
-  it is never asked on the probe's own lanes, resting included, where it would crash the probe.
-  It is asked again, alone, after an hour, then after twice as long at each crash, to a day. An
+  in ten minutes the names in flight are asked again one at a time, for at most 8 seconds after
+  the last crash; the one that crashes again is poison: its checks fail at once, saying the
+  lookup helper failed while asking for it, and it is never asked on the probe's own lanes,
+  resting included, where it would crash the probe. It is asked again after an hour, at a moment
+  the helper has nothing else in flight, then after twice as long at each crash, to a day. An
   answer, or a restart of the probe, clears it.
 - **Stopping.** The helper serves the check pool until the pool has drained, then stops with the
   probe. A probe killed outright takes it with it: the child exits within a second of its channel

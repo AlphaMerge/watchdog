@@ -300,8 +300,9 @@ describe('the probe’s answer file (`P-438`)', () => {
       );
     });
 
-    it('keeps a name the hosts file gives only for another family than the one asked, or after DNS', async () => {
-      // `P-438`'s review (L5): `getaddrinfo` answers these from DNS, as any other name.
+    it('keeps a name the hosts file lists only for another family than the one asked, DNS asked first or not', async () => {
+      // `P-438`'s review (L5): `getaddrinfo` answers these from DNS, as any other name. `P-432`
+      // S3: a name the file lists for the family is never kept, whatever the order says.
       const { dir, files, nsswitch } = hostsAndOrder('192.0.2.50 local.test\n');
       const path = join(dir, ANSWER_FILE);
       const made = make({ watch: { files, everyMs: 60_000 } });
@@ -321,11 +322,8 @@ describe('the probe’s answer file (`P-438`)', () => {
       assert.equal(await made.resolver.checkFiles(), true);
       assert.deepEqual(
         await saved(),
-        [
-          ['local.test', 4],
-          ['local.test', 6],
-        ],
-        'DNS is asked before the file',
+        [['local.test', 6]],
+        'DNS is asked before the file, and the name the file lists for IPv4 is still not kept',
       );
     });
 
@@ -609,7 +607,7 @@ describe('the probe’s answer file (`P-438`)', () => {
       assert.equal(await fileFor(make({ wall: WALL }), path).load(), 1);
     });
 
-    it('does not load a name the hosts file gives now, for the family asked, when it is read before DNS', async () => {
+    it('does not load a name the hosts file lists now, for the family asked, DNS asked first or not', async () => {
       const { dir, files, nsswitch } = hostsAndOrder(
         '# moved here while the probe was stopped\n192.0.2.50 local.test\n',
       );
@@ -623,9 +621,12 @@ describe('the probe’s answer file (`P-438`)', () => {
       // `getaddrinfo` is asked, and reads the file first.
       assert.equal(await isSettled(made.ask('local.test')), false);
       assert.equal(made.callsFor('local.test').length, 1);
-      // DNS asked before the file: the file's name is DNS's too.
+      // DNS asked before the file: `P-432` S3 still leaves out the name the file lists.
       writeFileSync(nsswitch, 'hosts: dns files\n');
-      assert.equal(await fileFor(make({ watch: { files, everyMs: 60_000 } }), path).load(), 3);
+      const after = captured();
+      const dnsFirst = make({ watch: { files, everyMs: 60_000 } });
+      assert.equal(await fileFor(dnsFirst, path, { logger: after.logger }).load(), 2);
+      assert.equal(after.lines[0]?.['hostsFile'], 1);
     });
 
     it('ages a file written since this boot by the monotonic clock, whatever the wall clock did since', async () => {

@@ -17,6 +17,7 @@ import {
   type WatchedReading,
 } from '../src/resolver/name-resolver.js';
 import {
+  CHECK_NOT_BUILT,
   digestOf,
   DIGEST_ABSENT,
   GlibcNamePolicy,
@@ -24,6 +25,7 @@ import {
   inetAton,
   inetPton4,
   inetPton6,
+  NAME_CHECK_BUILT,
   NARROWINGS,
   nssModuleLook,
   POLICY_LOAD_MS,
@@ -137,6 +139,8 @@ const HOSTS = [
 ].join('\n');
 
 interface Fixture {
+  /** Whether the check is built: these tests run its rules as S6 will, unless one says not. */
+  readonly checkBuilt?: boolean;
   readonly resolv?: string;
   readonly nsswitch?: string;
   readonly hosts?: string;
@@ -199,6 +203,7 @@ function policyFor(
               : (texts.get(path) ?? ''),
       ),
     socketExists: () => Promise.resolve(nscd.present),
+    checkBuilt: f.checkBuilt ?? true,
     moduleLook: (name) => {
       modules.asked.push(name);
       return Promise.resolve<ModuleLook>(
@@ -2835,6 +2840,7 @@ describe('the description logged at start', () => {
     assert.deepEqual(policy.describe(), {
       check: 'off',
       off: { code: 'nscd', why: `nscd is running (${FILES.nscdSocket})` },
+      shapeOff: { code: 'nscd', why: `nscd is running (${FILES.nscdSocket})` },
       platform: 'linux',
       glibc: '2.30',
       servers: ['10.0.0.53'],
@@ -2849,10 +2855,11 @@ describe('the description logged at start', () => {
     });
     const bad = await loaded({ resolv: 'options bogus\n' });
     assert.deepEqual(
-      { ...bad.describe(), off: undefined },
+      { ...bad.describe(), off: undefined, shapeOff: undefined },
       {
         check: 'off',
         off: undefined,
+        shapeOff: undefined,
         platform: 'linux',
         glibc: '2.39',
         servers: [],
@@ -2866,6 +2873,29 @@ describe('the description logged at start', () => {
         skewed: false,
       },
     );
+  });
+  it('in a build without the check, says it is off as not built, on the stock shape too (P-432 S3)', async () => {
+    assert.equal(NAME_CHECK_BUILT, false, 'S6 builds the check');
+    const policy = await loaded({ checkBuilt: false });
+    assert.equal(policy.view().off, undefined, 'a shape the check takes');
+    assert.equal(policy.checkOn(), false);
+    const said = policy.describe();
+    assert.equal(said.check, 'off');
+    assert.deepEqual(said.off, CHECK_NOT_BUILT);
+    assert.equal(said.off.code, 'unbuilt');
+    assert.match(said.off.why, /not in this build/u);
+    assert.equal(said.shapeOff, undefined);
+    // Routing is the shape's, as ever: a name the hosts file gives is still answered locally.
+    assert.equal(verdict(policy.classify('printer', 4)), 'local:hosts');
+    // A shape it does not take says so beside it.
+    const nscd = await loaded({ checkBuilt: false, nscd: true });
+    assert.deepEqual(nscd.describe().off, CHECK_NOT_BUILT);
+    assert.equal(nscd.describe().shapeOff?.code, 'nscd');
+    // Built, the same stock shape is on.
+    const built = await loaded();
+    assert.equal(built.checkOn(), true);
+    assert.equal(built.describe().check, 'on');
+    assert.equal(built.describe().off, undefined);
   });
 });
 

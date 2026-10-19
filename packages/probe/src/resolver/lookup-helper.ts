@@ -70,16 +70,19 @@ import { afterPolls } from './verdict-timer.js';
  * **Isolation and poison** (D27). After the second `exit` loss in ten minutes that leaves crash
  * candidates, those are suspects, which the resolver sends alone: the lookups asked again, and a
  * lookup the child had said was stuck, once its hold ends (a crash on a slow reply comes after the
- * child said so). Isolation ends when the resolver says it has no suspect left (`endIsolation`),
- * or when ten minutes pass with no `exit` loss and no suspect in flight; every change says whether
- * it is on. A crash is charged only when it names its culprit: a suspect asked while isolating, or
- * a poison name's re-ask, with no other suspect and no lookup said stuck in flight. With two or
- * more, no one is charged, and each is avoided and asked again alone, so that a working name is
- * never poison for another's crash. A charged name is poison, never asked on a probe lane, and
- * asked again alone here after an hour, then after twice as long at each crash, to a day at most.
- * An answer clears the mark; a restart of the probe does too. `memory`, `hung` and `start` losses
- * are never charged to a name. A change and a loss say whether a crash made a `new` mark or
- * crashed `again` at a re-ask: the trouble latch counts the first and not the second.
+ * child said so). Isolation ends when the resolver says it has no suspect left (`endIsolation`):
+ * none to ask, held or queued, and none in flight the child has not said is stuck. It ends in any
+ * case `isolationMaxMs` (8 s) after the crash that began it or the last one during it, whether or
+ * not a suspect is in flight, so that a `getaddrinfo` that never returns cannot keep it on; every
+ * change says whether it is on. A crash is charged only when it names its culprit: a suspect asked
+ * while isolating, or a poison name's re-ask, with no other suspect and no lookup said stuck in
+ * flight. With two or more, no one is charged, and each is avoided and asked again alone, so that a
+ * working name is never poison for another's crash. A charged name is poison, never asked on a
+ * probe lane, and asked again alone here after an hour, then after twice as long at each crash, to
+ * a day at most, at a moment nothing else is in flight; one that finds none for a whole period
+ * waits for the next. An answer clears the mark; a restart of the probe does too. `memory`, `hung`
+ * and `start` losses are never charged to a name. A change and a loss say whether a crash made a
+ * `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and not the second.
  *
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So while the route is `resting` or `down`,
@@ -128,6 +131,12 @@ export const HELPER_STOP_MS = 500;
 export const HELPER_POISON_RETRY_MS = 3_600_000;
 /** The longest a poison name waits for its re-ask. */
 export const HELPER_POISON_RETRY_MAX_MS = 86_400_000;
+/**
+ * The longest isolation lasts after the crash that began it, or the last crash during it (D27):
+ * at most 8 suspects, each sent alone until the child says it is stuck, at most `STUCK_MS` on the
+ * child's clock (§1.11). It ends then whether or not a suspect is in flight.
+ */
+export const HELPER_ISOLATION_MAX_MS = 8_000;
 /** How much of the child's stderr is kept, and how much of it a loss's log line carries. */
 const STDERR_KEEP = 4_096;
 const STDERR_SAID = 400;
@@ -160,6 +169,7 @@ export interface HelperLimits {
   readonly stopMs: number;
   readonly poisonRetryMs: number;
   readonly poisonRetryMaxMs: number;
+  readonly isolationMaxMs: number;
   readonly lossSayMs: number;
 }
 
@@ -184,6 +194,7 @@ export const HELPER_LIMITS: HelperLimits = {
   stopMs: HELPER_STOP_MS,
   poisonRetryMs: HELPER_POISON_RETRY_MS,
   poisonRetryMaxMs: HELPER_POISON_RETRY_MAX_MS,
+  isolationMaxMs: HELPER_ISOLATION_MAX_MS,
   lossSayMs: HELPER_LOSS_SAY_MS,
 };
 
@@ -802,6 +813,8 @@ export class LookupHelper implements HelperPort {
   #skewed: string | undefined;
   readonly #skewSaid = new Set<string>();
   #isolating = false;
+  /** Isolation's hard lapse (`isolationMaxMs`), from the last crash that began or continued it. */
+  #isolationTimer: HelperTimer | undefined;
   readonly #poison = new Map<string, PoisonMark>();
   /** Each name in flight at an `exit` loss charged to no one, with when: kept off probe lanes. */
   readonly #crashed = new Map<string, number>();
@@ -1007,6 +1020,8 @@ export class LookupHelper implements HelperPort {
   #endIsolation(why: string): void {
     if (!this.#isolating) return;
     this.#isolating = false;
+    this.#timers.clearTimeout(this.#isolationTimer);
+    this.#isolationTimer = undefined;
     // Nothing more is charged (D27): a suspect still running is a lookup like any other now.
     for (const flight of this.#child?.table.values() ?? []) flight.suspect = false;
     this.#suspects.clear();
@@ -1014,13 +1029,21 @@ export class LookupHelper implements HelperPort {
     this.#emitIsolation();
   }
 
-  /** Ten minutes with no `exit` loss, and no suspect in flight, end isolation (D27). */
-  #isolationLapse(): void {
-    if (!this.#isolating) return;
-    const last = this.#exitLosses.at(-1);
-    if (last !== undefined && this.#timers.now() - last < this.#limits.stableMs) return;
-    for (const flight of this.#child?.table.values() ?? []) if (flight.suspect) return;
-    this.#endIsolation('ten minutes passed with no crash and no suspect running');
+  /**
+   * Isolation's hard lapse, armed again at each crash while it is on (D27): it ends
+   * `isolationMaxMs` after the last, a suspect in flight or not, after the polls, so that an answer
+   * already in the pipe is read first.
+   */
+  #armIsolationLapse(): void {
+    this.#timers.clearTimeout(this.#isolationTimer);
+    this.#isolationTimer = this.#timers.setTimeout(() => {
+      this.#isolationTimer = undefined;
+      afterPolls(() => {
+        this.#endIsolation(
+          `${String(this.#limits.isolationMaxMs)} ms passed since the last crash, a suspect in flight or not`,
+        );
+      });
+    }, this.#limits.isolationMaxMs);
   }
 
   /**
@@ -1045,10 +1068,27 @@ export class LookupHelper implements HelperPort {
     return this.#poison.get(poisonKey(host, family));
   }
 
-  /** The poison names due their hourly ask. */
+  /**
+   * The poison names due their hourly ask. One due a whole period ago and not asked, since the
+   * resolver found no moment with nothing in flight, waits for its next (D27): a re-ask put off
+   * costs nothing, and one that waited would hold every lookup back.
+   */
   poisonDue(): readonly PoisonMark[] {
     const now = this.#timers.now();
-    return [...this.#poison.values()].filter((mark) => mark.nextAskAt <= now);
+    const due: PoisonMark[] = [];
+    for (const mark of this.#poison.values()) {
+      if (mark.nextAskAt > now) continue;
+      if (now - mark.nextAskAt < mark.retryMs) {
+        due.push(mark);
+        continue;
+      }
+      mark.nextAskAt = now + mark.retryMs;
+      this.#logger.debug(
+        { host: mark.host, family: mark.family, nextAskInMs: mark.retryMs },
+        'a poison name’s re-ask found the lookup helper never idle: it waits for its next',
+      );
+    }
+    return due;
   }
 
   /**
@@ -1104,6 +1144,8 @@ export class LookupHelper implements HelperPort {
     }
     this.#timers.clearInterval(this.#tick);
     this.#isolating = false;
+    this.#timers.clearTimeout(this.#isolationTimer);
+    this.#isolationTimer = undefined;
     this.#closeRejoin();
     const record = this.#child;
     this.#child = undefined;
@@ -1504,7 +1546,6 @@ export class LookupHelper implements HelperPort {
    * did not bring it back, so a child heard only now and then still reaches `hungTicks`.
    */
   #judge(): void {
-    this.#isolationLapse();
     const judged =
       this.#state === 'up' ||
       this.#state === 'unresponsive' ||
@@ -1661,6 +1702,8 @@ export class LookupHelper implements HelperPort {
           'the lookup helper is isolating suspects: the lookups asked again are sent alone',
         );
       }
+      // Its hard lapse runs from this crash, whether it began isolation or came during it.
+      if (this.#isolating) this.#armIsolationLapse();
       // Charged to no one: any of them may be what crashed it, so none goes to the probe's own
       // getaddrinfo for ten minutes, resting or not.
       if (charged === undefined) {

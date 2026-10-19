@@ -10,6 +10,7 @@ import { pino, type Logger } from 'pino';
 import {
   helperEnv,
   helperSelf,
+  HELPER_ISOLATION_MAX_MS,
   HELPER_LOST,
   HELPER_THREADS,
   HELPER_RSS_MAX,
@@ -2469,7 +2470,8 @@ describe('the lookup helper: its windows (scripted process, the test’s clock)'
     }
   });
 
-  it('U20: isolation ends when ten minutes pass with no crash and no suspect running', async () => {
+  it('U20: isolation ends 8 s after its last crash, after the polls, a suspect in flight or not', async () => {
+    assert.equal(HELPER_ISOLATION_MAX_MS, 8_000, '8 suspects, each at most 1 s before it is stuck');
     const made = fakeMade();
     void made.helper.start();
     try {
@@ -2477,20 +2479,95 @@ describe('the lookup helper: its windows (scripted process, the test’s clock)'
       made.timers.fire((await crashAsking(made)).delayMs ?? -1);
       assert.equal(made.helper.isolating(), true);
       const child = await fakeUp(made);
+      // A suspect whose getaddrinfo never returns: it must not keep isolation on.
       const suspect = settled(
         made.helper.ask({ host: 'dev-9.example.test', family: 4, max: 64, suspect: true }),
       );
-      made.timers.clock += 600_000;
-      await tick(made);
-      assert.equal(made.helper.isolating(), true, 'a suspect is still running');
-      child.answer(child.asks.at(-1)?.id ?? -1);
-      await within(WAIT, 'the suspect', suspect);
-      await tick(made);
-      assert.equal(made.helper.isolating(), false);
+      made.timers.fire(HELPER_ISOLATION_MAX_MS);
+      assert.equal(made.helper.isolating(), true, 'judged after the polls');
+      await polls();
+      assert.equal(made.helper.isolating(), false, 'its suspect still in flight');
       const said = made.changes.at(-1);
       assert.equal(said?.isolating, false);
       assert.equal(said.state, 'up');
       assert.equal(said.previous, 'up');
+      // A suspect no more: a crash now is charged to no one.
+      child.die();
+      child.closeChannel();
+      assert.equal(lostError((await within(WAIT, 'the suspect', suspect)).error).charged, false);
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('U20: a crash during isolation runs its lapse again from that crash', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    const lapses = (): object[] =>
+      [...made.timers.pending].filter(
+        (timer) => !timer.interval && timer.ms === HELPER_ISOLATION_MAX_MS,
+      );
+    try {
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      const second = await crashAsking(made);
+      const [first] = lapses();
+      assert.ok(first !== undefined, 'armed at the crash that began it');
+      made.timers.fire(second.delayMs ?? -1);
+      await crashAsking(made, 'dev-2.example.test');
+      assert.equal(made.helper.isolating(), true);
+      assert.equal(lapses().length, 1);
+      assert.equal(lapses().includes(first), false, 'the first lapse cleared, a new one armed');
+      made.helper.endIsolation();
+      assert.equal(lapses().length, 0, 'and cleared when isolation ends');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('U20: a stop leaves no lapse of isolation armed', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    const lapses = (): object[] =>
+      [...made.timers.pending].filter(
+        (timer) => !timer.interval && timer.ms === HELPER_ISOLATION_MAX_MS,
+      );
+    made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+    await crashAsking(made);
+    assert.equal(made.helper.isolating(), true);
+    assert.equal(lapses().length, 1);
+    await stop(made);
+    assert.equal(lapses().length, 0);
+  });
+
+  it('a poison name whose re-ask finds no moment for a whole period waits for its next (D27)', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+      await fakeUp(made);
+      const host = 'bad.example.test';
+      const first = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      await fakeCrash(made);
+      assert.equal(lostError((await first).error).charged, true);
+      made.helper.endIsolation();
+      const mark = made.helper.poison(host, 4);
+      assert.ok(mark !== undefined);
+      const due = mark.nextAskAt;
+      made.timers.clock = due + mark.retryMs - 1;
+      assert.deepEqual(
+        made.helper.poisonDue().map((one) => one.host),
+        [host],
+        'due all its period',
+      );
+      made.timers.clock = due + mark.retryMs;
+      assert.deepEqual(made.helper.poisonDue(), [], 'a whole period with no moment to ask it');
+      assert.equal(mark.nextAskAt, made.timers.clock + mark.retryMs, 'its next');
+      made.timers.clock = mark.nextAskAt;
+      assert.deepEqual(
+        made.helper.poisonDue().map((one) => one.host),
+        [host],
+      );
     } finally {
       await stop(made);
     }

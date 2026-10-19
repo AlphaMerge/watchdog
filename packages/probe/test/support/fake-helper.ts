@@ -370,10 +370,16 @@ export class StubPolicy implements SystemNamePolicy {
     return this.watched;
   }
 
+  /** On while the test says the check is: the stub plays a build that has it. */
+  checkOn(): boolean {
+    return this.off === undefined;
+  }
+
   describe(): PolicyDescription {
     return {
       check: this.off === undefined ? 'on' : 'off',
       off: this.off,
+      shapeOff: this.off,
       platform: 'linux',
       glibc: '2.39',
       servers: [],

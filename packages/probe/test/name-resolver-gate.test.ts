@@ -24,7 +24,9 @@ import {
   type Family,
   type NameResolverOptions,
 } from '../src/resolver/name-resolver.js';
+import { GlibcNamePolicy, SYSTEM_FILES } from '../src/resolver/system-names.js';
 import { FakeHelper, StubPolicy } from './support/fake-helper.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * The resolver in gate mode with the check off (`P-432` S3): what runs where in each of the
@@ -739,7 +741,7 @@ describe('losing the helper (P-432 S3, §1.11)', () => {
 });
 
 describe('isolation and poison (P-432 S3, D27)', () => {
-  it('N11: sends the suspects alone, one at a time, then the rest once isolation ends', async () => {
+  it('N11: sends the suspects alone, one at a time; isolation ends once the last is said stuck, and the rest go', async () => {
     const { helper, ask } = make();
     const names = ['s1.zone-a.test', 's2.zone-a.test', 'other.zone-c.test'];
     const waits = names.map((name) => outcome(ask(name, 4, { waitMs: 60_000 })));
@@ -756,15 +758,233 @@ describe('isolation and poison (P-432 S3, D27)', () => {
     helper.inFlight()[0]?.stuck();
     await settled();
     assert.equal(helper.inFlight().length, 2, 'stuck: the next may go');
-    helper.inFlight()[1]?.answer();
+    assert.equal(helper.asksFor('later.zone-d.test').length, 0, 'nothing beside a suspect unsaid');
+    helper.inFlight()[1]?.stuck();
     await settled();
-    assert.equal(helper.isolatingNow, true, 'a suspect is still in flight, stuck');
-    helper.inFlight()[0]?.answer();
-    await settled();
-    assert.equal(helper.endedIsolation, 1, 'no suspect left: ended');
-    assert.ok(helper.asksFor('later.zone-d.test').length === 1, 'and the rest go');
-    helper.last('later.zone-d.test').answer();
+    assert.equal(helper.endedIsolation, 1, 'the last suspect said stuck: isolation is over');
+    assert.equal(helper.asksFor('later.zone-d.test').length, 1, 'and the rest go beside them');
+    for (const sent of helper.inFlight()) sent.answer();
     for (const got of await Promise.all([...waits, later])) assert.ok(got.ok);
+  });
+
+  it('N11: a suspect whose getaddrinfo never returns holds the helper only until the child says it is stuck', async () => {
+    const { helper, ask } = make();
+    const hung = outcome(ask('hang.zone-a.test', 4, { waitMs: 60_000 }));
+    helper.isolatingNow = true;
+    helper.lose('exit', 'rejoining', { suspects: true });
+    await settled();
+    helper.move('up');
+    const [suspect] = helper.inFlight();
+    assert.ok(suspect?.suspect === true);
+    const other = outcome(ask('dev-1.zone-c.test', 4, { waitMs: 60_000 }));
+    const checkNow = outcome(ask('dev-2.zone-c.test', 4, { waitMs: 60_000, fresh: true }));
+    assert.equal(helper.inFlight().length, 1, 'alone while the child has said nothing of it');
+    // Said stuck, and never answering: the helper goes on without it.
+    suspect.stuck();
+    await settled();
+    assert.equal(helper.endedIsolation, 1);
+    assert.deepEqual(
+      helper
+        .inFlight()
+        .map((sent) => sent.host)
+        .sort(),
+      ['dev-1.zone-c.test', 'dev-2.zone-c.test', 'hang.zone-a.test'],
+    );
+    helper.last('dev-1.zone-c.test').answer();
+    helper.last('dev-2.zone-c.test').answer();
+    assert.ok((await other).ok);
+    assert.ok((await checkNow).ok, '"Check now" too');
+    const more = outcome(ask('dev-3.zone-c.test', 4, { waitMs: 60_000 }));
+    assert.equal(helper.asksFor('dev-3.zone-c.test').length, 1, 'and what is asked after');
+    helper.last('dev-3.zone-c.test').answer();
+    assert.ok((await more).ok);
+    suspect.fail('EAI_AGAIN');
+    assert.ok(!(await hung).ok);
+  });
+
+  it('D27: a suspect held at the second crash keeps isolation on until it is asked again alone, once its hold ends', async () => {
+    const { helper, ask, clock, resolver } = make({ tickMs: 5 });
+    resolver.start();
+    try {
+      const slow = outcome(ask('slow.zone-a.test', 4, { waitMs: 60_000 }));
+      const fine = outcome(ask('fine.zone-b.test', 4, { waitMs: 60_000 }));
+      const fine2 = outcome(ask('fine-2.zone-b.test', 4, { waitMs: 60_000 }));
+      helper.last('slow.zone-a.test').stuck();
+      // The second crash: the stuck lookup held, the others asked again, all three suspects.
+      helper.isolatingNow = true;
+      helper.lose('exit', 'rejoining', { suspects: true });
+      const held = await slow;
+      assert.ok(!held.ok && codeOf(held.error) === RESOLVER_HELD);
+      helper.move('up');
+      const [one] = helper.inFlight();
+      assert.equal(helper.inFlight().length, 1, 'one suspect alone');
+      assert.ok(one?.suspect === true);
+      one.answer();
+      await settled();
+      const [two] = helper.inFlight();
+      assert.equal(helper.inFlight().length, 1, 'then the other, alone');
+      assert.ok(two?.suspect === true && two.host !== one.host);
+      // Ticks while the second is in flight: the first, asked and answered, is owed no more.
+      await wait(30);
+      two.answer();
+      for (const got of await Promise.all([fine, fine2])) assert.ok(got.ok);
+      await wait(30);
+      assert.equal(helper.asksFor(one.host).length, 2, 'a suspect asked is not asked again');
+      assert.equal(helper.asksFor(two.host).length, 2);
+      assert.equal(helper.endedIsolation, 0, 'the held suspect is still to be asked');
+      const meanwhile = outcome(ask('meanwhile.zone-c.test', 4, { waitMs: 60_000 }));
+      assert.equal(
+        helper.asksFor('meanwhile.zone-c.test').length,
+        1,
+        'a suspect held holds nothing back',
+      );
+      helper.last('meanwhile.zone-c.test').answer();
+      assert.ok((await meanwhile).ok);
+      assert.equal(helper.asksFor('slow.zone-a.test').length, 1, 'not before its hold ends');
+      clock.now += 5_000;
+      await pollWithin(
+        1_000,
+        'the held suspect asked again',
+        () => helper.asksFor('slow.zone-a.test').length === 2,
+        5,
+      );
+      const again = helper.last('slow.zone-a.test');
+      assert.equal(again.suspect, true, 'alone, as a suspect, though no check asked for it');
+      const blocked = outcome(ask('blocked.zone-d.test', 4, { waitMs: 60_000 }));
+      assert.equal(helper.asksFor('blocked.zone-d.test').length, 0, 'nothing beside it');
+      // It crashes the child again, alone: charged, as D27 means it to be.
+      helper.lose('exit', 'rejoining', { charged: again, suspects: true });
+      await settled();
+      helper.move('up');
+      assert.equal(helper.endedIsolation, 1, 'none left: over');
+      helper.last('blocked.zone-d.test').answer();
+      assert.ok((await blocked).ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('D27: a suspect let go when the child was judged quiet holds back no other once it is heard again', async () => {
+    const { helper, ask, clock, resolver } = make({ tickMs: 5 });
+    resolver.start();
+    try {
+      const slow = outcome(ask('slow.zone-a.test', 4, { waitMs: 60_000 }));
+      void outcome(ask('quiet.zone-b.test', 4, { waitMs: 60_000 }));
+      helper.last('slow.zone-a.test').stuck();
+      helper.isolatingNow = true;
+      helper.lose('exit', 'rejoining', { suspects: true });
+      const held = await slow;
+      assert.ok(!held.ok && codeOf(held.error) === RESOLVER_HELD);
+      helper.move('up');
+      const quiet = helper.last('quiet.zone-b.test');
+      assert.equal(quiet.suspect, true, 'alone');
+      // Judged quiet with it in flight (D26): let go, then heard again, the same child.
+      helper.goQuiet();
+      helper.move('up');
+      clock.now += 5_000;
+      await pollWithin(
+        1_000,
+        'the held suspect asked again',
+        () => helper.asksFor('slow.zone-a.test').length === 2,
+        5,
+      );
+      assert.equal(helper.last('slow.zone-a.test').suspect, true, 'alone, beside one let go');
+      quiet.answer();
+      helper.last('slow.zone-a.test').answer();
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('D27: isolation ended by the helper leaves no suspect owed: a name held is asked as any other', async () => {
+    const { helper, ask, clock, resolver } = make({ tickMs: 5 });
+    resolver.start();
+    try {
+      const slow = outcome(ask('slow.zone-a.test', 4, { waitMs: 60_000 }));
+      const fine = outcome(ask('fine.zone-b.test', 4, { waitMs: 60_000 }));
+      helper.last('slow.zone-a.test').stuck();
+      helper.isolatingNow = true;
+      helper.lose('exit', 'rejoining', { suspects: true });
+      await slow;
+      helper.move('up');
+      helper.last('fine.zone-b.test').answer();
+      assert.ok((await fine).ok);
+      assert.equal(helper.endedIsolation, 0, 'the held suspect is still owed');
+      // The helper's own lapse (8 s after the crash): its change says isolation is over.
+      helper.isolatingNow = false;
+      helper.move('up');
+      clock.now += 5_000;
+      await wait(30);
+      assert.equal(helper.asksFor('slow.zone-a.test').length, 1, 'not asked again for isolation');
+      const again = outcome(ask('slow.zone-a.test', 4, { waitMs: 60_000 }));
+      assert.equal(helper.last('slow.zone-a.test').suspect, false, 'a name like any other');
+      helper.last('slow.zone-a.test').answer();
+      assert.ok((await again).ok);
+      // A later isolation owes nothing for it: with nothing to send, it ends at the next pick.
+      helper.isolatingNow = true;
+      helper.move('up');
+      const next = outcome(ask('next.zone-c.test', 4, { waitMs: 60_000 }));
+      assert.equal(helper.endedIsolation, 1);
+      helper.last('next.zone-c.test').answer();
+      assert.ok((await next).ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('D27: at the helper’s lapse a suspect still queued goes as any lookup, beside the one in flight', async () => {
+    const { helper, ask } = make();
+    const first = outcome(ask('s1.zone-a.test', 4, { waitMs: 60_000 }));
+    const second = outcome(ask('s2.zone-b.test', 4, { waitMs: 60_000 }));
+    helper.isolatingNow = true;
+    helper.lose('exit', 'rejoining', { suspects: true });
+    await settled();
+    helper.move('up');
+    assert.deepEqual(
+      helper.inFlight().map((sent) => sent.host),
+      ['s1.zone-a.test'],
+    );
+    // 8 s after the crash, the first never said stuck: the helper's change ends isolation.
+    helper.isolatingNow = false;
+    helper.move('up');
+    assert.equal(helper.last('s2.zone-b.test').suspect, false, 'a suspect no more');
+    assert.equal(helper.inFlight().length, 2);
+    for (const sent of helper.inFlight()) sent.answer();
+    for (const got of await Promise.all([first, second])) assert.ok(got.ok);
+  });
+
+  it('D27: a poison name due while the helper isolates waits for isolation to end', async () => {
+    const { helper, ask, clock, resolver } = make({ tickMs: 5 });
+    resolver.start();
+    try {
+      helper.markPoison('crash.zone-a.test', 4, 1_000);
+      const first = outcome(ask('s1.zone-b.test', 4, { waitMs: 60_000 }));
+      helper.isolatingNow = true;
+      helper.lose('exit', 'rejoining', { suspects: true });
+      await settled();
+      clock.now = 1_000;
+      helper.move('up');
+      assert.deepEqual(
+        helper.inFlight().map((sent) => [sent.host, sent.suspect]),
+        [['s1.zone-b.test', true]],
+        'the suspect alone, and no poison ask before it',
+      );
+      await wait(30);
+      assert.equal(helper.asksFor('crash.zone-a.test').length, 0, 'nor beside it');
+      helper.last('s1.zone-b.test').answer();
+      assert.ok((await first).ok);
+      await pollWithin(
+        1_000,
+        'the poison ask once isolation is over',
+        () => helper.asksFor('crash.zone-a.test').length === 1,
+        5,
+      );
+      assert.equal(helper.endedIsolation, 1);
+      assert.equal(helper.inFlight().length, 1, 'alone as it starts');
+      helper.last('crash.zone-a.test').answer(B);
+    } finally {
+      resolver.stop();
+    }
   });
 
   it('N11: a stuck suspect holds its lane: the next suspect goes only within its class’s cap (LR7 I3)', async () => {
@@ -833,7 +1053,7 @@ describe('isolation and poison (P-432 S3, D27)', () => {
     assert.deepEqual(await other, A);
   });
 
-  it('asks a poison name again hourly, alone, once nothing else runs in the helper', async () => {
+  it('asks a poison name again at a moment nothing is in flight, and holds nothing back (D27)', async () => {
     const { helper, ask, clock, resolver } = make({ tickMs: 5 });
     resolver.start();
     try {
@@ -843,20 +1063,20 @@ describe('isolation and poison (P-432 S3, D27)', () => {
       await wait(40);
       assert.equal(helper.asksFor('crash.zone-a.test').length, 0, 'not beside another lookup');
       const next = outcome(ask('next.zone-d.test', 4, { waitMs: 60_000 }));
-      assert.equal(
-        helper.asksFor('next.zone-d.test').length,
-        0,
-        'nothing new starts while it waits',
-      );
+      assert.equal(helper.asksFor('next.zone-d.test').length, 1, 'nothing waits for it');
       helper.last('busy.zone-c.test').answer();
-      await busy;
-      assert.equal(helper.asksFor('crash.zone-a.test').length, 1, 'asked');
-      assert.equal(helper.inFlight().length, 1, 'alone');
-      helper.last('crash.zone-a.test').answer(B);
-      await settled();
-      assert.equal(helper.asksFor('next.zone-d.test').length, 1, 'and the rest go');
+      assert.ok((await busy).ok);
+      assert.equal(helper.asksFor('crash.zone-a.test').length, 0, 'one is still in flight');
       helper.last('next.zone-d.test').answer();
       assert.ok((await next).ok);
+      await settled();
+      assert.equal(helper.asksFor('crash.zone-a.test').length, 1, 'asked as the helper fell idle');
+      assert.equal(helper.inFlight().length, 1, 'alone as it starts');
+      const beside = outcome(ask('beside.zone-e.test', 4, { waitMs: 60_000 }));
+      assert.equal(helper.asksFor('beside.zone-e.test').length, 1, 'and it holds nothing back');
+      helper.last('crash.zone-a.test').answer(B);
+      helper.last('beside.zone-e.test').answer();
+      assert.ok((await beside).ok);
     } finally {
       resolver.stop();
     }
@@ -1078,6 +1298,90 @@ describe('gate mode’s start, watch and health (P-432 S3)', () => {
     await waiting;
     helper.move('resting');
     assert.equal(resolver.gateHealth()?.mode, 3, 'resting: resolving as system does');
+  });
+
+  it('says which helper change it failed on, and which files the policy could not be told of', async () => {
+    const lines: Record<string, unknown>[] = [];
+    const logger = pino(
+      { level: 'error' },
+      {
+        write: (line: string) => {
+          lines.push(JSON.parse(line) as Record<string, unknown>);
+        },
+      },
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'ms-gate-logs-'));
+    try {
+      const hosts = join(dir, 'hosts');
+      writeFileSync(hosts, '127.0.0.1 localhost\n');
+      const { helper, policy, resolver } = make(
+        {},
+        { logger, watch: { files: [hosts], everyMs: 60_000 } },
+      );
+      policy.checkOn = () => {
+        throw new Error('a policy that fails');
+      };
+      helper.lose('exit', 'rejoining');
+      await settled();
+      const change = lines.find(
+        (line) => line['msg'] === 'the probe’s resolver failed on a lookup helper change',
+      )?.['change'] as Record<string, unknown> | undefined;
+      assert.ok(change !== undefined, 'logged');
+      assert.equal(change['loss'], 'exit');
+      assert.equal(change['route'], 'rejoining');
+      assert.equal(change['previous'], 'up');
+      policy.looked = () => Promise.reject(new Error('a policy that cannot be told'));
+      await resolver.checkFiles();
+      const told = lines.find(
+        (line) => line['msg'] === 'what a watched file says could not reach the name policy',
+      );
+      assert.deepEqual(told?.['files'], [hosts]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('counts no time with the check on in this build: the real policy on a stock shape says not built', async () => {
+    const stock: Record<string, string | null> = {
+      [SYSTEM_FILES.resolvConf]: 'nameserver 192.0.2.53\n',
+      [SYSTEM_FILES.nsswitchConf]: 'hosts: files dns\n',
+      [SYSTEM_FILES.hosts]: '127.0.0.1 localhost\n',
+      [SYSTEM_FILES.gaiConf]: '',
+      [SYSTEM_FILES.ldSoPreload]: null,
+    };
+    const seconds = async (checkBuilt: boolean | undefined): Promise<number | undefined> => {
+      const policy = new GlibcNamePolicy({
+        logger: silent,
+        platform: 'linux',
+        env: {},
+        glibcVersion: () => '2.39',
+        nodeVersion: 'v24.0.0-test',
+        hostname: () => 'probe-1',
+        readText: (path) => Promise.resolve(stock[path] ?? null),
+        socketExists: () => Promise.resolve(false),
+        moduleLook: () => Promise.resolve({ state: 'installed' }),
+        ...(checkBuilt === undefined ? {} : { checkBuilt }),
+      });
+      await policy.load();
+      assert.equal(policy.view().off, undefined, 'a shape the check would take');
+      const clock = { now: 0 };
+      const helper = new FakeHelper(() => clock.now);
+      const resolver = new NameResolver({
+        logger: silent,
+        lookup: () => Promise.reject(new Error('no lookup in this test')),
+        now: () => clock.now,
+        watch: { files: [], everyMs: 60_000 },
+        gate: { helper, policy, tickMs: 3_600_000 },
+      });
+      helper.onChange = (change) => {
+        resolver.onHelperChange(change);
+      };
+      helper.move('up');
+      clock.now = 60_000;
+      return resolver.gateHealth()?.checkOnSeconds;
+    };
+    assert.equal(await seconds(undefined), 0, 'this build: off, the helper up a minute');
+    assert.equal(await seconds(true), 60, 'a build with the check: on');
   });
 
   it('takes the peak of the questions open since the last take', async () => {

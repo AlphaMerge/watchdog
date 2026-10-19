@@ -51,7 +51,6 @@ import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './p
 import {
   digestOf,
   digestOfError,
-  readNsswitch,
   type PolicyChange,
   type SystemNamePolicy,
 } from './system-names.js';
@@ -455,8 +454,12 @@ interface Gate {
   readonly urgentRunning: Set<Pending>;
   readonly tickMs: number;
   readonly realNow: () => number;
-  /** A poison name's hourly ask, waiting for the helper to have nothing else in flight. */
-  poisonWaiting: Pending | undefined;
+  /**
+   * The names the helper made suspects at a crash (D27) and still to be asked alone: asked again
+   * at once, or held first, as a lookup the child had said was stuck is. Isolation ends only once
+   * none is left and no suspect in flight is unsaid stuck, or at the helper's own lapse.
+   */
+  readonly suspects: Set<Entry>;
   checkOnMs: number;
   checkOnSince: number | undefined;
   passedStuck: number;
@@ -559,21 +562,34 @@ function isNsswitch(file: string): boolean {
   return file.split(/[\\/]/u).at(-1)?.toLowerCase() === 'nsswitch.conf';
 }
 
+/** Sources of a `hosts` line that never ask DNS, which glibc passes by for any other name. */
+const LOCAL_SOURCES = new Set(['myhostname', 'mymachines']);
+
 /**
  * Whether a name the hosts file gives is answered from it before DNS is asked, by nsswitch.conf's
- * `hosts` line (`P-438`'s narrow check), read by the probe's one reader of that file
- * (`readNsswitch`, `P-432` S4): the line is found as every glibc from 2.28 to 2.42 finds it, and
- * taken only as `files dns`, `files dns myhostname` or `files myhostname dns`, each of which reads
- * the file first. **Any other line is taken as asking DNS first**, as glibc's built-in default
- * does: a shape the reader does not vouch for, such as `files mdns4_minimal [NOTFOUND=return] dns`
- * or one with two hosts lines, which glibc versions read apart, never exempts a name from its
- * domain's first lanes or keeps it out of the answer file (decided 2026-10-19, under the user's
- * delegation: one nsswitch reader in the probe). That direction only costs such a name the
- * exemption; the other would let a lookup that asks DNS take a lane its domain's rule refused.
+ * `hosts` line as glibc reads it (`P-438`'s narrow check): the last `hosts` line, its name ended
+ * at a blank or a colon, either way; a `#` ending any line; actions in brackets left out, and a
+ * list that starts with one read as none. The file is read first when `files` comes before any
+ * source that asks DNS, with only `myhostname` or `mymachines` ahead of it, or when `resolve`
+ * does, since systemd-resolved answers the hosts file's names itself. Any other source, `dns`,
+ * `mdns4_minimal` or `nis`, is taken as asking DNS. A file without a `hosts` line, or none at
+ * all, is glibc's default, `dns [!UNAVAIL=return] files`: DNS first.
  */
 export function hostsFileFirst(text: string): boolean {
-  const line = readNsswitch(text);
-  return line.ok && line.value.startsWith('files ');
+  let list: string | undefined;
+  for (const raw of text.split(/\r?\n/u)) {
+    const match = /^\s*([^\s:]+)[\s:]*(.*)$/u.exec(raw.replace(/#.*$/u, ''));
+    if (match?.[1] === 'hosts') list = match[2] ?? '';
+  }
+  if (list === undefined || list.trimStart().startsWith('[')) return false;
+  for (const source of list
+    .replace(/\[[^\]]*\]/gu, ' ')
+    .trim()
+    .split(/\s+/u)) {
+    if (source === 'files' || source === 'resolve') return true;
+    if (!LOCAL_SOURCES.has(source)) return false;
+  }
+  return false;
 }
 
 /**
@@ -857,7 +873,7 @@ export class NameResolver implements PoolResolver {
             urgentRunning: new Set(),
             tickMs: gate.tickMs ?? GATE_TICK_MS,
             realNow: gate.realNow ?? (() => performance.now()),
-            poisonWaiting: undefined,
+            suspects: new Set(),
             checkOnMs: 0,
             checkOnSince: undefined,
             passedStuck: 0,
@@ -1037,7 +1053,7 @@ export class NameResolver implements PoolResolver {
         this.#policyMoved(gate, await gate.policy.looked(readings));
       } catch (error: unknown) {
         this.#logger.error(
-          { err: error },
+          { err: error, files: readings.map((reading) => reading.file) },
           'what a watched file says could not reach the name policy',
         );
       }
@@ -1065,9 +1081,9 @@ export class NameResolver implements PoolResolver {
   /**
    * The answers kept, for the probe's answer file (`P-438`): most recently asked first, read a
    * slice at a time so that saving them never holds the event loop, each slice at the clock when
-   * it is taken. Not a name the hosts file gives for its family (`hostsGive`), which
-   * `getaddrinfo` answers from the file at once and whose file may change before the next start,
-   * and none past its grace.
+   * it is taken. Not a name the hosts file lists for its family (`hostsLists`), whatever
+   * nsswitch.conf is read to say of the order (`P-432` S3's review): `getaddrinfo` may answer it
+   * from the file, and the file may change before the next start. None past its grace either.
    */
   answersToSave(): { take(count: number): KeptAnswer[] } {
     const entries = [...this.#entries.values()].reverse();
@@ -1085,7 +1101,7 @@ export class NameResolver implements PoolResolver {
           if (entry === undefined || answer === undefined) continue;
           if (this.#entries.get(entry.key) !== entry) continue;
           if (now >= answer.expiresAt + this.#staleMs) continue;
-          if (hostsGive(view, entry.host, entry.family)) continue;
+          if (hostsLists(view, entry.host, entry.family)) continue;
           taken.push({
             host: entry.host,
             family: entry.family,
@@ -1105,8 +1121,9 @@ export class NameResolver implements PoolResolver {
    * left of it, so the first check of its name is served it while a refresh asks again, as an
    * expired answer always is, and never past its grace: what the probe answers after a restart
    * is asked again, and what it was served meanwhile is what it had. Not kept: a name the hosts
-   * file gives now for its family (`hostsGive`, the files read now, since the first look may not
-   * have been), a name already kept, one past its grace, and any over `maxEntries`. Each one kept
+   * file lists now for its family (`hostsLists`, the files read now, since the first look may not
+   * have been), whatever nsswitch.conf is read to say of the order, a name already kept, one past
+   * its grace, and any over `maxEntries`. Each one kept
    * counts its domain as answering until a lookup for its name settles, and never past its own
    * grace, so the domain may take all 4 first lanes before any of its names is asked again.
    */
@@ -1135,7 +1152,7 @@ export class NameResolver implements PoolResolver {
         counts.duplicate += 1;
       } else if (answer.expiresInMs + this.#staleMs <= 0) {
         counts.pastGrace += 1;
-      } else if (hostsGive(view, host, answer.family)) {
+      } else if (hostsLists(view, host, answer.family)) {
         counts.hostsFile += 1;
       } else if (taken.length + this.#entries.size >= this.#maxEntries) {
         counts.overCap += 1;
@@ -2269,7 +2286,6 @@ export class NameResolver implements PoolResolver {
       gate.budget.untokenedDone(pending);
     }
     if (pending.pool === 'helper') gate.keys.ended(pending, learned);
-    if (pending.poisonAsk && gate.poisonWaiting === pending) gate.poisonWaiting = undefined;
   }
 
   /** Sends what the helper's lanes admit (§1.8's pick), while its route is up. */
@@ -2296,41 +2312,23 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
-   * The helper lookup to send next, with its token, or undefined (§1.8): a poison name's hourly
-   * ask alone (D27); while isolating, the suspects alone, one at a time; then "Check now"'s on an
-   * urgent token, or a shared one as its key's first look; then `P-426`'s order over the helper's
-   * queues, each lookup admitted by its key, the at-risk count, its class and a token. A lookup
-   * asked again after a loss carries its token and starts first.
+   * The helper lookup to send next, with its token, or undefined (§1.8): a poison name's re-ask
+   * at a moment nothing is in flight, holding nothing back (D27); while isolating, a suspect alone,
+   * one at a time; then "Check now"'s on an urgent token, or a shared one as its key's first look;
+   * then `P-426`'s order over the helper's queues, each lookup admitted by its key, the at-risk
+   * count, its class and a token. A lookup asked again after a loss carries its token and starts
+   * first.
    */
   #nextHelper(gate: Gate): { pending: Pending; token: GaiToken } | undefined {
     const running = helperRunning(gate);
-    const waiting = gate.poisonWaiting;
-    if (waiting !== undefined) {
-      if (running.length > 0) return undefined;
-      const token = this.#takeToken(gate, waiting, 'shared');
-      if (token === undefined) return undefined;
-      gate.poisonWaiting = undefined;
-      return { pending: waiting, token };
+    const isolating = gate.helper.isolating();
+    if (running.length === 0 && !isolating) {
+      const poison = this.#poisonAsk(gate);
+      if (poison !== undefined) return poison;
     }
-    if (running.some((pending) => pending.poisonAsk && !pending.stuck)) return undefined;
-    if (gate.helper.isolating()) {
-      if (running.some((pending) => pending.suspect && !pending.stuck)) return undefined;
-      // One at a time, and within its class's cap: a stuck suspect holds its lane as any lookup
-      // does (LR7 I3).
-      const alone = (cls: LaneClass) => (p: Pending) =>
-        p.suspect && (p.urgent || this.#canRun(gate.lanes, cls));
-      const suspect =
-        this.#takeNext(gate.lanes, 'first', alone('first')) ??
-        this.#takeNext(gate.lanes, 'retry', alone('retry')) ??
-        this.#takeNext(gate.lanes, 'refresh', alone('refresh'));
-      if (suspect !== undefined) {
-        const token = suspect.token ?? this.#takeToken(gate, suspect, 'shared');
-        if (token !== undefined) return { pending: suspect, token };
-        this.#requeueFront(suspect);
-        return undefined;
-      }
-      if (running.some((pending) => pending.suspect)) return undefined;
-      gate.helper.endIsolation();
+    if (isolating) {
+      const pick = this.#isolationPick(gate, running);
+      if (pick !== 'free') return pick === 'wait' ? undefined : pick;
     }
     // A lookup asked again after a loss: it carries its token, and was admitted when it first ran.
     for (const cls of ['retry', 'first', 'refresh'] as const) {
@@ -2366,6 +2364,75 @@ export class NameResolver implements PoolResolver {
       return kind === undefined ? undefined : this.#started(gate, next, kind, atRisk);
     }
     return undefined;
+  }
+
+  /**
+   * The pick while the helper isolates (D27). A suspect in flight that the child has not said is
+   * stuck goes alone: nothing else starts. The next suspect that may run goes alone too, once
+   * nothing else is in flight but lookups the child said are stuck or that were let go, which
+   * never answer for the crash; until then nothing else starts, at most the child's bound for
+   * stuck. With none to send, the rest go: a suspect held until its hold ends holds nothing back.
+   * Isolation ends once no suspect is left to ask (`#suspectsLeft`); the helper also ends it at its
+   * own lapse, so that none of this outlasts 8 s after a crash.
+   */
+  #isolationPick(
+    gate: Gate,
+    running: readonly Pending[],
+  ): { pending: Pending; token: GaiToken } | 'wait' | 'free' {
+    const unsaid = running.filter((pending) => !pending.stuck && !pending.detached);
+    if (unsaid.some((pending) => pending.suspect)) return 'wait';
+    // Within its class's cap: a stuck suspect holds its lane as any lookup does (LR7 I3).
+    const alone = (cls: LaneClass) => (p: Pending) =>
+      p.suspect && (p.urgent || this.#canRun(gate.lanes, cls));
+    const suspect =
+      this.#takeNext(gate.lanes, 'first', alone('first')) ??
+      this.#takeNext(gate.lanes, 'retry', alone('retry')) ??
+      this.#takeNext(gate.lanes, 'refresh', alone('refresh'));
+    if (suspect === undefined) {
+      if (this.#suspectsLeft(gate) === 0) gate.helper.endIsolation();
+      return 'free';
+    }
+    const token =
+      unsaid.length > 0 ? undefined : (suspect.token ?? this.#takeToken(gate, suspect, 'shared'));
+    if (token !== undefined) return { pending: suspect, token };
+    this.#requeueFront(suspect);
+    // Waiting for a token, as any lookup does, it holds nothing back.
+    return unsaid.length > 0 ? 'wait' : 'free';
+  }
+
+  /** The suspects still to be asked alone, those since forgotten or asked let go (D27). */
+  #suspectsLeft(gate: Gate): number {
+    for (const entry of gate.suspects) {
+      if (!entry.suspect || this.#entries.get(entry.key) !== entry) gate.suspects.delete(entry);
+    }
+    return gate.suspects.size;
+  }
+
+  /**
+   * Isolation over (D27): a suspect not yet asked is a name like any other, and a lookup of one
+   * queued goes as any lookup does.
+   */
+  #dropSuspects(gate: Gate): void {
+    for (const entry of gate.suspects) entry.suspect = false;
+    gate.suspects.clear();
+    for (const cls of ['first', 'refresh', 'retry'] as const) {
+      for (const pending of gate.lanes.queues[cls]) pending.suspect = false;
+    }
+  }
+
+  /**
+   * A suspect held, as a lookup the child had said was stuck is, is asked again alone once its
+   * hold ends, with nobody waiting for it (D27): isolation is for finding what crashed the child,
+   * and a check may not ask for it before the helper's lapse ends isolation. Only while isolating:
+   * the change that ends it drops every suspect (`#dropSuspects`).
+   */
+  #askHeldSuspects(gate: Gate, now: number): void {
+    // Those asked since, or forgotten, first: none is asked again.
+    this.#suspectsLeft(gate);
+    for (const entry of gate.suspects) {
+      if (entry.pending !== undefined || this.#held(entry, now)) continue;
+      this.#start(entry, entry.failures > 0 ? 'retry' : 'first');
+    }
   }
 
   /**
@@ -2443,7 +2510,7 @@ export class NameResolver implements PoolResolver {
     gate.keys.stuck(pending);
     gate.helperStuck += 1;
     this.#onStuck(pending);
-    // A suspect said stuck lets the next go (D27), and a poison name's ask the rest.
+    // A suspect said stuck lets the next go (D27).
     this.#pump();
   }
 
@@ -2483,7 +2550,10 @@ export class NameResolver implements PoolResolver {
       gate.budget.lose([{ token: pending.token, stuck: ghostly, started: error.started }]);
       if (ghostly) pending.token = undefined;
     }
-    if (error.suspect) pending.entry.suspect = true;
+    if (error.suspect) {
+      pending.entry.suspect = true;
+      gate.suspects.add(pending.entry);
+    }
     if (error.requeue && !ghostly) {
       this.#runningOf(pending).delete(pending);
       gate.keys.ended(pending, 'neutral');
@@ -2528,6 +2598,8 @@ export class NameResolver implements PoolResolver {
       // The time with the check on runs to the change, not to the next read.
       this.#accrueCheckOn(gate, this.#now());
       for (const ref of change.detached ?? []) this.#detach(gate, ref);
+      // Isolation over, by the resolver's word or at the helper's lapse: no suspect is owed.
+      if (!change.isolating) this.#dropSuspects(gate);
       gate.route = change.route;
       // Stopped, or stopping once the resolver has: the helper's stop takes its child before it
       // says it is stopped, and what is queued for it then is the probe's stop's, never the
@@ -2538,7 +2610,15 @@ export class NameResolver implements PoolResolver {
       }
       this.#reroute(gate);
     } catch (error: unknown) {
-      this.#logger.error({ err: error }, 'the probe’s resolver failed on a lookup helper change');
+      // The change it failed on, its loss included; the lookups it detached, counted.
+      const { detached, ...said } = change;
+      this.#logger.error(
+        {
+          err: error,
+          change: { ...said, ...(detached === undefined ? {} : { detached: detached.length }) },
+        },
+        'the probe’s resolver failed on a lookup helper change',
+      );
     }
   }
 
@@ -2615,13 +2695,6 @@ export class NameResolver implements PoolResolver {
    * When the helper has stopped, every one fails: the probe is stopping.
    */
   #fallBack(gate: Gate, which: 'vouched' | 'all' | 'stopped'): void {
-    const waiting = gate.poisonWaiting;
-    if (waiting !== undefined) {
-      gate.poisonWaiting = undefined;
-      this.#settle(waiting, {
-        passed: { code: RESOLVER_FAULT, why: `${waiting.entry.host} was not asked again` },
-      });
-    }
     for (const cls of ['first', 'refresh', 'retry'] as const) {
       const queue = gate.lanes.queues[cls];
       for (const pending of [...queue]) {
@@ -2856,7 +2929,7 @@ export class NameResolver implements PoolResolver {
     try {
       const now = this.#now();
       this.#accrueCheckOn(gate, now);
-      if (gate.helper.routeState() === 'up') this.#askPoison(gate);
+      if (gate.helper.routeState() === 'up') this.#askHeldSuspects(gate, now);
       if (now - gate.lastSummaryAt >= GATE_SUMMARY_MS) this.#summary(gate, now);
       this.#pump();
     } catch (error: unknown) {
@@ -2866,15 +2939,19 @@ export class NameResolver implements PoolResolver {
 
   /** The time with the check on and the helper up (`nameCheckOnSeconds`), to now. */
   #accrueCheckOn(gate: Gate, now: number): void {
-    const on = gate.policy.view().off === undefined && gate.helper.routeState() === 'up';
+    // On only in a build with the check (`NAME_CHECK_BUILT`): never in S3, whatever the shape.
+    const on = gate.policy.checkOn() && gate.helper.routeState() === 'up';
     if (gate.checkOnSince !== undefined) gate.checkOnMs += Math.max(0, now - gate.checkOnSince);
     gate.checkOnSince = on ? now : undefined;
   }
 
-  /** A poison name due its hourly ask (D27): asked alone in the helper, once nothing else runs. */
-  #askPoison(gate: Gate): void {
-    if (gate.poisonWaiting !== undefined) return;
-    if (helperRunning(gate).some((pending) => pending.poisonAsk)) return;
+  /**
+   * A poison name due its re-ask (D27), sent now, as nothing is in flight, so that a crash is its
+   * alone at the start. It holds nothing back: what is asked meanwhile starts beside it, and a
+   * crash then is still charged to it alone, which costs it no more than a later re-ask. One due
+   * that finds no such moment for a whole period waits for its next (`poisonDue`).
+   */
+  #poisonAsk(gate: Gate): { pending: Pending; token: GaiToken } | undefined {
     for (const mark of gate.helper.poisonDue()) {
       const key = `${String(mark.family)}:${mark.host}`;
       const entry = this.#entries.get(key) ?? this.#add(key, mark.host, mark.family);
@@ -2901,10 +2978,12 @@ export class NameResolver implements PoolResolver {
         ungated: false,
         armedAt: 0,
       };
+      const token = this.#takeToken(gate, pending, 'shared');
+      if (token === undefined) return undefined;
       entry.pending = pending;
-      gate.poisonWaiting = pending;
-      return;
+      return { pending, token };
     }
+    return undefined;
   }
 
   /** The hourly summary (§5): what was routed where, the helper's peaks and its losses. */
