@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { coreHealth, CREDENTIAL_KINDS, probeHealth } from '@ms/sensors';
+import { healthForPeer, PROTOCOL_VERSION, versionFor, type ProbeHealthReport } from '@ms/shared';
 import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
 import { notificationMethods } from '../src/notifications/methods.js';
 import { coreCatalogue } from '../src/profile.js';
@@ -1048,6 +1049,99 @@ describe('the field-test runbook', () => {
         "channel with no declared limit never moves its sensor's state, so a state trigger on " +
         `it delivers nothing:\n  ${wrong.join('\n  ')}`,
     );
+  });
+
+  /**
+   * Step 4's criteria for `probe.nameResolver: gate` name every channel the gate adds to Probe
+   * Health, each as the kind the type declares it (`H-50`).
+   *
+   * The gate's channels are what the protocol carries for it: what `healthForPeer` strips from a
+   * core below the protocol `nameResolver` needs, and keeps above it, so a channel a later slice
+   * adds is held here without this list being written again. The runbook says which are counters,
+   * which the core stores as rates and the criteria judge as such, which are readings and how many
+   * are states; a counter called a reading, or a channel the week never reads, fails here. The
+   * prepared runbook named five of the fourteen, as the design named them before S3 and S6 landed.
+   */
+  it('judges every channel the gate adds, each as the kind it is declared', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const runbook = await readFile(join(repoRoot, 'docs', 'runbook-field-test.md'), 'utf8');
+    const start = runbook.indexOf("- **The gate's channels, on every probe**");
+    const end = runbook.indexOf('- **`lookupsGivenUp`', start);
+    assert.ok(start >= 0 && end > start, 'step 4 has no list of the gate’s channels');
+    const section = runbook.slice(start, end).replace(/\s+/g, ' ');
+
+    const channels = new Map(probeHealth.channels({}).map((channel) => [channel.key, channel]));
+    const full = Object.fromEntries(
+      [...channels.keys()].map((key) => [key, 1]),
+    ) as unknown as ProbeHealthReport;
+    const older = new Set(Object.keys(healthForPeer(full, versionFor('nameResolver') - 1)));
+    const newest = new Set(Object.keys(healthForPeer(full, PROTOCOL_VERSION)));
+    const gate = [...channels.keys()].filter((key) => newest.has(key) && !older.has(key));
+    // A strip that matched nothing would make every assertion below vacuous.
+    assert.ok(gate.length >= 6, `found ${String(gate.length)} gate channels: ${gate.join(', ')}`);
+
+    const named = (text: string): string[] =>
+      [...text.matchAll(/`([a-zA-Z]+)`/g)].map((match) => match[1] ?? '').sort();
+    const declared = (kind: (key: string) => boolean): string[] => gate.filter(kind).sort();
+    const counter = (key: string): boolean => channels.get(key)?.counter !== undefined;
+    const lookup = (key: string): boolean => channels.get(key)?.lookup !== undefined;
+
+    const mentioned = new Set(named(section));
+    assert.deepEqual(
+      gate.filter((key) => !mentioned.has(key)),
+      [],
+      'step 4 does not judge every channel the gate adds',
+    );
+    const counters = /The counters are ([^;]+);/.exec(section);
+    assert.ok(counters, 'step 4 does not say which of the gate’s channels are counters');
+    assert.deepEqual(named(counters[1] ?? ''), declared(counter), 'the counters step 4 names');
+    const readings = /;([^;]+) are readings;/.exec(section);
+    assert.ok(readings, 'step 4 does not say which of the gate’s channels are readings');
+    assert.deepEqual(
+      named(readings[1] ?? ''),
+      declared((key) => !counter(key) && !lookup(key)),
+      'the readings step 4 names',
+    );
+    const states = /the other (\w+) are states/.exec(section);
+    const numbers = new Map([
+      ['two', 2],
+      ['three', 3],
+      ['four', 4],
+      ['five', 5],
+      ['six', 6],
+    ]);
+    assert.equal(
+      numbers.get(states?.[1] ?? ''),
+      declared((key) => !counter(key) && lookup(key)).length,
+      'the states step 4 counts',
+    );
+  });
+});
+
+/**
+ * The 1.0 release notes name the protocol and the last migration an upgrade from rc.2 brings
+ * (`H-50`). Both moved while rc.3 was prepared, the protocol three times (`P-438`'s 37, `P-432`
+ * S3's 38 and S6's 39), and the prepared notes said 38 until they were brought onto the code. An
+ * operator reads that line to know what a core or probe left on rc.2 negotiates down from.
+ */
+describe('the 1.0 release notes', () => {
+  it('name the protocol this build speaks, and its last migration', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const notes = (await readFile(join(repoRoot, 'docs', 'release-notes-1.0.md'), 'utf8')).replace(
+      /\s+/g,
+      ' ',
+    );
+    const protocol = /the protocol between core and probe moves from (\d+) to (\d+)/.exec(notes);
+    assert.ok(protocol, 'the upgrade section names no protocol');
+    assert.equal(Number(protocol[2]), PROTOCOL_VERSION, 'the protocol the notes say rc.3 speaks');
+
+    const migrations = /applies migrations (\d{3}) to (\d{3})/.exec(notes);
+    assert.ok(migrations, 'the upgrade section names no migrations');
+    const files = (await readdir(join(repoRoot, 'packages', 'core', 'src', 'db', 'migrations')))
+      .map((name) => /^(\d{3})-/.exec(name)?.[1])
+      .filter((number): number is string => number !== undefined)
+      .sort();
+    assert.equal(migrations[2], files.at(-1), 'the last migration the notes say rc.3 applies');
   });
 });
 

@@ -4,12 +4,18 @@
   ([its record](2026-10-04-v1-release-candidate-cut.md), from
   [the proposal's §4](2026-09-28-v1-release-candidate.md)), with every command written out, so that
   the cut is run from this page and not from memory. **Nothing here has been run yet.** It was
-  written before `P-432`'s last slices landed, so the steps that depend on them carry a
-  `TODO(rc3-cut)` marker, and the cut does not start while one is left (step 0).
+  written before `P-432`'s S3, S6 and S8 landed, and brought onto them on 2026-10-20 (`H-50`,
+  on `a95c3302`, where they were integrated): every `TODO(rc3-cut)` marker the documents carried
+  for them is resolved against that code. What is still to land before the cut, S7 and the
+  tickets the coordinator put in 1.0, step 0.1 checks by name, and the cut does not start without
+  them. What only the cut can say (the commit, the dates, the checksums) stays a `<…>`
+  placeholder, filled in step 9.
 - **What it adds to rc.2's procedure**: the x86_64 build and its smokes as steps, not a ticket
   (`H-14`); the probe host's packages in the record, since the field test now installs remote
-  probes (runbook step 1); `P-432`'s differential as a gate, by the user's decision of 2026-10-18;
-  and a check, at each artefact, of the three things rc.1 got wrong (below).
+  probes (runbook step 1); `P-432`'s differential as a gate, by the user's decision of 2026-10-18,
+  in all seven images and with the name check's own questions beside glibc's (`P-460`), and the
+  gate's full-size measurement (S7), both on the commit to be cut; and a check, at each artefact,
+  of the three things rc.1 got wrong (below).
 - **Who runs it**: the orchestrating session, after saying what is being cut. The user's approval
   of 2026-10-17 covers the version commit, the arm64 and amd64 tarballs, `.deb` and `.rpm` built in
   `dev.sh` with `MS_BUILD_COMMIT`, the four smokes and the runbook's *Last verified* dates. It does
@@ -45,30 +51,51 @@ Windows Installer refuses; Windows is release 1.1, and that is `H-49`.
 
 Each of these is a yes, or the cut waits.
 
-1. **`P-432` has landed whole**: S1 to S8 on `origin/main`.
+1. **`P-432` has landed whole**: S1 to S8 on `origin/main`, S7 with its findings file
+   (`2026-10-20-name-lookups-gated.md` in `docs/findings/`); and the four things the coordinator
+   put in 1.0 before this cut on 2026-10-20 (`P-432`'s outcome in `TASKS.md`): `P-453` (a child
+   killed from outside poisons no name), `P-460` (the differential records the check's questions
+   too), `P-461` (boxes that show the check off), and S6's re-check gaps (no avoided name started
+   from the probe's queues, or settled after `stop()`). `P-454` stays open: it is a known limit
+   in the release notes.
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem
    git fetch -q origin
-   git log --oneline origin/main | grep -E 'P-432 S[0-9]'
+   git log --oneline origin/main | grep -E 'P-432 S[0-9]'    # S1 to S8, each at least once
+   git cat-file -e origin/main:docs/findings/2026-10-20-name-lookups-gated.md && echo "S7's findings"
+   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461) '    # 3
    ```
 
-2. **Its differential has passed, with its recordings committed** (the user's decision of
-   2026-10-18: against `getaddrinfo`, in the smoke images, `systemd-resolved` included). The
-   recordings file S4 left empty for S8 must now hold every image's:
+   The S6 gaps have no ticket of their own: read `P-432`'s outcome for the commit that closed
+   them, and name it in the record.
+
+2. **The differential's recordings are committed** (the user's decision of 2026-10-18: against
+   `getaddrinfo`, `systemd-resolved` included). `P-432` S8 ran it in boxes of each
+   distribution's own image rather than the smoke images, since the glibc and the NSS modules are
+   the distribution's either way (S8's outcome, decided 2026-10-20): Rocky 8 and 9, Debian 11, 12
+   and 13, Ubuntu 22.04 and 24.04. The fixture holds glibc's wire for every image, and Ubuntu
+   24.04's run went through `systemd-resolved`:
 
    ```bash
-   git show origin/main:packages/probe/test/fixtures/system-names-recordings.json | head -c 400
+   cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
+   git show origin/main:packages/probe/test/fixtures/system-names-recordings.json | python3 -I -c '
+   import json, sys
+   r = json.load(sys.stdin)
+   images = r["images"]
+   print(sorted(images), "recordings:", len(r["recordings"]))
+   assert sorted(images) == ["debian11", "debian12", "debian13", "rocky8", "rocky9", "ubuntu2204", "ubuntu2404"], images
+   assert images["ubuntu2404"]["resolved"] is True
+   '
    ```
 
-   <!-- TODO(rc3-cut): S8 had not landed when this was written. Put the differential's exact
-   command here (design p432-r2-final.md §7.5 names scripts/smoke/name-gate-differential.sh),
-   with its bound, and the line its passing run prints. -->
+   Step 0.6 runs it again, on the commit to be cut.
 
 3. **No `TODO(rc3-cut)` marker is left in the documents** that ship in `/opt/ms/docs`. Each is
-   resolved against the landed code in a docs commit on `main`, before step 2; the version
-   commit changes nothing but versions. This page's own markers go with them. The pattern is
-   written so that it does not find itself:
+   resolved against the landed code in a docs commit on `main`, before step 0.4, so that the
+   suite, the differential and the measurement run on the commit that is cut; the version commit
+   changes nothing but versions. This page's own markers go with them. The pattern is written so
+   that it does not find itself:
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
@@ -96,16 +123,73 @@ Each of these is a yes, or the cut waits.
    The last line must be `==> clean. Full log: …`. Write down its `tests · pass · fail ·
    cancelled · skipped` line and every `﹣` line it lists, and compare them with the last green
    run's: `skipped 0`, `cancelled 0` and `fail 0`, and a `tests` total that fell names suites that
-   did not run. `clean, but N suite(s) never ran` is not a pass. Then remove the worktree
-   (`git worktree remove --force` on it, from the main checkout). Nothing else lands from here
-   until step 7 has pushed: the version commit's parent must be the commit that passed, which
-   step 1 checks.
+   did not run. `clean, but N suite(s) never ran` is not a pass. Keep the worktree for steps 0.6
+   and 0.7, and remove it after them (`git worktree remove --force` on it, from the main
+   checkout). Nothing else lands from here until step 7 has pushed: the version commit's parent
+   must be the commit that passed, which step 1 checks.
 5. **The VM has room.** Builds and smokes are heavy: start one only when fewer than two toolchain
    runs are going, counting the amd64 project's too, and run the smokes one at a time.
 
    ```bash
    docker ps -q --filter name=toolchain-run | wc -l | tr -d ' '    # under 2
    ```
+
+6. **The name gate's differential passes on the commit to be cut, in all seven images**
+   (`scripts/smoke/name-gate-differential.sh`), in step 0.4's worktree. It judges which
+   questions glibc sends, never how long anything takes, so it needs step 0.5's count under 2,
+   not a quiet machine. Every image, with no `MS_DIFF_IMAGES` or `MS_DIFF_ONLY` (a narrowed run
+   never verifies), on the digests the recordings were made on (no `MS_DIFF_REFRESH`), and
+   without `MS_DIFF_WRITE`: the cut checks the committed recordings, it does not rewrite them.
+   The boxes load the worktree's build, and the script refuses one older than its sources, so
+   build first. S8's run 3 took 830 s; each image's replay is bounded at 1,500 s inside its box.
+
+   ```bash
+   cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite || exit 1
+   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && [ -z "$(git status --porcelain)" ] || exit 1
+   perl -e 'alarm 660; exec @ARGV' ./scripts/dev.sh "timeout 600 npx tsc -b packages/probe"
+   mkdir -p /tmp/rc3-diff
+   MS_DIFF_OUT=/tmp/rc3-diff perl -e 'alarm 3600; exec @ARGV' ./scripts/smoke/name-gate-differential.sh 2>&1 | tee /tmp/rc3-diff/run.out
+   ```
+
+   It must end `==> NAME GATE DIFFERENTIAL PASSED (runs in /tmp/rc3-diff)`, with a `rows in …`
+   line for each of the seven images and `systemd-resolved: active` for `ubuntu2404`. Any
+   `FAILED` line, or `MS_DIFF_REFRESH` named because a recorded digest could no longer be pulled,
+   stops the cut: a moved image is a new recording, made on `main` and reviewed, not at the cut.
+   `git status --porcelain` in the worktree prints nothing afterwards.
+
+   1. **`P-460`'s walk recording, as a step of its own.** With `P-460` landed, the same run also
+      records the name check's own questions for every row and plan, from `DnsCheck.route` with
+      no lanes and no helper, and fails where they differ from glibc's: the qnames, qtypes and
+      servers in order up to where each stops, and heard if and only if glibc returned within
+      1 s, with `P-460`'s regression, budget and answer rows. `P-460`'s outcome in `TASKS.md`
+      names the line its run prints for that recording: find that line in `run.out`, and name
+      both recordings in the record. A run that passes without it has not tested the check, and
+      the cut waits.
+
+   Copy `/tmp/rc3-diff` beside the record before the worktree goes.
+
+7. **S7's full-size name-lookups run, on the commit to be cut**, in step 0.4's worktree: the
+   gate's `test:perf` arms, cold and warm, in both modes beside `P-426`'s, whose findings file is
+   `2026-10-20-name-lookups-gated.md` in `docs/findings/`. **A quiet window**: `ms-server`
+   stopped, no other toolchain run, and the other projects' containers paused only with the
+   user's leave, asked each time. The conditions print at the top of the run (`P-192`), and go in
+   the record with the numbers. The command is the one that findings file says it ran, at full
+   size; the design's knobs (`p432-r2-final.md` §7.6) are below, and where S7's file differs, its
+   line is the one to run:
+
+   ```bash
+   cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite || exit 1
+   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || exit 1
+   docker ps -q --filter name=toolchain-run | wc -l | tr -d ' '    # 0
+   perl -e 'alarm 660; exec @ARGV' ./scripts/dev.sh "timeout 600 npx tsc -b"
+   perl -e 'alarm 7260; exec @ARGV' ./scripts/dev.sh "timeout 7200 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups.out
+   ```
+
+   Every arm passes (`fail 0`, `cancelled 0`), and each number the findings file records is read
+   against this run's: a result on the other side of a bound the findings state, or of the
+   design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
+   loop's p99), stops the cut. Then `ms-server` is started and verified, and the paused
+   containers unpaused.
 
 ## 1. The commit, and a clean worktree for it
 
@@ -236,8 +320,8 @@ cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut && p
 Write down each one's last line and its time. A `DeadlineExceeded` from BuildKit on a `FROM` line
 is not the code: `docker pull` that base image and run the same command again.
 
-<!-- TODO(rc3-cut): if S8's differential is meant to run against the candidate as well as on
-main (step 0.2), its command goes here, against this worktree. -->
+The differential does not run again here. Its boxes load a worktree's build of the probe, not a
+tarball, and the tag is step 0.6's commit plus a version commit that changes no source.
 
 ## 6. The packages, as the package managers read them
 
@@ -391,14 +475,16 @@ as rc.2's did):
 1. **`docs/findings/<cut date>-v1-release-candidate-rc3-cut.md`**, in the shape of
    [rc.2's](2026-10-04-v1-release-candidate-cut.md): the tag and both commits; the manifest; the
    two checksum tables (arm64, x86_64), the probe's packages included; the smokes with their
-   times, and Ubuntu on x86_64 as not run (`H-29`); the differential's run; and what is not yet
-   true of it.
+   times, and Ubuntu on x86_64 as not run (`H-29`); the suite's line (step 0.4); the
+   differential's run, both recordings named (step 0.6); S7's run with its conditions (step
+   0.7); and what is not yet true of it.
 2. **`docs/runbook-field-test.md`**: the four *Last verified* rows, `2026-10-<dd>, v1.0.0-rc.3,
    locally (arm64; x86_64 except Ubuntu)`; and step 1's pointer to the record whose checksums a
    package is checked against.
 3. **`docs/release-notes-1.0.md`**: the *Verified* line (the commit, the date, the record), which
    keeps saying that Ubuntu on x86_64 was not run (`H-29`) unless it was, and *What a candidate
-   has been installed on* under *Requirements*.
+   has been installed on* under *Requirements*; and *Name resolution*'s **Before `v1.0.0`**
+   gains the gate's measurement, from step 0.7's run and S7's findings.
 4. **`docs/README.md`**: the row *Know what the current candidate is and what was checked* names
    rc.3's record.
 5. **`docs/TASKS.md`**: `H-50` is ticked with the record, `P-432`'s outcome names the cut, and

@@ -122,10 +122,7 @@ spells its version `1.0.0~rc.3`, so that `1.0.0` upgrades it.
 upgrade*, *Every probe host* and *After the upgrade*. From anything older, including every build
 that says `0.1.0`, read *From a build older than rc.2* as well. From rc.2, the core's first start
 applies migrations 071 to 084 (there is no 083) while `database.autoMigrate` is on, the default,
-and the protocol between core and probe moves from 28 to 38.
-<!-- TODO(rc3-cut): 38 is P-432 S3's bump (with P-441). At the cut, read PROTOCOL_VERSION in
-packages/shared/src/protocol/messages.ts and the last file in packages/core/src/db/migrations,
-and correct both numbers here if S3, S6 or S8 moved them. -->
+and the protocol between core and probe moves from 28 to 39.
 
 ### Before you upgrade
 
@@ -299,49 +296,49 @@ From rc.2 or anything older:
   pool's 30 s timeout and read as a check that timed out. The name follows a DNS change within
   30 s, where each worker kept it for 5 minutes
   ([how a probe resolves its devices' names](administration.md#how-a-probe-resolves-its-devices-names)).
-- **Probe Health warns while its resolver gives checks up** (`P-441`): 100 in five minutes for
-  want of an answer, from DNS not answering, puts it in Warning with the domains not answering
-  in its message, where it stayed Up through any outage. A trigger on Probe Health's Warning now
-  fires once for such an outage, beside the sensors that fail in it
-  ([Probe Health](administration.md#probe-health--msprobehealth)).
+- **Probe Health warns while its resolver gives checks up** (`P-441`): 100 checks in five minutes
+  given up for want of an answer, from DNS not answering, put it in Warning
+  (`lookupsGivenUpRecently`), with up to three of the domains not answering in its message from a
+  probe at protocol 38, where it stayed Up through any outage. A trigger on Probe Health's Warning
+  now fires once for such an outage, beside the sensors that fail in it, in either mode of
+  `probe.nameResolver` ([Probe Health](administration.md#probe-health--msprobehealth)).
 - **`probe.nameResolver`, new, default `"system"`** (`P-432`). Nothing changes unless you set it.
-  `"gate"` is the field test's setting, described under *Known limits → Name resolution* below.
-  Before you set it:
-  <!-- TODO(rc3-cut): every bullet of this item describes P-432 S3 and S6, which had not landed
-  when it was written (design p432-r2-final.md §5, §6). At the cut, check each number against
-  the landed code and the administration guide's "The gate" subsection, and link that
-  subsection here. -->
+  `"gate"` is the field test's setting, described under *Known limits → Name resolution* below
+  and in full in [the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver).
+  A restart applies it: nothing reloads it. Before you set it:
   - **Queries.** With `"gate"` the probe also asks each name's DNS servers itself, in the order
-    the system would. That is at most 10 more questions a second to each server, during a cold
-    start or while a zone stops answering, and otherwise about one a second for each DNS zone
-    whose devices are being refreshed. A zone that has stopped answering is asked again once
-    per zone, every 5 s, backing off to 60 s. `getaddrinfo` still asks each device's name, at
-    most 3 at a time for a zone that is not answering.
+    the system would, one question for each name and type, never retried. That is at most 10
+    more questions a second to each server, 20 at once, during a cold start or while a zone
+    stops answering, and otherwise about one name's questions a second for each DNS zone whose
+    devices are being refreshed. A zone that has stopped answering is asked again once per zone,
+    every 5 s, backing off to 60 s. `getaddrinfo` still asks each device's name, in the lookup
+    helper at most 4 at a time for a zone that is not answering.
   - **Questions left unanswered.** In an outage the probe's resolver leaves about 24 questions
-    unanswered at your DNS server (30 with Check now, 42 at most), against 12 without the
-    gate, plus up to 16 more for 10 s after its lookup helper restarts, at a forwarder that does
-    not merge identical questions, such as dnsmasq older than 2.83. That is per probe. Ping,
-    scripts and `targetPolicy: none` ask for themselves in either mode. dnsmasq's default limit
-    is 150 outstanding questions, for all its clients together.
+    unanswered at your DNS server (28 with Check now, 40 at most), against 12 without the gate,
+    plus up to 16 more for 10 s after its lookup helper is replaced, at a forwarder that does
+    not merge identical questions, such as dnsmasq older than 2.83. That is per probe, and
+    `nameQuestionsOpen` reports its highest. Ping, scripts and `targetPolicy: none` ask for
+    themselves in either mode. dnsmasq's default limit is 150 outstanding questions, for all its
+    clients together.
   - **A per-client rate limit on your DNS server.** Pi-hole's default is believed to be 1,000
     queries a minute. A limit the probe stays under without the gate and not with it refuses
     everything the probe asks for the rest of that limit's window: `getaddrinfo`'s questions,
-    the ping binary's and the core link's, and ping sensors go Warning meanwhile. The probe sees
-    the refusals and stops asking that server itself, for 10 minutes the first time and for the
-    rest of the run the second. Raise the limit, exempt the probe's address, or keep
-    `"system"`.
+    the ping binary's and the core link's, and the sensors that need them fail meanwhile. **rc.3
+    does not back off a server that refuses it**: the probe goes on asking it, within the 10 a
+    second above (the design's detector for this was left out of rc.3). Raise the limit, exempt
+    the probe's address, or keep `"system"`.
   - **The lookup helper** is a child process of the probe, `ms-probe: lookups`, inside the
-    probe's unit and its `MemoryMax`. It needs no change to the unit.
-  <!-- TODO(rc3-cut): the helper's memory, measured by S7 (P5), goes here: "about N MB". -->
-  - **Probe Health gains six channels at protocol 38**: `nameResolverMode`, sent in both modes,
-    and `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck` and
-    `nameQuestionsOpen`, sent under `"gate"` only. Under `"system"` the five gap, and a core or
-    a probe older than rc.3 shows all six as gaps. A probe set to `"gate"` under a core below
-    38 warns at each session that the helper's health does not reach the core.
-  <!-- TODO(rc3-cut): the six names are the user's six-field set of 2026-10-18 in the design's
-  names. Check them, and that they are the only new Probe Health channels, against
-  packages/sensors/src/types/probe-health.ts once S3 has landed, and add P-441's if it took a
-  channel at 38. -->
+    probe's unit and its `MemoryMax`. It needs no change to the unit. Past 256 MiB resident it
+    is killed and replaced; `lookupHelperMemory` reports its resident memory.
+  - **Probe Health gains fourteen channels for it.** At protocol 38: `nameResolverMode`, sent in
+    both modes, and five sent under `"gate"` only: `lookupHelperTrouble`, the helper's one alarm
+    (Warning at 1), `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck` and
+    `nameQuestionsOpen`. At protocol 39, eight more under `"gate"` only: `lookupHelperState`,
+    `lookupHelperLosses`, `lookupHelperMemory`, `nameCheckState`, `nameLookupsHeard`,
+    `nameLookupsToHelper`, `nameCheckMisses` and `nameWalksDeferred`. Under `"system"` the
+    thirteen gap, and a gap makes no state; a core or a probe older than rc.3 shows all fourteen
+    as gaps. A probe set to `"gate"` under a core below 38 warns once a connection that the
+    lookup helper's health does not reach the core.
 - **A probe left on rc.2 keeps working, and its newer channels gap.** Core and probe negotiate down
   to the older version
   ([ADR-001 Decision 13](ADR-001-architecture.md#decision-13--protocol-versions-negotiate-down-they-do-not-gate-admission)).
@@ -416,8 +413,7 @@ key before installing a build older than rc.3 on its host, which refuses a key i
 and leaves the probe stopped (exit 78)
 ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
 To go back to the resolver without reinstalling anything, set `"system"` and restart the probe,
-after `systemctl reset-failed ms-probe`.
-<!-- TODO(rc3-cut): P-432 S3 (the setting, and that a restart is what applies it). -->
+after `systemctl reset-failed ms-probe`: the setting is read only at start.
 
 ## Known limits, and what comes next
 
@@ -457,18 +453,22 @@ after `systemctl reset-failed ms-probe`.
   of the answering zone's checks either, and answered all 2,478 of the silent zone's checks that
   came before their name's 5 minutes ran out from what the file kept.
 
-  **New in rc.3, off by default: the gate** (`P-432`). `"nameResolver": "gate"` in the `probe`
-  section of `/etc/ms/probe.json` keeps a DNS zone that stops answering away from the lookups
-  every other device needs: on a first install, for a device added during an outage, and after a
-  restart with nothing kept. With the gate, the probe first asks the name's DNS servers itself,
-  in the order the system would, and runs `getaddrinfo` on its own lookup lanes only for a name
-  they answered within 250 ms. Every other name it asks in a helper process it starts,
-  `ms-probe: lookups`, which has as many lanes as the probe's resolver: a zone that stops
-  answering holds at most 4 of its 6, and one is kept for zones that answer. **Every answer is
-  still the operating system's**: what the probe asks decides only where `getaddrinfo` runs.
-  <!-- TODO(rc3-cut): the paragraph above and the two below describe P-432 S3 and S6, unlanded
-  when this was written (design p432-r2-final.md §1, §5, §6). Check every number against the
-  landed code, and link the administration guide's "The gate" subsection. -->
+  **New in rc.3, off by default: the gate** (`P-432`;
+  [the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
+  `"nameResolver": "gate"` in the `probe` section of `/etc/ms/probe.json` keeps a DNS zone that
+  stops answering away from the lookups every other device needs: on a first install, for a
+  device added during an outage, and after a restart with nothing kept. With the gate, the probe
+  first asks the name's DNS servers itself, in the order the system would, and runs
+  `getaddrinfo` on its own lookup lanes only for a name they answered within 250 ms (or a quarter
+  of the check's bound, if that is less). Every other name it asks in a helper process it starts,
+  `ms-probe: lookups`, with six lanes under the probe resolver's own rules and two more for Check
+  now: a zone that stops answering holds at most 4 of the six, and one is kept for zones that
+  answer. A name the hosts file gives stays on the probe's own lanes, and Check now goes to the
+  helper without asking first. **Every answer is still the operating system's**: what the probe
+  asks decides only where `getaddrinfo` runs. A zone that stops answering raises nothing of its
+  own, and the probe's own thread pool is not the silent zone's while the helper is up, so a cold
+  start in the middle of one zone's outage answers the other zones from its first scan, with or
+  without the answer file.
 
   The probe follows the system's lookup order only where it can be sure of it, and checks that
   at start: Linux with glibc 2.28 to 2.42; a `resolv.conf` of `nameserver`, `search` or
@@ -476,45 +476,45 @@ after `systemctl reset-failed ms-probe`.
   `hosts:` line in `nsswitch.conf` of `files dns`, `files dns myhostname` or `files myhostname
   dns`; no `nscd`; and nothing preloaded or set in the environment that changes how a name is
   looked up (`LOCALDOMAIN`, `RES_OPTIONS`, `HOSTALIASES`, `LD_PRELOAD`, `LD_AUDIT`,
-  `LD_LIBRARY_PATH`, `/etc/ld.so.preload`). Anywhere else the probe's log names the first thing
-  that did not fit, and every name is asked in the helper. **After start, only the hosts file is
-  followed**, and `nscd` starting or stopping. Any change to `resolv.conf`, `nsswitch.conf`,
-  `gai.conf` or `/etc/ld.so.preload`, to the hostname's domain while `resolv.conf` has no search
-  list, or to the NSS modules the `hosts:` line names, turns the check off until `ms-probe`
-  restarts, and the log says so (`P-432` S4). Every name is then asked in the helper. On Ubuntu
-  that includes `systemd-resolved` rewriting its stub `resolv.conf` when a DHCP lease or netplan
-  changes the search domains.
-  <!-- TODO(rc3-cut): S4's policy (landed b13888f6) is wired into the resolver by S3. Check the
-  log's wording, that what is followed and what turns the check off until restart are still as
-  above, and that the check is on for the field host's stock Ubuntu with systemd-resolved (the S8
-  differential). -->
+  `LD_LIBRARY_PATH`, `/etc/ld.so.preload`). Anywhere else the check is off: the probe's start
+  line names the first thing that did not fit, and every name the hosts file does not give is
+  asked in the helper. On Ubuntu 24.04, `systemd-resolved`'s stub `resolv.conf` is one the check
+  takes, and a `resolve` or `mdns4_minimal` on the `hosts:` line turns it off. **After start,
+  only the hosts file is followed**, and `nscd` starting or stopping. Any change to
+  `resolv.conf`, `nsswitch.conf`, `gai.conf` or `/etc/ld.so.preload`, to the hostname's domain
+  while `resolv.conf` has no search list, or to the NSS modules the `hosts:` line names, turns
+  the check off until `ms-probe` restarts, and the log says so, naming what moved (`P-432` S4).
+  Every name is then asked in the helper. On Ubuntu that includes `systemd-resolved` rewriting
+  its stub `resolv.conf` when a DHCP lease or netplan changes the search domains.
 
-  If the helper fails three times in ten minutes, or runs out of memory, Probe Health's
-  `lookupHelperTrouble` goes Warning once, until ten minutes pass without a failure; after five
-  failures in ten minutes the probe resolves as with `"system"` for ten minutes, longer if it
-  happens again. `nameResolverMode` says which mode each probe ran. `"system"` is the resolver
-  rc.3 has without the gate: `P-426`'s, with `P-438`'s kept answers. **Before rc.3 was cut**,
-  the gate's questions were compared with glibc's own in the smoke images, `systemd-resolved`
-  included, and matched.
-  A zone that stops answering raises nothing of its own: the helper carries its lookups, and
-  the probe's own thread pool is not the silent zone's while the helper is up, so a cold start
-  in the middle of one zone's outage answers the other zones from its first scan, with or
-  without the answer file. A name the check found silent that the helper then answered within
-  a second is skipped for an hour, its zone after three such names in ten minutes, and the
-  check stands down for an hour after three zones are skipped in ten minutes. Probe Health
-  reports what the gate routed where in eight more channels, at protocol 39
-  ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
-  And in either mode Probe Health now warns once for the probe when its resolver gives up 100
-  checks in five minutes for want of an answer, naming the domains not answering (`P-441`,
-  `lookupsGivenUpRecently`).
-  <!-- TODO(rc3-cut): S8's differential (scripts/smoke/name-gate-differential.sh, design §7.5)
-  must have passed with its recordings committed; name the run and its commit here, or the cut
-  does not happen (the user's decision). The helper's measured memory (S7, P5) goes in the
-  upgrade item above. -->
+  A name the check found silent that the helper then answered within a second is a miss: one
+  skips the check for that name for an hour, three of one zone in ten minutes skip the zone for an
+  hour, and three zones skipped in ten minutes stand the check down for an hour, doubling to
+  eight within a day. What is skipped, or asked while the check stands down, goes to the helper.
 
-  **Before `v1.0.0`**: add the gate's measurement to this item. The field test runs `"gate"` on
-  every probe (`H-09`), and the default for 1.0 is decided again after it. Say here which it
-  is, and why.
+  A helper that fails is replaced. Meanwhile a name its servers did not answer waits for it, its
+  checks failing at once, and any other waits at most 2 s before it is asked on the probe's own
+  lanes. Probe Health's `lookupHelperTrouble` goes Warning, once, when the helper has
+  not been up for 30 s, has failed three times in ten minutes, ran out of memory, or rests, and
+  clears after ten minutes up with no failure. After five failures in ten minutes the probe
+  resolves as with `"system"` for ten minutes, doubling to an hour if it happens again
+  (`nameResolverMode` 3). A name that crashes `getaddrinfo` in the helper is found, its checks
+  fail at once, and it is never asked on the probe's own lanes. `"system"` is the resolver rc.3
+  has without the gate: `P-426`'s, with `P-438`'s kept answers. Probe Health says which mode
+  each probe ran and what the gate routed where (the upgrade item above). And in either mode it
+  now warns once for the probe when its resolver gives up 100 checks in five minutes for want of
+  an answer, naming the domains not answering (`P-441`, `lookupsGivenUpRecently`).
+
+  **Before rc.3 was cut**, the name policy the gate routes by was held to what glibc itself
+  asks, in boxes of seven distributions' own images, from glibc 2.28 (Rocky 8) to 2.41 (Debian
+  13), with `systemd-resolved` serving the stub on Ubuntu 24.04: 2,966 lookups, each glibc's
+  questions server by server and try by try, every one as the policy said
+  ([the differential](findings/2026-10-20-name-gate-differential.md)). The cut ran it again,
+  with the check's own questions beside glibc's (*Verified*, below).
+
+  **Before `v1.0.0`**: add the gate's measurement (`P-432` S7) to this item. The field test runs
+  `"gate"` on every probe (`H-09`), and the default for 1.0 is decided again after it. Say here
+  which it is, and why.
 - **Slipped to 1.0.1:**
   - `A-84`: when a probe's protocol flap ends, the core should push that probe its configuration
     and let go what the flap held, and no test has run that step. If Probe Health's
@@ -542,12 +542,14 @@ after `systemctl reset-failed ms-probe`.
   - The two ways of watching the core from outside have run against a packaged core, but on the
     core's own host against 127.0.0.1, not from another machine (`H-25`;
     [watching the core from outside](administration.md#watching-the-core-from-outside)).
-  - **Probe Health stays Up while the resolver gives checks up** (`P-441`). `lookupsGivenUp`
-    counts them and has no limit, so a zone that stops answering shows in its devices' sensors
-    and the probe's log, not on Probe Health. Read it at each of the field test's readings.
-    <!-- TODO(rc3-cut): P-441 rides protocol 38 with P-432 S3. If it landed, replace this item
-    with what it adds to Probe Health, or delete it, and change the runbook's step-4 item on
-    lookupsGivenUp to match. -->
+  - **The name check's questions carry no EDNS record** (`P-454`). Under `options edns0`, which
+    `systemd-resolved`'s stub `resolv.conf` sets, glibc adds one to every question, and the
+    gate's check sends none: Node's resolver offers no setting for it (measured with Node
+    24.19.0, c-ares 1.34.6). Only a DNS server that answers the two differently can make the
+    check disagree with `getaddrinfo`. One that answers plain questions and drops EDNS ones has
+    its names asked on the probe's own lanes, where the first lookup that sticks sends its zone
+    to the helper for five minutes, and `namePassedStuck` counts it; one that does the opposite
+    sends names to the helper, which is safe.
   - **A device given as an address of the other family is connected to anyway** (`A-87`): a
     device whose host is an IPv4 address and whose IP version is `v6`, or the other way round, is
     reached at that address, whatever its IP version says.
@@ -556,8 +558,10 @@ after `systemctl reset-failed ms-probe`.
 
 **Verified:** `v1.0.0-rc.3` at `<commit, filled at the rc.3 cut>`, on `<date>`: the four smoke
 tests of [runbook-field-test.md](runbook-field-test.md) on arm64, and on x86_64 all but the
-Ubuntu install, which this machine's emulator cannot boot (`H-29`); and `P-432`'s differential
-against `getaddrinfo`. Run by [the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md),
-with their results in the rc.3 record.
+Ubuntu install, which this machine's emulator cannot boot (`H-29`); `P-432`'s differential
+against `getaddrinfo` in seven images, glibc's questions and the name check's (`P-460`); the
+full suite; and the gate's full-size measurement (S7). Run by
+[the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md), with their results in the
+rc.3 record.
 rc.2, for comparison, is `0a43b7bf`, cut 2026-10-04
 ([its record](findings/2026-10-04-v1-release-candidate-cut.md)).

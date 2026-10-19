@@ -40376,6 +40376,100 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           for every sensor in the installation, which is a different alarm policy from the one
           the runbook asks for.
         - **Quiet-machine runs: none.** Nothing here is measured.
+      - **Brought onto the integrated code** 2026-10-20 (`prep/rc3-docs-2`, on `a95c3302`:
+        `f762dfc6` with `P-432` S3, S6 and S8). `ccdbc607`, `e1217bc6` and `94fbc9bd` were
+        cherry-picked; where they met S3's and `P-441`'s own edits of the same lines (the release
+        notes' *Name resolution*, the going-back paragraph and upgrade items; the runbook's
+        trigger count), both sides' facts were kept and made to agree with the code. Then every
+        `TODO(rc3-cut)` marker was resolved against the code, and none is left:
+        - **Release notes.** The protocol moves 28 to 39 (`PROTOCOL_VERSION`); the migrations still
+          end at 084. `P-441` is an upgrade item, S3's, with its domains from a probe at protocol 38
+          and the same Warning in both modes, and its *Also open* item is gone. The
+          `probe.nameResolver` item has the fourteen channels the type declares, six at 38 and
+          eight at 39 (S6's `nameCheck` capability), with which gap where; the helper's 256 MiB
+          bound and `lookupHelperMemory` where S7's figure was to go; `getaddrinfo` at most 4 at a
+          time in the helper for a zone not answering (the outage scenarios assert
+          `zoneB.peak <= 4`), not 3; the questions left open as the code counts them, 28 with Check
+          now and 40 at most; and a rate-limited server not backed off. *Name resolution* is the
+          gate as built, linked to the administration guide's subsection: the routing wait, the
+          helper's lanes, the hosts file on the probe's lanes, Check now unwalked, S4's allowlist
+          checked against `system-names.ts` (what is followed, and the move that turns the check
+          off until restart), Ubuntu 24.04's stub, the miss rule, the latch's four causes, the
+          rest's doubling, poison, and the differential as S8 ran it. `P-454`'s missing EDNS
+          record is under *Also open*, by the coordinator's decision. *Verified* names the cut's
+          differential with both recordings (`P-460`), the suite and S7's run.
+        - **Runbook.** Step 1's start-log check is `grep -F 'probe.nameResolver is gate'`, the line
+          `name-resolution.ts` writes in gate mode only, read for `"check":"on"`, with `off`
+          naming the rule otherwise; the old `grep -i 'name resolver'` matched nothing.
+          `config check` exits 1 on a bad key and prints `note: probe.nameResolver: is gate: …`.
+          Step 4 judges every gate channel by its kind in `probe-health.ts` (eight counters,
+          stored as rates, two readings and four states) against the design's pass criteria: no
+          loss and no rest, misses and passed-stuck 0 or explained, `nameCheckOnSeconds` at 95%,
+          `nameCheckState` 1, and the helper's memory flat from `lookupHelperMemory`, which
+          replaces `ps`. The `lookupsGivenUp` item takes in `P-441`'s Warning. The drill records
+          the gate's channels.
+        - **Cut checklist.** Step 0.1 asks for S1 to S8 with S7's findings file, `P-453`, `P-460`
+          and `P-461` ticked and S6's re-check gaps closed (the coordinator's 2026-10-20 list);
+          0.2 checks the recordings hold all seven images, Ubuntu 24.04's through
+          `systemd-resolved`; 0.3's markers are resolved before the suite, so the suite, the
+          differential and the measurement run on the commit that is cut; 0.4 keeps its worktree
+          for 0.6 and 0.7. 0.6 runs `scripts/smoke/name-gate-differential.sh` in all seven
+          images, built first, under a host alarm, verify-only, and ends on its `PASSED` line,
+          with `P-460`'s walk recording as a step that names it. 0.7 runs S7's full-size
+          name-lookups arms in a quiet window, with the design's knobs and S7's findings file as
+          the authority. Step 5 says why the differential does not run against the tarball. Step
+          9 records all three, and the gate's measurement goes into the release notes' **Before
+          `v1.0.0`** after the tag.
+        - **What the cut fills in, the only placeholders left**: the release notes' *Verified* line
+          (`<commit, filled at the rc.3 cut>`, `<date>`) and *What a candidate has been installed
+          on*; the runbook's four *Last verified* rows and its pointer to the record; the record
+          itself (`<cut date>`), with both checksum tables; all in step 9.
+        - **Tests**: `build-hygiene` and `candidate-surface` (core), 39 of 39, after a clean rebuild
+          with no marker in `dist`. Two are new in `build-hygiene`: the runbook's step 4 judges
+          every channel the gate adds, derived from what `healthForPeer` strips below protocol 38,
+          each as the kind the type declares; and the release notes name `PROTOCOL_VERSION` and
+          the last migration. Ten mutants, each restored with `shutil.copy` and `os.utime` and
+          compared with `filecmp`, all killed: a counter left out of step 4's list, a reading
+          called a counter, the states miscounted, the prepared five-channel section (by its
+          heading and, renamed, by the channels it misses), the protocol as 38, the migrations
+          to 083, a misspelt link to the differential's findings, and two in code, each with its
+          marker found in `dist`: `nameQuestionsOpen` declared a counter, and `PROTOCOL_VERSION`
+          40. `prettier` and `eslint` on the changed files.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **The documents name every channel the code sends**, fourteen for the gate. The
+          prepared documents named the six-field set, as decided 2026-10-19 above; S6 has since
+          landed eight more at protocol 39, and documents that named six would misdescribe the
+          build an operator runs. Whether the eight fit the user's choice is left open (below).
+        - **The questions left open are stated as the code counts them.** The design's 30 and 42
+          include the walk's urgent pool of 2 for Check now, which S6's cut 5 leaves unused (Check
+          now goes to the helper unwalked): 24, plus 4 for the urgent tokens, plus 12 for the
+          probe's own lookups past their bound, from `ForwardBudget`'s pools and tokens.
+        - **The rate-limit item says rc.3 does not back off**, since S6 cut the pressure detector
+          (D21) and the design's cut order says the upgrade note then says so.
+        - **S7's measurement goes into the release notes after the tag, with the record**, and
+          not as a marker before the cut: a docs commit after the suite would change the commit
+          the suite, the differential and S7 ran on. Until then *Name resolution* states the
+          code's bound (256 MiB) and the channel that reports the helper's memory.
+        - **The differential runs on the commit to be cut, verify-only, and not again on the tag**:
+          its boxes load a worktree's build, the tag adds a version commit with no source, and
+          `MS_DIFF_WRITE` would rewrite reviewed recordings at the cut.
+        - **Two tests hold what the markers held**, so that the next protocol bump or gate channel
+          fails the suite until the documents follow, rather than waiting for a cut's grep. The
+          gate's channels come from the protocol's own strip, so a slice adding one needs no edit
+          of the test.
+      - **Open, for the coordinator**:
+        - **The user's decision on S3's six Probe Health fields is not recorded here**: the three
+          scratchpad files the brief names hold no words of the user's for it. The pause handoff
+          of 2026-10-18 has the coordinator's note "~15:05Z USER: rc.3 WAITS for P-432; sampling
+          D20 KEPT; 6-field Probe Health set." (`handoff-2026-10-18-pause.md`), and the design its
+          OPEN-5, "A smaller set (the mode, the latch, the time counter, passed-stuck, helper
+          stuck and peak questions) still meets S-F1 and S-F2" (`p432-r2-final.md`); neither
+          quotes the user. S6's eight fields at protocol 39 go past that six-field set.
+        - **S7's run command** in step 0.7 is the design's (`MS_DNS_RESOLVER=system,gate`,
+          `MS_DNS_WARM_MINUTES=7`, `MS_DNS_COLD_MINUTES=7`); S7 had not landed, and its findings
+          file's line, when it does, is the one to run.
+        - **`P-460`'s passing line** is not known until it lands; step 0.6.1 sends the cut to its
+          outcome for it.
 
 ## Release 1.1 — Windows
 

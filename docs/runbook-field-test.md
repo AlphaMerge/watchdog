@@ -161,22 +161,30 @@ sudo nano /etc/ms/probe.json                    # "nameResolver": "gate" in the 
 sudo /opt/ms/bin/ms-probe config check          # refuses a misspelt key or value
 ```
 
+`config check` refuses a misspelt key or value (exit 1), and passes `"gate"` (exit 0) with a line
+on its standard output, `note: probe.nameResolver: is gate: …`, that says where names are asked.
+
 Nothing applies it but a restart. On the core's host step 2's restart does it; on a remote
 probe's host restart that probe now, and do it again in step 2:
 
 ```bash
 sudo systemctl reset-failed ms-probe
 sudo systemctl restart ms-probe
-sudo journalctl -u ms-probe -b --no-pager | grep -i 'name resolver'
+sudo journalctl -u ms-probe -b --no-pager | grep -F 'probe.nameResolver is gate'
+pgrep -af 'ms-probe: lookups'                   # the lookup helper, the probe's child
 ```
 
-The start line names the mode asked for and the mode in effect, and why. **`gate` asked and
-`gate` in effect is the pass.** A check that is off names the first setting of the host it could
-not vouch for, and asks every name in the lookup helper: still the gate, and the write-up says
-which setting, since nothing the week records then tests the walk.
-<!-- TODO(rc3-cut): P-432 S3 writes the start line (design p432-r2-final.md §5, "Logs"). Check
-the grep and the words against the landed code, and run this block once against a packaged
-probe before the week, as the dress rehearsal did for the rest of step 1. -->
+A probe in gate mode logs one line at start, *probe.nameResolver is gate: the name policy the
+probe routes its lookups by*, with what it read of the host's name settings: its DNS servers,
+search list, `resolv.conf` options, `hosts:` line and glibc. **`"check":"on"` in that line is the
+pass**: the name check takes this host's settings. `"check":"off"` names in its `off` field the
+first rule the host failed (`code`, and `why` in words), and every name the hosts file does not
+give is asked in the lookup helper: still the gate, and the write-up says which rule, since
+nothing the week records then tests the check. No such line means the probe runs `"system"`,
+which logs nothing of the mode, or has not restarted. Probe Health's `nameResolverMode` says the
+same from the core (step 4), and `nameCheckState` reads `1` once a DNS server has answered the
+check (`3` until then). Run this block once against a packaged probe before the week, as the
+dress rehearsal did for the rest of step 1.
 
 ## 2. Restart everything, once, before you start counting
 
@@ -377,9 +385,6 @@ done
 The write-up's second line, after the build, names each probe, its host's OS, which resolver its
 host asks (`systemd-resolved`'s stub or the site's servers), and the mode it ran. A probe that
 ran anything but `2` for the week did not test the gate, whatever else it shows.
-<!-- TODO(rc3-cut): nameResolverMode and the five channels below are P-432 S3's (protocol 38,
-the user's six-field set of 2026-10-18), named as the design names them. Check each name, value
-and lookup against packages/sensors/src/types/probe-health.ts once S3 has landed. -->
 
 The numbers that decide the criterion:
 
@@ -418,23 +423,37 @@ The numbers that decide the criterion:
   each with its own sessions, so `open` rises during an outage and falls back within `idleMs` of
   the workers it no longer reaches going quiet (`P-256`). Still high an `idleMs` after the checks
   stopped is a finding.
-- **The gate's five channels, on every probe** (`P-432`), written down here before the week so
-  that nobody judges them after it. Only the trouble latch moves Probe Health's state (its
-  lookup reads `1` as Warning, so step 3's Warning trigger on that probe's sensor delivers it);
-  read the others. **The core stores a counter as a rate**, the difference between two readings
-  over the time between them, per second, so `/values` and the history give no running total to
-  subtract: each criterion below is on the hourly history since the start reading (the `curl`
-  loop above, `resolutionSeconds=3600`), in the form the core stores, and an hour with no value
-  is a gap the write-up explains:
+- **The gate's channels, on every probe** (`P-432`), written down here before the week so that
+  nobody judges them after it: six at protocol 38 and eight at 39, gaps on a probe running
+  `"system"`. Only the trouble latch moves Probe Health's state (its lookup reads `1` as Warning,
+  so step 3's Warning trigger on that probe's sensor delivers it); read the others. **The core
+  stores a counter as a rate**, the difference between two readings over the time between them,
+  per second, so `/values` and the history give no running total to subtract: each criterion
+  below is on the hourly history since the start reading (the `curl` loop above,
+  `resolutionSeconds=3600`), in the form the core stores, and an hour with no value is a gap the
+  write-up explains. The counters are `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck`,
+  `lookupHelperLosses`, `nameLookupsHeard`, `nameLookupsToHelper`, `nameCheckMisses` and
+  `nameWalksDeferred`; `nameQuestionsOpen` and `lookupHelperMemory` are readings; the other four
+  are states, read as their numbers.
   - `lookupHelperTrouble` is `0` throughout: every hour's `max` is `0`. Each Warning, and any
     time the probe's log says the lookup helper ran out of memory, is a finding, explained by the
     probe log's `lookup helper` lines.
-  - `namePassedStuck` (a counter, so lookups a second) is `0` throughout: every hour's `max` is
-    `0`. Each one is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and
-    is explained from the log line naming its host, or it is a finding.
+  - **No loss and no rest.** `lookupHelperLosses` (helpers lost a second) is `0` throughout:
+    every hour's `max` is `0`, or each hour above it matches a loss the probe's log explains,
+    with its reason. `lookupHelperState` reads `1` (up) in every hour's `min` and `max` but the
+    hours of those losses; a `5` in it, or a `3` in `nameResolverMode`, is a rest, and a
+    finding.
+  - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
+    is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and is explained
+    from the log line naming its host, or it is a finding.
+  - `nameCheckMisses` (misses a second) is `0` throughout, or each hour above it is explained
+    from the probe log's line naming the name and zone the check skipped. `nameCheckState` is
+    `1` (on) in every hour's `min` and `max` after the first; `4` is a stand-down after misses,
+    a finding with the zones the log names, and `2` the check off for the host's settings, from
+    the start line or the line that moved it.
   - `nameCheckOnSeconds` (a counter of seconds, so seconds a second: `1` while the check is on
     and the helper up) averages at least `0.95` over the week: the mean of every hour's `avg`
-    since the start reading. Less, and the write-up says the walk was not tested for that share
+    since the start reading. Less, and the write-up says the check was not tested for that share
     of the week, and why, from the start line and the log.
   - **A log line during the week saying the check is off until `ms-probe` restarts is a
     finding: record it, and do not restart to clear it**, which is an intervention. It means a
@@ -442,34 +461,27 @@ The numbers that decide the criterion:
     `gai.conf`, `/etc/ld.so.preload`, the hostname's domain or an NSS module; on Ubuntu, most
     likely `systemd-resolved` rewriting its stub after a DHCP lease or netplan changed the search
     domains), and every name goes to the helper from then on. The line names the file and when,
-    and `nameCheckOnSeconds` falls short from that hour.
-  - `nameHelperStuck` (a counter, so lookups a second) is recorded, not judged: the hours whose
-    `max` is above `0`, each a lookup that `"system"` would have held one of the probe's own
-    lanes for.
-  - `nameQuestionsOpen` (the highest since the last heartbeat) is recorded as the highest hourly
-    `max` at each reading, beside the release notes' bound (about 24 in an outage, 42 at most).
-  - **The helper's memory**, at each reading, on each probe's host. Flat is the pass, judged as
-    `memory` is; an elapsed time shorter than the probe's own means the helper was replaced, and
-    that must match a loss in the probe's log:
-
-    ```bash
-    ps -o pid=,rss=,etimes= -p "$(pgrep -f 'ms-probe: lookups')"
-    ```
-  <!-- TODO(rc3-cut): the process title, the log's wording and the 95% rule are P-432 S3 and
-  S6's (design §5, "The field test's record"). Check them against the landed code, and each
-  channel's kind in packages/sensors/src/types/probe-health.ts: the design declares
-  nameCheckOnSeconds a Counter and namePassedStuck and nameHelperStuck Rates, which the core
-  stores as rates, as written above. One that landed as a gauge of a running total is judged by
-  its difference between two readings instead, nameCheckOnSeconds against uptime's. -->
-- **`lookupsGivenUp`, on every probe** (`P-426`; a counter, so lookups a second): at each reading,
-  the hours since the start reading whose `max` is above `0`, from the same hourly history, each
-  explained from the probe's log (the name and its zone). It is the only place Probe Health shows
-  a zone that stops answering: no limit moves the sensor for one (`P-441`, in the release notes'
-  *Also open*), so Probe Health can read Up all week while its devices' checks are given up.
-  Record `answersLoaded` once, after step 2's restart, and the highest hourly `max` of
+    `nameCheckState` reads `2` and `nameCheckOnSeconds` falls short from that hour.
+  - `nameHelperStuck` (lookups a second) is recorded, not judged: the hours whose `max` is above
+    `0`, each a lookup that `"system"` would have held one of the probe's own lanes for. So are
+    `nameLookupsHeard` and `nameLookupsToHelper`, as each hour's share of the two, and
+    `nameWalksDeferred`, whose hours above `0` the probe's log says the reason for.
+  - `nameQuestionsOpen` (the highest since the last heartbeat the core acknowledged) is recorded
+    as the highest hourly `max` at each reading, beside the release notes' bound (about 24 in an
+    outage, 40 at most).
+  - **The helper's memory**, `lookupHelperMemory`, in MB at the child's last beat. Flat is the
+    pass, judged as `memory` is, from the hourly averages, with the first hour after a restart
+    or a loss left out. A gap in it is a moment with no child, which `lookupHelperLosses` must
+    explain.
+- **`lookupsGivenUp` and `lookupsGivenUpRecently`, on every probe** (`P-426`, `P-441`).
+  `lookupsGivenUp` is a counter, so lookups a second: at each reading, the hours since the start
+  reading whose `max` is above `0`, from the same hourly history, each explained from the
+  probe's log (the name and its zone). `lookupsGivenUpRecently` counts the same checks over the
+  last five minutes and puts Probe Health in Warning from 100, with up to three of the domains
+  not answering in its message, which step 3's Warning trigger delivers: each such Warning is a
+  DNS outage the write-up explains, in either mode, and not a fault of the probe. Record
+  `answersLoaded` once, after step 2's restart, and the highest hourly `max` of
   `lookupsInFlight` beside it.
-  <!-- TODO(rc3-cut): if P-441 landed with S3, say here what it adds to Probe Health, or delete
-  this item with the release notes' P-441 item. -->
 
 ### After the end reading: the gate drill (`P-432`)
 
@@ -502,7 +514,7 @@ and runs on the same installation once with `"gate"` and once with `"system"`:
 
    Probe Health's `answersLoaded` then reads `0`; anything else, and the restart kept something.
 3. Wait two scan intervals, then record every sensor state change since the zones went silent,
-   from `GET /api/v1/state-log`, and the six Probe Health channels above.
+   from `GET /api/v1/state-log`, and the gate's Probe Health channels above.
 4. Restore both zones, set the other mode in that probe's `probe.json`, and repeat from 1: step
    2's restart applies it.
 
