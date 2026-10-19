@@ -14,7 +14,7 @@ import {
 } from '@ms/sensors';
 import { FORWARD_HOLD_MS, ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
-import { HELPER_LOST } from '../src/resolver/lookup-helper.js';
+import { HELPER_LOST, HelperLookupError } from '../src/resolver/lookup-helper.js';
 import {
   ANSWER_MS,
   HELPER_LOST_CODE,
@@ -654,6 +654,54 @@ describe('isolation and poison (P-432 S3, D27)', () => {
     assert.ok(helper.asksFor('later.zone-d.test').length === 1, 'and the rest go');
     helper.last('later.zone-d.test').answer();
     for (const got of await Promise.all([...waits, later])) assert.ok(got.ok);
+  });
+
+  it('N11: a stuck suspect holds its lane: the next suspect goes only within its class’s cap (LR7 I3)', async () => {
+    const { helper, ask, clock, resolver } = make();
+    const names = ['r1.zone-a.test', 'r2.zone-b.test'];
+    // Each held once, so that it is asked again on the retry lane.
+    for (const name of names) {
+      const first = outcome(ask(name));
+      helper.last(name).fail('EAI_AGAIN');
+      await first;
+    }
+    // Each lost with a child while isolating, so a suspect, and held again by its late answer.
+    for (const name of names) {
+      clock.now += 120_000;
+      const asked = outcome(ask(name, 4, { waitMs: 60_000 }));
+      const sent = helper.last(name);
+      helper.isolatingNow = true;
+      helper.lose('exit', 'rejoining', { suspects: true });
+      await settled();
+      assert.ok(sent.ref !== undefined);
+      resolver.onHelperLateAnswer(sent.ref, {
+        ok: false,
+        error: new HelperLookupError(`getaddrinfo EAI_AGAIN ${name}`, 'EAI_AGAIN', 3),
+      });
+      await asked;
+      helper.move('up');
+    }
+    // Both asked again: two suspects of the retry class, sent alone while isolating.
+    clock.now += 120_000;
+    helper.isolatingNow = true;
+    helper.move('rejoining', { state: 'backoff' });
+    const waits = names.map((name) => outcome(ask(name, 4, { waitMs: 60_000 })));
+    helper.move('up');
+    assert.equal(helper.inFlight().length, 1, 'one suspect alone');
+    const [sent] = helper.inFlight();
+    assert.ok(sent?.suspect === true);
+    sent.stuck();
+    await settled();
+    assert.equal(helper.inFlight().length, 1, 'stuck, yet the retry lane is still its');
+    sent.answer();
+    await settled();
+    assert.equal(helper.inFlight().length, 1, 'its end lets the next go');
+    assert.equal(helper.inFlight()[0]?.suspect, true);
+    helper.inFlight()[0]?.answer();
+    const [one, two] = await Promise.all(waits);
+    assert.ok(one?.ok === true);
+    // The second's check stopped waiting once its one lane's holder was stuck (§1.8's fail fast).
+    assert.ok(two?.ok === false && codeOf(two.error) === RESOLVER_STUCK);
   });
 
   it('N11: the one charged fails naming the crash, and while the helper rests its name fails at once', async () => {

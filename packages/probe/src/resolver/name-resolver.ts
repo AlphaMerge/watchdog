@@ -2308,10 +2308,14 @@ export class NameResolver implements PoolResolver {
     if (running.some((pending) => pending.poisonAsk && !pending.stuck)) return undefined;
     if (gate.helper.isolating()) {
       if (running.some((pending) => pending.suspect && !pending.stuck)) return undefined;
+      // One at a time, and within its class's cap: a stuck suspect holds its lane as any lookup
+      // does (LR7 I3).
+      const alone = (cls: LaneClass) => (p: Pending) =>
+        p.suspect && (p.urgent || this.#canRun(gate.lanes, cls));
       const suspect =
-        this.#takeNext(gate.lanes, 'first', (p) => p.suspect) ??
-        this.#takeNext(gate.lanes, 'retry', (p) => p.suspect) ??
-        this.#takeNext(gate.lanes, 'refresh', (p) => p.suspect);
+        this.#takeNext(gate.lanes, 'first', alone('first')) ??
+        this.#takeNext(gate.lanes, 'retry', alone('retry')) ??
+        this.#takeNext(gate.lanes, 'refresh', alone('refresh'));
       if (suspect !== undefined) {
         const token = suspect.token ?? this.#takeToken(gate, suspect, 'shared');
         if (token !== undefined) return { pending: suspect, token };
