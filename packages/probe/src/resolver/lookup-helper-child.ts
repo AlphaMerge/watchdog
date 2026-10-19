@@ -190,26 +190,69 @@ export function parseHelperChildArgs(argv: readonly string[]): HelperChildArgs |
 }
 
 /**
- * A read-once file's digest (D28): sha256 of its bytes, `absent` when it does not exist, and
- * `unreadable:<code>` otherwise. The policy records the probe's at start, and the child its own:
- * the two must agree, or the two processes read different files.
+ * **The digest of a system file** (D28): the one function behind every digest the gate compares,
+ * the child's own reading of each read-once file (`readOnceDigest`), the probe's policy and its
+ * resolver's watch (re-exported by system-names.ts), so that the strings the parent compares are
+ * made by one rule and agree to the character. A read is one of three forms:
+ * - **read**: sha256, in lower-case hex, of the bytes as read (a string is taken as its UTF-8
+ *   bytes), so an empty file is e3b0c442…b855;
+ * - **absent** (ENOENT): `DIGEST_ABSENT`, the word `absent`;
+ * - **unreadable** for any other reason: `unreadable:<code>`, or `unreadable:unknown` with none.
+ */
+export function digestOf(content: string | Uint8Array): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+/** The digest of a file that could not be read for another reason than its absence, by its code. */
+export function unreadableDigest(code: string | undefined): string {
+  return `unreadable:${code ?? 'unknown'}`;
+}
+
+/** The digest of a read that failed, by its error: `DIGEST_ABSENT` or `unreadable:<code>`. */
+export function digestOfError(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return code === 'ENOENT'
+    ? DIGEST_ABSENT
+    : unreadableDigest(typeof code === 'string' ? code : undefined);
+}
+
+/**
+ * A read-once file's digest (D28), by `digestOf`'s rule. The policy records the probe's at start,
+ * and the child its own: the two must agree, or the two processes read different files.
  */
 export async function readOnceDigest(file: string): Promise<string> {
   try {
-    return createHash('sha256')
-      .update(await readFile(file))
-      .digest('hex');
+    return digestOf(await readFile(file));
   } catch (error: unknown) {
-    const code = (error as { code?: unknown } | null)?.code;
-    if (code === 'ENOENT') return DIGEST_ABSENT;
-    return `unreadable:${typeof code === 'string' ? code : 'unknown'}`;
+    return digestOfError(error);
   }
 }
 
-/** glibc's runtime version, as Node's diagnostic report gives it, or null off glibc. */
+/**
+ * glibc's runtime version from `process.report`, or null off glibc: the one reading of it, the
+ * child's `ready`, the probe's `helperSelf` and its policy. **With the report's network section
+ * left out**: otherwise `getReport` asks the name of every open socket's peer, synchronously on
+ * the calling thread (Node's src/node_report_utils.cc `ReportEndpoint`), which on the probe's
+ * main thread waits on DNS exactly when it is silent. The setting is put back as it was.
+ */
 export function glibcRuntime(): string | null {
-  const report = process.report.getReport() as { header?: { glibcVersionRuntime?: unknown } };
-  const version = report.header?.glibcVersionRuntime;
+  const reporter = process.report as NodeJS.ProcessReport & {
+    excludeNetwork?: boolean | undefined;
+  };
+  const before = reporter.excludeNetwork;
+  reporter.excludeNetwork = true;
+  let report: unknown;
+  try {
+    report = reporter.getReport();
+  } finally {
+    reporter.excludeNetwork = before;
+  }
+  if (typeof report !== 'object' || report === null || !('header' in report)) return null;
+  const header: unknown = report.header;
+  if (typeof header !== 'object' || header === null || !('glibcVersionRuntime' in header)) {
+    return null;
+  }
+  const version: unknown = header.glibcVersionRuntime;
   return typeof version === 'string' ? version : null;
 }
 

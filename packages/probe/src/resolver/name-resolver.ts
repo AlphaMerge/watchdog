@@ -16,9 +16,46 @@ import {
   type ResolveOptions,
 } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
-import { firstLoad, heldBy, probeFirstRule, type HeldBy, type KeyRule } from './lane-rule.js';
+import { ForwardBudget, questionsOf, type GaiToken, type TokenKind } from './forward-budget.js';
+import {
+  admitHelper,
+  candidateKey,
+  firstLoad,
+  gateFirstRule,
+  heldBy,
+  helperKeyOk,
+  helperRiskOk,
+  helperUngated,
+  HelperKeys,
+  KEY_QUIET,
+  keyWords,
+  probeFirstRule,
+  RISK_T,
+  type HeldBy,
+  type HelperAdmitAsk,
+  type HelperOutcome,
+  type HelperToken,
+  type KeyRule,
+} from './lane-rule.js';
+// Types only: the helper's module imports this one's values (`STUCK_MS`), so a value imported
+// back would be read before it is made.
+import type {
+  HelperAnswer,
+  HelperChange,
+  HelperLostError,
+  HelperPort,
+  LateOutcome,
+  RouteState,
+} from './lookup-helper.js';
 import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './protocol.js';
-import { digestOf, digestOfError } from './system-names.js';
+import {
+  digestOf,
+  digestOfError,
+  readNsswitch,
+  type PolicyChange,
+  type SystemNamePolicy,
+} from './system-names.js';
+import { afterPolls, LATE_MS } from './verdict-timer.js';
 
 /**
  * The probe's one resolver (`P-426`): every name a check resolves to check it, asked once and kept
@@ -144,6 +181,12 @@ const FORGET_SLACK_MS = 250;
 const HOLD_WARN_EVERY_MS = 60_000;
 /** What `getaddrinfo` answers when a name has no address: the only failures kept as denials. */
 const NO_ADDRESS: ReadonlySet<string> = new Set(['ENOTFOUND', 'ENODATA']);
+/** How often gate mode looks at its clocks: the time with the check on, poison names due. */
+export const GATE_TICK_MS = 1_000;
+/** How often gate mode logs its summary. */
+export const GATE_SUMMARY_MS = 3_600_000;
+/** The domains Probe Health names as not answering (`P-441`). */
+export const NOT_ANSWERING_NAMED = 3;
 
 export type Family = 0 | 4 | 6;
 
@@ -153,8 +196,51 @@ export type SystemLookup = (host: string, family: Family) => Promise<readonly Re
 /** Which lanes a lookup may use. */
 type LaneClass = 'first' | 'refresh' | 'retry';
 
+/** Which lane set runs a lookup (`P-432`): the probe's own, or the lookup helper's. */
+type Pool = 'probe' | 'helper';
+
+/**
+ * How gate mode routed a lookup (`P-432` §1.3, S3): `local` when the policy says glibc answers it
+ * without the network, run on the probe's lanes; `unvouched` for everything else, since the walk
+ * that could vouch for a name is `S6`'s, run in the lookup helper while it is up, and on the
+ * probe's lanes under the domain's first-lane rule (D24) while it is down or resting.
+ */
+export type GateRoute = 'local' | 'unvouched';
+
+/**
+ * What gate mode is built from (`P-432` S3): the lookup helper the probe starts, and the system's
+ * name policy, which says which names glibc answers without the network and which files it reads
+ * once. In `system` mode none of it exists, and every branch that reads it is dead.
+ */
+export interface GateParts {
+  readonly helper: HelperPort;
+  readonly policy: SystemNamePolicy;
+  /** The question budget: a new one on the resolver's clock unless a test hands one in. */
+  readonly budget?: ForwardBudget;
+  /** What the helper knows of each key: a new one unless a test hands one in. */
+  readonly keys?: HelperKeys;
+  /** How often its clocks are looked at: `GATE_TICK_MS` unless a test says. */
+  readonly tickMs?: number;
+  /** A monotonic clock for the stuck timer's lateness (D25): real time unless a test says. */
+  readonly realNow?: () => number;
+}
+
+/** What gate mode has done since the probe started, for Probe Health and the log. */
+export interface GateHealth {
+  /** 2 while the helper serves its route, 3 while it rests and the probe resolves as `system`. */
+  readonly mode: 2 | 3;
+  /** Seconds with the check on (the policy vouching) and the helper up: a running total. */
+  readonly checkOnSeconds: number;
+  /** Probe-lane `local` lookups past `STUCK_MS`, judged after polls (D25): a running total. */
+  readonly passedStuck: number;
+  /** Helper lookups the child said were stuck: a running total. */
+  readonly helperStuck: number;
+}
+
 export interface NameResolverOptions {
   readonly logger: Logger;
+  /** Gate mode (`P-432`), with what it is built from. Absent: `system` mode, `P-426` with `P-438`. */
+  readonly gate?: GateParts;
   /** What asks the system. `systemResolve` (getaddrinfo) unless a test hands one in. */
   readonly lookup?: SystemLookup;
   /** A monotonic clock in milliseconds. `performance.now` unless a test hands one in. */
@@ -279,6 +365,11 @@ interface Entry {
    */
   lastAnsweredAt: number | undefined;
   pending: Pending | undefined;
+  /**
+   * Gate mode: the lookup helper named it a suspect at a crash it had run past `STUCK_MS` in
+   * (D27), so its next lookup is sent alone while the helper isolates.
+   */
+  suspect: boolean;
 }
 
 interface Waiter {
@@ -304,6 +395,81 @@ interface Pending {
   stuck: boolean;
   stuckTimer: NodeJS.Timeout | undefined;
   readonly waiters: Set<Waiter>;
+  /** Gate mode: the lane set it is queued on or runs on. Always the probe's in `system` mode. */
+  pool: Pool;
+  /** Gate mode: how it was routed. */
+  route: GateRoute;
+  /** Gate mode: the key the helper judges it by (`candidateKey`). */
+  readonly key: string;
+  /** Gate mode: the helper token it holds, carried across a loss (D7). */
+  token: GaiToken | undefined;
+  /** Gate mode: detached when the helper went quiet (D26): it no longer stands for its name. */
+  detached: boolean;
+  /** Gate mode: sent alone while the helper isolates (D27). */
+  suspect: boolean;
+  /** Gate mode: a poison name's hourly ask, sent alone in the helper (D27). */
+  poisonAsk: boolean;
+  /** Gate mode: a probe-lane DNS lookup past `STUCK_MS` after polls, counted in U (D25). */
+  untokened: boolean;
+  /** Gate mode: ungated when it started in the helper, which the kept token needs (I8). */
+  ungated: boolean;
+  /** When its stuck timer was set, on a real clock: how late it fired (D25). */
+  armedAt: number;
+}
+
+/**
+ * One of `P-426`'s lane sets: the probe's, or in gate mode the lookup helper's, which is a second
+ * copy with the same classes and caps (`P-432` §1.8).
+ */
+interface LaneSet {
+  readonly pool: Pool;
+  readonly queues: Record<LaneClass, Pending[]>;
+  readonly running: Record<LaneClass, Set<Pending>>;
+  /** "Check now"'s lookups still queued. */
+  urgentQueued: number;
+  readonly sharedCap: number;
+  readonly firstCap: number;
+  readonly refreshCap: number;
+}
+
+function laneSet(pool: Pool, lanes: number): LaneSet {
+  return {
+    pool,
+    queues: { first: [], refresh: [], retry: [] },
+    running: { first: new Set(), refresh: new Set(), retry: new Set() },
+    urgentQueued: 0,
+    sharedCap: lanes - 1,
+    firstCap: lanes - 2,
+    refreshCap: lanes - 2,
+  };
+}
+
+/** The parts of gate mode the resolver keeps, made whole. */
+interface Gate {
+  readonly helper: HelperPort;
+  readonly policy: SystemNamePolicy;
+  readonly budget: ForwardBudget;
+  readonly keys: HelperKeys;
+  readonly lanes: LaneSet;
+  /** Helper lookups running on any token for "Check now": outside the classes' caps. */
+  readonly urgentRunning: Set<Pending>;
+  readonly tickMs: number;
+  readonly realNow: () => number;
+  /** A poison name's hourly ask, waiting for the helper to have nothing else in flight. */
+  poisonWaiting: Pending | undefined;
+  checkOnMs: number;
+  checkOnSince: number | undefined;
+  passedStuck: number;
+  helperStuck: number;
+  /** The route at the last change, to tell a move. */
+  route: RouteState;
+  tick: NodeJS.Timeout | undefined;
+  lastSummaryAt: number;
+  /** For the hourly summary: what was routed where, and the highest at risk, since the last. */
+  readonly routed: Record<'local' | 'helper' | 'probe' | 'faulted' | 'resting', number>;
+  riskPeak: number;
+  /** What the policy was last told the hosts file says, for the first look. */
+  loaded: boolean;
 }
 
 /**
@@ -393,34 +559,21 @@ function isNsswitch(file: string): boolean {
   return file.split(/[\\/]/u).at(-1)?.toLowerCase() === 'nsswitch.conf';
 }
 
-/** Sources of a `hosts` line that never ask DNS, which glibc passes by for any other name. */
-const LOCAL_SOURCES = new Set(['myhostname', 'mymachines']);
-
 /**
  * Whether a name the hosts file gives is answered from it before DNS is asked, by nsswitch.conf's
- * `hosts` line as glibc reads it (`P-438`'s narrow check): the last `hosts` line, its name ended
- * at a blank or a colon, either way; a `#` ending any line; actions in brackets left out, and a
- * list that starts with one read as none. The file is read first when `files` comes before any
- * source that asks DNS, with only `myhostname` or `mymachines` ahead of it, or when `resolve`
- * does, since systemd-resolved answers the hosts file's names itself. Any other source, `dns`,
- * `mdns4_minimal` or `nis`, is taken as asking DNS. A file without a `hosts` line, or none at
- * all, is glibc's default, `dns [!UNAVAIL=return] files`: DNS first.
+ * `hosts` line (`P-438`'s narrow check), read by the probe's one reader of that file
+ * (`readNsswitch`, `P-432` S4): the line is found as every glibc from 2.28 to 2.42 finds it, and
+ * taken only as `files dns`, `files dns myhostname` or `files myhostname dns`, each of which reads
+ * the file first. **Any other line is taken as asking DNS first**, as glibc's built-in default
+ * does: a shape the reader does not vouch for, such as `files mdns4_minimal [NOTFOUND=return] dns`
+ * or one with two hosts lines, which glibc versions read apart, never exempts a name from its
+ * domain's first lanes or keeps it out of the answer file (decided 2026-10-19, under the user's
+ * delegation: one nsswitch reader in the probe). That direction only costs such a name the
+ * exemption; the other would let a lookup that asks DNS take a lane its domain's rule refused.
  */
 export function hostsFileFirst(text: string): boolean {
-  let list: string | undefined;
-  for (const raw of text.split(/\r?\n/u)) {
-    const match = /^\s*([^\s:]+)[\s:]*(.*)$/u.exec(raw.replace(/#.*$/u, ''));
-    if (match?.[1] === 'hosts') list = match[2] ?? '';
-  }
-  if (list === undefined || list.trimStart().startsWith('[')) return false;
-  for (const source of list
-    .replace(/\[[^\]]*\]/gu, ' ')
-    .trim()
-    .split(/\s+/u)) {
-    if (source === 'files' || source === 'resolve') return true;
-    if (!LOCAL_SOURCES.has(source)) return false;
-  }
-  return false;
+  const line = readNsswitch(text);
+  return line.ok && line.value.startsWith('files ');
 }
 
 /**
@@ -554,6 +707,47 @@ function failure(code: string, message: string): ResolveOutcome {
   return { ok: false, code, message };
 }
 
+/** `HELPER_LOST` (lookup-helper.ts), the code a lookup the helper no longer has is rejected with. */
+export const HELPER_LOST_CODE = 'ERESOLVERHELPERLOST';
+
+/** A `HelperLostError`, told by its code: the helper's module cannot be imported for its values. */
+function isHelperLost(error: unknown): error is HelperLostError {
+  return (error as { code?: unknown } | null | undefined)?.code === HELPER_LOST_CODE;
+}
+
+/** How a lookup ended, as `#settle` reads it. */
+type Settled =
+  | { readonly addresses: readonly ResolvedAddress[]; readonly total?: number }
+  | { readonly error: unknown }
+  | { readonly fault: unknown }
+  /** A failure that says nothing of the name: told to its checks, nothing kept (gate mode). */
+  | { readonly passed: { readonly code: string; readonly why: string } }
+  /** Lost with the lookup helper after the child said it was stuck: held, and said so. */
+  | { readonly held: string };
+
+/** Why a queued helper lookup fails fast, and what holds it (§1.8). */
+interface HelperBlock {
+  readonly condition: 'key' | 'unit' | 'risk' | 'class' | 'token';
+  readonly lookups: readonly Pending[];
+  /** Ghosts and U among the blockers: each stuck. */
+  readonly ghosts: number;
+}
+
+function queuedIn(set: LaneSet): number {
+  return set.queues.first.length + set.queues.refresh.length + set.queues.retry.length;
+}
+
+/** How many of the shared lanes a class may hold: each leaves the other one. */
+function capOf(set: LaneSet, cls: 'first' | 'refresh'): number {
+  return cls === 'first' ? set.firstCap : set.refreshCap;
+}
+
+/** Every helper lookup running, "Check now"'s with them. */
+function helperRunning(gate: Gate): Pending[] {
+  const { running } = gate.lanes;
+  return [...running.first, ...running.refresh, ...running.retry, ...gate.urgentRunning];
+}
+
 export class NameResolver implements PoolResolver {
   readonly #logger: Logger;
   readonly #lookup: SystemLookup;
@@ -596,8 +790,6 @@ export class NameResolver implements PoolResolver {
   readonly #failing = new Map<Entry, number>();
   /** Names counted in `#failing`, over every domain. */
   #failingNames = 0;
-  /** "Check now"'s lookups still queued. */
-  #urgentQueued = 0;
   /** Moved on by a change to the resolver's configuration: what a lookup was asked under. */
   #generation = 0;
   /** What each watched file said at the last look. */
@@ -608,12 +800,12 @@ export class NameResolver implements PoolResolver {
   #events = 0;
   /** What `watch.onLook` was last told of each file: its digest. */
   readonly #told = new Map<string, string>();
-  readonly #queues: Record<LaneClass, Pending[]> = { first: [], refresh: [], retry: [] };
-  readonly #running: Record<LaneClass, Set<Pending>> = {
-    first: new Set(),
-    refresh: new Set(),
-    retry: new Set(),
-  };
+  /** The probe's own lanes: `P-426`'s lane set. */
+  readonly #probe: LaneSet;
+  /** Gate mode (`P-432`): undefined in `system` mode. */
+  readonly #gate: Gate | undefined;
+  /** Whether `firstLook` took the watch's baseline, so `start` need not. */
+  #firstLooked = false;
   #watchTimer: NodeJS.Timeout | undefined;
   /** Each pumps the queue when the `STUCK_MS` after a lookup ended stuck is over (`#endedStuck`). */
   readonly #windowTimers = new Set<NodeJS.Timeout>();
@@ -640,11 +832,46 @@ export class NameResolver implements PoolResolver {
     this.#sharedCap = lanes - 1;
     this.#firstCap = lanes - 2;
     this.#refreshCap = lanes - 2;
-    this.#firstRule = probeFirstRule(this.#firstCap, this.#sharedCap);
+    this.#probe = laneSet('probe', lanes);
+    // One lane rule (D24, decided 2026-10-19): gate mode's is `P-438`'s, and only the load differs.
+    this.#firstRule =
+      options.gate === undefined
+        ? probeFirstRule(this.#firstCap, this.#sharedCap)
+        : gateFirstRule(this.#firstCap, this.#sharedCap);
+    const gate = options.gate;
+    this.#gate =
+      gate === undefined
+        ? undefined
+        : {
+            helper: gate.helper,
+            policy: gate.policy,
+            budget: gate.budget ?? new ForwardBudget({ now: this.#now }),
+            keys: gate.keys ?? new HelperKeys(),
+            // A second copy of `P-426`'s lane set (§1.8): the child has lanes enough for it.
+            lanes: laneSet('helper', RESOLVER_LANES),
+            urgentRunning: new Set(),
+            tickMs: gate.tickMs ?? GATE_TICK_MS,
+            realNow: gate.realNow ?? (() => performance.now()),
+            poisonWaiting: undefined,
+            checkOnMs: 0,
+            checkOnSince: undefined,
+            passedStuck: 0,
+            helperStuck: 0,
+            route: gate.helper.routeState(),
+            tick: undefined,
+            lastSummaryAt: this.#now(),
+            routed: { local: 0, helper: 0, probe: 0, faulted: 0, resting: 0 },
+            riskPeak: 0,
+            loaded: false,
+          };
     // Past the longest hold, an answer's life and its grace: a name a scan still checks has been
     // asked within it.
     this.#countFailingMs = this.#holdMaxMs + this.#answerMs + this.#staleMs;
-    this.#watch = options.watch ?? { files: systemResolverFiles(), everyMs: WATCH_EVERY_MS };
+    // In gate mode the policy's files too (§1.12): gai.conf beside the three `P-438` watches.
+    this.#watch = options.watch ?? {
+      files: [...systemResolverFiles(), ...(gate?.policy.watchedFiles() ?? [])],
+      everyMs: WATCH_EVERY_MS,
+    };
   }
 
   /**
@@ -653,8 +880,9 @@ export class NameResolver implements PoolResolver {
    * it is acted on by `checkFiles`.
    */
   start(): void {
+    this.#startGate();
     if (this.#watchTimer !== undefined || this.#watch.files.length === 0) return;
-    void this.checkFiles();
+    if (!this.#firstLooked) void this.checkFiles();
     this.#watchTimer = setInterval(() => void this.checkFiles(), this.#watch.everyMs);
     this.#watchTimer.unref();
   }
@@ -662,6 +890,10 @@ export class NameResolver implements PoolResolver {
   stop(): void {
     clearInterval(this.#watchTimer);
     this.#watchTimer = undefined;
+    if (this.#gate !== undefined) {
+      clearInterval(this.#gate.tick);
+      this.#gate.tick = undefined;
+    }
     for (const timer of this.#windowTimers) clearTimeout(timer);
     this.#windowTimers.clear();
   }
@@ -718,6 +950,7 @@ export class NameResolver implements PoolResolver {
       }
       this.#view = viewOf(this.#seen);
       if (!changed) {
+        await this.#loadPolicy(looked);
         await this.#tell(readings);
         return false;
       }
@@ -756,6 +989,8 @@ export class NameResolver implements PoolResolver {
           count.stuckAt = undefined;
           count.stuckSeq = 0;
         }
+        // Nor what the helper's keys said (§1.12): its lookups running count against no key.
+        this.#gate?.keys.detachAll();
       }
       this.#logger.info(
         {
@@ -769,15 +1004,37 @@ export class NameResolver implements PoolResolver {
       );
       // What held a queued lookup back may be gone: a domain's history, or a name not the file's.
       this.#pump();
+      await this.#loadPolicy(looked);
       await this.#tell(readings);
+      if (this.#gate !== undefined) {
+        this.#logger.info(
+          { ...this.#gate.policy.describe() },
+          'the name policy after the change: what the gate routes by',
+        );
+      }
       return true;
     } finally {
       this.#watching = false;
     }
   }
 
-  /** `watch.onLook`, told what this look read; its failure fails nothing here. */
+  /**
+   * `watch.onLook`, told what this look read; its failure fails nothing here. In gate mode the
+   * name policy is told first (§1.12), and a read-once file that moved skews the helper (D28).
+   */
   async #tell(readings: readonly WatchedReading[]): Promise<void> {
+    const gate = this.#gate;
+    if (gate !== undefined) {
+      try {
+        this.#accrueCheckOn(gate, this.#now());
+        this.#policyMoved(gate, await gate.policy.looked(readings));
+      } catch (error: unknown) {
+        this.#logger.error(
+          { err: error },
+          'what a watched file says could not reach the name policy',
+        );
+      }
+    }
     const onLook = this.#watch.onLook;
     if (onLook === undefined) return;
     try {
@@ -902,9 +1159,11 @@ export class NameResolver implements PoolResolver {
     return counts;
   }
 
+  /** In gate mode, both lane sets: every lookup asked for is in flight, wherever it runs. */
   stats(): NameResolverStats {
+    const gate = this.#gate;
     const running =
-      this.#running.first.size + this.#running.refresh.size + this.#running.retry.size;
+      this.#probeRunning().length + (gate === undefined ? 0 : helperRunning(gate).length);
     return { running, queued: this.#queuedCount(), entries: this.#entries.size };
   }
 
@@ -1058,6 +1317,13 @@ export class NameResolver implements PoolResolver {
 
     let pending = entry.pending;
     if (pending === undefined) {
+      // Gate mode: a poison name, or one the probe's own `getaddrinfo` must not be asked for while
+      // the helper cannot (§1.3 row 0).
+      const refusal = this.#gateRefusal(entry);
+      if (refusal !== undefined) {
+        if (this.#gate !== undefined) this.#gate.routed.faulted += 1;
+        return { now: this.#unanswered(entry, fresh, now, RESOLVER_FAULT, refusal) };
+      }
       pending = this.#start(entry, fresh || entry.failures === 0 ? 'first' : 'retry', fresh);
     } else if (fresh && pending.state === 'queued') {
       this.#promote(pending);
@@ -1112,6 +1378,7 @@ export class NameResolver implements PoolResolver {
       failures: 0,
       lastAnsweredAt: undefined,
       pending: undefined,
+      suspect: false,
     };
     this.#entries.set(key, entry);
     const domain = this.#domains.get(entry.domain) ?? {
@@ -1166,7 +1433,7 @@ export class NameResolver implements PoolResolver {
    * silent zone is asked at its next check.
    */
   #heldBack(pending: Pending): HeldBy | undefined {
-    if (pending.cls !== 'first' || pending.urgent) return undefined;
+    if (pending.cls !== 'first' || pending.urgent || pending.pool !== 'probe') return undefined;
     const entry = pending.entry;
     if (hostsGive(this.#view, entry.host, entry.family)) return undefined;
     const load = firstLoad({
@@ -1174,10 +1441,11 @@ export class NameResolver implements PoolResolver {
       history: this.#domains.get(entry.domain),
       now: this.#now(),
       stuckMs: this.#stuckMs,
-      running: this.#running,
-      refreshQueued: this.#queues.refresh.length,
+      running: this.#probe.running,
+      refreshQueued: this.#probe.queues.refresh.length,
       refreshCap: this.#refreshCap,
-      helperStuck: 0,
+      // Gate mode (D24): the domain's helper lookups the child said are stuck cap it too.
+      helperStuck: this.#gate === undefined ? 0 : this.#helperStuckOf(this.#gate, entry.domain),
       answering: this.#answeringOf,
     });
     return heldBy(load, this.#firstRule);
@@ -1225,7 +1493,7 @@ export class NameResolver implements PoolResolver {
 
   /** The first lookups running of a pending lookup's domain: what one held back waits for. */
   #domainRunning(pending: Pending): Pending[] {
-    return [...this.#running.first].filter(
+    return [...this.#probe.running.first].filter(
       (running) => running.entry.domain === pending.entry.domain,
     );
   }
@@ -1318,6 +1586,11 @@ export class NameResolver implements PoolResolver {
 
   /** Why a queued lookup's check fails at once: the lanes it could take, and theirs. */
   #stuckWhy(pending: Pending): string {
+    const gate = this.#gate;
+    if (pending.pool === 'helper' && gate !== undefined) {
+      const block = this.#helperBlocked(gate, pending);
+      if (block !== undefined) return this.#helperWhy(gate, pending, block);
+    }
     const host = pending.entry.host;
     const lanes = this.#blockers(pending)
       .slice(0, 3)
@@ -1360,6 +1633,7 @@ export class NameResolver implements PoolResolver {
   /** A refresh, or a held name's retry, that nobody waits for. Not when one is on its way. */
   #background(entry: Entry, now: number): void {
     if (entry.pending !== undefined || this.#held(entry, now)) return;
+    if (this.#gateRefusal(entry) !== undefined) return;
     const pending = this.#start(entry, entry.failures > 0 ? 'retry' : 'refresh');
     if (pending === undefined) {
       this.#logger.warn(
@@ -1370,12 +1644,30 @@ export class NameResolver implements PoolResolver {
   }
 
   #queuedCount(): number {
-    return this.#queues.first.length + this.#queues.refresh.length + this.#queues.retry.length;
+    return queuedIn(this.#probe) + (this.#gate === undefined ? 0 : queuedIn(this.#gate.lanes));
+  }
+
+  /** The lane set a lookup is queued on or runs on. */
+  #setOf(pending: Pending): LaneSet {
+    return pending.pool === 'helper' && this.#gate !== undefined ? this.#gate.lanes : this.#probe;
+  }
+
+  /** The running set a lookup is in while it runs: "Check now"'s in the helper are apart. */
+  #runningOf(pending: Pending): Set<Pending> {
+    const gate = this.#gate;
+    if (pending.pool === 'helper' && gate !== undefined) {
+      return pending.urgent ? gate.urgentRunning : gate.lanes.running[pending.cls];
+    }
+    return this.#probe.running[pending.cls];
   }
 
   /** A new lookup for an entry, queued and started if a lane is free; undefined if full. */
   #start(entry: Entry, cls: LaneClass, urgent = false): Pending | undefined {
-    if (this.#queuedCount() >= this.#maxQueued && !this.#canRun(cls)) return undefined;
+    const gate = this.#gate;
+    const route = gate === undefined ? 'unvouched' : this.#routeOf(gate, entry);
+    const pool = gate === undefined ? 'probe' : this.#poolFor(gate, route);
+    const set = pool === 'helper' && gate !== undefined ? gate.lanes : this.#probe;
+    if (this.#queuedCount() >= this.#maxQueued && !this.#canRun(set, cls)) return undefined;
     const pending: Pending = {
       entry,
       cls,
@@ -1387,29 +1679,49 @@ export class NameResolver implements PoolResolver {
       stuck: false,
       stuckTimer: undefined,
       waiters: new Set(),
+      pool,
+      route,
+      key: gate === undefined ? '' : candidateKey(entry.host),
+      token: undefined,
+      detached: false,
+      suspect: pool === 'helper' && entry.suspect,
+      poisonAsk: false,
+      untokened: false,
+      ungated: false,
+      armedAt: 0,
     };
     entry.pending = pending;
-    if (urgent) this.#urgentQueued += 1;
-    this.#queues[cls].push(pending);
+    if (gate !== undefined) {
+      gate.routed[pool === 'helper' ? 'helper' : route === 'local' ? 'local' : 'probe'] += 1;
+      if (gate.helper.routeState() === 'resting') gate.routed.resting += 1;
+      this.#logger.debug(
+        { host: entry.host, family: entry.family, route, key: pending.key, pool },
+        'routed a lookup',
+      );
+    }
+    if (urgent) set.urgentQueued += 1;
+    set.queues[cls].push(pending);
     this.#pump();
     return pending;
   }
 
   /**
    * "Check now" joining a lookup still queued: moved to the first lookups' lanes, ahead of every
-   * other, so that it never waits behind held names' retries.
+   * other, so that it never waits behind held names' retries. In the helper it becomes urgent
+   * there, and takes an urgent token when one is free (§1.3).
    */
   #promote(pending: Pending): void {
-    const queue = this.#queues[pending.cls];
+    const set = this.#setOf(pending);
+    const queue = set.queues[pending.cls];
     const at = queue.indexOf(pending);
     if (at === -1) return;
     queue.splice(at, 1);
     pending.cls = 'first';
     if (!pending.urgent) {
       pending.urgent = true;
-      this.#urgentQueued += 1;
+      set.urgentQueued += 1;
     }
-    this.#queues.first.push(pending);
+    set.queues.first.push(pending);
     this.#pump();
   }
 
@@ -1417,20 +1729,25 @@ export class NameResolver implements PoolResolver {
    * The queued lookup a free lane of this class takes: "Check now"'s first, then the name whose
    * domain has the least of its names failing, its own failure left out, then, among retries, the
    * name with the fewest failures in a row and then the one that answered most recently, then the
-   * oldest. With nothing failing and no "Check now", the oldest. Never a first lookup held back
-   * (`P-438`): undefined when every one queued is.
+   * oldest. With nothing failing and no "Check now", the oldest. Never one `mayTake` refuses: on
+   * the probe's lanes a first lookup held back (`P-438`), in the helper one its admission refuses
+   * (§1.8). Undefined when every one queued is refused.
    */
-  #takeNext(cls: LaneClass): Pending | undefined {
-    const queue = this.#queues[cls];
+  #takeNext(
+    set: LaneSet,
+    cls: LaneClass,
+    mayTake: (pending: Pending) => boolean,
+  ): Pending | undefined {
+    const queue = set.queues[cls];
     // A first lookup whose domain holds all it may, or that would take the last shared lane from
     // the other domains, waits (`P-438`).
-    let best = queue.findIndex((pending) => this.#heldBack(pending) === undefined);
+    let best = queue.findIndex(mayTake);
     if (best === -1) return undefined;
-    if (queue.length > 1 && (this.#failingNames > 0 || this.#urgentQueued > 0)) {
+    if (queue.length > 1 && (this.#failingNames > 0 || set.urgentQueued > 0)) {
       let bestRank: number[] | undefined;
       for (const [index, pending] of queue.entries()) {
         // Those before the first that may run are each held back.
-        if (index < best || (index > best && this.#heldBack(pending) !== undefined)) continue;
+        if (index < best || (index > best && !mayTake(pending))) continue;
         const entry = pending.entry;
         const rank = [
           pending.urgent ? 0 : 1,
@@ -1448,19 +1765,25 @@ export class NameResolver implements PoolResolver {
       }
     }
     const [next] = queue.splice(best, 1);
-    if (next?.urgent === true) this.#urgentQueued -= 1;
+    if (next?.urgent === true) set.urgentQueued -= 1;
     return next;
   }
 
-  #canRun(cls: LaneClass): boolean {
-    if (cls === 'retry') return this.#running.retry.size < 1;
-    const shared = this.#running.first.size + this.#running.refresh.size;
-    return this.#running[cls].size < this.#capOf(cls) && shared < this.#sharedCap;
+  /** Takes one lookup out of its queue, wherever it is in it. */
+  #unqueue(pending: Pending): boolean {
+    const set = this.#setOf(pending);
+    const queue = set.queues[pending.cls];
+    const at = queue.indexOf(pending);
+    if (at === -1) return false;
+    queue.splice(at, 1);
+    if (pending.urgent) set.urgentQueued -= 1;
+    return true;
   }
 
-  /** How many of the shared lanes a class may hold: each leaves the other one. */
-  #capOf(cls: 'first' | 'refresh'): number {
-    return cls === 'first' ? this.#firstCap : this.#refreshCap;
+  #canRun(set: LaneSet, cls: LaneClass): boolean {
+    if (cls === 'retry') return set.running.retry.size < 1;
+    const shared = set.running.first.size + set.running.refresh.size;
+    return set.running[cls].size < capOf(set, cls) && shared < set.sharedCap;
   }
 
   /**
@@ -1469,26 +1792,40 @@ export class NameResolver implements PoolResolver {
    * shared lane's, as when it is held back from the last of them. Never a lane it could not take.
    */
   #blockers(pending: Pending): Pending[] {
+    const set = this.#setOf(pending);
     const cls = pending.cls;
-    if (cls === 'retry') return [...this.#running.retry];
-    const held = this.#heldBack(pending);
-    if (held !== undefined && held !== 'shared') return this.#domainRunning(pending);
-    if (this.#running[cls].size >= this.#capOf(cls)) return [...this.#running[cls]];
-    return [...this.#running.first, ...this.#running.refresh];
+    if (cls === 'retry') return [...set.running.retry];
+    if (set.pool === 'probe') {
+      const held = this.#heldBack(pending);
+      if (held !== undefined && held !== 'shared') return this.#domainRunning(pending);
+    }
+    if (set.running[cls].size >= capOf(set, cls)) return [...set.running[cls]];
+    return [...set.running.first, ...set.running.refresh];
   }
 
   /**
    * Whether every lane a queued lookup could take is held by a lookup that has run past
-   * `STUCK_MS`. A check then fails at once rather than waiting out its bound.
+   * `STUCK_MS`. A check then fails at once rather than waiting out its bound. In the helper, by
+   * the condition that holds it (§1.8's fail fast).
    */
   #lanesStuck(pending: Pending): boolean {
+    const gate = this.#gate;
+    if (pending.pool === 'helper' && gate !== undefined) {
+      return this.#helperBlocked(gate, pending) !== undefined;
+    }
     const blockers = this.#blockers(pending);
     return blockers.length > 0 && blockers.every((blocker) => blocker.stuck);
   }
 
+  /** The probe's lanes, then in gate mode the helper's. */
   #pump(): void {
+    this.#pumpProbe();
+    if (this.#gate !== undefined) this.#pumpHelper(this.#gate);
+  }
+
+  #pumpProbe(): void {
     for (;;) {
-      const next = this.#next();
+      const next = this.#next(this.#probe);
       if (next === undefined) return;
       // A lookup nobody waits for any more, for a name the watched files have since
       // replaced, is not worth a lane.
@@ -1506,10 +1843,10 @@ export class NameResolver implements PoolResolver {
    * when its class may run another. A class whose queued lookups are all held back (`P-438`)
    * leaves the lane to the next.
    */
-  #next(): Pending | undefined {
+  #next(set: LaneSet): Pending | undefined {
     for (const cls of ['retry', 'first', 'refresh'] as const) {
-      if (this.#queues[cls].length === 0 || !this.#canRun(cls)) continue;
-      const next = this.#takeNext(cls);
+      if (set.queues[cls].length === 0 || !this.#canRun(set, cls)) continue;
+      const next = this.#takeNext(set, cls, (pending) => this.#heldBack(pending) === undefined);
       if (next !== undefined) return next;
     }
     return undefined;
@@ -1520,7 +1857,8 @@ export class NameResolver implements PoolResolver {
     pending.startedAt = this.#now();
     pending.startedSeq = this.#events;
     pending.generation = this.#generation;
-    this.#running[pending.cls].add(pending);
+    this.#probe.running[pending.cls].add(pending);
+    if (this.#gate !== undefined) pending.armedAt = this.#gate.realNow();
     pending.stuckTimer = setTimeout(() => {
       this.#onStuck(pending);
     }, this.#stuckMs);
@@ -1551,7 +1889,9 @@ export class NameResolver implements PoolResolver {
    * A lookup has run past `STUCK_MS`: its lane is stuck, and its name is held for new checks. The
    * checks already waiting for it keep waiting, up to their own bound (`P-426`'s review): a
    * resolver that answers in two seconds answers them, as it did before this resolver. They stop
-   * early only with an answer: "Check now", given the one kept for the name.
+   * early only with an answer: "Check now", given the one kept for the name. In the helper, the
+   * child's clock says so (D4); on the probe's lanes in gate mode, the gate's marks are taken
+   * after polls (D25).
    */
   #onStuck(pending: Pending): void {
     if (pending.state !== 'running') return;
@@ -1560,41 +1900,60 @@ export class NameResolver implements PoolResolver {
     const now = this.#now();
     // Not for a lookup the configuration has moved on from: the name is asked again under the new.
     if (entry.pending === pending) {
-      this.#hold(entry, now, `a lookup had no answer after ${String(this.#stuckMs)} ms`);
+      this.#hold(
+        entry,
+        now,
+        pending.pool === 'helper'
+          ? `a lookup had no answer after ${String(this.#stuckMs)} ms in the lookup helper`
+          : `a lookup had no answer after ${String(this.#stuckMs)} ms`,
+        pending.pool,
+      );
     }
     for (const waiter of [...pending.waiters]) {
       const outcome = this.#unanswered(entry, waiter.fresh, now, RESOLVER_HELD);
       if (outcome.ok) this.#deliver(pending, waiter, outcome);
     }
-    // And whatever is queued behind lanes that are now every one stuck stops waiting too.
-    for (const cls of ['first', 'refresh', 'retry'] as const) {
-      for (const queued of this.#queues[cls]) {
-        if (queued.waiters.size === 0 || !this.#lanesStuck(queued)) continue;
-        for (const waiter of [...queued.waiters]) {
-          this.#deliver(
-            queued,
-            waiter,
-            this.#unanswered(
-              queued.entry,
-              waiter.fresh,
-              now,
-              RESOLVER_STUCK,
-              this.#stuckWhy(queued),
-            ),
-          );
+    // And whatever is queued behind lanes that are now every one stuck stops waiting too, on
+    // either lane set.
+    const sets = this.#gate === undefined ? [this.#probe] : [this.#probe, this.#gate.lanes];
+    for (const set of sets) {
+      for (const cls of ['first', 'refresh', 'retry'] as const) {
+        for (const queued of set.queues[cls]) {
+          if (queued.waiters.size === 0 || !this.#lanesStuck(queued)) continue;
+          for (const waiter of [...queued.waiters]) {
+            this.#deliver(
+              queued,
+              waiter,
+              this.#unanswered(
+                queued.entry,
+                waiter.fresh,
+                now,
+                RESOLVER_STUCK,
+                this.#stuckWhy(queued),
+              ),
+            );
+          }
         }
       }
     }
+    if (this.#gate !== undefined && pending.pool === 'probe')
+      this.#markAfterPolls(this.#gate, pending);
   }
 
   /** One more lookup in a row the resolver did not answer: the name is held for the next step. */
-  #hold(entry: Entry, now: number, why: string): void {
+  #hold(entry: Entry, now: number, why: string, via: Pool = 'probe'): void {
     if (entry.failures === 0) {
       // Once a minute at most, with how many more were held since: a resolver outage holds every
       // name it serves, and one line each would bury the log.
       if (this.#lastHoldWarn === undefined || now - this.#lastHoldWarn >= HOLD_WARN_EVERY_MS) {
         this.#logger.warn(
-          { host: entry.host, family: entry.family, why, alsoHeld: this.#heldSinceWarn },
+          {
+            host: entry.host,
+            family: entry.family,
+            why,
+            alsoHeld: this.#heldSinceWarn,
+            ...(this.#gate === undefined ? {} : { via: via === 'helper' ? 'helper' : 'lane' }),
+          },
           'the probe’s resolver did not answer a name: holding it',
         );
         this.#lastHoldWarn = now;
@@ -1610,22 +1969,18 @@ export class NameResolver implements PoolResolver {
     entry.hold = { since: now, until: now + jittered, why };
   }
 
-  #settle(
-    pending: Pending,
-    result:
-      | { readonly addresses: readonly ResolvedAddress[] }
-      | { readonly error: unknown }
-      | { readonly fault: unknown },
-  ): void {
+  #settle(pending: Pending, result: Settled): void {
     if (pending.state === 'done') return;
     pending.state = 'done';
     clearTimeout(pending.stuckTimer);
-    this.#running[pending.cls].delete(pending);
+    this.#runningOf(pending).delete(pending);
     const entry = pending.entry;
     // Whatever it said, a loaded answer no longer stands for its domain (`P-438`).
     this.#unload(entry);
-    // Whether the name still stands for this lookup: not once the configuration moved on.
-    const current = entry.pending === pending || pending.generation === this.#generation;
+    // Whether the name still stands for this lookup: not once the configuration moved on, nor
+    // once the lookup helper went quiet with it in flight (D26).
+    const current =
+      !pending.detached && (entry.pending === pending || pending.generation === this.#generation);
     if (entry.pending === pending) entry.pending = undefined;
     const now = this.#now();
 
@@ -1636,13 +1991,20 @@ export class NameResolver implements PoolResolver {
     // A failure that says nothing about the name: each waiter is told it, "Check now" given the
     // kept answer, and nothing is kept.
     let passed: { readonly code: string; readonly why: string } | undefined;
+    // What the lookup helper learns of the lookup's key (§1.8).
+    let learned: HelperOutcome = 'neutral';
     if ('fault' in result) {
       outcome = failure(RESOLVER_FAULT, this.#fault(result.fault, entry.host).message);
+    } else if ('passed' in result) {
+      passed = result.passed;
     } else if ('addresses' in result) {
+      learned = 'answer';
       const addresses = result.addresses.map(({ address, family }) => ({ address, family }));
-      if (addresses.length > this.#maxAddresses) {
+      // The helper sends at most one more than the cap, and says how many there were (O-OS-9).
+      const total = result.total ?? addresses.length;
+      if (total > this.#maxAddresses) {
         const message =
-          `${entry.host} resolved to ${String(addresses.length)} addresses, more than the ` +
+          `${entry.host} resolved to ${String(total)} addresses, more than the ` +
           `${String(this.#maxAddresses)} the probe uses for one name`;
         if (current) this.#deny(entry, now, RESOLVER_TOO_MANY, message);
         else outcome = failure(RESOLVER_TOO_MANY, message);
@@ -1675,7 +2037,8 @@ export class NameResolver implements PoolResolver {
         entry.hold = undefined;
         this.#setFailures(entry, 0, now);
         // Its domain answers under this configuration (`P-438`): from DNS, not from the hosts
-        // file, which `getaddrinfo` reads first and which answers for a silent zone too.
+        // file, which `getaddrinfo` reads first and which answers for a silent zone too. On
+        // either lane set: a helper answer is the same evidence (`P-432` S3).
         const domain = this.#domains.get(entry.domain);
         if (domain !== undefined && !hostsLists(this.#view, entry.host, entry.family)) {
           domain.answeredAt = now;
@@ -1688,10 +2051,23 @@ export class NameResolver implements PoolResolver {
         answered = true;
         outcome = { ok: true, addresses };
       }
+    } else if ('held' in result) {
+      // Lost with the lookup helper after the child said it was stuck: as `EAI_AGAIN` after
+      // stuck, the hold runs from now at the same step, and its waiters are told it is held.
+      learned = 'giveUp';
+      if (current && entry.hold !== undefined) {
+        const step = entry.hold.until - entry.hold.since;
+        entry.hold.until = Math.max(entry.hold.until, now + step);
+        entry.hold.why = result.held;
+      } else if (current) {
+        this.#hold(entry, now, result.held, pending.pool);
+      }
+      passed = { code: RESOLVER_HELD, why: result.held };
     } else {
       const code = codeOf(result.error);
       const message = result.error instanceof Error ? result.error.message : String(result.error);
       if (code === 'EAI_AGAIN') {
+        if (pending.stuck) learned = 'giveUp';
         if (!current) {
           // Said of a configuration since replaced: nothing held for it.
         } else if (pending.stuck && entry.hold !== undefined) {
@@ -1700,12 +2076,14 @@ export class NameResolver implements PoolResolver {
           entry.hold.until = Math.max(entry.hold.until, now + step);
           entry.hold.why = 'getaddrinfo said EAI_AGAIN';
         } else {
-          this.#hold(entry, now, 'getaddrinfo said EAI_AGAIN');
+          this.#hold(entry, now, 'getaddrinfo said EAI_AGAIN', pending.pool);
         }
       } else if (code !== undefined && NO_ADDRESS.has(code)) {
+        learned = 'answer';
         if (current) this.#deny(entry, now, code, message);
         else outcome = failure(code, message);
       } else {
+        if (pending.stuck) learned = 'giveUp';
         // `EMFILE`, `EAI_MEMORY`, `EAI_FAIL`, no code at all: the probe's or the system's
         // trouble, not an answer about the name, so nothing is kept and the kept answer stays.
         passed = { code: code ?? RESOLVER_FAULT, why: message };
@@ -1716,6 +2094,7 @@ export class NameResolver implements PoolResolver {
     if (pending.stuck && !answered && pending.generation === this.#generation) {
       this.#endedStuck(entry, now);
     }
+    if (this.#gate !== undefined) this.#gateSettled(this.#gate, pending, learned);
 
     for (const waiter of [...pending.waiters]) {
       this.#deliver(
@@ -1782,5 +2161,795 @@ export class NameResolver implements PoolResolver {
     if (!pending.waiters.delete(waiter)) return;
     for (const timer of waiter.timers) clearTimeout(timer);
     waiter.deliver(outcome);
+  }
+
+  // --- Gate mode (`P-432` S3) --------------------------------------------------------------------
+
+  /** How the policy routes a name (§1.3 rows 3 to 5, with the walk `S6`'s): `local` or not. */
+  #routeOf(gate: Gate, entry: Entry): GateRoute {
+    try {
+      return gate.policy.classify(entry.host, entry.family).kind === 'local'
+        ? 'local'
+        : 'unvouched';
+    } catch (error: unknown) {
+      this.#logger.error({ err: error, host: entry.host }, 'the name policy failed on a name');
+      return 'unvouched';
+    }
+  }
+
+  /**
+   * Which lane set a lookup goes to (§1.3's table): the probe's for `local`, and for everything
+   * while the helper rests, as `system` routes; the helper's for the rest while it is up or
+   * rejoining, and the probe's under D24's rule while it is down.
+   */
+  #poolFor(gate: Gate, route: GateRoute): Pool {
+    const state = gate.helper.routeState();
+    if (state === 'resting' || route === 'local') return 'probe';
+    return state === 'up' || state === 'rejoining' ? 'helper' : 'probe';
+  }
+
+  /**
+   * Why gate mode fails a name's check at once rather than queue a lookup for it, or undefined
+   * (§1.3 row 0, S2's names kept off the probe's lanes): a poison name in any state, and while the
+   * helper rests or is down, a name the probe's own `getaddrinfo` must not be asked for.
+   */
+  #gateRefusal(entry: Entry): string | undefined {
+    const gate = this.#gate;
+    if (gate === undefined) return undefined;
+    const mark = gate.helper.poison(entry.host, entry.family);
+    if (mark !== undefined) {
+      const signal = mark.signal === null ? '' : ` (${mark.signal})`;
+      const next = Math.max(0, mark.nextAskAt - this.#now());
+      return (
+        `asking getaddrinfo for ${entry.host} made the lookup helper fail${signal}: it is not ` +
+        `asked on the probe’s own lanes, and is asked again alone in the helper in ${seconds(next)}`
+      );
+    }
+    const state = gate.helper.routeState();
+    if (
+      (state === 'resting' || state === 'down') &&
+      gate.helper.avoidsSystem(entry.host, entry.family)
+    ) {
+      return (
+        `the probe’s resolver does not ask its own getaddrinfo for ${entry.host}: the lookup ` +
+        `helper failed while asking for it lately, and is ${state === 'resting' ? 'resting' : 'not answering'}`
+      );
+    }
+    return undefined;
+  }
+
+  /** The domain's helper lookups the child said are stuck (D24's `helperStuck`). */
+  #helperStuckOf(gate: Gate, domain: string): number {
+    let stuck = 0;
+    for (const pending of helperRunning(gate)) {
+      if (pending.stuck && pending.entry.domain === domain) stuck += 1;
+    }
+    return stuck;
+  }
+
+  /**
+   * D25's marks for a probe-lane lookup past `STUCK_MS`, taken after polls, so that a stall with
+   * its answer waiting to be read sets none: a `local` lookup is passed-stuck when its timer fired
+   * no later than `LATE_MS`, and any other is in U while it runs, late or not, because it really
+   * has run that long.
+   */
+  #markAfterPolls(gate: Gate, pending: Pending): void {
+    const late = gate.realNow() - pending.armedAt - this.#stuckMs;
+    afterPolls(() => {
+      if (pending.state !== 'running') return;
+      if (pending.route === 'local') {
+        if (late > LATE_MS) return;
+        gate.passedStuck += 1;
+        this.#logger.warn(
+          { host: pending.entry.host, family: pending.entry.family },
+          'a name the system answers without the network ran past the bound for stuck on the probe’s lanes',
+        );
+        return;
+      }
+      pending.untokened = true;
+      gate.budget.untokenedStuck(pending, questionsOf(pending.entry.family));
+    });
+  }
+
+  /** What a settled lookup gives back in gate mode: its token or its place in U, and its key's evidence. */
+  #gateSettled(gate: Gate, pending: Pending, learned: HelperOutcome): void {
+    if (pending.token !== undefined) {
+      gate.budget.releaseGai(pending.token);
+      pending.token = undefined;
+    }
+    if (pending.untokened) {
+      pending.untokened = false;
+      gate.budget.untokenedDone(pending);
+    }
+    if (pending.pool === 'helper') gate.keys.ended(pending, learned);
+    if (pending.poisonAsk && gate.poisonWaiting === pending) gate.poisonWaiting = undefined;
+  }
+
+  /** Sends what the helper's lanes admit (§1.8's pick), while its route is up. */
+  #pumpHelper(gate: Gate): void {
+    for (;;) {
+      if (gate.helper.routeState() !== 'up') return;
+      const picked = this.#nextHelper(gate);
+      if (picked === undefined) return;
+      const { pending, token } = picked;
+      // As on the probe's lanes: nobody waits, for a name the watched files have since replaced.
+      if (
+        pending.waiters.size === 0 &&
+        !pending.poisonAsk &&
+        this.#entries.get(pending.entry.key) !== pending.entry
+      ) {
+        pending.state = 'done';
+        gate.budget.releaseGai(token);
+        pending.token = undefined;
+        if (pending.entry.pending === pending) pending.entry.pending = undefined;
+        continue;
+      }
+      this.#runHelper(gate, pending, token);
+    }
+  }
+
+  /**
+   * The helper lookup to send next, with its token, or undefined (§1.8): a poison name's hourly
+   * ask alone (D27); while isolating, the suspects alone, one at a time; then "Check now"'s on an
+   * urgent token, or a shared one as its key's first look; then `P-426`'s order over the helper's
+   * queues, each lookup admitted by its key, the at-risk count, its class and a token. A lookup
+   * asked again after a loss carries its token and starts first.
+   */
+  #nextHelper(gate: Gate): { pending: Pending; token: GaiToken } | undefined {
+    const running = helperRunning(gate);
+    const waiting = gate.poisonWaiting;
+    if (waiting !== undefined) {
+      if (running.length > 0) return undefined;
+      const token = this.#takeToken(gate, waiting, 'shared');
+      if (token === undefined) return undefined;
+      gate.poisonWaiting = undefined;
+      return { pending: waiting, token };
+    }
+    if (running.some((pending) => pending.poisonAsk && !pending.stuck)) return undefined;
+    if (gate.helper.isolating()) {
+      if (running.some((pending) => pending.suspect && !pending.stuck)) return undefined;
+      const suspect =
+        this.#takeNext(gate.lanes, 'first', (p) => p.suspect) ??
+        this.#takeNext(gate.lanes, 'retry', (p) => p.suspect) ??
+        this.#takeNext(gate.lanes, 'refresh', (p) => p.suspect);
+      if (suspect !== undefined) {
+        const token = suspect.token ?? this.#takeToken(gate, suspect, 'shared');
+        if (token !== undefined) return { pending: suspect, token };
+        this.#requeueFront(suspect);
+        return undefined;
+      }
+      if (running.some((pending) => pending.suspect)) return undefined;
+      gate.helper.endIsolation();
+    }
+    // A lookup asked again after a loss: it carries its token, and was admitted when it first ran.
+    for (const cls of ['retry', 'first', 'refresh'] as const) {
+      const carried = gate.lanes.queues[cls].find((p) => p.token !== undefined);
+      if (carried?.token !== undefined && (carried.urgent || this.#canRun(gate.lanes, cls))) {
+        this.#unqueue(carried);
+        return { pending: carried, token: carried.token };
+      }
+    }
+    const atRisk = this.#atRisk(gate);
+    gate.riskPeak = Math.max(gate.riskPeak, atRisk);
+    const admitted = new Map<string, HelperToken | undefined>();
+    const admit = (pending: Pending): HelperToken | undefined => {
+      const at = `${pending.key}|${pending.cls}|${String(pending.urgent)}`;
+      if (admitted.has(at)) return admitted.get(at);
+      const token = admitHelper(this.#admitAsk(gate, pending, atRisk));
+      admitted.set(at, token);
+      return token;
+    };
+    const urgent = gate.lanes.queues.first.find(
+      (pending) => pending.urgent && admit(pending) !== undefined,
+    );
+    if (urgent !== undefined) {
+      const kind = admit(urgent);
+      this.#unqueue(urgent);
+      return kind === undefined ? undefined : this.#started(gate, urgent, kind, atRisk);
+    }
+    for (const cls of ['retry', 'first', 'refresh'] as const) {
+      if (gate.lanes.queues[cls].length === 0 || !this.#canRun(gate.lanes, cls)) continue;
+      const next = this.#takeNext(gate.lanes, cls, (p) => !p.urgent && admit(p) !== undefined);
+      if (next === undefined) continue;
+      const kind = admit(next);
+      return kind === undefined ? undefined : this.#started(gate, next, kind, atRisk);
+    }
+    return undefined;
+  }
+
+  /**
+   * A lookup the pick took out of its queue, with the token its admission named, and whether it
+   * was ungated as it started (I8). Back at the front of its queue if the token is gone.
+   */
+  #started(
+    gate: Gate,
+    pending: Pending,
+    kind: HelperToken,
+    atRisk: number,
+  ): { pending: Pending; token: GaiToken } | undefined {
+    pending.ungated = helperUngated(this.#admitAsk(gate, pending, atRisk));
+    const token = this.#takeToken(gate, pending, kind);
+    if (token === undefined) {
+      this.#requeueFront(pending);
+      return undefined;
+    }
+    return { pending, token };
+  }
+
+  #takeToken(gate: Gate, pending: Pending, kind: TokenKind): GaiToken | undefined {
+    return gate.budget.takeGai(kind, questionsOf(pending.entry.family), pending);
+  }
+
+  /** Puts a lookup the pick took back at the front of its queue. */
+  #requeueFront(pending: Pending): void {
+    const set = this.#setOf(pending);
+    set.queues[pending.cls].unshift(pending);
+    if (pending.urgent) set.urgentQueued += 1;
+  }
+
+  #runHelper(gate: Gate, pending: Pending, token: GaiToken): void {
+    pending.state = 'running';
+    pending.startedAt = this.#now();
+    pending.startedSeq = this.#events;
+    pending.generation = this.#generation;
+    pending.token = token;
+    this.#runningOf(pending).add(pending);
+    gate.keys.started(pending, pending.key, pending.cls);
+    if (pending.suspect) pending.entry.suspect = false;
+    const { host, family } = pending.entry;
+    let asked: Promise<HelperAnswer>;
+    try {
+      asked = gate.helper.ask({
+        host,
+        family,
+        max: this.#maxAddresses,
+        onStuck: () => {
+          this.#onHelperStuck(gate, pending);
+        },
+        ref: pending,
+        suspect: pending.suspect,
+      });
+    } catch (error: unknown) {
+      queueMicrotask(() => {
+        this.#settle(pending, { fault: error });
+      });
+      return;
+    }
+    asked.then(
+      (answer) => {
+        this.#settle(pending, { addresses: answer.addresses, total: answer.total });
+      },
+      (error: unknown) => {
+        if (isHelperLost(error)) this.#onHelperLost(gate, pending, error);
+        else this.#settle(pending, { error });
+      },
+    );
+  }
+
+  /** The child said a helper lookup ran past `STUCK_MS` (D4): held as on a lane, and its key told. */
+  #onHelperStuck(gate: Gate, pending: Pending): void {
+    if (pending.state !== 'running' || pending.stuck) return;
+    gate.keys.stuck(pending);
+    gate.helperStuck += 1;
+    this.#onStuck(pending);
+    // A suspect said stuck lets the next go (D27), and a poison name's ask the rest.
+    this.#pump();
+  }
+
+  /**
+   * A helper lookup lost with its child, or never sent (§1.11's table). Never sent
+   * (`unavailable`): kept and routed again. Asked again in the next child (`requeue`): at the
+   * front, with its waiters and its token, and a ledger ghost for what the forwarder still holds.
+   * Stuck when lost: held as for `EAI_AGAIN` after stuck, a give-up for its key, and an
+   * availability ghost. Otherwise, a hung child's, a detached one, one charged with the crash, or
+   * one with no child to ask it in: its checks fail at once (`RESOLVER_FAULT`), with no hold.
+   */
+  #onHelperLost(gate: Gate, pending: Pending, error: HelperLostError): void {
+    if (pending.state !== 'running') return;
+    const host = pending.entry.host;
+    if (error.reason === 'unavailable') {
+      this.#runningOf(pending).delete(pending);
+      gate.keys.ended(pending, 'neutral');
+      if (pending.token !== undefined) gate.budget.releaseGai(pending.token);
+      pending.token = undefined;
+      pending.state = 'queued';
+      this.#requeueFront(pending);
+      // Routed again by the change that follows, or by the next tick if the route still says up.
+      queueMicrotask(() => {
+        if (gate.helper.routeState() !== 'up') this.#reroute(gate);
+      });
+      return;
+    }
+    if (error.reason === 'stop') {
+      this.#settle(pending, {
+        passed: { code: RESOLVER_FAULT, why: `the probe is stopping: ${host} was not answered` },
+      });
+      return;
+    }
+    const stuck = pending.stuck || error.stuck;
+    const ghostly = stuck || error.reason === 'hung' || pending.detached || error.detached;
+    if (pending.token !== undefined) {
+      gate.budget.lose([{ token: pending.token, stuck: ghostly, started: error.started }]);
+      if (ghostly) pending.token = undefined;
+    }
+    if (error.suspect) pending.entry.suspect = true;
+    if (error.requeue && !ghostly) {
+      this.#runningOf(pending).delete(pending);
+      gate.keys.ended(pending, 'neutral');
+      pending.state = 'queued';
+      pending.suspect = error.suspect;
+      // At the front, behind those of the same loss asked again before it: in their order.
+      const set = this.#setOf(pending);
+      const queue = set.queues[pending.cls];
+      const at = queue.findIndex((queued) => queued.token === undefined);
+      queue.splice(at === -1 ? queue.length : at, 0, pending);
+      if (pending.urgent) set.urgentQueued += 1;
+      return;
+    }
+    if (stuck) {
+      this.#settle(pending, {
+        held:
+          `a lookup for ${host} had run past ${String(this.#stuckMs)} ms in the lookup helper ` +
+          `when the helper was lost (${error.reason})`,
+      });
+      return;
+    }
+    const why =
+      error.reason === 'hung' || pending.detached || error.detached
+        ? `the lookup helper stopped answering while asking for ${host}`
+        : error.charged
+          ? `asking getaddrinfo for ${host} made the lookup helper fail: it is not asked for an hour`
+          : `the lookup helper failed (${error.reason}) while asking for ${host}`;
+    this.#settle(pending, { passed: { code: RESOLVER_FAULT, why } });
+  }
+
+  /**
+   * The lookup helper changed state, route or isolation (S2's `onChange`), a microtask after the
+   * lookups it affects were settled. Up: what fell back to the probe's lanes moves into the helper
+   * (`#rejoin`). Down: the helper's queued lookups go to their `P-426` class under D24's rule
+   * (`#fallBack`). Resting: everything does, as `system` routes. Detached: the lookups in flight
+   * no longer stand for their names (D26). Rejoining: what is queued waits for the next child.
+   */
+  onHelperChange(change: HelperChange): void {
+    const gate = this.#gate;
+    if (gate === undefined) return;
+    try {
+      // The time with the check on runs to the change, not to the next read.
+      this.#accrueCheckOn(gate, this.#now());
+      for (const ref of change.detached ?? []) this.#detach(gate, ref);
+      gate.route = change.route;
+      if (change.state === 'stopped') {
+        this.#fallBack(gate, 'stopped');
+        return;
+      }
+      this.#reroute(gate);
+    } catch (error: unknown) {
+      this.#logger.error({ err: error }, 'the probe’s resolver failed on a lookup helper change');
+    }
+  }
+
+  /** Routes what is queued again, by the helper's route now. */
+  #reroute(gate: Gate): void {
+    const route = gate.helper.routeState();
+    if (route === 'up') this.#rejoin(gate);
+    else if (route === 'down') this.#fallBack(gate, 'vouched');
+    else if (route === 'resting') this.#fallBack(gate, 'all');
+    this.#pump();
+  }
+
+  /**
+   * A lost child's answer for a lookup asked again and not yet re-sent (L-F5): taken out of its
+   * queue, wherever it went since, and settled once. Anything else is the helper's to drop.
+   */
+  onHelperLateAnswer(ref: object, outcome: LateOutcome): void {
+    const gate = this.#gate;
+    if (gate === undefined) return;
+    const pending = this.#queuedPending(gate, ref);
+    if (pending === undefined) return;
+    this.#unqueue(pending);
+    this.#settle(
+      pending,
+      outcome.ok
+        ? { addresses: outcome.answer.addresses, total: outcome.answer.total }
+        : { error: outcome.error },
+    );
+  }
+
+  /** A queued lookup by its reference, on either lane set. */
+  #queuedPending(gate: Gate, ref: object): Pending | undefined {
+    for (const set of [gate.lanes, this.#probe]) {
+      for (const cls of ['first', 'refresh', 'retry'] as const) {
+        const found = set.queues[cls].find((pending) => pending === ref);
+        if (found !== undefined) return found;
+      }
+    }
+    return undefined;
+  }
+
+  /** At `unresponsive` (D26): the lookup no longer stands for its name, nor counts for its key. */
+  #detach(gate: Gate, ref: object): void {
+    const pending = helperRunning(gate).find((running) => running === ref);
+    if (pending === undefined || pending.detached) return;
+    pending.detached = true;
+    if (pending.entry.pending === pending) pending.entry.pending = undefined;
+    gate.keys.detach(pending);
+  }
+
+  /** Back up (§1.11): the queued lookups that fell back to the probe's lanes move into the helper. */
+  #rejoin(gate: Gate): void {
+    for (const cls of ['first', 'refresh', 'retry'] as const) {
+      const queue = this.#probe.queues[cls];
+      for (let at = 0; at < queue.length;) {
+        const pending = queue[at];
+        if (pending === undefined || pending.route !== 'unvouched') {
+          at += 1;
+          continue;
+        }
+        queue.splice(at, 1);
+        if (pending.urgent) this.#probe.urgentQueued -= 1;
+        pending.pool = 'helper';
+        gate.lanes.queues[cls].push(pending);
+        if (pending.urgent) gate.lanes.urgentQueued += 1;
+      }
+    }
+  }
+
+  /**
+   * The helper's queued lookups leave it (§1.11): to their `P-426` class on the probe's lanes, with
+   * a carried token released, at `down` (`vouched`: S3 has only unvouched lookups there) and at a
+   * rest (`all`); failed at once for a name the probe's own `getaddrinfo` must not be asked for.
+   * When the helper has stopped, every one fails: the probe is stopping.
+   */
+  #fallBack(gate: Gate, which: 'vouched' | 'all' | 'stopped'): void {
+    const waiting = gate.poisonWaiting;
+    if (waiting !== undefined) {
+      gate.poisonWaiting = undefined;
+      this.#settle(waiting, {
+        passed: { code: RESOLVER_FAULT, why: `${waiting.entry.host} was not asked again` },
+      });
+    }
+    for (const cls of ['first', 'refresh', 'retry'] as const) {
+      const queue = gate.lanes.queues[cls];
+      for (const pending of [...queue]) {
+        if (which === 'vouched' && pending.route !== 'unvouched') continue;
+        this.#unqueue(pending);
+        if (pending.token !== undefined) {
+          gate.budget.releaseGai(pending.token);
+          pending.token = undefined;
+        }
+        const refusal =
+          which === 'stopped'
+            ? `the probe is stopping: ${pending.entry.host} was not answered`
+            : this.#gateRefusal(pending.entry);
+        if (refusal !== undefined) {
+          gate.routed.faulted += 1;
+          this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
+          continue;
+        }
+        pending.pool = 'probe';
+        this.#probe.queues[cls].push(pending);
+        if (pending.urgent) this.#probe.urgentQueued += 1;
+      }
+    }
+  }
+
+  /**
+   * The helper's lanes at risk now (§1.8): its general tokens held by a lookup the child said is
+   * stuck, a detached one, or a gated one on a shared token; availability ghosts; and U.
+   */
+  #atRisk(gate: Gate): number {
+    let risk = gate.budget.ghosts('shared') + gate.budget.ghosts('kept') + gate.budget.untokened();
+    for (const pending of helperRunning(gate)) {
+      const token = pending.token;
+      if (token === undefined || token.kind === 'urgent') continue;
+      if (pending.stuck || pending.detached) risk += 1;
+      else if (token.kind === 'shared' && !this.#ungatedNow(gate, pending)) risk += 1;
+    }
+    return risk;
+  }
+
+  #ungatedNow(gate: Gate, pending: Pending): boolean {
+    return helperUngated({
+      overflow: false,
+      vouched: false,
+      keyQuiet: gate.keys.quiet(pending.key),
+      unitCapped: gate.keys.capped(pending.key, pending.cls),
+    });
+  }
+
+  /** What the admission reads of a queued helper lookup (§1.8). The walk's vouching is `S6`'s. */
+  #admitAsk(gate: Gate, pending: Pending, atRisk: number): HelperAdmitAsk {
+    const { keys, budget } = gate;
+    const key = pending.key;
+    const domain = pending.entry.domain;
+    const stuckAnywhere = [...this.#probeRunning(), ...helperRunning(gate)].some(
+      (running) => running.stuck && (running.key === key || running.entry.domain === domain),
+    );
+    return {
+      urgent: pending.urgent,
+      overflow: false,
+      stuckAnywhere,
+      keyNew: keys.isNew(key),
+      keyQuiet: keys.quiet(key),
+      keyRunning: keys.running(key),
+      vouched: false,
+      unitRunning: keys.unitRunning(key, pending.cls),
+      unitCapped: keys.capped(key, pending.cls),
+      atRisk,
+      classOk: pending.urgent || this.#canRun(gate.lanes, pending.cls),
+      urgentAvailable: budget.available('urgent'),
+      sharedAvailable: budget.available('shared'),
+      keptAvailable: budget.available('kept'),
+    };
+  }
+
+  #probeRunning(): Pending[] {
+    const { running } = this.#probe;
+    return [...running.first, ...running.refresh, ...running.retry];
+  }
+
+  /**
+   * Why a queued helper lookup's checks fail at once (§1.8's fail fast), or undefined: a condition
+   * that holds it, whose blockers are every one stuck. Stuck is what the child said, or a ghost;
+   * U is stuck too. The lookup stays queued.
+   */
+  #helperBlocked(gate: Gate, pending: Pending): HelperBlock | undefined {
+    if (pending.token !== undefined) return undefined;
+    const atRisk = this.#atRisk(gate);
+    const ask = this.#admitAsk(gate, pending, atRisk);
+    if (admitHelper(ask) !== undefined) return undefined;
+    const { keys, budget } = gate;
+    const blocks: HelperBlock[] = [];
+    if (!helperKeyOk(ask)) {
+      const quiet = ask.keyQuiet && !ask.vouched;
+      blocks.push({
+        condition: quiet ? 'key' : 'unit',
+        lookups: (quiet
+          ? keys.runningOf(pending.key)
+          : keys.runningOf(pending.key, pending.cls)
+        ).map((lookup) => lookup as Pending),
+        ghosts: 0,
+      });
+    }
+    if (!helperRiskOk(ask)) {
+      blocks.push({
+        condition: 'risk',
+        lookups: helperRunning(gate).filter(
+          (running) =>
+            running.token !== undefined &&
+            running.token.kind !== 'urgent' &&
+            (running.stuck ||
+              running.detached ||
+              (running.token.kind === 'shared' && !this.#ungatedNow(gate, running))),
+        ),
+        ghosts: budget.ghosts('shared') + budget.ghosts('kept') + budget.untokened(),
+      });
+    }
+    if (!ask.classOk) {
+      blocks.push({ condition: 'class', lookups: this.#blockers(pending), ghosts: 0 });
+    }
+    const ungated = helperUngated(ask);
+    const noToken =
+      ask.sharedAvailable <= 0 &&
+      !(pending.urgent && ask.urgentAvailable > 0) &&
+      !(!pending.urgent && ungated && ask.keptAvailable > 0);
+    if (noToken) {
+      const kinds: TokenKind[] = ['shared'];
+      if (ungated && !pending.urgent) kinds.push('kept');
+      if (pending.urgent) kinds.push('urgent');
+      blocks.push({
+        condition: 'token',
+        lookups: helperRunning(gate).filter(
+          (running) => running.token !== undefined && kinds.includes(running.token.kind),
+        ),
+        ghosts: kinds.reduce((sum, kind) => sum + budget.ghosts(kind), 0) + budget.untokened(),
+      });
+    }
+    return blocks.find(
+      (block) =>
+        block.lookups.length + block.ghosts > 0 && block.lookups.every((lookup) => lookup.stuck),
+    );
+  }
+
+  /** The words a helper lookup's fail-fast message names its condition in (§5). */
+  #helperWhy(gate: Gate, pending: Pending, block: HelperBlock): string {
+    const lanes = block.lookups
+      .slice(0, 3)
+      .map((blocker) => blocker.entry.host)
+      .join(', ');
+    const named = lanes === '' ? '' : ` (${lanes})`;
+    const prefix =
+      `every lane a lookup for ${pending.entry.host} could use is held by a lookup that has run ` +
+      `past ${String(this.#stuckMs)} ms${named}`;
+    const domain = keyWords(pending.key);
+    switch (block.condition) {
+      case 'key':
+        return (
+          `${prefix}: no name of ${domain} has answered in the lookup helper since one of its ` +
+          `lookups ran past ${String(this.#stuckMs)} ms, so it holds at most ` +
+          `${String(KEY_QUIET)} of the helper’s lanes; it stays queued`
+        );
+      case 'unit':
+        return (
+          `${prefix}: a ${pending.cls} lookup of ${domain} gave up or is stuck in the lookup ` +
+          `helper, so its ${pending.cls} lookups hold at most 3 of the helper’s lanes until one ` +
+          `answers; it stays queued`
+        );
+      case 'risk':
+        return (
+          `${prefix}: ${String(RISK_T)} of the lookup helper’s lanes are held by lookups that ` +
+          `may not answer, the most a name not known to answer waits behind; it stays queued`
+        );
+      case 'class':
+        return `${prefix}, in the lookup helper; it stays queued`;
+      case 'token':
+        return (
+          `${prefix}, and every lane of the lookup helper is taken, ` +
+          `${String(gate.budget.ghosts('shared') + gate.budget.ghosts('kept'))} of them by ` +
+          `questions a lost helper left at the DNS server; it stays queued`
+        );
+    }
+  }
+
+  /**
+   * Gate mode's start (§1.2, L-N3): the watch's first look, awaited, which loads the name policy
+   * from this same reading of the hosts file before the policy is told of the look. `start` then
+   * does not look again at once. In `system` mode it is the first look alone.
+   */
+  async firstLook(): Promise<void> {
+    this.#firstLooked = true;
+    await this.checkFiles();
+  }
+
+  /** The name policy, loaded once, from the hosts file as the watch's first look read it. */
+  async #loadPolicy(looked: readonly WatchedReading[]): Promise<void> {
+    const gate = this.#gate;
+    if (gate === undefined || gate.loaded) return;
+    gate.loaded = true;
+    const hosts = looked.find((reading) => isHostsFile(reading.file))?.text;
+    await gate.policy.load(hosts === undefined ? {} : { hosts });
+  }
+
+  /**
+   * What the policy makes of a look (§1.12, D28): a read-once file that moved marks the helper
+   * skewed, so its next loss rests it until the probe restarts.
+   */
+  #policyMoved(gate: Gate, change: PolicyChange): void {
+    if (change.moved.length === 0 && !gate.policy.skewed()) return;
+    const readOnce = gate.policy.describe().readOnce;
+    let marked = false;
+    for (const file of change.moved) {
+      if (!readOnce.includes(file)) continue;
+      gate.helper.markSkewed(file);
+      marked = true;
+    }
+    if (!marked && gate.policy.skewed()) {
+      gate.helper.markSkewed(readOnce[0] ?? 'a file glibc reads once');
+    }
+  }
+
+  /** Starts gate mode's clock: the time with the check on, poison names due, the summary. */
+  #startGate(): void {
+    const gate = this.#gate;
+    if (gate === undefined || gate.tick !== undefined) return;
+    gate.tick = setInterval(() => {
+      this.#gateTick(gate);
+    }, gate.tickMs);
+    gate.tick.unref();
+  }
+
+  #gateTick(gate: Gate): void {
+    try {
+      const now = this.#now();
+      this.#accrueCheckOn(gate, now);
+      if (gate.helper.routeState() === 'up') this.#askPoison(gate);
+      if (now - gate.lastSummaryAt >= GATE_SUMMARY_MS) this.#summary(gate, now);
+      this.#pump();
+    } catch (error: unknown) {
+      this.#logger.error({ err: error }, 'the probe’s resolver failed on its gate tick');
+    }
+  }
+
+  /** The time with the check on and the helper up (`nameCheckOnSeconds`), to now. */
+  #accrueCheckOn(gate: Gate, now: number): void {
+    const on = gate.policy.view().off === undefined && gate.helper.routeState() === 'up';
+    if (gate.checkOnSince !== undefined) gate.checkOnMs += Math.max(0, now - gate.checkOnSince);
+    gate.checkOnSince = on ? now : undefined;
+  }
+
+  /** A poison name due its hourly ask (D27): asked alone in the helper, once nothing else runs. */
+  #askPoison(gate: Gate): void {
+    if (gate.poisonWaiting !== undefined) return;
+    if (helperRunning(gate).some((pending) => pending.poisonAsk)) return;
+    for (const mark of gate.helper.poisonDue()) {
+      const key = `${String(mark.family)}:${mark.host}`;
+      const entry = this.#entries.get(key) ?? this.#add(key, mark.host, mark.family);
+      if (entry.pending !== undefined) continue;
+      const pending: Pending = {
+        entry,
+        cls: 'retry',
+        urgent: false,
+        state: 'queued',
+        startedAt: 0,
+        generation: this.#generation,
+        startedSeq: 0,
+        stuck: false,
+        stuckTimer: undefined,
+        waiters: new Set(),
+        pool: 'helper',
+        route: 'unvouched',
+        key: candidateKey(entry.host),
+        token: undefined,
+        detached: false,
+        suspect: false,
+        poisonAsk: true,
+        untokened: false,
+        ungated: false,
+        armedAt: 0,
+      };
+      entry.pending = pending;
+      gate.poisonWaiting = pending;
+      return;
+    }
+  }
+
+  /** The hourly summary (§5): what was routed where, the helper's peaks and its losses. */
+  #summary(gate: Gate, now: number): void {
+    const helper = gate.helper.stats();
+    const budget = gate.budget.stats();
+    this.#logger.info(
+      {
+        routed: { ...gate.routed },
+        passedStuck: gate.passedStuck,
+        helperStuck: gate.helperStuck,
+        atRiskPeak: gate.riskPeak,
+        questionsOpenPeak: budget.peak,
+        helper: {
+          state: helper.state,
+          losses: helper.lossesByReason,
+          rssPeak: helper.rssPeak,
+          lagPeakMs: helper.lagPeakMs,
+          poisoned: helper.poisoned,
+          msInState: helper.msInState,
+        },
+      },
+      'the probe’s resolver in gate mode, this hour',
+    );
+    gate.lastSummaryAt = now;
+    for (const kind of Object.keys(gate.routed) as (keyof Gate['routed'])[]) gate.routed[kind] = 0;
+    gate.riskPeak = 0;
+  }
+
+  /** What gate mode has done, for Probe Health: undefined in `system` mode. */
+  gateHealth(): GateHealth | undefined {
+    const gate = this.#gate;
+    if (gate === undefined) return undefined;
+    this.#accrueCheckOn(gate, this.#now());
+    return {
+      mode: gate.helper.routeState() === 'resting' ? 3 : 2,
+      checkOnSeconds: Math.floor(gate.checkOnMs / 1_000),
+      passedStuck: gate.passedStuck,
+      helperStuck: gate.helperStuck,
+    };
+  }
+
+  /**
+   * The most DNS questions the probe's `getaddrinfo` calls held unanswered at the site's servers
+   * since the last take (§1.6), and from now the count starts again: undefined in `system` mode.
+   */
+  takeQuestionsPeak(): number | undefined {
+    return this.#gate?.budget.takePeak();
+  }
+
+  /**
+   * The domains with the most names failing now, most first (`P-441`): what Probe Health names as
+   * not answering. A name of one label is in the domain `''`. In either mode.
+   */
+  notAnswering(count = NOT_ANSWERING_NAMED): string[] {
+    return [...this.#domains]
+      .filter(([, domain]) => domain.failing > 0)
+      .sort(([a, x], [b, y]) => y.failing - x.failing || a.localeCompare(b))
+      .slice(0, count)
+      .map(([name]) => name);
   }
 }

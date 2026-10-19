@@ -17,3 +17,9 @@ export function afterPolls(fn: () => void): void {
     setImmediate(fn);
   });
 }
+
+/**
+ * How late a stuck timer may fire and still be evidence (D25): later than this, the main thread
+ * was stalled, and what it would judge may be an answer waiting to be read.
+ */
+export const LATE_MS = 100;

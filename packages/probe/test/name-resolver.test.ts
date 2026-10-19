@@ -2666,6 +2666,9 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     ['the hosts file not on its hosts line', 'passwd: files\nhosts: dns myhostname\n'],
     ['no hosts line, glibc’s default', 'passwd: files\n'],
     ['no nsswitch.conf at all', null],
+    // A line the probe's one nsswitch reader does not take is DNS first (P-432 S3).
+    ['a line with an action group', 'hosts: files mdns4_minimal [NOTFOUND=return] dns\n'],
+    ['two hosts lines', 'hosts: files dns\nhosts: files dns\n'],
   ] as const) {
     it(`holds back a name the hosts file gives when nsswitch.conf asks DNS before it: ${order} (P-438)`, async (t) => {
       t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -2685,35 +2688,31 @@ describe('the hosts file and resolv.conf (P-426)', () => {
     });
   }
 
-  it('reads nsswitch.conf’s hosts line as glibc does: the hosts file first or not, its actions left out (P-438)', () => {
+  it('reads nsswitch.conf’s hosts line by the policy’s one reader: the file first only on the lines it takes (P-432 S3)', () => {
+    // One nsswitch reader in the probe (decided 2026-10-19): `readNsswitch`'s rules, which glibc
+    // 2.28 to 2.42 read alike. A line it does not take is DNS first, glibc's default, so no name is
+    // exempted from its domain's first lanes on a line read one way by one glibc and another by
+    // the next.
     const lines: [string, boolean, string][] = [
       ['hosts: files dns\n', true, 'Debian’s'],
       ['hosts:     files dns myhostname\n', true, 'Rocky’s'],
-      ['# hosts: dns files\nhosts:\tfiles mdns4_minimal [NOTFOUND=return] dns\n', true, 'Ubuntu’s'],
+      ['hosts:\tfiles myhostname dns\n', true, 'myhostname before DNS'],
+      ['  hosts: files dns\n', true, 'blanks before it'],
+      ['# hosts: dns files\nhosts: files dns\n', true, 'a comment line before it'],
       ['hosts: dns files\n', false, 'DNS first'],
       ['hosts: dns\n', false, 'DNS alone'],
       ['passwd: files\n', false, 'no hosts line: glibc’s default, DNS first'],
-      ['', false, 'an empty file'],
-      // `P-438`'s narrow check: sources that never ask DNS ahead of the file, and resolve, which
-      // answers the hosts file's names itself.
-      ['hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n', true, 'nss-resolve’s'],
-      ['hosts: mymachines files dns\n', true, 'mymachines ahead'],
-      ['hosts: myhostname files dns\n', true, 'myhostname ahead'],
-      ['hosts: myhostname dns files\n', false, 'DNS ahead of the file, myhostname first'],
-      ['hosts: mdns4_minimal [NOTFOUND=return] files dns\n', false, 'another network source first'],
-      // The last hosts line is the one in force.
-      ['hosts: dns\nhosts: files\n', true, 'the last line, the file first'],
-      ['hosts: files dns\nhosts: dns\n', false, 'the last line, DNS alone'],
-      // The name ends at a blank or a colon.
-      ['hosts files dns\n', true, 'no colon'],
-      ['hosts dns\n', false, 'no colon, DNS'],
-      ['hosts:files dns\n', true, 'no blank'],
-      ['  hosts: files\n', true, 'blanks before it'],
-      ['hosts: files[NOTFOUND=return] dns\n', true, 'an action against the name'],
-      ['hosts: [NOTFOUND=return] files dns\n', false, 'a list that starts with an action'],
-      ['Hosts: files\n', false, 'not the hosts line: glibc reads names as written'],
+      ['', false, 'an empty file, or none'],
+      // Lines the reader does not take, which P-438's own reader read as the file first.
+      ['hosts:\tfiles mdns4_minimal [NOTFOUND=return] dns\n', false, 'an action group'],
+      ['hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n', false, 'resolve'],
+      ['hosts: myhostname files dns\n', false, 'myhostname ahead of the file'],
+      ['hosts: dns\nhosts: files dns\n', false, 'two hosts lines, read apart by glibc versions'],
+      ['hosts: files dns', false, 'its last line with no newline, which 2.33 never reads'],
+      ['hosts files dns\n', false, 'no colon'],
+      ['hosts: files dns # comment\n', false, 'a #, read apart by glibc versions'],
+      ['Hosts: files dns\n', false, 'not the hosts line: glibc reads names as written'],
       ['hosts: Files dns\n', false, 'nor `Files` as files'],
-      ['hosts: dns # files\n', false, 'a comment'],
     ];
     for (const [text, first, why] of lines) {
       assert.equal(hostsFileFirst(text), first, `${why}: ${JSON.stringify(text)}`);

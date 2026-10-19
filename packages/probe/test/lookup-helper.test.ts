@@ -31,7 +31,14 @@ import {
   type LookupHelperOptions,
   type LossReason,
 } from '../src/resolver/lookup-helper.js';
-import { readOnceDigest, type AskMessage } from '../src/resolver/lookup-helper-child.js';
+import {
+  digestOf as childDigestOf,
+  digestOfError as childDigestOfError,
+  glibcRuntime,
+  readOnceDigest,
+  type AskMessage,
+} from '../src/resolver/lookup-helper-child.js';
+import * as systemNames from '../src/resolver/system-names.js';
 import { pollWithin, within } from './support/within.js';
 
 /**
@@ -404,6 +411,21 @@ describe('the lookup helper’s child environment', () => {
       RES_OPTIONS: 'ndots:2',
       UV_THREADPOOL_SIZE: String(HELPER_THREADS),
     });
+  });
+
+  it('keeps what changes what glibc resolves to: the child resolves as the probe’s lanes do (P-432 S3)', () => {
+    // Decided 2026-10-19 by Claude, under the user's delegation: the child inherits the dynamic
+    // linker's and the resolver's settings as they are, and never resolves otherwise than the
+    // probe would. When LD_PRELOAD or LD_AUDIT is set, the name policy turns the check off.
+    const base = {
+      LD_PRELOAD: '/usr/lib/libshim.so',
+      LD_AUDIT: '/usr/lib/libaudit-shim.so',
+      LD_LIBRARY_PATH: '/opt/lib',
+      LOCALDOMAIN: 'example.test',
+      RES_OPTIONS: 'ndots:2',
+      HOSTALIASES: '/etc/host.aliases',
+    };
+    assert.deepEqual(helperEnv(base), { ...base, UV_THREADPOOL_SIZE: String(HELPER_THREADS) });
   });
 
   it('U1 (part): on Windows a name in any case is the same name, and is dropped all the same', () => {
@@ -1715,6 +1737,50 @@ describe('the lookup helper’s production child', () => {
       }
     },
   );
+});
+
+describe('the lookup helper’s reading of itself (P-432 S3)', () => {
+  it('reads glibc’s version with the report’s network section left out, and puts it back', (t) => {
+    const reporter = process.report as NodeJS.ProcessReport & {
+      excludeNetwork?: boolean | undefined;
+    };
+    const before = reporter.excludeNetwork;
+    const seen: unknown[] = [];
+    const header: Record<string, unknown> = { glibcVersionRuntime: '2.39' };
+    t.mock.method(reporter, 'getReport', () => {
+      seen.push(reporter.excludeNetwork);
+      return { header };
+    });
+    assert.equal(glibcRuntime(), '2.39');
+    assert.deepEqual(seen, [true], 'no reverse lookup of the open sockets, which waits on DNS');
+    assert.equal(reporter.excludeNetwork, before, 'put back as it was');
+    delete header['glibcVersionRuntime'];
+    assert.equal(glibcRuntime(), null, 'off glibc: null, not undefined');
+    assert.equal(reporter.excludeNetwork, before);
+  });
+
+  it('puts the report’s setting back when the report throws', (t) => {
+    const reporter = process.report as NodeJS.ProcessReport & {
+      excludeNetwork?: boolean | undefined;
+    };
+    const before = reporter.excludeNetwork;
+    t.mock.method(reporter, 'getReport', () => {
+      throw new Error('no report');
+    });
+    assert.throws(() => glibcRuntime(), /no report/);
+    assert.equal(reporter.excludeNetwork, before);
+  });
+
+  it('has one digest: the policy’s is the child’s, the very function', () => {
+    assert.equal(systemNames.digestOf, childDigestOf);
+    assert.equal(systemNames.digestOfError, childDigestOfError);
+    assert.equal(childDigestOfError(Object.assign(new Error('x'), { code: 'ENOENT' })), 'absent');
+    assert.equal(
+      childDigestOfError(Object.assign(new Error('x'), { code: 'EACCES' })),
+      'unreadable:EACCES',
+    );
+    assert.equal(childDigestOfError(new Error('no code')), 'unreadable:unknown');
+  });
 });
 
 /** A child process the test plays, for the interleavings a real child cannot be made to give. */

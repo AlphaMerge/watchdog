@@ -12720,7 +12720,11 @@ because each is a decision rather than a defect:
           - Use one nsswitch reader: P-438's `hostsFileFirst` should take `readNsswitch`'s
             rules.
           - Wire `SystemFiles.ldSoPreload` and pass `watchedFiles()` to the watch. The helper
-            child's environment must not carry an `LD_PRELOAD` or `LD_AUDIT` the probe's lacks.
+            child inherits the probe's environment as it is, `LD_PRELOAD` and `LD_AUDIT`
+            included, so that it resolves as the probe's lanes do: the design's invariant is
+            that the gate never changes what a name resolves to, and when either is set the
+            policy already turns the check off. (Decided 2026-10-19 by Claude, under the
+            user's delegation; an earlier note here said to keep them out of the child.)
         - **For S6**: `timeout` is `retrans`. glibc's send_dg waits `retrans << ns` seconds at
           server index `ns` (after rotation), divided by `nscount` when `ns` is above 0, and
           floored at 1 (resolv/res_send.c).

@@ -184,7 +184,7 @@ function policyFor(
     files: FILES,
     env: f.env ?? {},
     platform: f.platform ?? 'linux',
-    glibcVersion: () => (f.glibc === null ? undefined : (f.glibc ?? '2.39')),
+    glibcVersion: () => (f.glibc === null ? null : (f.glibc ?? '2.39')),
     nodeVersion: 'v24.0.0-test',
     hostname: hostnameOf(f.hostname),
     readText: (path) =>

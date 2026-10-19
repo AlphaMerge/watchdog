@@ -207,3 +207,304 @@ export function firstLoad<H extends DomainHistory>(ask: FirstAsk<H>): KeyLoad {
       running.first.size + Math.min(ask.refreshCap, running.refresh.size + ask.refreshQueued),
   };
 }
+
+// --- The lookup helper's lanes (`P-432` §1.8, S3) ---------------------------------------------
+
+/** The most lookups a quiet key the walk does not vouch for runs in the helper at once. */
+export const KEY_QUIET = 3;
+/** At-risk helper lanes at which a gated start waits (T). */
+export const RISK_T = 4;
+/** One more at-risk lane a never-seen key's first look may start at (F). */
+export const RISK_F = 1;
+/**
+ * What a key's unit (its lookups of one class) may run in the helper: nothing holds it but its
+ * class's cap while it answers, and 3 once capped. `unacked` and `sharedLanes` are no limit, so
+ * the load's own counts of them are whatever it says (`heldBy`'s rule for a limit not finite).
+ */
+export const HELPER_UNIT_RULE: KeyRule = {
+  lanes: Number.POSITIVE_INFINITY,
+  cappedLanes: 3,
+  unacked: Number.POSITIVE_INFINITY,
+  sharedLanes: Number.POSITIVE_INFINITY,
+};
+/** The most keys the helper remembers: the least recently used with nothing running goes first. */
+export const HELPER_MAX_KEYS = 20_000;
+
+/**
+ * The key a name is judged by in the helper and the walk (D6): `d:<suffix>`, the name less its
+ * first label, for a name of more than one label, and `n:<label>` for a single label, so that
+ * single labels are each their own key and the search list's domains are judged by the walk.
+ * Lower case, a trailing dot dropped; never `''` and never `d:` with nothing after it.
+ */
+export function candidateKey(name: string): string {
+  const lower = name.trim().toLowerCase();
+  const bare = lower.length > 1 && lower.endsWith('.') ? lower.slice(0, -1) : lower;
+  const dot = bare.indexOf('.');
+  if (dot <= 0 || dot === bare.length - 1) return `n:${bare}`;
+  return `d:${bare.slice(dot + 1)}`;
+}
+
+/** The words a key is named by in a message: its domain, or its single label. */
+export function keyWords(key: string): string {
+  return key.slice(2);
+}
+
+export type HelperClass = 'first' | 'refresh' | 'retry';
+/**
+ * What a helper lookup's end says of its key (§1.8): an answer (addresses, `ENOTFOUND`, `ENODATA`
+ * or too many addresses), a give-up (a failure of a lookup the child said was stuck, or one lost
+ * while stuck), or nothing.
+ */
+export type HelperOutcome = 'answer' | 'giveUp' | 'neutral';
+
+interface Unit {
+  running: number;
+  /** Its lookups running that the child said are stuck. */
+  stuck: number;
+  answeredSeq: number;
+  gaveUpSeq: number;
+}
+
+interface KeyEvidence {
+  answeredSeq: number;
+  stuckSeq: number;
+  running: number;
+  readonly units: Record<HelperClass, Unit>;
+  /** Its lookups running, for the fail-fast blockers. */
+  readonly lookups: Set<object>;
+}
+
+interface Started {
+  readonly key: string;
+  readonly cls: HelperClass;
+  readonly evidence: KeyEvidence;
+  stuck: boolean;
+  /** Let go at a configuration change (`detachAll`): its end says nothing of the key now. */
+  detached: boolean;
+}
+
+const unit = (): Unit => ({ running: 0, stuck: 0, answeredSeq: 0, gaveUpSeq: 0 });
+
+/**
+ * What the helper knows of each key (§1.8), from helper lookups only: whether it has answered,
+ * whether one of its lookups has been stuck since, and per class whether its unit is capped. The
+ * order of events is a counter, never the clock, which may not tell two events apart.
+ *
+ * - `new(K)`: no answer and nothing stuck, ever.
+ * - `quiet(K)`: new, or stuck since its last answer.
+ * - `capped(K, c)`: a lookup of class `c` stuck and running, or one that gave up since that class
+ *   last answered.
+ */
+export class HelperKeys {
+  readonly #keys = new Map<string, KeyEvidence>();
+  readonly #lookups = new Map<object, Started>();
+  readonly #maxKeys: number;
+  #seq = 0;
+
+  constructor(options: { readonly maxKeys?: number } = {}) {
+    this.#maxKeys = Math.max(1, options.maxKeys ?? HELPER_MAX_KEYS);
+  }
+
+  /** A key's evidence, made if new, and moved to the most recently used end. */
+  #evidence(key: string): KeyEvidence {
+    let found = this.#keys.get(key);
+    if (found === undefined) {
+      found = {
+        answeredSeq: 0,
+        stuckSeq: 0,
+        running: 0,
+        units: { first: unit(), refresh: unit(), retry: unit() },
+        lookups: new Set(),
+      };
+    } else {
+      this.#keys.delete(key);
+    }
+    this.#keys.set(key, found);
+    if (this.#keys.size > this.#maxKeys) {
+      for (const [old, evidence] of this.#keys) {
+        if (evidence.running === 0 && old !== key) {
+          this.#keys.delete(old);
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  #peek(key: string): KeyEvidence | undefined {
+    return this.#keys.get(key);
+  }
+
+  isNew(key: string): boolean {
+    const k = this.#peek(key);
+    return k === undefined || (k.answeredSeq === 0 && k.stuckSeq === 0);
+  }
+
+  quiet(key: string): boolean {
+    const k = this.#peek(key);
+    return k === undefined || this.isNew(key) || k.stuckSeq > k.answeredSeq;
+  }
+
+  capped(key: string, cls: HelperClass): boolean {
+    const u = this.#peek(key)?.units[cls];
+    return u !== undefined && (u.stuck > 0 || u.gaveUpSeq > u.answeredSeq);
+  }
+
+  running(key: string): number {
+    return this.#peek(key)?.running ?? 0;
+  }
+
+  unitRunning(key: string, cls: HelperClass): number {
+    return this.#peek(key)?.units[cls].running ?? 0;
+  }
+
+  /** The lookups of a key running, or of its unit of one class. */
+  runningOf(key: string, cls?: HelperClass): object[] {
+    const k = this.#peek(key);
+    if (k === undefined) return [];
+    return [...k.lookups].filter(
+      (lookup) => cls === undefined || this.#lookups.get(lookup)?.cls === cls,
+    );
+  }
+
+  /** Whether the child said this lookup is stuck, as the key knows it. */
+  isStuck(lookup: object): boolean {
+    return this.#lookups.get(lookup)?.stuck === true;
+  }
+
+  started(lookup: object, key: string, cls: HelperClass): void {
+    if (this.#lookups.has(lookup)) return;
+    const evidence = this.#evidence(key);
+    evidence.running += 1;
+    evidence.units[cls].running += 1;
+    evidence.lookups.add(lookup);
+    this.#lookups.set(lookup, { key, cls, evidence, stuck: false, detached: false });
+  }
+
+  /** The child said a lookup has run past `STUCK_MS`. */
+  stuck(lookup: object): void {
+    const started = this.#lookups.get(lookup);
+    if (started === undefined || started.stuck) return;
+    started.stuck = true;
+    if (started.detached) return;
+    this.#seq += 1;
+    started.evidence.stuckSeq = this.#seq;
+    started.evidence.units[started.cls].stuck += 1;
+  }
+
+  ended(lookup: object, outcome: HelperOutcome): void {
+    const started = this.#lookups.get(lookup);
+    if (started === undefined) return;
+    this.#lookups.delete(lookup);
+    if (started.detached) return;
+    const { evidence, cls } = started;
+    const u = evidence.units[cls];
+    evidence.running -= 1;
+    u.running -= 1;
+    evidence.lookups.delete(lookup);
+    if (started.stuck) u.stuck -= 1;
+    if (outcome === 'neutral') return;
+    this.#seq += 1;
+    if (outcome === 'answer') {
+      evidence.answeredSeq = this.#seq;
+      u.answeredSeq = this.#seq;
+    } else {
+      u.gaveUpSeq = this.#seq;
+    }
+  }
+
+  /**
+   * One lookup detached when the helper went quiet (D26): it no longer counts against its key, and
+   * its end says nothing of it. It still holds its token until it ends.
+   */
+  detach(lookup: object): void {
+    const started = this.#lookups.get(lookup);
+    if (started === undefined || started.detached) return;
+    const { evidence, cls } = started;
+    evidence.running -= 1;
+    evidence.units[cls].running -= 1;
+    if (started.stuck) evidence.units[cls].stuck -= 1;
+    evidence.lookups.delete(lookup);
+    started.detached = true;
+  }
+
+  /**
+   * A configuration change (§1.12): what every key said is let go, and the lookups running no
+   * longer count against their keys. They still hold their lanes and tokens until they end.
+   */
+  detachAll(): void {
+    for (const started of this.#lookups.values()) started.detached = true;
+    this.#keys.clear();
+  }
+
+  /** Lookups started and not ended, detached ones included: a recount for tests. */
+  size(): { readonly keys: number; readonly lookups: number } {
+    return { keys: this.#keys.size, lookups: this.#lookups.size };
+  }
+}
+
+/** What the helper's admission reads of one queued lookup and the helper's lanes (§1.8). */
+export interface HelperAdmitAsk {
+  /** "Check now". */
+  readonly urgent: boolean;
+  /** Heard on the probe's lanes and over its class's cap there (S6): never in S3. */
+  readonly overflow: boolean;
+  /** Its key or its domain has a lookup past `STUCK_MS` on either lane set. */
+  readonly stuckAnywhere: boolean;
+  readonly keyNew: boolean;
+  readonly keyQuiet: boolean;
+  readonly keyRunning: number;
+  /** The walk vouches for the key (D23, S6): never in S3. */
+  readonly vouched: boolean;
+  readonly unitRunning: number;
+  readonly unitCapped: boolean;
+  /** The helper's lanes at risk now. */
+  readonly atRisk: number;
+  /** Its class may run another in the helper (`#canRun`). */
+  readonly classOk: boolean;
+  readonly urgentAvailable: number;
+  readonly sharedAvailable: number;
+  readonly keptAvailable: number;
+}
+
+export type HelperToken = 'urgent' | 'shared' | 'kept';
+
+/** The key rule (§1.8's `keyOk`). */
+export function helperKeyOk(a: HelperAdmitAsk): boolean {
+  if (a.overflow) return !a.stuckAnywhere;
+  if (a.keyQuiet && !a.vouched) return a.keyRunning < KEY_QUIET;
+  return mayStart(
+    { running: a.unitRunning, unacked: 0, capped: a.unitCapped, sharedTaken: 0 },
+    HELPER_UNIT_RULE,
+  );
+}
+
+/** Whether a lookup is ungated (§1.8, D23): its key answers, or is vouched, and its unit is not capped. */
+export function helperUngated(
+  a: Pick<HelperAdmitAsk, 'overflow' | 'vouched' | 'keyQuiet' | 'unitCapped'>,
+): boolean {
+  return !a.overflow && (a.vouched || !a.keyQuiet) && !a.unitCapped;
+}
+
+/** The at-risk gate (§1.8's `riskOk`): T, or T + F for a never-seen key's first look. */
+export function helperRiskOk(a: HelperAdmitAsk): boolean {
+  if (helperUngated(a)) return true;
+  const firstLook = a.keyNew && a.keyRunning === 0 && !a.overflow;
+  return a.atRisk < (firstLook ? RISK_T + RISK_F : RISK_T);
+}
+
+/**
+ * The token a queued helper lookup starts on, or undefined while it waits (§1.3's Check now and
+ * §1.8's `admit`). "Check now" takes an urgent token when one is free, under no key rule, so it
+ * passes a silent zone's stuck lookups; otherwise a shared one, as its key's first look, under the
+ * key rule and T. Any other lookup needs the key rule, T and its class's cap, and takes a shared
+ * token, or the kept one only while ungated: the kept token is never a gated lookup's.
+ */
+export function admitHelper(a: HelperAdmitAsk): HelperToken | undefined {
+  if (a.urgent && a.urgentAvailable > 0) return 'urgent';
+  if (!helperKeyOk(a) || !helperRiskOk(a)) return undefined;
+  if (!a.urgent && !a.classOk) return undefined;
+  if (a.sharedAvailable > 0) return 'shared';
+  if (!a.urgent && helperUngated(a) && a.keptAvailable > 0) return 'kept';
+  return undefined;
+}

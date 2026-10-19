@@ -1,8 +1,14 @@
-import { createHash } from 'node:crypto';
 import { open, readFile, stat, type FileHandle } from 'node:fs/promises';
 import { hostname as osHostname } from 'node:os';
 import { join } from 'node:path';
 import type { Logger } from '@ms/shared';
+import {
+  DIGEST_ABSENT,
+  digestOf,
+  digestOfError,
+  glibcRuntime,
+  unreadableDigest,
+} from './lookup-helper-child.js';
 import type { Family, WatchedReading } from './name-resolver.js';
 
 /**
@@ -118,7 +124,7 @@ const SYSTEMD_NAMES: ReadonlySet<string> = new Set([
   '_localdnsproxy',
 ]);
 
-export function glibcVersionOf(text: string | undefined): GlibcVersion | undefined {
+export function glibcVersionOf(text: string | null | undefined): GlibcVersion | undefined {
   const match = /^(\d+)\.(\d+)/u.exec(text ?? '');
   if (match === null) return undefined;
   return [Number(match[1] ?? Number.NaN), Number(match[2] ?? Number.NaN)];
@@ -140,25 +146,11 @@ export function atLeast(version: GlibcVersion, since: GlibcVersion): boolean {
  *   or `unreadable:unknown` with none (`unreadableDigest`).
  *
  * So an absent file is told from an empty one, and an unreadable one from both. The check decides
- * whether a file moved by this digest alone, never by its inode or times.
+ * whether a file moved by this digest alone, never by its inode or times. **One function** for the
+ * policy, the resolver's watch and the lookup helper's child (`P-432` S3): the child's module, which
+ * imports only `node:*`, holds it, and this module hands it on.
  */
-export function digestOf(content: string | Uint8Array): string {
-  return createHash('sha256').update(content).digest('hex');
-}
-
-/** An absent file's digest (`digestOf`'s contract). */
-export const DIGEST_ABSENT = 'absent';
-
-/** The digest of a file that could not be read for another reason than its absence, by its code. */
-export function unreadableDigest(code: string | undefined): string {
-  return `unreadable:${code ?? 'unknown'}`;
-}
-
-/** The digest of a read that failed, by its error: `DIGEST_ABSENT` or `unreadable:<code>`. */
-export function digestOfError(error: unknown): string {
-  const code = codeOf(error);
-  return code === 'ENOENT' ? DIGEST_ABSENT : unreadableDigest(code);
-}
+export { DIGEST_ABSENT, digestOf, digestOfError, unreadableDigest };
 
 // --- C's character classes and number parsing, as glibc's parsers use them (C locale) ----------
 
@@ -784,7 +776,7 @@ export interface PolicyView {
 /** What a view is built from. A file's text is null when it is absent, undefined when unreadable. */
 export interface PolicyInputs {
   readonly platform: string;
-  readonly glibc: string | undefined;
+  readonly glibc: string | null | undefined;
   readonly env: Environment;
   /** The hostname at load: glibc's search list when resolv.conf names none. */
   readonly hostname: string;
@@ -1102,7 +1094,7 @@ export function classifyName(
 /** What the lookup helper's `ready` must echo (D28): a child that read otherwise is skewed. */
 export interface PolicySnapshot {
   readonly node: string;
-  readonly glibc: string | undefined;
+  readonly glibc: string | null;
   /**
    * Each file this process's glibc reads once, by path: its digest at load, by `digestOf`'s
    * contract (sha256 of its bytes, `absent`, or `unreadable:<code>`).
@@ -1124,7 +1116,7 @@ export interface PolicyDescription {
   readonly check: 'on' | 'off';
   readonly off: CheckOff | undefined;
   readonly platform: string;
-  readonly glibc: string | undefined;
+  readonly glibc: string | null;
   readonly servers: readonly string[];
   readonly search: readonly string[];
   readonly searchFrom: ResolvConf['searchFrom'] | undefined;
@@ -1177,8 +1169,8 @@ export interface GlibcNamePolicyOptions {
   readonly files?: SystemFiles;
   readonly env?: Environment;
   readonly platform?: string;
-  /** glibc's runtime version, undefined off glibc. `process.report`'s unless a test hands one in. */
-  readonly glibcVersion?: () => string | undefined;
+  /** glibc's runtime version, null off glibc. `glibcRuntime`'s unless a test hands one in. */
+  readonly glibcVersion?: () => string | null;
   readonly nodeVersion?: string;
   readonly hostname?: () => string;
   /**
@@ -1345,32 +1337,6 @@ export async function nssModuleLook(
   return { state: 'absent' };
 }
 
-/**
- * glibc's runtime version from `process.report`, with the report's network section left out:
- * otherwise `getReport` asks the name of every open socket's peer, synchronously on the main thread
- * (Node's src/node_report_utils.cc `ReportEndpoint`), which waits on DNS exactly when it is silent.
- */
-function glibcRuntime(): string | undefined {
-  const reporter = process.report as NodeJS.ProcessReport & {
-    excludeNetwork?: boolean | undefined;
-  };
-  const before = reporter.excludeNetwork;
-  reporter.excludeNetwork = true;
-  let report: unknown;
-  try {
-    report = reporter.getReport();
-  } finally {
-    reporter.excludeNetwork = before;
-  }
-  if (typeof report !== 'object' || report === null || !('header' in report)) return undefined;
-  const header: unknown = report.header;
-  if (typeof header !== 'object' || header === null || !('glibcVersionRuntime' in header)) {
-    return undefined;
-  }
-  const version: unknown = header.glibcVersionRuntime;
-  return typeof version === 'string' ? version : undefined;
-}
-
 /** The domain glibc's `domain_from_hostname` takes from a hostname: after its first dot, if any. */
 function domainOf(hostname: string): string | null {
   const dot = hostname.indexOf('.');
@@ -1415,7 +1381,7 @@ export class GlibcNamePolicy implements SystemNamePolicy {
   readonly #files: SystemFiles;
   readonly #env: Environment;
   readonly #platform: string;
-  readonly #glibcVersion: () => string | undefined;
+  readonly #glibcVersion: () => string | null;
   readonly #nodeVersion: string;
   readonly #hostname: () => string;
   readonly #readText: ((path: string) => Promise<string | null | undefined>) | undefined;
@@ -1430,7 +1396,7 @@ export class GlibcNamePolicy implements SystemNamePolicy {
   #generation = 0;
   /** What the watch read before load had, the latest of each file (`looked`). */
   readonly #early = new Map<string, WatchedReading>();
-  #glibc: string | undefined;
+  #glibc: string | null = null;
   /** What load read of each file. */
   readonly #atLoad: Record<FileKey, FileReading> = {
     hosts: UNREAD,

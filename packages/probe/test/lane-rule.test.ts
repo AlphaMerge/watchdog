@@ -1,13 +1,25 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
+  admitHelper,
+  candidateKey,
   firstLoad,
   gateFirstRule,
   heldBy,
+  HELPER_UNIT_RULE,
+  HelperKeys,
+  helperKeyOk,
+  helperRiskOk,
+  helperUngated,
+  KEY_QUIET,
+  keyWords,
   mayStart,
   probeFirstRule,
+  RISK_F,
+  RISK_T,
   type DomainHistory,
   type HeldBy,
+  type HelperAdmitAsk,
   type KeyLoad,
   type KeyRule,
   type RunningLookup,
@@ -624,6 +636,352 @@ describe('the lane rule (P-432 S1)', () => {
     it('decides as P-438 does with each helper lookup stuck one more stuck, over every world of the grid', () => {
       const worlds = sweep(1, gateFirstRule);
       assert.equal(worlds, 1_368_000);
+    });
+  });
+});
+
+describe('the lookup helper’s lane rule (P-432 S3)', () => {
+  it('is built to the numbers decided: a quiet key holds 3, T is 4, F is 1, a capped unit 3', () => {
+    assert.equal(KEY_QUIET, 3);
+    assert.equal(RISK_T, 4);
+    assert.equal(RISK_F, 1);
+    assert.deepEqual(HELPER_UNIT_RULE, {
+      lanes: INF,
+      cappedLanes: 3,
+      unacked: INF,
+      sharedLanes: INF,
+    });
+  });
+
+  describe('LR3: candidateKey', () => {
+    it('keys a name by its domain, a single label by itself, and never by nothing', () => {
+      const keys: [string, string][] = [
+        ['dev-4.zone-b.test', 'd:zone-b.test'],
+        ['DEV-4.Zone-B.Test', 'd:zone-b.test'],
+        ['dev-4.zone-b.test.', 'd:zone-b.test'],
+        [' dev-4.zone-b.test ', 'd:zone-b.test'],
+        ['a.b.c.d', 'd:b.c.d'],
+        ['sw-b1', 'n:sw-b1'],
+        ['SW-B1.', 'n:sw-b1'],
+        ['localhost', 'n:localhost'],
+        ['.', 'n:.'],
+        ['', 'n:'],
+        ['.leading.test', 'n:.leading.test'],
+        ['trailing.', 'n:trailing'],
+        ['x..test', 'd:.test'],
+      ];
+      for (const [name, key] of keys) assert.equal(candidateKey(name), key, name);
+      for (const [name] of keys) {
+        assert.notEqual(candidateKey(name), '', name);
+        assert.notEqual(candidateKey(name), 'd:', name);
+      }
+    });
+
+    it('names a key in a message by its domain or its label', () => {
+      assert.equal(keyWords('d:zone-b.test'), 'zone-b.test');
+      assert.equal(keyWords('n:sw-b1'), 'sw-b1');
+    });
+  });
+
+  describe('LR4: what the helper knows of each key', () => {
+    it('is new until it answers or sticks, quiet while stuck since its last answer', () => {
+      const keys = new HelperKeys();
+      const k = 'd:zone-b.test';
+      assert.equal(keys.isNew(k), true);
+      assert.equal(keys.quiet(k), true);
+      const one = {};
+      keys.started(one, k, 'first');
+      assert.equal(keys.running(k), 1);
+      assert.equal(keys.unitRunning(k, 'first'), 1);
+      assert.equal(keys.unitRunning(k, 'refresh'), 0);
+      assert.equal(keys.isNew(k), true, 'running is not evidence');
+      keys.ended(one, 'answer');
+      assert.equal(keys.isNew(k), false);
+      assert.equal(keys.quiet(k), false, 'it answered');
+      const two = {};
+      keys.started(two, k, 'refresh');
+      keys.stuck(two);
+      assert.equal(keys.quiet(k), true, 'stuck since its last answer');
+      assert.equal(keys.capped(k, 'refresh'), true, 'a stuck lookup of the class runs');
+      assert.equal(keys.capped(k, 'first'), false, 'per class');
+      const three = {};
+      keys.started(three, k, 'first');
+      keys.ended(three, 'answer');
+      assert.equal(keys.quiet(k), false, 'an answer after the stuck one');
+      keys.ended(two, 'giveUp');
+      assert.equal(keys.capped(k, 'refresh'), true, 'gave up since the class last answered');
+      assert.equal(keys.isStuck(two), false, 'ended');
+      const four = {};
+      keys.started(four, k, 'refresh');
+      keys.ended(four, 'answer');
+      assert.equal(keys.capped(k, 'refresh'), false, 'the class answered since');
+      assert.deepEqual(keys.size(), { keys: 1, lookups: 0 });
+    });
+
+    it('a stuck lookup that answers makes its key answering; a neutral end says nothing (K6)', () => {
+      const keys = new HelperKeys();
+      const k = 'd:zone-b.test';
+      const slow = {};
+      keys.started(slow, k, 'first');
+      keys.stuck(slow);
+      assert.equal(keys.isNew(k), false, 'stuck is evidence');
+      assert.equal(keys.quiet(k), true);
+      keys.ended(slow, 'answer');
+      assert.equal(keys.quiet(k), false);
+      assert.equal(keys.capped(k, 'first'), false);
+      const lost = {};
+      keys.started(lost, 'd:other.test', 'first');
+      keys.ended(lost, 'neutral');
+      assert.equal(keys.isNew('d:other.test'), true, 'a neutral end is no evidence');
+    });
+
+    it('orders events by a counter, never the clock: stuck then answered in one instant is not quiet', () => {
+      const keys = new HelperKeys();
+      const k = 'n:sw-b1';
+      const a = {};
+      const b = {};
+      keys.started(a, k, 'first');
+      keys.started(b, k, 'first');
+      keys.stuck(a);
+      keys.ended(b, 'answer');
+      assert.equal(keys.quiet(k), false);
+      keys.stuck(a);
+      assert.equal(keys.quiet(k), false, 'said stuck once only');
+    });
+
+    it('forgets the least recently used key with nothing running past its bound', () => {
+      const keys = new HelperKeys({ maxKeys: 2 });
+      const held = {};
+      keys.started(held, 'd:a.test', 'first');
+      for (const name of ['d:b.test', 'd:c.test', 'd:d.test']) {
+        const one = {};
+        keys.started(one, name, 'first');
+        keys.ended(one, 'answer');
+      }
+      assert.equal(keys.size().keys, 2);
+      assert.equal(keys.running('d:a.test'), 1, 'a key with a lookup running is kept');
+      assert.equal(keys.isNew('d:b.test'), true, 'forgotten');
+    });
+  });
+
+  describe('LR5: the gates', () => {
+    /** A lookup asking to start: a never-seen key, nothing running, every token free. */
+    const asking = (overrides: Partial<HelperAdmitAsk> = {}): HelperAdmitAsk => ({
+      urgent: false,
+      overflow: false,
+      stuckAnywhere: false,
+      keyNew: true,
+      keyQuiet: true,
+      keyRunning: 0,
+      vouched: false,
+      unitRunning: 0,
+      unitCapped: false,
+      atRisk: 0,
+      classOk: true,
+      urgentAvailable: 2,
+      sharedAvailable: 5,
+      keptAvailable: 1,
+      ...overrides,
+    });
+
+    it('keyOk: a quiet key the walk does not vouch for runs at most 3, an answering one by its unit', () => {
+      for (let running = 0; running <= 5; running += 1) {
+        assert.equal(
+          helperKeyOk(asking({ keyRunning: running, unitRunning: running })),
+          running < 3,
+        );
+        const answering = asking({ keyNew: false, keyQuiet: false, keyRunning: running });
+        assert.equal(helperKeyOk({ ...answering, unitRunning: running }), true, 'no limit');
+        assert.equal(
+          helperKeyOk({ ...answering, unitRunning: running, unitCapped: true }),
+          running < 3,
+          'a capped unit holds 3',
+        );
+        assert.equal(
+          helperKeyOk(asking({ keyRunning: running, unitRunning: running, vouched: true })),
+          true,
+          'vouched is judged by its unit',
+        );
+      }
+    });
+
+    it('riskOk: a gated start waits at T, a never-seen key’s first look at T + F, an ungated one never', () => {
+      for (let atRisk = 0; atRisk <= 7; atRisk += 1) {
+        assert.equal(helperRiskOk(asking({ atRisk })), atRisk < 5, 'first look');
+        assert.equal(helperRiskOk(asking({ atRisk, keyRunning: 1 })), atRisk < 4, 'second');
+        assert.equal(helperRiskOk(asking({ atRisk, keyNew: false })), atRisk < 4, 'quiet');
+        assert.equal(
+          helperRiskOk(asking({ atRisk, keyNew: false, keyQuiet: false })),
+          true,
+          'ungated: its key answers',
+        );
+        assert.equal(helperRiskOk(asking({ atRisk, vouched: true })), true, 'ungated: vouched');
+        assert.equal(
+          helperRiskOk(asking({ atRisk, keyNew: false, keyQuiet: false, unitCapped: true })),
+          atRisk < 4,
+          'a capped unit is gated',
+        );
+      }
+    });
+
+    it('an ungated (vouched) lookup passes T and takes the kept token when no shared one is free', () => {
+      const vouched = asking({ vouched: true, atRisk: 6, sharedAvailable: 0 });
+      assert.equal(helperUngated(vouched), true);
+      assert.equal(admitHelper(vouched), 'kept');
+      assert.equal(admitHelper({ ...vouched, sharedAvailable: 1 }), 'shared', 'shared first');
+      assert.equal(admitHelper({ ...vouched, keptAvailable: 0 }), undefined);
+    });
+
+    it('never gives the kept token to a gated lookup, an overflow or "Check now"', () => {
+      assert.equal(admitHelper(asking({ sharedAvailable: 0 })), undefined, 'gated');
+      assert.equal(
+        admitHelper(asking({ overflow: true, keyNew: false, keyQuiet: false, sharedAvailable: 0 })),
+        undefined,
+        'overflow',
+      );
+      assert.equal(
+        admitHelper(
+          asking({ urgent: true, urgentAvailable: 0, sharedAvailable: 0, keyQuiet: false }),
+        ),
+        undefined,
+        '"Check now"',
+      );
+    });
+
+    it('overflow is T-gated, never ungated, and refused once its key is stuck anywhere', () => {
+      const overflow = asking({ overflow: true, keyNew: false, keyQuiet: false });
+      assert.equal(helperUngated(overflow), false);
+      assert.equal(admitHelper(overflow), 'shared');
+      assert.equal(admitHelper({ ...overflow, atRisk: 3 }), 'shared');
+      assert.equal(admitHelper({ ...overflow, atRisk: 4 }), undefined, 'at T');
+      assert.equal(
+        admitHelper({ ...overflow, keyNew: true, keyRunning: 0, atRisk: 4 }),
+        undefined,
+        'no T + F for overflow',
+      );
+      assert.equal(admitHelper({ ...overflow, stuckAnywhere: true }), undefined);
+    });
+
+    it('"Check now" takes an urgent token past every rule, else a shared one under the key rule and T, not its class', () => {
+      const urgent = asking({ urgent: true, keyRunning: 3, unitRunning: 3, atRisk: 9 });
+      assert.equal(admitHelper({ ...urgent, classOk: false }), 'urgent');
+      const noUrgent = { ...urgent, urgentAvailable: 0 };
+      assert.equal(admitHelper(noUrgent), undefined, 'a silent key at 3');
+      const first = asking({ urgent: true, urgentAvailable: 0, classOk: false });
+      assert.equal(admitHelper(first), 'shared', 'as its key’s first look, class caps aside');
+      assert.equal(admitHelper({ ...first, atRisk: 5 }), undefined, 'T + F applies');
+    });
+
+    it('a lookup its class may not run waits, whatever its tokens', () => {
+      assert.equal(admitHelper(asking({ classOk: false })), undefined);
+      assert.equal(
+        admitHelper(asking({ classOk: false, keyQuiet: false, keyNew: false })),
+        undefined,
+      );
+    });
+
+    it('every start it admits satisfies keyOk, riskOk, its class and a token of the kind named', () => {
+      let seen = 0;
+      for (const urgent of [false, true])
+        for (const overflow of [false, true])
+          for (const keyNew of [false, true])
+            for (const keyQuiet of [false, true])
+              for (const vouched of [false, true])
+                for (const unitCapped of [false, true])
+                  for (const classOk of [false, true])
+                    for (const keyRunning of [0, 1, 3])
+                      for (const atRisk of [0, 3, 4, 5])
+                        for (const urgentAvailable of [0, 1])
+                          for (const sharedAvailable of [0, 1])
+                            for (const keptAvailable of [0, 1]) {
+                              const a = asking({
+                                urgent,
+                                overflow,
+                                keyNew,
+                                keyQuiet,
+                                vouched,
+                                unitCapped,
+                                classOk,
+                                keyRunning,
+                                unitRunning: keyRunning,
+                                atRisk,
+                                urgentAvailable,
+                                sharedAvailable,
+                                keptAvailable,
+                              });
+                              const token = admitHelper(a);
+                              seen += 1;
+                              if (token === undefined) continue;
+                              if (token === 'urgent') {
+                                assert.ok(urgent && urgentAvailable > 0);
+                                continue;
+                              }
+                              assert.ok(helperKeyOk(a) && helperRiskOk(a));
+                              assert.ok(urgent || classOk);
+                              if (token === 'shared') assert.ok(sharedAvailable > 0);
+                              if (token === 'kept') {
+                                assert.ok(keptAvailable > 0 && sharedAvailable === 0);
+                                assert.ok(helperUngated(a) && !urgent && !overflow);
+                              }
+                            }
+      assert.equal(seen, 2 ** 7 * 3 * 4 * 2 ** 3);
+    });
+
+    it('the unit’s rule is mayStart’s with no shared lane and no unacked', () => {
+      for (let running = 0; running <= 5; running += 1) {
+        for (const capped of [false, true]) {
+          const load: KeyLoad = { running, unacked: 0, capped, sharedTaken: 0 };
+          assert.equal(mayStart(load, HELPER_UNIT_RULE), !capped || running < 3);
+          assert.equal(
+            heldBy(load, HELPER_UNIT_RULE),
+            capped && running >= 3 ? 'cappedLanes' : undefined,
+          );
+        }
+      }
+    });
+  });
+
+  describe('LR6: detachAll and detach', () => {
+    it('lets go of every key, and lookups running then count against none and say nothing', () => {
+      const keys = new HelperKeys();
+      const k = 'd:zone-b.test';
+      const stuck = {};
+      const other = {};
+      keys.started(stuck, k, 'first');
+      keys.started(other, k, 'refresh');
+      keys.stuck(stuck);
+      assert.equal(keys.quiet(k), true);
+      keys.detachAll();
+      assert.equal(keys.isNew(k), true, 'forgotten');
+      assert.equal(keys.running(k), 0);
+      keys.ended(stuck, 'giveUp');
+      keys.ended(other, 'answer');
+      assert.equal(keys.isNew(k), true, 'their ends say nothing of the key now');
+      assert.equal(keys.capped(k, 'first'), false);
+      assert.deepEqual(keys.size(), { keys: 0, lookups: 0 });
+      const later = {};
+      keys.started(later, k, 'first');
+      assert.equal(keys.running(k), 1, 'a new lookup counts from nothing');
+    });
+
+    it('detaches one lookup when the helper goes quiet: off its key, its stuck with it', () => {
+      const keys = new HelperKeys();
+      const k = 'd:zone-b.test';
+      const quiet = {};
+      const kept = {};
+      keys.started(quiet, k, 'first');
+      keys.started(kept, k, 'first');
+      keys.stuck(quiet);
+      assert.equal(keys.capped(k, 'first'), true);
+      keys.detach(quiet);
+      assert.equal(keys.running(k), 1);
+      assert.equal(keys.unitRunning(k, 'first'), 1);
+      assert.equal(keys.capped(k, 'first'), false, 'its stuck no longer caps the unit');
+      assert.equal(keys.quiet(k), true, 'what it said before stands');
+      keys.ended(quiet, 'answer');
+      assert.equal(keys.quiet(k), true, 'its answer says nothing');
+      keys.ended(kept, 'answer');
+      assert.equal(keys.quiet(k), false);
     });
   });
 });
