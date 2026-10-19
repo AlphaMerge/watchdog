@@ -588,16 +588,27 @@ function scanner(
     // Less than a silent lookup runs, so those one scan started still hold lanes at the next.
     await new Promise((resolve) => setTimeout(resolve, SCAN_SPACING_MS));
   };
-  /** Why each state changed: the check's result at that scan, and the resolver's state. */
+  /**
+   * Why each state changed: the check's result at that scan, and the resolver's state; and, for a
+   * sensor whose first check failed, what that check said and the state when it said it, since its
+   * first scan is no change and says nothing of its own.
+   */
   const why = (list: readonly Change[]): string =>
     list.length === 0
       ? 'none'
       : list
-          .map(
-            (change) =>
+          .map((change) => {
+            const first = [...scans].find(([, scan]) => scan.bySensor.has(change.sensorId));
+            const firstSaid =
+              first !== undefined && first[1].bySensor.get(change.sensorId)?.outcome !== 'ok'
+                ? `; its first check, ${said(change.sensorId, first[0])}`
+                : '';
+            return (
               `sensor ${String(change.sensorId)} ${change.from} to ${change.to} ` +
-              (reasons.get(change) ?? `at ${String(change.at)} ms, not said`),
-          )
+              (reasons.get(change) ?? `at ${String(change.at)} ms, not said`) +
+              firstSaid
+            );
+          })
           .join(' | ');
   /** A sensor's every result, by scan, and its changes. */
   const history = (sensorId: number): string =>
@@ -1479,8 +1490,20 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
     return { running, scan, inA };
   }
 
-  it('SC12: single labels, cold, check off, 4 silent in b.corp: the sw-a sensors never change state; with 40 silent, they change no more than in system mode', async () => {
-    const few = await singleLabels('gate', 44, 11);
+  it('SC12: single labels, cold, check off, 3 silent: the sw-a sensors never change state, whatever order their lookups come in; with 40 silent, they change no more than in system mode', async () => {
+    // Three silent labels, each a key of its own, hold 3 of the helper's 4 first lanes while they
+    // hang, so every answering label has the fourth whichever order the 8 workers' lookups arrive
+    // in, and sw-a36 to sw-a43 are asked after all three are held (K4). Four silent labels fill
+    // the four: an answering label asked after the fourth waits behind four lookups said stuck,
+    // and its check fails at once, as K4 pins. This was 44 labels with every eleventh silent, the
+    // fourth silent one last, which held only while sw-b43's lookup came after sw-a42's; on 8
+    // workers it now and then came first, and sw-a42 failed its cold first check.
+    const few = await singleLabels('gate', 44, 12);
+    const silentPeak = few.running.gate?.helperLookups.get('zone b')?.peak ?? 0;
+    assert.ok(
+      silentPeak >= 3,
+      `the three silent labels held three of the helper’s lanes at once: ${few.running.state()}`,
+    );
     const fewA = few.scan.changes.filter(({ sensorId }) => few.inA(sensorId));
     assert.deepEqual(fewA, [], `sw-a never changed state: ${few.scan.why(fewA)}`);
     for (const { sensorId, durationMs, outcome } of few.scan.results) {

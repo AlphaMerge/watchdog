@@ -12981,6 +12981,39 @@ because each is a decision rather than a defect:
               re-check, run again. One was not run, as equivalent: avoiding only at a crash
               charged to no one. A charged crash has nothing else in flight, and its name is
               poison, which is avoided anyway.
+            - Tests: the probe's twelve unit files 871 of 871, shared 255, core 250 and sensors
+              26, after a clean rebuild with no marker in dist. The three timing files 103 of
+              104, one file at a time. The one failure was SC12, for the reason below, which is
+              not this change's.
+          - **SC12 was intermittent, because its claim was wrong for four silent labels.** The
+            landing branch found it in 2 of 7 runs of the whole file, and it failed once more in
+            the one-rule run above. SC12 alone never failed.
+            - Why: each single label is a key of its own, so on a cold scan four silent labels
+              take the helper's 4 first lanes. An answering label whose lookup reaches the
+              resolver after the fourth waits behind four lookups the child says are stuck. Its
+              check then fails at once, at the 1 s stuck bound. That is K4, as decided.
+            - The script had 44 labels with every eleventh silent, so the fourth silent label,
+              `sw-b43`, was the scan's last. The claim held only while `sw-b43`'s lookup came
+              after the last answering ones, and on 8 workers it sometimes came first. The first
+              check of `sw-a42` (once `sw-a41`) then failed, and the sensor was Up again a scan
+              later.
+            - It was not state an earlier test left behind, and not the helper's ready. The
+              earlier tests' load only changes the odds.
+            - Fix: the scenario now claims what K4 promises. Three silent labels hold three of the
+              4 first lanes, whatever order their lookups arrive in, and the answering labels
+              have the fourth. SC12 is now 44 labels with every twelfth silent, so `sw-a36` to
+              `sw-a43` are asked after all three silent labels hold their lanes.
+            - It also asserts that the three were held at once: zone b's peak in the helper is
+              at least 3. So it cannot pass with the silent lookups never overlapping.
+            - The assertions are otherwise unchanged: no sw-a sensor changes state, and none
+              waits for a lane. The 40-silent half is unchanged.
+            - The failure message now says why each changed sensor's first check failed: what
+              the check said, and the resolver's state when it said it. Before, it gave only the
+              change.
+            - Mutant: the helper keeps three first lanes, not four. SC12 kills it.
+            - Proof: the whole file passed 20 runs in a row, 13 of 13 tests each time. Every run
+              was the file alone, after a rebuild with no marker in dist, started with fewer
+              than two toolchain runs, and took 234 to 360 s.
           - **Tests**: 1,498 of 1,498 in the targeted files, after the mutants, the last lint and
             a clean rebuild with no marker in dist: the probe's twelve unit files 868, its three
             timing files 99, one file at a time, shared 255 (capabilities, config, messages),
