@@ -9,9 +9,10 @@ function current(): Theme {
 }
 
 /**
- * Reads and writes the same `data-theme` attribute the inline script in `index.html` sets before
- * first paint. React is not the source of truth here on purpose: by the time a component could
- * set it, the page has already painted, and a dark-theme user has already seen a white flash.
+ * Reads and writes the same `data-theme` attribute that `public/theme-*.js`, the first script
+ * `index.html` loads, sets before first paint. React is not the source of truth here on purpose: by
+ * the time a component could set it, the page has already painted, and a dark-theme user has
+ * already seen a white flash.
  */
 export function useTheme(): { theme: Theme; toggle: () => void } {
   const [theme, setTheme] = useState<Theme>(current);
