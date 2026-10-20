@@ -104,7 +104,7 @@ export const IDENTIFY_PORTS: readonly { port: number; why: string }[] = [
   // The ones that say what a host is *for*, which is what a template needs.
   { port: 80, why: 'HTTP — a management interface on a switch as often as a web server' },
   { port: 443, why: 'HTTPS — and the only one many appliances answer at all' },
-  { port: 5985, why: 'WinRM — a Windows machine that T-09 can actually reach' },
+  { port: 5985, why: 'WinRM — a Windows machine the Windows sensors can actually reach' },
   { port: 9100, why: 'JetDirect — a printer, and almost nothing else listens here' },
   { port: 631, why: 'IPP — a printer, or a Unix host running CUPS' },
   { port: 3306, why: 'MySQL — a database sensor set rather than a bare host' },

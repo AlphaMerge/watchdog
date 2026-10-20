@@ -101,10 +101,14 @@ screen reader says of the entry. `entry-titles.test.ts` holds every shipped list
 such in the form (`U-89`) and on `docs/sensor-reference.md`. Nothing else — no links, lists or
 headings — and a `*` that opens or closes nothing (`*.domain`) stays a star, as CommonMark has it.
 
-**Every `title` and `description` is written for the operator**, as are a channel's name and unit
-and a limit's message: somebody with no `TASKS.md` reads them, so none cites a ticket or a decision
-record. Say what the reason is instead; the comment beside the schema is where its ticket goes.
-The core's `operator-text.test.ts` walks everything the API serves and fails on one (`U-92`).
+**Every `title` and `description` is written for the operator**, as are a channel's name and unit,
+a limit's message, a default, and what a check says when it fails — a result's `message` and the
+message of an error `execute()` throws, which are the sensor's message, its state-log entry and
+every notification carrying `%lastmessage`. Somebody with no `TASKS.md` reads them, so none cites a
+ticket or a decision record. Say what the reason is instead; the comment beside the code is where
+its ticket goes. The sensors' `operator-text.test.ts` reads every string and template under
+`packages/sensors/src`, outside the comments, and fails on one; the core's walks the schemas,
+channels and registries the API serves, a channel a parameter turns on included (`U-92`).
 
 ### `listener` (optional)
 
