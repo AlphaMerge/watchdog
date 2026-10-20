@@ -40392,7 +40392,9 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           `zoneB.peak <= 4`), not 3; the questions left open as the code counts them, 28 with Check
           now and 40 at most; and a rate-limited server not backed off. *Name resolution* is the
           gate as built, linked to the administration guide's subsection: the routing wait, the
-          helper's lanes, the hosts file on the probe's lanes, Check now unwalked, S4's allowlist
+          helper's lanes, the hosts file on the probe's lanes while the check is on (and in the
+          helper with every other name while the host's settings turn it off, as corrected in
+          the review below), Check now unwalked, S4's allowlist
           checked against `system-names.ts` (what is followed, and the move that turns the check
           off until restart), Ubuntu 24.04's stub, the miss rule, the latch's four causes, the
           rest's doubling, poison, and the differential as S8 ran it. `P-454`'s missing EDNS
@@ -40470,6 +40472,110 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           file's line, when it does, is the one to run.
         - **`P-460`'s passing line** is not known until it lands; step 0.6.1 sends the cut to its
           outcome for it.
+      - **Review of the integrated documents, fix round 1** (2026-10-20, on `bf9b9dfa`): eight
+        findings, two of them the same (the redo path), so seven distinct. Every one fixed, in new
+        commits on `prep/rc3-docs-2`:
+        - **Going back names both probe keys rc.3 adds** (release notes). `probe.allowScriptsAsRoot`
+          (`P-276`) is in rc.3's probe schema and not in rc.2's, beside `probe.nameResolver`, and
+          rc.2 refuses either, in `probe.json` or as `MS_PROBE__NAME_RESOLVER` and
+          `MS_PROBE__ALLOW_SCRIPTS_AS_ROOT` in a drop-in, with `probe: unknown setting "…"` and
+          exit 78. The paragraph names both keys and both variables, `daemon-reload` after the
+          drop-in, and that rc.2 then runs a root probe's scripts as root, as before.
+          `installation.md` → *Going back, after a tarball upgrade* says that an earlier release
+          refuses any key it does not know, in the file or a drop-in, and sends the reader to the
+          release notes for which.
+        - **The cut re-cuts from step 0.3, on the commit the gates passed** (checklist). Step 0.4
+          writes `/tmp/rc3-suite-commit` only after `==> clean. Full log:` (not `clean, but`),
+          step 0.6 writes `/tmp/rc3-diff-commit` only after `PASSED`, and each clears its own
+          file first; 0.6 and 0.7 refuse to start unless the suite's file names their commit; and
+          step 1's first lines compare both files with `origin/main` and stop, "cut again from
+          step 0.3", where the comment `# … or stop` was. Step 3's failure path is fix on `main`,
+          then step 0.3 to 0.7 on the new commit, then step 1; a failure that needs no change on
+          `main` is the same command again. Its clearing loop names all three worktrees
+          (`rc3-suite rc3-cut rc3-amd64`), and step 0.4 removes a leftover `rc3-suite` itself,
+          since a stop at 0.6 or 0.7 never reaches step 3. A failure after step 7 leaves the
+          pushed tag where it is, and the next candidate is rc.4 from step 0.
+        - **Step 0.7 stops `ms-server`, refuses to run beside it, and starts it after**
+          (checklist): `./scripts/dev-services.sh stop` from the main checkout, a guard on
+          `docker ps -q --filter name='^ms-server$'` and one on the toolchain count being 0, each
+          exiting, and `mkdir -p /tmp/rc3-diff` before the `tee`; then, however that block ended,
+          a second block starts `ms-server` and checks it by the standing push rule: the commit
+          both services log, no `"level":"error"` line, `connected to core`, and 401 from the API.
+        - **An rc.2 probe under an rc.3 core reads Warning** (release notes): `protocol` `1`,
+          *older than the core*, the message naming both protocols, a Warning trigger firing for
+          it, and the Warning clearing at 39; rc.1 and rc.2 both spoke 28, so this upgrade is the
+          first in the 1.0 line to show it.
+        - **Thirteen of the gate's channels gap under `"system"`, not fourteen** (runbook step 4):
+          `nameResolverMode` reads `1` in both modes, as step 4's own record and the release notes
+          said.
+        - **`ms-enrol` needs `--host`, a name the core's certificate lists** (`installation.md` →
+          *Remote probes*, runbook step 1 and *Before you start*): a default core binds
+          `0.0.0.0`, which `ms-enrol` drops, and the certificate lists `localhost`, `127.0.0.1` and
+          the core host's `hostname -f` at install, so an IP address fails the probe's TLS check.
+          The documented command is `--host "$(hostname -f)"`, with the `openssl` line that
+          prints the names, and the probe's host must resolve that name to the core. The usage
+          text of `deploy/enrol-probe.sh` and `deploy/install-probe.sh` gives the same command.
+        - **While the host's settings turn the check off, every name is asked in the helper, the
+          hosts file's included** (release notes, runbook step 1, the administration guide, and
+          this ticket's bullet above), as `classifyName` and `DnsCheck.route` do; a name the
+          hosts file gives stays on the probe's lanes only while the settings pass, also while
+          the check waits for its first answer or stands down, which the stand-down sentences now
+          say too.
+        - **Tests**: `build-hygiene` and `candidate-surface` (core) 48 of 48, 39 before and nine
+          new: going back names every probe setting this build has and rc.2 does not (rc.2's
+          settings a list read from the tag, its refusal played by this build's loader on the
+          schema with those keys taken out, and each variable read as its key by this build); the
+          rc.2 item says Warning with the lookup's reading; step 4 and the notes count the
+          thirteen alike; the three documents send the hosts file's names to the helper; every
+          `ms-enrol` command in `docs/` and `deploy/` passes `--host`, and *Remote probes* names
+          every name `setup.sh` issues the certificate for; the checklist clears every worktree it
+          names, its guards are run in bash with `git` and `docker` stubbed (the pass lines
+          against what `test-all.sh` and the differential print, step 1's loop, 0.6's and 0.7's
+          suite check, 0.7's two `docker ps` guards), and its redo goes to step 0.3.
+          `probe-health-report` (probe) 51 of 51: system mode is held to sending none of the
+          thirteen, where it named S3's five. Twenty document mutants, each restored with
+          `shutil.copy` and `os.utime` and compared with `filecmp`, all killed; two code mutants,
+          each with its marker in `dist` while mutated and gone after the rebuild, both killed:
+          system mode sending `nameCheckState` (missed by the old five-field list) and an
+          outdated probe's lookup reading Down. The checklist's 0.4, 0.6, step 1 and step 3
+          blocks were also run as written, in zsh on the host, against a scratch repository
+          standing for the main checkout: a first attempt, a fix on `main`, step 3's clearing,
+          step 1 stopping, 0.4 again and over a leftover `rc3-suite`, step 1 stopping while only
+          the suite had run again, and step 1 passing once both had. `prettier` and `eslint` on
+          the changed test files.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (review fix round 1):
+        - **The documents follow the code on the hosts file while the check is off, and
+          `classifyName` is not changed.** S4 is an allowlist by the user's decision of
+          2026-10-19, and which source glibc reads first is one of the shapes it vouches for:
+          off, the probe cannot say a name in the hosts file is answered from it. The cost of
+          vouching nothing is a lane in the helper, never an answer, since every answer is
+          `getaddrinfo`'s. An exemption would change S4 and S6 code after S8's differential ran
+          on it; if it is wanted, it is a ticket of its own with a test, not a documents fix.
+        - **The administration guide is corrected with the three named documents**: it said the
+          same, and the release notes link to it for the gate.
+        - **The refusal is quoted as the loader writes it**, `probe: unknown setting
+          "allowScriptsAsRoot"` (`formatAjvError`, the same at `v1.0.0-rc.2`), not as
+          `probe.allowScriptsAsRoot: unknown setting`, and the test holds the quote to the loader.
+        - **Step 1 checks the suite's and the differential's files, not S7's.** Both scripts
+          print a verdict line; S7's verdict is its numbers read against the findings' bounds,
+          which a file written by a grep would claim without reading. The record names the
+          commit 0.7 ran on, and 0.7 refuses a commit the suite did not pass.
+        - **`ms-server` is verified by the standing push rule's four checks** (the commit in the
+          log, no error line, 401, the probe connected), the checks every restart after a push
+          already uses.
+        - **`--host` is documented, not defaulted in `ms-enrol`.** Its refusal of a wildcard is
+          right, and a default it chose could be a name the certificate does not list (an
+          operator's own PKI). Making `ms-enrol` read the certificate's DNS names is a code change
+          left open (below).
+        - **The probe's system-mode test is extended rather than a test added**: the thirteen is
+          a claim about that report, and the test that held five of them is where it belongs.
+        - **Quiet-machine runs: none.** Nothing here is measured.
+      - **Open, for the coordinator** (review fix round 1):
+        - **Whether `ms-enrol` should take `--host` from the core's certificate** when the core
+          binds a wildcard, which would make the documented command work without it. No ticket
+          is filed: it needs a number.
+        - **Whether a name the hosts file gives should stay on the probe's lanes while the
+          check is off**, a change to `classifyName` (above). Not filed, for the same reason.
 
 ## Release 1.1 — Windows
 
