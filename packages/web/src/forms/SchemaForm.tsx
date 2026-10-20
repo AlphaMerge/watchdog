@@ -295,6 +295,7 @@ function Control({
             isSet={isSet}
             replacing={beingReplaced}
             value={typeof value === 'string' ? value : ''}
+            cleared={value === null}
             disabled={disabled}
             describedBy={describedBy}
             onReplace={onReplace}
@@ -644,6 +645,11 @@ function EntryButton({
   );
 }
 
+/** The part of a credential's control that focus goes to once the control has changed shape. */
+type WriteOnlyPart = 'box' | 'replace' | 'clear' | 'keep';
+
+const WRITE_ONLY_BUTTON = 'border border-control px-2 py-1 text-xs text-text-muted hover:text-text';
+
 /**
  * A credential.
  *
@@ -652,6 +658,18 @@ function EntryButton({
  * be pre-filled with a lie, and a form that submitted its empty box would replace the stored
  * secret with nothing. Leaving it alone omits the key, and the core carries the stored value
  * forward.
+ *
+ * **Each of its buttons changes what the control is, and says where focus goes next** (`U-23`,
+ * WCAG 2.4.3). The button pressed is taken away, or its node is kept by React for whichever button
+ * now stands in its place: walked with a keyboard, Replace left focus on *Keep the current one*,
+ * the button that undoes it, with the box to type in behind. Replace now goes to the box, Keep to
+ * Replace, Clear to the Keep that undoes it, and that Keep back to Clear. Each button has a key of
+ * its own, so none is handed another's focus by accident and the order above is the only one.
+ *
+ * **A secret cleared says so where it was cleared** (`U-23`). Clear used to change nothing at the
+ * control: it still read "set, write-only", with the same two buttons, and only a sentence at the
+ * foot of the form said the secret would go. It now reads "removed on save", and offers to keep
+ * the stored one instead, which is the only way back that does not go through Replace.
  */
 function WriteOnly({
   id,
@@ -659,6 +677,7 @@ function WriteOnly({
   isSet,
   replacing,
   value,
+  cleared,
   disabled,
   describedBy,
   onReplace,
@@ -670,12 +689,31 @@ function WriteOnly({
   isSet: boolean;
   replacing: boolean;
   value: string;
+  /** The stored secret is to be removed on save: the form holds `null` for it. */
+  cleared: boolean;
   disabled: boolean;
   describedBy: string;
   onReplace: (path: string, replacing: boolean) => void;
   onValue: (next: unknown) => void;
   onClear: () => void;
 }): React.JSX.Element {
+  const next = useRef<WriteOnlyPart | null>(null);
+  const replaceButton = useRef<HTMLButtonElement>(null);
+  const clearButton = useRef<HTMLButtonElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    const wanted = next.current;
+    if (wanted === null) return;
+    next.current = null;
+    const parts: Record<WriteOnlyPart, HTMLElement | null> = {
+      box: document.getElementById(id),
+      replace: replaceButton.current,
+      clear: clearButton.current,
+      keep: keepButton.current,
+    };
+    parts[wanted]?.focus();
+  });
+
   if (!isSet || replacing) {
     return (
       <div className="flex flex-wrap items-center gap-2">
@@ -714,13 +752,16 @@ function WriteOnly({
         )}
         {isSet && (
           <button
+            key="keep"
+            ref={keepButton}
             type="button"
             disabled={disabled}
             onClick={() => {
+              next.current = 'replace';
               onValue(undefined);
               onReplace(field.path, false);
             }}
-            className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+            className={WRITE_ONLY_BUTTON}
           >
             Keep the current one
           </button>
@@ -732,30 +773,59 @@ function WriteOnly({
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span
-        className="border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg"
+        className={
+          cleared
+            ? 'border border-down-border bg-down-bg px-1.5 py-0.5 text-xs font-medium text-down-fg'
+            : 'border border-ack-border bg-ack-bg px-1.5 py-0.5 text-xs font-medium text-ack-fg'
+        }
         id={id}
       >
-        set, write-only
+        {cleared ? 'removed on save' : 'set, write-only'}
       </span>
       <button
+        key="replace"
+        ref={replaceButton}
         type="button"
         disabled={disabled}
         onClick={() => {
+          next.current = 'box';
           onReplace(field.path, true);
         }}
-        className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+        className={WRITE_ONLY_BUTTON}
       >
         Replace
       </button>
-      {!field.required && (
+      {cleared ? (
         <button
+          key="keep"
+          ref={keepButton}
           type="button"
           disabled={disabled}
-          onClick={onClear}
-          className="border border-control px-2 py-1 text-xs text-text-muted hover:text-text"
+          aria-describedby={id}
+          onClick={() => {
+            next.current = 'clear';
+            onValue(undefined);
+          }}
+          className={WRITE_ONLY_BUTTON}
         >
-          Clear
+          Keep the current one
         </button>
+      ) : (
+        !field.required && (
+          <button
+            key="clear"
+            ref={clearButton}
+            type="button"
+            disabled={disabled}
+            onClick={() => {
+              next.current = 'keep';
+              onClear();
+            }}
+            className={WRITE_ONLY_BUTTON}
+          >
+            Clear
+          </button>
+        )
       )}
     </div>
   );

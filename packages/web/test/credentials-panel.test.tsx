@@ -473,6 +473,51 @@ describe('the credentials tab', () => {
       });
     });
 
+    it('puts focus in the box Replace opens, and back on Replace when the stored one is kept', async () => {
+      // Walked with a keyboard (`U-23`): Replace left focus on the button that took its place,
+      // which is the one that undoes it, with the box to type in behind it.
+      const { form } = await editSnmp();
+      const replace = within(form).getByRole('button', { name: 'Replace' });
+      replace.focus();
+      fireEvent.click(replace);
+      expect(document.activeElement).toBe(within(form).getByLabelText('Community string'));
+
+      const keep = within(form).getByRole('button', { name: 'Keep the current one' });
+      keep.focus();
+      fireEvent.click(keep);
+      expect(document.activeElement).toBe(within(form).getByRole('button', { name: 'Replace' }));
+    });
+
+    it('says at the field that Clear removes the secret on save, and offers to keep it there', async () => {
+      // Walked with a keyboard (`U-23`): Clear changed nothing at the control, which still read
+      // "set, write-only" beside the same two buttons, and could be undone only through Replace.
+      const { calls, form } = await editSnmp({ write: written() });
+      const clear = within(form).getByRole('button', { name: 'Clear' });
+      clear.focus();
+      fireEvent.click(clear);
+
+      expect(within(form).queryByText('set, write-only')).toBeNull();
+      expect(within(form).queryByRole('button', { name: 'Clear' })).toBeNull();
+      const keep = within(form).getByRole('button', { name: 'Keep the current one' });
+      expect(document.activeElement).toBe(keep);
+      const said = document.getElementById(keep.getAttribute('aria-describedby') ?? '');
+      expect(said?.textContent).toBe('removed on save');
+      expect(within(form).getByText('On save: Community string will be removed.')).toBeDefined();
+
+      fireEvent.click(keep);
+      expect(within(form).getByText('set, write-only')).toBeDefined();
+      expect(document.activeElement).toBe(within(form).getByRole('button', { name: 'Clear' }));
+      expect(within(form).queryByText(/On save/u)).toBeNull();
+
+      // Kept: a save sends no word about it.
+      fireEvent.change(within(form).getByLabelText('SNMP version'), { target: { value: 'v1' } });
+      fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+      await waitFor(() => {
+        expect(writes(calls)).toHaveLength(2);
+      });
+      expect('community' in (writes(calls)[1]?.body as { values: object }).values).toBe(false);
+    });
+
     it('has nothing to save until something changes', async () => {
       const { form } = await editSnmp();
       const save = within(form).getByRole('button', { name: 'Save changes' });
