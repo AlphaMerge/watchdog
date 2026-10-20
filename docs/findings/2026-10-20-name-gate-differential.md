@@ -2,7 +2,9 @@
 
 2026-10-20, on `feat/p432-s8-diff` (on `f762dfc6`). `scripts/smoke/name-gate-differential.sh`,
 the whole run three times: first on S4's policy as it landed, then on the policy narrowed by what
-the first run found, and then after the review's fixes (run 3). Built first, then:
+the first run found, and then after the review's fixes (run 3). Run 4, on `feat/p432-s8-walk`,
+adds the walk's wire, the regressions, the answer rows, the budget boxes and the boxes with the
+check off (`P-460`, `P-461`). Built first, then:
 
 ```
 MS_DIFF_WRITE=1 ./scripts/smoke/name-gate-differential.sh
@@ -122,6 +124,95 @@ upstream.
   about 4 s: each server for 1 s, the second's `(1 << 1) / 2`.
 - `timeout:3`, two attempts: two tries, about 6 s.
 
+## Run 4: the walk beside glibc, the answer rows, the budget and the boxes with the check off
+
+2026-10-20, on `feat/p432-s8-walk` (on `a95c3302`, with S6 landed), `P-460` and `P-461`. Built
+first, then the whole run, as above. Each base was the digest run 3 recorded, pinned. The policy's
+build is S6's (`dist/src/resolver/system-names.js`, sha256 `e19f270b…`), so the committed
+recordings, made on S8's build (`b3aaf3cf…`), were stale by that digest.
+
+**What it adds.** After glibc's wire (A), each plan is played again with the same answers for the
+walk alone (B): `DnsCheck.route` in a process of the row's own (`names-modes.ts`), with a budget
+and c-ares of its own and no lanes or helper, proven by its canary before the answers are set.
+The same process then makes §7.5's regression lookups at once: through the probe's resolver in
+`system` mode and in `gate` mode, in the helper's child, and on the probe's lanes. Every
+resolver is new for each plan, so every cache is cold. Then six answer rows in every image, two
+budget boxes and five boxes with the check off.
+
+**Run 4 passed.** 260 rows in each image (251 on Rocky 8), **2,966 plans, each walk agreeing with
+glibc's wire and every regression holding**, the 6 answer rows in every image (42 recordings),
+both budget boxes and the five boxes with the check off. Each image's rows took 303–494 s (run 3:
+107–127 s, with no walk or regression), and the whole run about 50 minutes, from 00:33 to 01:22
+UTC. Every image's run named the same rows file (`44aa6cb3…`) and policy build, and Ubuntu 24.04's
+saw resolved serve the stub. The recordings are rewritten, schema 3: 2,966 recordings and 42
+answer recordings, each with glibc's OPT flags.
+
+**The walk against glibc**, in every image:
+- **2,128 plans heard, 70 silent and 768 local** across the seven images (304, 10 and 111 in each
+  but Rocky 8, which has 102 local). Each walk asked each question once: 679 questions in each
+  image's walks against 696–708 of glibc's. glibc asks again on its second tries and over TCP
+  after TC, and the walk, under `rotate`, asks every server where glibc asks one.
+- A heard walk took a median of 1.8 ms, 16.6 ms at the 99th percentile and at most 36 ms. A silent
+  one ended at its routing wait, in 250–304 ms.
+- Every silent walk's plan had glibc return after 1 s, but for the two rotating rows'
+  `last-answers-after-silent` in some images (7 plans in all, 0 to 2 an image), where glibc
+  started at a server that answered and returned in 7–9 ms. That is rotate's one-way rule: the
+  walk asks every server at once, and a silent one holds it.
+- Gate mode ran every heard and local name on the probe's lanes and every silent one in the
+  helper.
+
+**The answer rows**, the same in every image:
+
+| Row | glibc's wire | glibc | The walk |
+| --- | --- | --- | --- |
+| TC from server 1, its TCP/53 refused | server 1 A, AAAA over UDP; server 2 A, AAAA over TCP | the answer, 11–18 ms | heard, both servers over UDP |
+| the same under `edns0` | the same, each with OPT | the answer | heard, no OPT |
+| FORMERR from server 1 | server 1 A, AAAA | `ENOTFOUND`; server 2 never asked | heard at server 1 |
+| A answered, AAAA SERVFAIL, server 2 silent | server 1 A, AAAA | the A alone; server 2 never asked | heard at server 1 |
+| FORMERR to a question with OPT, under `edns0` | server 1 A, AAAA, with OPT | `ENOTFOUND`: no retry without EDNS | heard: its questions carry no OPT |
+| one server dropping questions with OPT (`P-454`) | server 1 A, AAAA, with OPT | `EAI_AGAIN` after 1 s | heard |
+
+The last is `P-454`'s known limit, asserted as it is. The run fails if either side moves. In
+every plan of every row, glibc's questions carried an OPT record exactly where the policy read
+`options edns0`, and the check's never did.
+
+**The regressions.** In every plan of every image, gate mode answered as `system` mode did, the
+helper's child as the probe's lanes, and gate mode ran each name where its walk said: heard and
+local names on the probe's lanes, silent ones in the helper.
+
+**The budget boxes.** 150 names of a silent zone asked at once, family 0, for 30 s, by the
+probe's resolver in a process of its own with `UV_THREADPOOL_SIZE` 16. The upstream is the S5
+simulator at 127.0.0.2, holding a slot per distinct question for 10 s as dnsmasq does, so its
+peak is the distinct questions the forwarder had open upstream at once.
+
+| Forwarder | Arm | Held at once, at most | Distinct in 30 s | Bound | Table full |
+| --- | --- | --- | --- | --- | --- |
+| dnsmasq 2.90, `dns-forward-max=30` | `system` | 6 | 18 | | 0 |
+| | gate | 8 | 20 | 18 | 0 |
+| | gate, helper SIGKILLed 5 s in | 10 | 22 | 34 | 0 |
+| systemd-resolved 255 | `system` | 8 | 12 | | |
+| | gate | 9 | 14 | 20 | |
+
+A narrowed run before run 4 measured the same at dnsmasq, and 10 and 9 at resolved.
+
+`system` holds 6 at dnsmasq: the zone's 3 lanes in an outage (`P-438`'s "unacked: 3", a cold
+probe in the middle of the outage), A and AAAA each. Gate mode adds the walk's questions, well
+within D16's 12, and after a helper SIGKILL 5 s in, within D16's transient too. dnsmasq never
+said its table was full.
+
+**The boxes with the check off** (`P-461`), each the policy loaded in situ:
+
+| Box | Image | What the box had | Off by |
+| --- | --- | --- | --- |
+| nscd | Debian 12 | nscd running, `/var/run/nscd/socket` | `nscd` |
+| libnss-resolve | Ubuntu 24.04 | `files resolve [!UNAVAIL=return] dns myhostname` | `nsswitch`: an action group |
+| libnss-mdns | Debian 12 | `files myhostname mdns4_minimal [NOTFOUND=return] dns` | `nsswitch`: an action group |
+| LD_PRELOAD | Debian 12 | libresolv preloaded by the environment | `env` |
+| /etc/ld.so.preload | Debian 12 | libresolv named in the file | `env` |
+
+In each, the check routed `sw1.example.test` `unvouched:off` with nothing asked. The hosts:
+lines are the packages' own.
+
 ## Through systemd-resolved
 
 In `ubuntu2404` the stub rows were played through resolved: glibc asked 127.0.0.53, read off
@@ -146,6 +237,12 @@ upstream.
 
 ## Not measured here
 
-- The walk's own wire, D30's recording (B), needs S6 (`P-460`). So do the regression and budget
-  rows of the design's §7.5.
-- No box has the check off (nscd, `libnss-resolve`, `mdns4_minimal`, `LD_PRELOAD`): `P-461`.
+- The check's own OPT record: c-ares sends none, and run 4 asserts that it does not (`P-454`).
+- §7.5's rows beyond `P-460`'s and S4's: `sss` or `mdns4_minimal` before `files`, `files resolve
+  dns`, the stub refused under `resolve`, a `%scope` hosts line, a partial key, mid-run edits of
+  gai.conf and nsswitch.conf with a helper SIGKILL, `_gateway` for family 6 and
+  `LOCALDOMAIN=""` (`P-462`).
+- Timings: no run here is a quiet one, and none needs to be. The 1 s line is far from where load
+  could move a plan across it: glibc took at most 137 ms on a plan whose walk was heard, and load
+  only slows it; where the walk was silent and glibc slow, glibc took at least 1,009 ms, waiting
+  out a 1 s try, which load cannot shorten.

@@ -26,8 +26,21 @@
 # stub is played through it. Images build for this machine's architecture: on Apple silicon,
 # arm64, as Rosetta cannot boot Ubuntu 24.04's systemd.
 #
+# Each plan is played twice, in separate runs (`P-460`, D30): glibc's wire (A), and the name
+# check's walk alone (B, `DnsCheck.route` with no lanes and no helper), which the verdict holds to
+# glibc's; then the same lookup through the probe's resolver in `system` and `gate` mode, in the
+# helper's child and on the probe's lanes (§7.5's regressions). Beside the rows: the answer rows
+# (TC with TCP/53 refused, FORMERR, A with AAAA SERVFAIL, EDNS-intolerant servers) in every image;
+# the budget boxes, dnsmasq at `dns-forward-max=30` (a box of Debian 12 with `dnsmasq-base`) and
+# systemd-resolved (in Ubuntu 24.04's box, after its rows), each in front of a 150-name silent
+# zone in both modes and after a helper SIGKILL; and the boxes with the check off in situ
+# (`P-461`): nscd running, libnss-resolve's and libnss-mdns's hosts: lines, LD_PRELOAD and
+# /etc/ld.so.preload. Every one must hold for the run to pass.
+#
 #   MS_DIFF_IMAGES="debian12 ubuntu2404"   only these (default: all of them)
 #   MS_DIFF_ONLY=<id,id>                   only these rows (a partial run never verifies)
+#   MS_DIFF_BOXES="budget off"             the boxes beside the rows (default both; `none`: neither,
+#                                          and the run never verifies)
 #   MS_DIFF_OUT=<dir>                      keep each image's run there (default: a temp dir); an
 #                                          earlier run's files there are removed first, and the
 #                                          verdict takes only the runs this invocation made
@@ -56,6 +69,66 @@ ubuntu2404 ubuntu:24.04 1 0
 debian13 debian:trixie 0 0
 "
 
+# case image package: each box with the check off (`P-461`), built on the image's base with the
+# package installed as an operator would (`-` for none).
+OFF_BOXES="
+nscd debian12 nscd
+mdns4_minimal debian12 libnss-mdns
+resolve ubuntu2404 libnss-resolve
+ld-preload debian12 -
+ld-so-preload debian12 -
+"
+boxes=" ${MS_DIFF_BOXES:-budget off} "
+want_box() { case "${boxes}" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# `image_row <name>`: the image's base, resolved and apt-snapshot columns.
+image_row() {
+  echo "${IMAGES}" | awk -v want="$1" '$1 == want { print $2, $3, $4 }'
+}
+
+# `base_digest <name> <base>`: the digest a box of the image is built on, the recorded one unless
+# MS_DIFF_REFRESH=1 or none is recorded, then the tag's current one. Prints it; says why on stderr.
+base_digest() {
+  local name="$1" base="$2" recorded digest
+  recorded="$(ms_names_diff_recorded "${repo_root}/${recordings}" "${name}" "${base}")"
+  if [ "${MS_DIFF_REFRESH:-0}" = 1 ] || [ -z "${recorded}" ]; then
+    docker pull -q "${base}" >/dev/null
+    digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${base}" |
+      grep "^${base%%:*}@sha256:" | head -1 || true)"
+    if [ -z "${digest}" ]; then
+      echo "    FAILED: ${base} has no digest from ${base%%:*}" >&2
+      return 1
+    fi
+    if [ -z "${recorded}" ]; then
+      echo "    ${base}: no digest recorded for ${name}; the tag is ${digest}" >&2
+    elif [ "${recorded}" != "${digest}" ]; then
+      echo "    ${base}: MOVED, recorded on ${recorded}, the tag is now ${digest}" >&2
+    else
+      echo "    ${base}: the tag is still ${digest}" >&2
+    fi
+  else
+    digest="${recorded}"
+    if ! docker pull -q "${digest}" >/dev/null; then
+      echo "    FAILED: could not pull ${digest}, the recorded ${base}; MS_DIFF_REFRESH=1 takes the tag's current image" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "${digest}"
+}
+
+# `build_box <tag> <digest> <resolved> <snapshot> <packages>`
+build_box() {
+  docker build -q -t "$1" --build-arg "BASE=$2" --build-arg "RESOLVED=$3" \
+    --build-arg "APT_SNAPSHOT=$4" --build-arg "EXTRA=$5" \
+    -f "${repo_root}/scripts/smoke/Dockerfile.names" "${repo_root}/scripts/smoke" >/dev/null
+}
+
+# `keep_run <file>`: a box's stdout went to `<file>.partial`; it is kept whole, for the verdict.
+keep_run() {
+  mv "${out}/$1.partial" "${out}/$1"
+  runs+=("/out/$1")
+}
+
 if ! stale="$(ms_names_diff_stale "${repo_root}")"; then
   echo "==> the boxes load the build, and these sources are newer than it or not built: build first" >&2
   echo "${stale}" | head -20 | sed 's/^/      /' >&2
@@ -69,7 +142,8 @@ while read -r name _; do
   [ -n "${name}" ] || continue
   rm -f "${out}/${name}.json" "${out}/${name}.json.partial" "${out}/${name}.log"
 done <<<"${IMAGES}"
-rm -f "${out}/recordings.json" "${out}/verify.log"
+rm -f "${out}/recordings.json" "${out}/verify.log" "${out:?}"/off-*.json* "${out:?}"/off-*.log \
+  "${out:?}"/budget-*.json* "${out:?}"/budget-*.log
 wanted="${MS_DIFF_IMAGES:-$(echo "${IMAGES}" | awk 'NF { print $1 }' | tr '\n' ' ')}"
 only=()
 if [ -n "${MS_DIFF_ONLY:-}" ]; then only=(--only "${MS_DIFF_ONLY}"); fi
@@ -90,42 +164,20 @@ while read -r name base resolved snapshot; do
   [ -n "${name}" ] || continue
   case " ${wanted} " in *" ${name} "*) ;; *) continue ;; esac
   image="ms-names-diff:${name}"
-  recorded="$(ms_names_diff_recorded "${repo_root}/${recordings}" "${name}" "${base}")"
-  if [ "${MS_DIFF_REFRESH:-0}" = 1 ] || [ -z "${recorded}" ]; then
-    docker pull -q "${base}" >/dev/null
-    digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${base}" |
-      grep "^${base%%:*}@sha256:" | head -1 || true)"
-    if [ -z "${digest}" ]; then
-      echo "    FAILED: ${base} has no digest from ${base%%:*}" >&2
-      failed=1
-      continue
-    fi
-    if [ -z "${recorded}" ]; then
-      echo "    ${base}: no digest recorded for ${name}; the tag is ${digest}"
-    elif [ "${recorded}" != "${digest}" ]; then
-      echo "    ${base}: MOVED, recorded on ${recorded}, the tag is now ${digest}"
-    else
-      echo "    ${base}: the tag is still ${digest}"
-    fi
-  else
-    digest="${recorded}"
-    if ! docker pull -q "${digest}" >/dev/null; then
-      echo "    FAILED: could not pull ${digest}, the recorded ${base}; MS_DIFF_REFRESH=1 takes the tag's current image" >&2
-      failed=1
-      continue
-    fi
+  if ! digest="$(base_digest "${name}" "${base}")"; then
+    failed=1
+    continue
   fi
   echo "==> ${name}: building ${image} from ${digest}"
-  docker build -q -t "${image}" --build-arg "BASE=${digest}" --build-arg "RESOLVED=${resolved}" \
-    --build-arg "APT_SNAPSHOT=${snapshot}" -f "${repo_root}/scripts/smoke/Dockerfile.names" \
-    "${repo_root}/scripts/smoke" >/dev/null
+  build_box "${image}" "${digest}" "${resolved}" "${snapshot}" ""
   verify_image="${image}"
   container="$(ms_smoke_name "names-${name}")"
   containers+=("${container}")
   docker rm -f "${container}" >/dev/null 2>&1 || true
   started="$(date +%s)"
-  # Bounded inside the box, as the Mac has no timeout: an image's rows take about 140 s.
-  replay=(timeout 1500 node "/ms/${dist}/names-replay.js" --rows "/ms/${rows}" --image "${name}"
+  # Bounded inside the box, as the Mac has no timeout: an image's rows, each plan played for
+  # glibc, for the walk and for the regression, took 5 to 8 minutes in run 4.
+  replay=(timeout 3600 node "/ms/${dist}/names-replay.js" --rows "/ms/${rows}" --image "${name}"
     "${only[@]+"${only[@]}"}")
   if [ "${resolved}" = 1 ]; then
     # The labels are two separate arguments by design, so this expansion must split.
@@ -174,11 +226,25 @@ systemctl restart systemd-resolved'
       failed=1
       continue
     fi
-    mv "${out}/${name}.json.partial" "${out}/${name}.json"
-    runs+=("/out/${name}.json")
+    keep_run "${name}.json"
     if [ "$(docker exec "${container}" timeout 10 systemctl is-active systemd-resolved || true)" != active ]; then
       echo "    FAILED: systemd-resolved stopped during the run in ${name}" >&2
       failed=1
+    fi
+    # §7.5's resolved budget row, in this box after its rows: resolved in front of a silent zone.
+    if want_box budget; then
+      echo "==> budget box resolved, in ${name}"
+      if docker exec "${container}" timeout 900 node "/ms/${dist}/names-budget.js" \
+        --forwarder resolved --image "${name}" >"${out}/budget-resolved.json.partial" \
+        2>"${out}/budget-resolved.log"; then
+        keep_run budget-resolved.json
+        sed 's/^/    /' "${out}/budget-resolved.log"
+      else
+        mv "${out}/budget-resolved.json.partial" "${out}/budget-resolved.json.failed"
+        echo "    FAILED: the resolved budget box stopped:" >&2
+        tail -5 "${out}/budget-resolved.log" | sed 's/^/      /' >&2
+        failed=1
+      fi
     fi
   else
     # shellcheck disable=SC2046
@@ -191,14 +257,67 @@ systemctl restart systemd-resolved'
       failed=1
       continue
     fi
-    mv "${out}/${name}.json.partial" "${out}/${name}.json"
-    runs+=("/out/${name}.json")
+    keep_run "${name}.json"
   fi
   docker rm -f "${container}" >/dev/null 2>&1 || true
   echo "    $(wc -l <"${out}/${name}.log" | tr -d ' ') rows in $(($(date +%s) - started)) s"
 done <<<"${IMAGES}"
 
-echo "==> verifying every image's run against the rows"
+# `run_box <name> <tag> <command…>`: a box of its own, privileged with no network, its stdout the
+# run kept as `<name>.json`.
+run_box() {
+  local box="$1" tag="$2" container
+  shift 2
+  container="$(ms_smoke_name "names-${box}")"
+  containers+=("${container}")
+  docker rm -f "${container}" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2046
+  if docker run --rm --name "${container}" $(ms_smoke_labels) --privileged --network none \
+    -v "${repo_root}:/ms:ro" "${tag}" "$@" >"${out}/${box}.json.partial" 2>"${out}/${box}.log"; then
+    keep_run "${box}.json"
+    sed 's/^/    /' "${out}/${box}.log"
+  else
+    mv "${out}/${box}.json.partial" "${out}/${box}.json.failed"
+    echo "    FAILED: the ${box} box stopped:" >&2
+    tail -5 "${out}/${box}.log" | sed 's/^/      /' >&2
+    failed=1
+  fi
+}
+
+# §7.5's dnsmasq budget row: dnsmasq at dns-forward-max=30, in a Debian 12 box of its own.
+if want_box budget; then
+  read -r base _ snapshot <<<"$(image_row debian12)"
+  if digest="$(base_digest debian12 "${base}")"; then
+    echo "==> budget box dnsmasq: building ms-names-diff:debian12-dnsmasq from ${digest}"
+    build_box ms-names-diff:debian12-dnsmasq "${digest}" 0 "${snapshot}" dnsmasq-base
+    verify_image="ms-names-diff:debian12-dnsmasq"
+    run_box budget-dnsmasq ms-names-diff:debian12-dnsmasq timeout 900 node \
+      "/ms/${dist}/names-budget.js" --forwarder dnsmasq --image debian12
+  else
+    failed=1
+  fi
+fi
+
+# The boxes with the check off in situ (`P-461`).
+if want_box off; then
+  while read -r box image package; do
+    [ -n "${box}" ] || continue
+    [ "${package}" != - ] || package=""
+    read -r base _ snapshot <<<"$(image_row "${image}")"
+    if ! digest="$(base_digest "${image}" "${base}")"; then
+      failed=1
+      continue
+    fi
+    tag="ms-names-diff:${image}-${box}"
+    echo "==> off box ${box}: building ${tag} from ${digest}${package:+ with ${package}}"
+    build_box "${tag}" "${digest}" 0 "${snapshot}" "${package}"
+    verify_image="${tag}"
+    run_box "off-${box}" "${tag}" timeout 120 node "/ms/${dist}/names-off.js" --case "${box}" \
+      --image "${image}"
+  done <<<"${OFF_BOXES}"
+fi
+
+echo "==> verifying every image's run against the rows, and every box"
 if [ "${#runs[@]}" -eq 0 ] || [ -z "${verify_image}" ]; then
   echo "==> NAME GATE DIFFERENTIAL FAILED: no image ran" >&2
   exit 1

@@ -9,11 +9,16 @@
 #
 # `RESOLVED=1` (Ubuntu 24.04) adds systemd, systemd-resolved and tcpdump: that box boots systemd,
 # resolved serves its stub, and the questions glibc sends the stub are read off `lo`.
+#
+# `EXTRA` adds packages for the boxes beside the replay (`P-460`, `P-461`): `dnsmasq-base` for the
+# budget box, and `nscd`, `libnss-mdns` or `libnss-resolve` for a box with the check off, each
+# installed as an operator would, so its package's own hosts: line is the box's.
 ARG BASE=debian:bookworm
 FROM ${BASE}
 
 ARG NODE_VERSION=24.19.0
 ARG RESOLVED=0
+ARG EXTRA=""
 # `APT_SNAPSHOT=1` (Debian 11): take packages from the snapshot the base image was built from,
 # which its sources.list names in comments. Bullseye is past its LTS, and deb.debian.org's
 # security pool no longer has the arm64 packages its index still lists.
@@ -29,6 +34,7 @@ RUN set -eux; \
       apt-get update; \
       pkgs="ca-certificates curl xz-utils iproute2 libnss-myhostname"; \
       if [ "${RESOLVED}" = 1 ]; then pkgs="${pkgs} systemd systemd-sysv dbus systemd-resolved tcpdump"; fi; \
+      if [ -n "${EXTRA}" ]; then pkgs="${pkgs} ${EXTRA}"; fi; \
       apt-get install -y --no-install-recommends ${pkgs} || { dpkg --configure -a; apt-get install -y --no-install-recommends ${pkgs}; }; \
       rm -rf /var/lib/apt/lists/*; \
     else \

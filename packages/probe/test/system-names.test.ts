@@ -94,10 +94,12 @@ import {
  *   questions glibc sends, and writes what it verified to the recordings file. A row whose
  *   recording disagrees is fixed in the policy, or turns the check off, before the cut.
  *
- * **Recordings** (`test/fixtures/system-names-recordings.json`, schema 2) are S8's, never this
- * test's: each `{ id, image, plan, offset?, wire, outcome, ms, upstream? }` is the wire glibc sent
- * for a row's plan in an image, how `getaddrinfo` ended and how long it took, and through
- * systemd-resolved what resolved asked upstream; `images` says what each image was (its base and
+ * **Recordings** (`test/fixtures/system-names-recordings.json`, schema 3) are S8's, never this
+ * test's: each `{ id, image, plan, offset?, wire, opt, outcome, ms, upstream? }` is the wire glibc
+ * sent for a row's plan in an image, whether each question carried an OPT record, how
+ * `getaddrinfo` ended and how long it took, and through systemd-resolved what resolved asked
+ * upstream; `answerRecordings` are the same for the differential's own answer rows (`P-460`,
+ * `names-differential.test` holds them); `images` says what each image was (its base and
  * digest, glibc, Node, whether systemd-resolved was seen to serve the stub, and the sha256 of the
  * rows file and of the policy's build the run replayed). They are
  * written by `scripts/smoke/name-gate-differential.sh`, only when every row of every image
@@ -3493,7 +3495,7 @@ describe('S8: the rows the check is on for, exported for the differential', () =
       readonly schema?: unknown;
       readonly recordings?: unknown;
     };
-    assert.equal(parsed.schema, 2);
+    assert.equal(parsed.schema, 3);
     assert.ok(Array.isArray(parsed.recordings));
     const { rows } = await exportRows();
     for (const recording of parsed.recordings as Recording[]) {

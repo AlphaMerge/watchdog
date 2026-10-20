@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, fork, spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync, rmSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -8,33 +8,43 @@ import {
   DnsSimulator,
   replies,
   type DnsBehaviour,
+  type DnsQueryRecord,
   type DnsReply,
   type DnsServerSpec,
 } from '@ms/simulators';
 import { GlibcNamePolicy } from '../../src/resolver/system-names.js';
+import { within } from '../support/within.js';
 import { startCapture } from './names-capture.js';
 import {
+  ANSWER_PLAN,
+  ANSWER_ROWS,
+  ANSWER_WORLD,
   NAMESERVER,
   STUB,
   digestOf,
   expectationIn,
   listenerOf,
   nameserversOf,
+  optOf,
   pcapQuestions,
   resolvedObserved,
   unplayable,
   wireOf,
+  type AnswerRow,
   type Asked,
   type Expectation,
   type ImageRun,
   type InImage,
+  type ModesRun,
   type Plan,
   type PlanRun,
   type Reply,
   type Row,
   type RowRun,
   type RowsFile,
+  type WalkRun,
 } from './names-differential.js';
+import type { ModesReply, ModesRequest } from './names-modes.js';
 
 /**
  * The differential's replay in one image (`P-432` S8, D30): run as root in a box from
@@ -50,21 +60,32 @@ import {
  *    glibc, the modules installed and the environment the lookup gets, and its class for the
  *    question is kept, so that a row is judged by what the policy reads here, not only by the
  *    export.
- * 3. **Each plan.** The S5 simulator is every server the resolv.conf names, on port 53, answering
- *    as the plan says, and is also 127.0.0.1 and ::1 (when no row server is), to catch a question
- *    sent where no server was named. glibc is asked in a child process of its own (`names-lookup`),
- *    through `systemLookup`, the one call `systemResolve` and the lookup helper make, so each
- *    lookup reads nsswitch.conf and gai.conf afresh, as they are read once per process, and starts
- *    `rotate` at a random server. Every cache is cold: there is no nscd, the simulator caches
- *    nothing, and systemd-resolved runs with `Cache=no`.
+ * 3. **Each plan, glibc's wire (A).** The S5 simulator is every server the resolv.conf names, on
+ *    port 53, answering as the plan says, and is also 127.0.0.1 and ::1 (when no row server is), to
+ *    catch a question sent where no server was named. glibc is asked in a child process of its own
+ *    (`names-lookup`), through `systemLookup`, the one call `systemResolve` and the lookup helper
+ *    make, so each lookup reads nsswitch.conf and gai.conf afresh, as they are read once per
+ *    process, and starts `rotate` at a random server. Every cache is cold: there is no nscd, the
+ *    simulator caches nothing, and systemd-resolved runs with `Cache=no`. Each question's OPT
+ *    record is kept with the wire.
+ * 4. **The same plan, the walk's wire (B), and the regression** (`P-460`), in a run of their own
+ *    after glibc's: the row's `names-modes` process, forked with the row's environment, proves a
+ *    name check of its own by its canary, the plan's answers are set and the log cleared, and the
+ *    check routes the name alone (`DnsCheck.route`: no lanes, no helper), its questions read off
+ *    the simulator's log (and the capture, through resolved). Then the same lookup through the
+ *    probe's resolver in `system` and in `gate` mode, in the helper's child, and on the probe's own
+ *    lanes.
+ *
+ * Then each answer row (`ANSWER_ROWS`), with a simulator of its own whose servers' TCP may be
+ * closed, played the same way.
  *
  * **systemd-resolved** (`--via-resolved`, Ubuntu 24.04): the box boots systemd with resolved
  * running, and a row whose server is its stub, 127.0.0.53, is played through it. resolved's
  * upstream is the simulator at 127.0.0.2, answering as the plan says the stub does, and the
- * questions glibc sends the stub are read from a capture on `lo` (`tcpdump`), since no simulator
- * can hold the stub's address. Every other row runs beside resolved as it would on such a host. The
- * run says resolved served the stub only where it saw it: every plan that asked the stub had
- * resolved ask the simulator (`resolvedObserved`).
+ * questions glibc and the walk send the stub are read from a capture on `lo` (`tcpdump`), since no
+ * simulator can hold the stub's address. Every other row runs beside resolved as it would on such
+ * a host. The run says resolved served the stub only where it saw it: every plan that asked the
+ * stub had resolved ask the simulator (`resolvedObserved`).
  *
  * The run carries the sha256 of the rows file and of the policy's build it loaded
  * (`dist/src/resolver/system-names.js`), which the verdict holds to the files it judges by.
@@ -74,11 +95,14 @@ const run = promisify(execFile);
 const logger = pino({ level: 'silent' });
 
 const LOOKUP = fileURLToPath(new URL('./names-lookup.js', import.meta.url));
+const MODES = fileURLToPath(new URL('./names-modes.js', import.meta.url));
 const POLICY = fileURLToPath(new URL('../../src/resolver/system-names.js', import.meta.url));
 const UPSTREAM = '127.0.0.2';
 const SYSTEM_PATHS = ['/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf', '/etc/gai.conf'];
 /** A lookup that has not ended by then is a fault of the run, not a wire. */
 const LOOKUP_BOUND_MS = 120_000;
+/** Each step of a row's `names-modes` process: longer than its own bounds on the step. */
+const MODES_STEP_MS = 130_000;
 /** Datagrams glibc sent before it returned, given time to reach the simulator's worker. */
 const SETTLE_MS = 60;
 /** A capture given time to be on before the lookup, and to write what it saw before it stops. */
@@ -144,20 +168,19 @@ function enableIpv6(): boolean {
   return existsSync('/proc/sys/net/ipv6/conf/lo');
 }
 
-/** Writes the row's world over the image's files, and its hostname. What could not be is returned. */
-function writeWorld(rows: RowsFile, row: Row): string[] {
+/**
+ * Writes a world over the image's files: each system path's text, or absent when undefined, and
+ * the hostname. What could not be is returned.
+ */
+function writeFiles(
+  files: Readonly<Record<string, string | undefined>>,
+  hostname: string,
+): string[] {
   const problems: string[] = [];
-  const paths = new Set([...SYSTEM_PATHS, ...Object.keys(row.world.files)]);
-  for (const path of paths) {
-    const id = row.world.files[path];
+  for (const [path, text] of Object.entries(files)) {
     try {
-      if (id === undefined) {
-        if (existsSync(path)) unlinkSync(path);
-        continue;
-      }
-      const text = rows.texts[id];
       if (text === undefined) {
-        problems.push(`the rows have no text ${id} for ${path}`);
+        if (existsSync(path)) unlinkSync(path);
         continue;
       }
       writeFileSync(path, text);
@@ -165,32 +188,60 @@ function writeWorld(rows: RowsFile, row: Row): string[] {
       problems.push(`could not set ${path} up: ${String(error)}`);
     }
   }
-  if (row.world.missingModules.length > 0) {
-    problems.push(`removing NSS modules (${row.world.missingModules.join(', ')}) is not built`);
-  }
   try {
-    writeFileSync('/proc/sys/kernel/hostname', row.world.hostname);
+    writeFileSync('/proc/sys/kernel/hostname', hostname);
   } catch (error: unknown) {
     problems.push(`could not set the hostname: ${String(error)}`);
   }
   return problems;
 }
 
-function childEnv(row: Row): Record<string, string> {
-  return { PATH: '/usr/local/bin:/usr/bin:/bin', ...row.world.env };
+/** Writes the row's world over the image's files, and its hostname. What could not be is returned. */
+function writeWorld(rows: RowsFile, row: Row): string[] {
+  const problems: string[] = [];
+  const files: Record<string, string | undefined> = {};
+  for (const path of new Set([...SYSTEM_PATHS, ...Object.keys(row.world.files)])) {
+    const id = row.world.files[path];
+    if (id === undefined) {
+      files[path] = undefined;
+      continue;
+    }
+    const text = rows.texts[id];
+    if (text === undefined) problems.push(`the rows have no text ${id} for ${path}`);
+    else files[path] = text;
+  }
+  if (row.world.missingModules.length > 0) {
+    problems.push(`removing NSS modules (${row.world.missingModules.join(', ')}) is not built`);
+  }
+  return [...problems, ...writeFiles(files, row.world.hostname)];
+}
+
+function envOf(extra: Readonly<Record<string, string>>): Record<string, string> {
+  return { PATH: '/usr/local/bin:/usr/bin:/bin', ...extra };
+}
+
+interface Read {
+  readonly inImage: InImage;
+  readonly glibc: string | undefined;
+  readonly edns0: boolean | undefined;
 }
 
 /** What the policy, loaded here against the world as written, makes of the question. */
-async function inImage(row: Row): Promise<{ inImage: InImage; glibc: string | undefined }> {
-  const policy = new GlibcNamePolicy({ logger, env: childEnv(row) });
+async function inImageOf(
+  env: Record<string, string>,
+  name: string,
+  family: 0 | 4 | 6,
+): Promise<Read> {
+  const policy = new GlibcNamePolicy({ logger, env });
   await policy.load();
   const glibc = policy.describe().glibc ?? undefined;
-  const c = policy.classify(row.question.name, row.question.family);
+  const c = policy.classify(name, family);
   const conf = policy.view().conf;
+  const edns0 = conf?.options.edns0;
   if (c.kind === 'off')
-    return { inImage: { class: 'off', off: `${c.reason.code}: ${c.reason.why}` }, glibc };
+    return { inImage: { class: 'off', off: `${c.reason.code}: ${c.reason.why}` }, glibc, edns0 };
   if (conf === undefined)
-    return { inImage: { class: 'off', off: 'resolv.conf has no view' }, glibc };
+    return { inImage: { class: 'off', off: 'resolv.conf has no view' }, glibc, edns0 };
   return {
     inImage: {
       class: c.kind,
@@ -203,6 +254,7 @@ async function inImage(row: Row): Promise<{ inImage: InImage; glibc: string | un
       attempts: conf.options.attempts,
     },
     glibc,
+    edns0,
   };
 }
 
@@ -213,6 +265,18 @@ interface Servers {
   /** The simulator server that answers for each row server's address. */
   readonly answering: Map<string, string>;
   readonly throughStub: boolean;
+}
+
+/** The catchers of a question sent where no server was named: 127.0.0.1, and ::1 with IPv6. */
+function strays(specs: DnsServerSpec[], ipv6: boolean, spareV4: () => string): void {
+  const v4s = new Set(specs.map((spec) => spec.address));
+  const v6s = new Set(specs.map((spec) => spec.address6).filter((a) => a !== undefined));
+  if (!v4s.has('127.0.0.1')) {
+    specs.push({ ...NAMESERVER, name: '127.0.0.1', address: '127.0.0.1', port: 53, ipv6: false });
+  }
+  if (ipv6 && !v6s.has('::1')) {
+    specs.push({ ...NAMESERVER, name: '::1', address: spareV4(), port: 53, address6: '::1' });
+  }
 }
 
 /** The simulator's servers for a world: every server named, the strays, and resolved's upstream. */
@@ -259,14 +323,7 @@ async function serversFor(
     }
     answering.set(address, address);
   }
-  const v4s = new Set(specs.map((spec) => spec.address));
-  const v6s = new Set(specs.map((spec) => spec.address6).filter((a) => a !== undefined));
-  if (!v4s.has('127.0.0.1')) {
-    specs.push({ ...NAMESERVER, name: '127.0.0.1', address: '127.0.0.1', port: 53, ipv6: false });
-  }
-  if (ipv6 && !v6s.has('::1')) {
-    specs.push({ ...NAMESERVER, name: '::1', address: spareV4(), port: 53, address6: '::1' });
-  }
+  strays(specs, ipv6, spareV4);
   return { named, specs, answering, throughStub };
 }
 
@@ -304,13 +361,12 @@ interface Lookup {
 }
 
 /** `getaddrinfo` in a process of its own, with the row's environment and nothing else. */
-function lookUp(row: Row): Promise<Lookup> {
+function lookUp(name: string, family: number, env: Record<string, string>): Promise<Lookup> {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [LOOKUP, row.question.name, String(row.question.family)],
-      { env: childEnv(row), stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    const child = spawn(process.execPath, [LOOKUP, name, String(family)], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     let out = '';
     let err = '';
     child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()));
@@ -335,7 +391,7 @@ interface StubCapture {
   stop(): Promise<Asked[]>;
 }
 
-/** What glibc sends the stub, read off `lo`: the one server a simulator cannot be. */
+/** What glibc, or the walk, sends the stub, read off `lo`: the one server a simulator cannot be. */
 async function captureStub(): Promise<StubCapture> {
   const file = '/tmp/ms-names-stub.pcap';
   rmSync(file, { force: true });
@@ -358,6 +414,122 @@ async function captureStub(): Promise<StubCapture> {
   };
 }
 
+/** The questions the servers saw, resolved's own upstream ones aside. */
+function askedOf(log: readonly DnsQueryRecord[]): Asked[] {
+  return log
+    .filter((entry) => !entry.server.startsWith('upstream:'))
+    .map((entry) => ({
+      server: entry.server,
+      qname: entry.qname,
+      qtype: entry.qtype,
+      transport: entry.transport,
+      opt: entry.opt,
+    }));
+}
+
+/**
+ * A row's `names-modes` process: the walk's check and the regression's resolvers, plan by plan,
+ * each step bounded here as well as in it.
+ */
+class Modes {
+  readonly #child: ChildProcess;
+  #said = '';
+  #ended: string | undefined;
+  #waiting: ((reply: ModesReply) => void) | undefined;
+
+  private constructor(child: ChildProcess) {
+    this.#child = child;
+    child.stderr?.on('data', (chunk: Buffer) => {
+      this.#said = `${this.#said}${chunk.toString()}`.slice(-4_000);
+    });
+    child.on('message', (message: ModesReply) => {
+      const waiting = this.#waiting;
+      this.#waiting = undefined;
+      waiting?.(message);
+    });
+    child.on('exit', (code, signal) => {
+      this.#ended = `exited ${String(code ?? signal)}`;
+      const waiting = this.#waiting;
+      this.#waiting = undefined;
+      waiting?.({ op: 'failed', message: `the modes process ${this.#ended}: ${this.#said}` });
+    });
+  }
+
+  static start(name: string, family: number, env: Record<string, string>): Modes {
+    return new Modes(
+      fork(MODES, [name, String(family)], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }),
+    );
+  }
+
+  async request<K extends ModesReply['op']>(
+    message: ModesRequest,
+    op: K,
+  ): Promise<Extract<ModesReply, { op: K }>> {
+    if (this.#ended !== undefined)
+      throw new Error(`the modes process ${this.#ended}: ${this.#said}`);
+    const replied = new Promise<ModesReply>((resolve) => {
+      this.#waiting = resolve;
+    });
+    this.#child.send(message);
+    const reply = await within(MODES_STEP_MS, `the modes process to ${message.op}`, replied);
+    if (reply.op === 'failed')
+      throw new Error(`the modes process failed to ${message.op}: ${reply.message}`);
+    if (reply.op !== op) throw new Error(`the modes process said ${reply.op} to ${message.op}`);
+    return reply as Extract<ModesReply, { op: K }>;
+  }
+
+  async stop(): Promise<void> {
+    if (this.#ended !== undefined) return;
+    const exited = new Promise<void>((resolve) => {
+      this.#child.once('exit', () => {
+        resolve();
+      });
+    });
+    this.#child.send({ op: 'exit' } satisfies ModesRequest);
+    try {
+      await within(20_000, 'the modes process to exit', exited);
+    } catch {
+      this.#child.kill('SIGKILL');
+    }
+  }
+}
+
+interface Recorded {
+  readonly walk: WalkRun;
+  readonly modes: ModesRun;
+  readonly setup: string[];
+}
+
+/**
+ * Recording (B) of a plan, and its regression lookups, after glibc's (`P-460`): the checks proven
+ * first, then the plan's answers set and the log cleared, so the wire is the walk's alone.
+ */
+async function walkAndModes(
+  modes: Modes,
+  sim: DnsSimulator,
+  setPlan: () => Promise<void>,
+  throughStub: boolean,
+): Promise<Recorded> {
+  const setup: string[] = [];
+  const prepared = await modes.request({ op: 'prepare' }, 'prepared');
+  if (!prepared.walkProven) setup.push('the walk’s check was not proven by its canary');
+  if (!prepared.gateProven) setup.push('gate mode’s check was not proven by its canary');
+  await setPlan();
+  await sim.clearLog();
+  if (throughStub) await run('resolvectl', ['flush-caches']);
+  const capture = throughStub ? await captureStub() : undefined;
+  const walked = await modes.request({ op: 'walk' }, 'walked');
+  const stub = capture === undefined ? [] : await capture.stop();
+  const asked = [...stub, ...askedOf(await sim.log())];
+  const answered = await modes.request({ op: 'answers' }, 'answered');
+  await modes.request({ op: 'release' }, 'released');
+  return {
+    walk: { route: walked.route, wire: wireOf(asked), opt: optOf(asked), ms: walked.ms },
+    modes: answered.modes,
+    setup,
+  };
+}
+
 async function playRow(
   rows: RowsFile,
   row: Row,
@@ -366,40 +538,47 @@ async function playRow(
   ipv6: boolean,
 ): Promise<{ run: RowRun; glibc: string | undefined }> {
   const setup = writeWorld(rows, row);
-  const read = await inImage(row);
+  const env = envOf(row.world.env);
+  const read = await inImageOf(env, row.question.name, row.question.family);
   const servers = await serversFor(rows, row, viaResolved, ipv6);
   if (row.world.ipv6 && !ipv6) setup.push('the row needs IPv6, which this box does not have');
+  const said = {
+    id: row.id,
+    inImage: read.inImage,
+    ...(read.edns0 === undefined ? {} : { edns0: read.edns0 }),
+  };
   const cannot = unplayable(row.question.name, servers.named, viaResolved);
   if (cannot !== undefined) {
-    return {
-      run: { id: row.id, inImage: read.inImage, plans: [], setup: [...setup, cannot] },
-      glibc: read.glibc,
-    };
+    return { run: { ...said, plans: [], setup: [...setup, cannot] }, glibc: read.glibc };
   }
   const plans: PlanRun[] = [];
   const sim = await DnsSimulator.start({ servers: servers.specs, ipv6: false });
+  const modes = Modes.start(row.question.name, row.question.family, env);
   try {
     for (const plan of e.plans) {
+      // (A) glibc's wire.
       await answerAsPlanned(sim, servers, plan);
       await sim.clearLog();
       if (servers.throughStub) await run('resolvectl', ['flush-caches']);
       const capture = servers.throughStub ? await captureStub() : undefined;
-      const looked = await lookUp(row);
+      const looked = await lookUp(row.question.name, row.question.family, env);
       await sleep(SETTLE_MS);
       const stub = capture === undefined ? [] : await capture.stop();
       const log = await sim.log();
       const upstream = log.filter((entry) => entry.server.startsWith('upstream:'));
-      const asked = log
-        .filter((entry) => !entry.server.startsWith('upstream:'))
-        .map((entry) => ({
-          server: entry.server,
-          qname: entry.qname,
-          qtype: entry.qtype,
-          transport: entry.transport,
-        }));
+      const asked = [...stub, ...askedOf(log)];
+      // (B) the walk's wire, and the regression's lookups, in a run of their own.
+      const recorded = await walkAndModes(
+        modes,
+        sim,
+        () => answerAsPlanned(sim, servers, plan),
+        servers.throughStub,
+      );
+      for (const why of recorded.setup) setup.push(`${plan.plan}: ${why}`);
       plans.push({
         plan: plan.plan,
-        wire: wireOf([...stub, ...asked]),
+        wire: wireOf(asked),
+        opt: optOf(asked),
         outcome: looked.outcome,
         ms: looked.ms,
         ...(servers.throughStub
@@ -410,20 +589,94 @@ async function playRow(
                   qname: entry.qname,
                   qtype: entry.qtype,
                   transport: entry.transport,
+                  opt: entry.opt,
                 })),
               ),
             }
           : {}),
+        walk: recorded.walk,
+        modes: recorded.modes,
       });
     }
   } finally {
+    await modes.stop();
     await sim.stop();
   }
-  return {
-    run: { id: row.id, inImage: read.inImage, plans, ...(setup.length > 0 ? { setup } : {}) },
-    glibc: read.glibc,
-  };
+  return { run: { ...said, plans, ...(setup.length > 0 ? { setup } : {}) }, glibc: read.glibc };
 }
+
+/** An answer row (`ANSWER_ROWS`): its world, a simulator of its own, and its one plan. */
+async function playAnswerRow(
+  row: AnswerRow,
+  ipv6: boolean,
+): Promise<{ run: RowRun; glibc: string | undefined }> {
+  const setup = writeFiles(
+    {
+      '/etc/hosts': ANSWER_WORLD.hosts,
+      '/etc/resolv.conf': row.resolvConf,
+      '/etc/nsswitch.conf': ANSWER_WORLD.nsswitch,
+      '/etc/gai.conf': ANSWER_WORLD.gai,
+    },
+    ANSWER_WORLD.hostname,
+  );
+  const env = envOf({});
+  const { name, family } = row.question;
+  const read = await inImageOf(env, name, family);
+  const specs: DnsServerSpec[] = [];
+  for (const server of row.servers) {
+    await onLoopback(server.address, false);
+    specs.push({
+      ...NAMESERVER,
+      name: server.address,
+      address: server.address,
+      port: 53,
+      ipv6: false,
+      tcp: server.tcp,
+    });
+  }
+  let spare = 1;
+  strays(specs, ipv6, () => `127.0.1.${String(spare++)}`);
+  const sim = await DnsSimulator.start({ servers: specs, ipv6: false });
+  const setPlan = async (): Promise<void> => {
+    for (const server of row.servers) {
+      await sim.set({ fallback: true }, server.behaviour, server.address);
+    }
+  };
+  const modes = Modes.start(name, family, env);
+  try {
+    await setPlan();
+    await sim.clearLog();
+    const looked = await lookUp(name, family, env);
+    await sleep(SETTLE_MS);
+    const asked = askedOf(await sim.log());
+    const recorded = await walkAndModes(modes, sim, setPlan, false);
+    setup.push(...recorded.setup);
+    const played: RowRun = {
+      id: row.id,
+      inImage: read.inImage,
+      ...(read.edns0 === undefined ? {} : { edns0: read.edns0 }),
+      plans: [
+        {
+          plan: ANSWER_PLAN,
+          wire: wireOf(asked),
+          opt: optOf(asked),
+          outcome: looked.outcome,
+          ms: looked.ms,
+          walk: recorded.walk,
+          modes: recorded.modes,
+        },
+      ],
+      ...(setup.length > 0 ? { setup } : {}),
+    };
+    return { run: played, glibc: read.glibc };
+  } finally {
+    await modes.stop();
+    await sim.stop();
+  }
+}
+
+const planLine = (p: PlanRun): string =>
+  `${p.plan} ${String(p.wire.length)}q, walk ${p.walk?.route ?? '?'} ${String(p.walk?.wire.length ?? 0)}q`;
 
 async function main(): Promise<void> {
   const a = args(process.argv.slice(2));
@@ -442,7 +695,19 @@ async function main(): Promise<void> {
     glibc ??= played.glibc;
     runs.push(played.run);
     say(
-      `${a.image} ${row.id} ${row.title}: ${played.run.plans.map((p) => `${p.plan} ${String(p.wire.length)}q`).join(', ')} ` +
+      `${a.image} ${row.id} ${row.title}: ${played.run.plans.map(planLine).join(', ')} ` +
+        `(${String(Math.round(performance.now() - started))} ms)`,
+    );
+  }
+  const answers: RowRun[] = [];
+  for (const row of ANSWER_ROWS) {
+    if (a.only !== undefined && !a.only.includes(row.id)) continue;
+    const started = performance.now();
+    const played = await playAnswerRow(row, ipv6);
+    glibc ??= played.glibc;
+    answers.push(played.run);
+    say(
+      `${a.image} ${row.id} ${row.title}: ${played.run.plans.map(planLine).join(', ')} ` +
         `(${String(Math.round(performance.now() - started))} ms)`,
     );
   }
@@ -456,6 +721,7 @@ async function main(): Promise<void> {
     policyDigest: digestOf(readFileSync(POLICY)),
     resolved: a.viaResolved && resolvedObserved(runs),
     rows: runs,
+    answers,
   };
   process.stdout.write(`${JSON.stringify(image)}\n`);
 }

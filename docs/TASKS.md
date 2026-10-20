@@ -14428,7 +14428,7 @@ because each is a decision rather than a defect:
       `options edns0` (an asker of our own over `dgram`, or a c-ares flag if Node exposes one),
       `P-460`'s differential compares the OPT record along with the qnames, qtypes and servers,
       and the release notes' known limit is removed.
-- [ ] **P-460 — the name gate's differential has glibc's wire and not yet the walk's** · S ·
+- [x] **P-460 — the name gate's differential has glibc's wire and not yet the walk's** · S ·
       P-432 · Filed 2026-10-20 by `P-432` S8. S8 records what glibc sends for each of S4's rows
       in seven images and holds the policy to it. D30's second recording, the walk's wire from
       `DnsCheck.route` alone (no lanes, no helper), needs S6. **Done when**, with S6 landed,
@@ -14440,7 +14440,121 @@ because each is a decision rather than a defect:
       SIGKILL, resolved's distinct upstream questions), and its answer rows (TC with TCP dropped,
       with and without `edns0`; FORMERR; A answered and AAAA SERVFAIL from server 1 with server 2
       silent).
-- [ ] **P-461 — the differential shows the check off in no box** · XS · P-432 · Filed 2026-10-20
+
+      **P-460 outcome.** `name-gate-differential.sh` plays each plan twice, in separate runs:
+      glibc's wire (A), and then the walk's alone (B). The walk is `DnsCheck.route` in a
+      `names-modes` process of the row's own, with a `ForwardBudget` and c-ares of its own, no
+      lanes and no helper, proven by its canary before the plan's answers are set. The same
+      process then makes §7.5's regression lookups. **Run 4 passed in all seven images on this
+      build**: 260 rows in each image (251 on Rocky 8) and 2,966 plans, every walk agreeing with
+      glibc's (2,128 heard, 70 silent and 768 local), every regression holding, the 6 answer rows
+      in every image, both budget boxes and the five boxes with the check off. Each image's rows
+      took 303–494 s and the whole run about 50 minutes
+      (`docs/findings/2026-10-20-name-gate-differential.md`, run 4).
+      - **The walk is held to glibc's first asks** (`walkProblems`): each (server, name, type)
+        once, at its first question, the transport and the try aside, the name in lower case.
+        - A heard walk asked exactly glibc's first asks, in order. A silent one asked a
+          non-empty prefix of them.
+        - Heard if and only if glibc returned within 1 s (`WITHIN_MS`).
+        - No question is asked twice over UDP, and a walked row is routed by its walk.
+        - A `local` row is routed `local` with nothing asked.
+        - Under `rotate` the walk asks every server at once while glibc starts at one: the
+          names are glibc's in order, each asked of every server, and heard means glibc was
+          quick, but not the other way round.
+      - **The OPT record is asserted as it is** (`optProblems`, `P-454`): glibc's questions carry
+        one under `options edns0` and none without, and the check's never do. No row fails on
+        the difference alone, so the run says if either side moves.
+      - **The regressions** (`modesProblems`), labelled as such: gate mode answered as `system`
+        mode, the helper's child as the probe's lanes (`systemLookup`), and gate mode ran the name
+        where its walk said (heard or local on the lanes, silent in the helper, from
+        `lookupsToHelper`).
+      - **Six answer rows** (`ANSWER_ROWS`), each one plan in every image, with a simulator of
+        its own, so a server's TCP/53 can be closed. Each wire below was predicted, then seen in a
+        narrowed box run before the full one:
+        - **TC with TCP/53 refused**, without and with `edns0`. glibc asks server 1 A and AAAA
+          over UDP, is refused over TCP, and asks server 2 both over TCP. The walk asks both
+          servers over UDP and is heard.
+        - **FORMERR** from server 1: glibc takes it as the answer and returns `ENOTFOUND` without
+          asking server 2, and the walk is heard at server 1.
+        - **A answered and AAAA SERVFAIL** from server 1, server 2 silent: glibc returns the A in
+          about 10 ms and never asks server 2.
+        - **FORMERR to a question with OPT**, under `edns0`: glibc's questions carry OPT, it
+          takes the FORMERR, and returns `ENOTFOUND`. It does not ask again without EDNS.
+        - **A server that drops a question with OPT**, under `edns0 timeout:1 attempts:1`
+          (`P-454`, the listed divergence): the walk is heard, glibc returns `EAI_AGAIN` after
+          1 s, and gate mode answers as `system` mode does.
+      - **The budget boxes** (`names-budget.ts`), each arm in a process of its own with
+        `UV_THREADPOOL_SIZE` 16, 150 names of a silent zone at once for 30 s, and the upstream the
+        S5 simulator, which holds a slot per distinct question for 10 s as dnsmasq does:
+        - **dnsmasq 2.90 at `dns-forward-max=30`** (Debian 12): `system` held at most 6 distinct
+          questions upstream at once (18 in the window), gate mode 8 (20), and gate mode with the
+          helper SIGKILLed 5 s in 10 (22), against bounds of 18 and 34. dnsmasq never said its
+          table was full.
+        - **systemd-resolved 255** (Ubuntu 24.04): `system` 8 (12 in all), gate mode 9 (14),
+          against a bound of 20.
+        - `system`'s 6 is the zone's 3 lanes in an outage (`P-438`'s "unacked: 3"), A and AAAA
+          each. A narrowed run before run 4 measured the same at dnsmasq, and 10 and 9 at
+          resolved.
+      - **The committed recordings are schema 3**: each recording keeps glibc's OPT flags, and
+        `answerRecordings` holds glibc's wire for each answer row in each image. The fixture still
+        holds recording (A) only. `names-differential.test` holds the committed recordings to the
+        rows file as it is committed (`rowsDigest`), and each answer row's recording to its wire.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **The walk is compared with glibc's first asks, not its wire.** The walk asks each
+          question once (§1.4), and glibc asks again on each try and over TCP after TC, so
+          "in order, up to where each stops" can only mean first asks.
+        - **Under `rotate`, heard-if-and-only-if holds one way.** glibc may start at the one
+          server that answers while the walk, asking every server, waits on a silent one: a
+          silent walk and a quick glibc agree there. A heard walk with a slow glibc still fails.
+        - **The EDNS-deaf row is P-454's listed divergence**, asserted exactly: heard, and
+          glibc not within 1 s. The run fails if either side changes.
+        - **"TCP dropped" is TCP/53 refused.** The boxes have no network and no firewall to drop
+          with, and a silent drop would leave glibc waiting on its TCP connect (not measured).
+          Refused is what a server with no TCP listener gives, and glibc moves on at once.
+        - **"Distinct forwards" is the upstream's peak of distinct questions held at once**
+          (`peakHeld`), the S5 simulator modelling dnsmasq's forward record, beside dnsmasq's own
+          "Maximum number of concurrent DNS queries reached" lines. A count of forwards over the
+          whole window says nothing of the table's size at any instant.
+        - **The answer rows live in the differential**, not in S4's export. S4's plans answer only
+          with addresses, NXDOMAIN, SERVFAIL, REFUSED or silence, and its rows claim the policy's
+          reading. The answer rows claim what servers do.
+        - **The walk is judged only against a glibc wire that verified.** A row whose world was
+          not set up, or which the policy misread, is already a problem, and holding its walk to a
+          wire in question would add noise to it.
+        - **A process per row for the walk and the regressions**, with every resolver new for each
+          plan. glibc reads nsswitch.conf and gai.conf once per process, and every cache must be
+          cold.
+        - **The resolved budget box runs in Ubuntu 24.04's replay box, after its rows**, as that
+          box already boots systemd with resolved running. dnsmasq's runs in a Debian 12 box with
+          `dnsmasq-base`, which has no service to start and writes no resolv.conf hook.
+        - **No walk recording is committed.** The walk is the policy's own output, judged in the
+          run against glibc's, and D30 has the fixture hold glibc's only.
+      - **Tests**, each run after the last change: `names-differential.test.ts` 56 (26 new: first
+        asks, the walk against glibc, rotate, P-454, the OPT records, the regressions, the answer
+        rows, S4's plans held to all three, the budget and off boxes, an OPT record read off a
+        capture, and the committed recordings held to the rows file by `rowsDigest`), and
+        `system-names.test.ts` 441, which reads schema 3. `names-verify` is spawned on a budget
+        and an off box's run as well.
+      - **Mutants: 73 on the toolchain and 3 in the boxes, all killed.** Each was restored with
+        `shutil.copy` and `os.utime`, checked with `filecmp`, and no marker was left in `dist`
+        after the last rebuild, whose `dist` the run's own staleness check found current.
+        - The toolchain's: first asks (dedupe, TCP, case); the heard and silent orders; rotate's
+          coverage, strays, names and one-way heard; heard-if-and-only-if; resends; `P-454` both
+          ways; a local row's route and wire; a walk routed otherwise or not recorded; each OPT
+          rule, `then-none` both halves, the lengths and the walk's; each regression, a silent
+          walk on the lanes, and the lookups not recorded; each answer-row check, its
+          divergence, its walk, OPT and regression; the verdict's answer rows not replayed,
+          strays and recorded when failing, S4's plans not held to each of the three, `edns0`
+          read and not recorded; the recordings' OPT and answer recordings; every budget rule;
+          every off rule; each box not run or run twice; `carriesOpt` and the sections it walks;
+          the run file's kinds; and a byte added to the committed rows file.
+        - Six survived the first pass and are killed by tests added for them: rotate's names as a
+          prefix when heard, an answer row's walk, OPT and regression not judged, a box with the
+          check on that names a reason, and an OPT record after an authority record.
+        - In the boxes, all three in one narrowed run: the modes process saying gate mode ran a
+          silent name on the lanes, the budget box not killing the helper, and the nscd box not
+          starting nscd. Each showed as its own `DISAGREES` line.
+- [x] **P-461 — the differential shows the check off in no box** · XS · P-432 · Filed 2026-10-20
       by `P-432` S8. Every box S8 replays in has the check on, because a row the check is off for
       claims no wire. Rules 3 to 5 are unit-tested against fixtures, but nothing shows the policy
       off in a real box: nscd running, `libnss-resolve` on the hosts line (Ubuntu's
@@ -14497,6 +14611,38 @@ because each is a decision rather than a defect:
       as the cases "skipped outright", so a green run reads as a claim about the gate that it is
       not. CLAUDE.md is the user's to edit. **Done when** its list names `MS_DNS_RESOLVER` and the
       findings file the command is in.
+
+      **P-461 outcome.** Five boxes, each built on its image's recorded base with the package an
+      operator would install (`scripts/smoke/Dockerfile.names` takes `EXTRA`), and each left as
+      that package or the operator leaves it. `names-off.ts` sets the case up, then loads the
+      policy in a process started after that, with its defaults, and asks the check to route
+      `sw1.example.test` through an asker that records what it is asked. The run fails unless the
+      box is as its case says, the policy reports the check off by the case's rule, and the check
+      routes the name `unvouched:off` with nothing asked. In run 4:
+      - **nscd** (Debian 12, `nscd` started, its socket waited for): off by `nscd`, "nscd is
+        running (/var/run/nscd/socket)".
+      - **libnss-resolve** (Ubuntu 24.04): the package wrote `files resolve [!UNAVAIL=return] dns
+        myhostname`, off by `nsswitch`, "hosts: line has an action group".
+      - **mdns4_minimal** (Debian 12, `libnss-mdns`): the package wrote `files myhostname
+        mdns4_minimal [NOTFOUND=return] dns`, off by `nsswitch`, for the same reason.
+      - **LD_PRELOAD** set to libresolv, which ld.so loads harmlessly: off by `env`.
+      - **/etc/ld.so.preload** naming libresolv: off by `env`.
+      - **Decided 2026-10-20 by Claude, under the user's delegation: the boxes take the policy's
+        own words.** Each case names the rule's code and a phrase of its reason, and the policy is
+        unchanged. The two hosts: line cases are off by the action group, which both packages
+        write: `readNsswitch` says so before it would name the source it does not take
+        (`resolve`, `mdns4_minimal`), and either reason is the rule's.
+      - **Tests and mutants**: in `P-460`'s.
+- [ ] **P-462 — the differential replays none of §7.5's other rows** · S · P-432 · Filed
+      2026-10-20 by `P-460`. §7.5 lists rows beyond those `P-460` asked for and S4's export
+      holds, and the differential plays none of them: `sss` or `mdns4_minimal` before `files`;
+      `files resolve dns`; the stub refused under `resolve` (`DNSStubListener=no`); a `%scope`
+      hosts line; a partial key, several lookups in one row; mid-run edits of gai.conf and
+      nsswitch.conf, then a helper SIGKILL (D28's skew rest); `_gateway` for family 6 on a
+      v4-only host; and `LOCALDOMAIN=""`. Those the check is off for claim no wire, so each
+      needs a box like `P-461`'s; the others need a row of their own, as the answer rows are.
+      Not decided: whether any of them goes in before the rc.3 cut. **Done when** each is a box
+      or a row of the differential, or a reason it is not is recorded here.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

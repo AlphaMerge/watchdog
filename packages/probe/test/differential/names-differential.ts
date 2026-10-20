@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { isIP, isIPv4, isIPv6 } from 'node:net';
-import type { DnsServerPolicy } from '@ms/simulators';
+import type { DnsBehaviour, DnsServerPolicy } from '@ms/simulators';
 
 /**
  * The differential's judgement (`P-432` S8, the design's D30 and §7.5): what glibc sent for each
@@ -31,6 +31,30 @@ import type { DnsServerPolicy } from '@ms/simulators';
  * **A run is tied to what it ran**: each image's run carries the sha256 of the rows file and of the
  * policy's build (`dist/src/resolver/system-names.js`) it ran, and the verdict fails a run of
  * other rows or another build, so a run kept from before a change cannot verify after it.
+ *
+ * **The walk's wire beside glibc's** (`P-460`, D30's recording (B)). Each plan is played again,
+ * in a separate run with every cache cold, through `DnsCheck.route` alone: the name check with a
+ * budget and c-ares of its own, no lanes and no helper (`names-modes.ts`). The walk is held to
+ * glibc's wire, never to the policy's (`walkProblems`):
+ * - the servers, names and types in order, up to where each stops. Each wire is read as its first
+ *   asks (`firstAsks`): every (server, name, type) once, at its first question, whatever the
+ *   transport, since the walk asks each once and glibc's tries are its own. A heard walk asked
+ *   exactly what glibc asked first; a silent one stopped at a question glibc asked too, so its asks
+ *   are a prefix of glibc's. Under `rotate` the walk asks every server at once and each must reply
+ *   (§1.4), where glibc asks one: the walk's names are glibc's in order, each asked of every server;
+ * - heard if and only if glibc returned within `WITHIN_MS`. Under `rotate` only one way: heard means
+ *   glibc returned within 1 s, as glibc may start at the one server that answers;
+ * - the OPT record, as the decided known limit has it (`P-454`): glibc's questions carry one under
+ *   `options edns0` and none without, and the check's never do (`optProblems`). The difference is
+ *   asserted, so the run says if either side moves, and fails no row on its own.
+ *
+ * **The regressions, labelled as such** (§7.5, `modesProblems`): the same lookup through the
+ * probe's resolver in `system` and in `gate` mode answers alike, and the helper's child answers as
+ * the probe's own lanes; gate mode runs a heard name on the probe's lanes and a silent one in the
+ * helper. **The answer rows** (`ANSWER_ROWS`) play what S4's rows cannot: TC with TCP/53 refused,
+ * FORMERR, A answered with AAAA SERVFAIL, and EDNS-intolerant servers. **The budget boxes**
+ * (`budgetProblems`) and **the boxes with the check off** (`offProblems`, `P-461`) are judged here
+ * too.
  */
 
 /** systemd-resolved's stub: the one server glibc asks that no simulator can be. */
@@ -114,17 +138,53 @@ export interface Asked {
   readonly qname: string;
   readonly qtype: string;
   readonly transport: 'udp' | 'tcp';
+  /** Whether the question carried an OPT record (EDNS, RFC 6891). */
+  readonly opt: boolean;
+}
+
+/**
+ * Recording (B) of a plan (`P-460`): the walk's wire, from `DnsCheck.route` alone, with its own
+ * budget and c-ares, no lanes and no helper, every cache cold.
+ */
+export interface WalkRun {
+  /** The check's route: `local`, `heard`, `sampled`, `silent`, or `unvouched:<why>`. */
+  readonly route: string;
+  readonly wire: readonly Wire[];
+  /** Whether each of its questions carried an OPT record, in the wire's order. */
+  readonly opt: readonly boolean[];
+  /** From the ask to the route. */
+  readonly ms: number;
+}
+
+/**
+ * The regression's lookups of a plan (§7.5), each in a resolver of its own: `answer:<addresses>`
+ * in `getaddrinfo`'s order, or `error:<code>`.
+ */
+export interface ModesRun {
+  /** Through the probe's resolver in `system` mode, and in `gate` mode with the check on. */
+  readonly system: string;
+  readonly gate: string;
+  /** Where gate mode ran it, by its Probe Health counters: the probe's lanes, or the helper. */
+  readonly gateRan: 'lanes' | 'helper';
+  /** `getaddrinfo` in the lookup helper's child, and on the probe's own lanes, unrouted. */
+  readonly helper: string;
+  readonly lanes: string;
 }
 
 /** One plan played: the questions glibc sent, how `getaddrinfo` ended, and how long it took. */
 export interface PlanRun {
   readonly plan: string;
   readonly wire: readonly Wire[];
+  /** Whether each of glibc's questions carried an OPT record, in the wire's order. */
+  readonly opt?: readonly boolean[];
   /** `answer` with the addresses' count, or the error code. */
   readonly outcome: string;
   readonly ms: number;
   /** Through systemd-resolved: what resolved asked its upstream, for the record, never judged. */
   readonly upstream?: readonly Wire[];
+  /** Recording (B), played after glibc's in a run of its own. */
+  readonly walk?: WalkRun;
+  readonly modes?: ModesRun;
 }
 
 export interface RowRun {
@@ -133,6 +193,8 @@ export interface RowRun {
   readonly plans: readonly PlanRun[];
   /** What kept the row from being played as its world says: it is then unverified. */
   readonly setup?: readonly string[];
+  /** Whether the policy, loaded in the image, read `options edns0`: when glibc sends OPT. */
+  readonly edns0?: boolean;
 }
 
 /** One image's run, as `names-replay.ts` prints it. */
@@ -152,15 +214,19 @@ export interface ImageRun {
    */
   readonly resolved: boolean;
   readonly rows: readonly RowRun[];
+  /** The answer rows (`ANSWER_ROWS`), each with its one plan. */
+  readonly answers?: readonly RowRun[];
 }
 
-/** A wire glibc sent for a row's plan in an image (`system-names-recordings.json`, schema 1). */
+/** A wire glibc sent for a row's plan in an image (`system-names-recordings.json`, schema 3). */
 export interface Recording {
   readonly id: string;
   readonly image: string;
   readonly plan: string;
   readonly offset?: number;
   readonly wire: readonly Wire[];
+  /** Whether each question carried an OPT record, in the wire's order. */
+  readonly opt: readonly boolean[];
   readonly outcome: string;
   readonly ms: number;
   /** Through systemd-resolved: what resolved asked the simulator, kept for the record. */
@@ -168,7 +234,7 @@ export interface Recording {
 }
 
 export interface RecordingsFile {
-  readonly schema: 2;
+  readonly schema: 3;
   readonly images: Readonly<
     Record<
       string,
@@ -184,6 +250,8 @@ export interface RecordingsFile {
     >
   >;
   readonly recordings: readonly Recording[];
+  /** glibc's wire for each answer row (`ANSWER_ROWS`) in each image, plan `ANSWER_PLAN`. */
+  readonly answerRecordings: readonly Recording[];
 }
 
 /** The row's expectation in an image: null where the check is off there, so it is not replayed. */
@@ -201,6 +269,11 @@ export function wireOf(asked: readonly Asked[]): Wire[] {
     seen.set(key, tries);
     return [server, one.qname, one.qtype, tries];
   });
+}
+
+/** Whether each question carried an OPT record, in the order `wireOf` numbers them. */
+export function optOf(asked: readonly Asked[]): boolean[] {
+  return asked.map((one) => one.opt);
 }
 
 const CLASS_FIELDS = [
@@ -256,8 +329,420 @@ export function judgePlan(e: Expectation, run: PlanRun): PlanVerdict {
       };
 }
 
+// --- the walk's wire beside glibc's (`P-460`) ------------------------------------------------------
+
+/** glibc "returned within 1 s" (§7.5): the probe's bound for a lookup that is stuck (`STUCK_MS`). */
+export const WITHIN_MS = 1_000;
+
+/**
+ * A walk that differs from glibc by design, asserted exactly as it is, so the run says if either
+ * side moves: `P-454`, an EDNS-deaf server, which the check hears (c-ares sends no OPT record) and
+ * glibc, sending one under `options edns0`, does not.
+ */
+export type Divergence = 'P-454';
+
+/**
+ * A wire as its first asks: each (server, name, type) once, at its first question, the transport
+ * aside, the name in lower case as DNS compares it. The walk asks each question once (§1.4, no
+ * resends) where glibc asks it again on each try and over TCP after TC.
+ */
+export function firstAsks(wire: readonly Wire[]): string[] {
+  const out: string[] = [];
+  for (const [server, name, type] of wire) {
+    const ask = `${server.replace(/\/tcp$/u, '')} ${name.toLowerCase()} ${type}`;
+    if (!out.includes(ask)) out.push(ask);
+  }
+  return out;
+}
+
+const nameOf = (ask: string): string => ask.split(' ')[1] ?? '';
+
+/** Each name in the order a wire first asks it. */
+function namesInOrder(asks: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const ask of asks) if (!out.includes(nameOf(ask))) out.push(nameOf(ask));
+  return out;
+}
+
+const isPrefix = (part: readonly string[], whole: readonly string[]): boolean =>
+  part.length <= whole.length && part.every((each, k) => each === whole[k]);
+
+/** Why the walk's asks are not glibc's, up to where each stops, or undefined. */
+function orderDiffers(
+  glibc: readonly string[],
+  walked: readonly string[],
+  heard: boolean,
+): string | undefined {
+  if (walked.length === 0) return 'asked nothing';
+  if (heard ? isDeepStrictEqual(walked, glibc) : walked.length > 0 && isPrefix(walked, glibc)) {
+    return undefined;
+  }
+  return heard
+    ? `heard after asking ${JSON.stringify(walked)}, where glibc asked ${JSON.stringify(glibc)}`
+    : `silent after asking ${JSON.stringify(walked)}, which is not how glibc began: ${JSON.stringify(glibc)}`;
+}
+
+/**
+ * Under `rotate`, the walk asks every server at once and needs each to reply (§1.4): its names
+ * are glibc's in order, up to where each stops, and each name it reached was asked of every
+ * server, its first type at least.
+ */
+function rotateDiffers(
+  servers: readonly string[],
+  firstType: string,
+  glibc: readonly string[],
+  walked: readonly string[],
+  heard: boolean,
+): string | undefined {
+  if (walked.length === 0) return 'asked nothing';
+  const stray = walked.find((ask) => !servers.includes(ask.split(' ')[0] ?? ''));
+  if (stray !== undefined) return `asked ${stray}, of a server the row does not name`;
+  const theirs = namesInOrder(glibc);
+  const ours = namesInOrder(walked);
+  if (heard ? !isDeepStrictEqual(ours, theirs) : !isPrefix(ours, theirs)) {
+    return `asked the names ${JSON.stringify(ours)}, where glibc asked ${JSON.stringify(theirs)}`;
+  }
+  for (const name of ours) {
+    const missed = servers.filter((server) => !walked.includes(`${server} ${name} ${firstType}`));
+    if (missed.length > 0)
+      return `asked ${name} of ${String(servers.length - missed.length)} of ${String(servers.length)} servers under rotate, not of ${missed.join(', ')}`;
+  }
+  return undefined;
+}
+
+/**
+ * Why recording (B) of a plan disagrees with glibc's (A), or nothing (`P-460`, §7.5's fidelity
+ * assertions 1 and 2): see the header. A `local` row must be routed `local` with nothing asked; a
+ * walked one must be routed by its walk, heard or silent, asking each question once.
+ */
+export function walkProblems(
+  e: Pick<Classification, 'class' | 'rotate' | 'servers' | 'types'>,
+  run: PlanRun,
+  divergence?: Divergence,
+): string[] {
+  const walk = run.walk;
+  if (walk === undefined) return [`${run.plan}: the walk was not recorded`];
+  const at = `${run.plan}, the walk`;
+  if (e.class !== 'walk') {
+    const out: string[] = [];
+    if (walk.route !== 'local') out.push(`${at}: routed ${walk.route}, and the row is ${e.class}`);
+    if (walk.wire.length > 0) {
+      out.push(`${at}: asked ${JSON.stringify(walk.wire)} for a name glibc answers unasked`);
+    }
+    return out;
+  }
+  if (walk.route !== 'heard' && walk.route !== 'silent') {
+    return [`${at}: routed ${walk.route}, not by a walk`];
+  }
+  const out: string[] = [];
+  const again = walk.wire.filter(([server, , , tries]) => !server.endsWith('/tcp') && tries > 1);
+  if (again.length > 0) out.push(`${at}: asked a question again: ${JSON.stringify(again)}`);
+  const heard = walk.route === 'heard';
+  const rotating = e.rotate && e.servers.length > 1;
+  const glibc = firstAsks(run.wire);
+  const walked = firstAsks(walk.wire);
+  const differs = rotating
+    ? rotateDiffers(e.servers, e.types?.[0] ?? 'A', glibc, walked, heard)
+    : orderDiffers(glibc, walked, heard);
+  if (differs !== undefined) out.push(`${at}: ${differs}`);
+  const fast = run.ms < WITHIN_MS;
+  const took = `glibc returned in ${String(Math.round(run.ms))} ms (${run.outcome})`;
+  if (divergence === 'P-454') {
+    if (!heard || fast) {
+      out.push(`${at}: P-454's known limit has moved: the walk was ${walk.route}, and ${took}`);
+    }
+  } else if (rotating ? heard && !fast : heard !== fast) {
+    out.push(`${at}: ${walk.route}, and ${took}`);
+  }
+  return out;
+}
+
+/**
+ * Which of glibc's questions carry an OPT record: under `options edns0` every one (`every`), or
+ * the first of them and none once glibc drops EDNS (`then-none`); without it, none.
+ */
+export type GlibcOpt = 'every' | 'none' | 'then-none';
+
+const GLIBC_OPT_WORDS: Readonly<Record<GlibcOpt, string>> = {
+  every: 'under options edns0 every one of glibc’s questions carries an OPT record',
+  none: 'without options edns0 none of glibc’s questions carries an OPT record',
+  'then-none':
+    'under options edns0 glibc’s first questions carry an OPT record, and none once it drops EDNS',
+};
+
+function optAsExpected(opt: readonly boolean[], expected: GlibcOpt): boolean {
+  if (expected === 'every') return opt.every(Boolean);
+  if (expected === 'none') return !opt.some(Boolean);
+  const dropped = opt.indexOf(false);
+  return opt[0] === true && dropped !== -1 && !opt.slice(dropped).some(Boolean);
+}
+
+/**
+ * The OPT record on each wire (`P-454`, decided 2026-10-20 a known limit for 1.0): glibc's as
+ * `expected` says, and the check's on none of its questions (c-ares 1.34.6 in Node 24.19.0 sends
+ * none). Asserted exactly as it is, so the run tells if either side changes; the walk's fidelity
+ * (`walkProblems`) never looks at it.
+ */
+export function optProblems(run: PlanRun, expected: GlibcOpt): string[] {
+  const out: string[] = [];
+  const opt = run.opt;
+  if (opt === undefined || opt.length !== run.wire.length) {
+    out.push(`${run.plan}: glibc’s OPT records were not recorded for each question`);
+  } else if (!optAsExpected(opt, expected)) {
+    out.push(
+      `${run.plan}: glibc’s questions carried OPT records ${JSON.stringify(opt)}, and ${GLIBC_OPT_WORDS[expected]}`,
+    );
+  }
+  const walk = run.walk;
+  if (walk !== undefined) {
+    if (walk.opt.length !== walk.wire.length) {
+      out.push(`${run.plan}: the walk’s OPT records were not recorded for each question`);
+    } else if (walk.opt.some(Boolean)) {
+      out.push(
+        `${run.plan}: the check’s questions carry an OPT record now, where c-ares 1.34.6 sent none: P-454’s known limit has moved`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * §7.5's regression assertions, labelled as such, comparing `getaddrinfo` with `getaddrinfo`: gate
+ * mode answers as `system` mode, the helper's child as the probe's lanes, and gate mode ran the
+ * name where its walk said: a heard or local name on the probe's lanes, a silent one in the helper.
+ */
+export function modesProblems(run: PlanRun): string[] {
+  const modes = run.modes;
+  if (modes === undefined) return [`${run.plan}: the regression’s lookups were not recorded`];
+  const out: string[] = [];
+  if (modes.gate !== modes.system) {
+    out.push(
+      `${run.plan}, regression: gate mode answered ${modes.gate}, system mode ${modes.system}`,
+    );
+  }
+  if (modes.helper !== modes.lanes) {
+    out.push(
+      `${run.plan}, regression: the helper’s child answered ${modes.helper}, the probe’s lanes ${modes.lanes}`,
+    );
+  }
+  const route = run.walk?.route;
+  const where =
+    route === 'silent' ? 'helper' : route === 'heard' || route === 'local' ? 'lanes' : undefined;
+  if (where !== undefined && modes.gateRan !== where) {
+    out.push(
+      `${run.plan}, regression: gate mode ran it ${modes.gateRan === 'helper' ? 'in the helper' : 'on the probe’s lanes'}, and its walk was ${route ?? ''}`,
+    );
+  }
+  return out;
+}
+
+// --- the answer rows (`P-460`) ---------------------------------------------------------------------
+
+/** The one plan each answer row plays. */
+export const ANSWER_PLAN = 'plan';
+export const ANSWER_A = '192.0.2.53';
+export const ANSWER_AAAA = '2001:db8::53';
+/** The answer rows' world, besides each one's resolv.conf. */
+export const ANSWER_WORLD = {
+  hostname: 'probe-1',
+  hosts: '127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n',
+  nsswitch: 'hosts: files dns\n',
+  gai: '',
+} as const;
+
+export interface AnswerServer {
+  readonly address: string;
+  /** `closed`: nothing listens on its TCP/53, so a TCP retry is refused. */
+  readonly tcp: 'listen' | 'closed';
+  readonly behaviour: DnsBehaviour;
+}
+
+/**
+ * A row about answers rather than routes (§7.5): what S4's rows cannot play, as their plans answer
+ * with addresses, NXDOMAIN, SERVFAIL, REFUSED or silence only. Each plays one plan in every image,
+ * with a simulator per row, so a server's TCP can be closed.
+ */
+export interface AnswerRow {
+  readonly id: string;
+  readonly title: string;
+  readonly resolvConf: string;
+  readonly question: { readonly name: string; readonly family: 0 | 4 | 6 };
+  readonly servers: readonly AnswerServer[];
+  /** The walk's route, and whether glibc returns within `WITHIN_MS`, as the row claims them. */
+  readonly walk: 'heard' | 'silent';
+  readonly fast: boolean;
+  readonly glibcOpt: GlibcOpt;
+  readonly divergence?: Divergence;
+  /** glibc's wire, in every image. */
+  readonly wire: readonly Wire[];
+}
+
+const ANSWERING: DnsBehaviour = {
+  reply: { kind: 'addresses', addresses: [ANSWER_A, ANSWER_AAAA] },
+};
+const S1 = '10.0.0.53';
+const S2 = '10.0.0.54';
+const TWO = `nameserver ${S1}\nnameserver ${S2}\n`;
+const NAME = 'sw1.example.test';
+const both = (server: string, tries = 1): Wire[] => [
+  [server, NAME, 'A', tries],
+  [server, NAME, 'AAAA', tries],
+];
+
+export const ANSWER_ROWS: readonly AnswerRow[] = [
+  {
+    id: 'answer-tc-tcp-refused',
+    title: 'TC from server 1, its TCP/53 refused, server 2 answering',
+    resolvConf: TWO,
+    question: { name: NAME, family: 0 },
+    servers: [
+      { address: S1, tcp: 'closed', behaviour: { ...ANSWERING, truncate: 'tcp' } },
+      { address: S2, tcp: 'listen', behaviour: ANSWERING },
+    ],
+    walk: 'heard',
+    fast: true,
+    glibcOpt: 'none',
+    wire: [...both(S1), ...both(`${S2}/tcp`)],
+  },
+  {
+    id: 'answer-tc-tcp-refused-edns0',
+    title: 'TC from server 1, its TCP/53 refused, server 2 answering, under options edns0',
+    resolvConf: `${TWO}options edns0\n`,
+    question: { name: NAME, family: 0 },
+    servers: [
+      { address: S1, tcp: 'closed', behaviour: { ...ANSWERING, truncate: 'tcp' } },
+      { address: S2, tcp: 'listen', behaviour: ANSWERING },
+    ],
+    walk: 'heard',
+    fast: true,
+    glibcOpt: 'every',
+    wire: [...both(S1), ...both(`${S2}/tcp`)],
+  },
+  {
+    id: 'answer-formerr',
+    title: 'FORMERR from server 1, server 2 answering',
+    resolvConf: TWO,
+    question: { name: NAME, family: 0 },
+    servers: [
+      { address: S1, tcp: 'listen', behaviour: { reply: { kind: 'rcode', rcode: 'FORMERR' } } },
+      { address: S2, tcp: 'listen', behaviour: ANSWERING },
+    ],
+    walk: 'heard',
+    fast: true,
+    glibcOpt: 'none',
+    wire: both(S1),
+  },
+  {
+    id: 'answer-aaaa-servfail-second-silent',
+    title: 'A answered and AAAA SERVFAIL from server 1, server 2 silent',
+    resolvConf: TWO,
+    question: { name: NAME, family: 0 },
+    servers: [
+      {
+        address: S1,
+        tcp: 'listen',
+        behaviour: {
+          a: { kind: 'addresses', addresses: [ANSWER_A] },
+          aaaa: { kind: 'rcode', rcode: 'SERVFAIL' },
+        },
+      },
+      { address: S2, tcp: 'listen', behaviour: { reply: { kind: 'silent' } } },
+    ],
+    walk: 'heard',
+    fast: true,
+    glibcOpt: 'none',
+    wire: both(S1),
+  },
+  {
+    id: 'answer-edns-formerr-edns0',
+    title:
+      'server 1 answers FORMERR to a question with OPT, server 2 answering, under options edns0',
+    resolvConf: `${TWO}options edns0\n`,
+    question: { name: NAME, family: 0 },
+    servers: [
+      { address: S1, tcp: 'listen', behaviour: { ...ANSWERING, onOpt: 'formerr' } },
+      { address: S2, tcp: 'listen', behaviour: ANSWERING },
+    ],
+    walk: 'heard',
+    fast: true,
+    glibcOpt: 'every',
+    wire: both(S1),
+  },
+  {
+    id: 'answer-edns-deaf-edns0',
+    title:
+      'one server that drops a question with OPT, under options edns0 timeout:1 attempts:1 (P-454)',
+    resolvConf: `nameserver ${S1}\noptions edns0 timeout:1 attempts:1\n`,
+    question: { name: NAME, family: 0 },
+    servers: [{ address: S1, tcp: 'listen', behaviour: { ...ANSWERING, onOpt: 'drop' } }],
+    walk: 'heard',
+    fast: false,
+    glibcOpt: 'every',
+    divergence: 'P-454',
+    wire: both(S1),
+  },
+];
+
+/** An `options` value an answer row's resolv.conf sets, or glibc's default. */
+function optionIn(resolvConf: string, name: 'timeout' | 'attempts', otherwise: number): number {
+  const found = new RegExp(`\\b${name}:(\\d+)`, 'u').exec(resolvConf)?.[1];
+  return found === undefined ? otherwise : Number(found);
+}
+
+/** The policy's reading of an answer row in the image, as its own row would state it. */
+export function answerExpectation(row: AnswerRow): Classification {
+  const family = row.question.family;
+  return {
+    class: 'walk',
+    candidates: [row.question.name],
+    types: family === 4 ? ['A'] : family === 6 ? ['AAAA'] : ['A', 'AAAA'],
+    servers: row.servers.map((server) => server.address),
+    rotate: false,
+    timeout: optionIn(row.resolvConf, 'timeout', 5),
+    attempts: optionIn(row.resolvConf, 'attempts', 2),
+  };
+}
+
+/** An answer row's run in an image against what it claims, as problems. */
+export function answerProblems(row: AnswerRow, played: RowRun): string[] {
+  const out: string[] = [...(played.setup ?? [])];
+  const e = answerExpectation(row);
+  const misread = classificationProblem(e, played.inImage);
+  if (misread !== undefined) out.push(misread);
+  const edns0 = row.glibcOpt !== 'none';
+  if (played.edns0 !== edns0) {
+    out.push(
+      `the policy in the image reads edns0 as ${String(played.edns0)}, the row says ${String(edns0)}`,
+    );
+  }
+  const ran = played.plans.find((plan) => plan.plan === ANSWER_PLAN);
+  if (ran === undefined) return [...out, `plan ${ANSWER_PLAN} not played`];
+  for (const extra of played.plans.filter((plan) => plan.plan !== ANSWER_PLAN)) {
+    out.push(`played ${extra.plan}, which the row has no plan for`);
+  }
+  if (!isDeepStrictEqual(ran.wire, row.wire)) {
+    out.push(
+      `${ran.plan}: the row expects ${JSON.stringify(row.wire)}, glibc sent ${JSON.stringify(ran.wire)}`,
+    );
+  }
+  if (ran.ms < WITHIN_MS !== row.fast) {
+    out.push(
+      `${ran.plan}: glibc returned in ${String(Math.round(ran.ms))} ms (${ran.outcome}), and the row says it returns ${row.fast ? 'within' : 'after'} ${String(WITHIN_MS)} ms`,
+    );
+  }
+  if (ran.walk !== undefined && ran.walk.route !== row.walk) {
+    out.push(`${ran.plan}: the walk was ${ran.walk.route}, and the row says ${row.walk}`);
+  }
+  out.push(...walkProblems(e, ran, row.divergence));
+  out.push(...optProblems(ran, row.glibcOpt));
+  out.push(...modesProblems(ran));
+  return out;
+}
+
 export interface Verified {
   readonly recordings: Recording[];
+  /** glibc's wire for each answer row in each image. */
+  readonly answerRecordings: Recording[];
   readonly problems: string[];
   /** Plans recorded and rows replayed, by image. */
   readonly counts: Record<string, { rows: number; plans: number }>;
@@ -280,11 +765,19 @@ export function digestOf(bytes: Uint8Array): string {
  * is not the one the rows state, is a problem**: an unverified row fails the run (D30). So is a run
  * of other rows or of another build of the policy than `current`, a row played that the rows do not
  * replay in that image, and an image the rows say goes through systemd-resolved where the run did
- * not see it serve the stub.
+ * not see it serve the stub. Each plan whose glibc wire verified is held to its walk, its OPT
+ * records and its regression lookups too (`P-460`), and every answer row must be played in every
+ * image and hold.
  */
-export function verify(rows: RowsFile, runs: readonly ImageRun[], current: Current): Verified {
+export function verify(
+  rows: RowsFile,
+  runs: readonly ImageRun[],
+  current: Current,
+  answerRows: readonly AnswerRow[] = ANSWER_ROWS,
+): Verified {
   const problems: string[] = [];
   const recordings: Recording[] = [];
+  const answerRecordings: Recording[] = [];
   const counts: Record<string, { rows: number; plans: number }> = {};
   for (const run of runs) {
     if (!Object.hasOwn(rows.images, run.image)) {
@@ -349,17 +842,20 @@ export function verify(rows: RowsFile, runs: readonly ImageRun[], current: Curre
           continue;
         }
         if ((played.setup ?? []).length > 0 || misread !== undefined) continue;
+        // The walk is held to a glibc wire that verified, never to one already in question.
+        if (played.edns0 === undefined) {
+          problems.push(`${at}: whether the policy read options edns0 was not recorded`);
+        }
+        const opt: GlibcOpt = played.edns0 === true ? 'every' : 'none';
+        for (const why of [
+          ...walkProblems(e, ran),
+          ...optProblems(ran, opt),
+          ...modesProblems(ran),
+        ]) {
+          problems.push(`${at}: ${why}`);
+        }
         count.plans += 1;
-        recordings.push({
-          id: row.id,
-          image,
-          plan: plan.plan,
-          ...(verdict.offset === undefined ? {} : { offset: verdict.offset }),
-          wire: ran.wire,
-          outcome: ran.outcome,
-          ms: Math.round(ran.ms),
-          ...(ran.upstream === undefined ? {} : { upstream: ran.upstream }),
-        });
+        recordings.push(recordingOf(row.id, image, ran, verdict.offset));
       }
       for (const ran of played.plans) {
         if (!e.plans.some((plan) => plan.plan === ran.plan)) {
@@ -367,8 +863,47 @@ export function verify(rows: RowsFile, runs: readonly ImageRun[], current: Curre
         }
       }
     }
+    const answers = run.answers ?? [];
+    for (const played of answers) {
+      if (!answerRows.some((row) => row.id === played.id)) {
+        problems.push(`${image}, answer row ${played.id}: played, and is no answer row`);
+      }
+    }
+    for (const row of answerRows) {
+      const at = `${image}, answer row ${row.id} (${row.title})`;
+      const played = answers.find((each) => each.id === row.id);
+      if (played === undefined) {
+        problems.push(`${at}: not replayed`);
+        continue;
+      }
+      const found = answerProblems(row, played);
+      for (const why of found) problems.push(`${at}: ${why}`);
+      const ran = played.plans.find((plan) => plan.plan === ANSWER_PLAN);
+      if (ran !== undefined && found.length === 0) {
+        answerRecordings.push(recordingOf(row.id, image, ran, undefined));
+      }
+    }
   }
-  return { recordings, problems, counts };
+  return { recordings, answerRecordings, problems, counts };
+}
+
+function recordingOf(
+  id: string,
+  image: string,
+  ran: PlanRun,
+  offset: number | undefined,
+): Recording {
+  return {
+    id,
+    image,
+    plan: ran.plan,
+    ...(offset === undefined ? {} : { offset }),
+    wire: ran.wire,
+    opt: ran.opt ?? [],
+    outcome: ran.outcome,
+    ms: Math.round(ran.ms),
+    ...(ran.upstream === undefined ? {} : { upstream: ran.upstream }),
+  };
 }
 
 /** The recordings file for a run that verified. */
@@ -385,25 +920,279 @@ export function recordingsFile(runs: readonly ImageRun[], verified: Verified): R
       policyDigest: run.policyDigest,
     };
   }
-  return { schema: 2, images, recordings: verified.recordings };
+  return {
+    schema: 3,
+    images,
+    recordings: verified.recordings,
+    answerRecordings: verified.answerRecordings,
+  };
 }
 
-/** One image's run as a file held it: the run, or why it is none (an empty file is a replay that stopped). */
+/**
+ * A run file as it held it: an image's run, a budget box's or a box with the check off, or why it
+ * is none (an empty file is a replay that stopped).
+ */
 export function parseRun(
   path: string,
   text: string,
-): { readonly run: ImageRun } | { readonly problem: string } {
+):
+  | { readonly run: ImageRun }
+  | { readonly budget: BudgetRun }
+  | { readonly off: OffRun }
+  | { readonly problem: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (error: unknown) {
     return { problem: `${path}: not an image's run (${String(error)})` };
   }
+  const kind = (parsed as { kind?: unknown } | null)?.kind;
+  if (kind === 'budget') {
+    const budget = parsed as Partial<BudgetRun>;
+    if (typeof budget.forwarder !== 'string' || !Array.isArray(budget.arms)) {
+      return { problem: `${path}: not a budget box's run (no forwarder or arms)` };
+    }
+    return { budget: budget as BudgetRun };
+  }
+  if (kind === 'off') {
+    const off = parsed as Partial<OffRun>;
+    if (typeof off.case !== 'string' || typeof off.check !== 'string') {
+      return { problem: `${path}: not an off box's run (no case or check)` };
+    }
+    return { off: off as OffRun };
+  }
   const run = parsed as Partial<ImageRun> | null;
   if (run === null || typeof run.image !== 'string' || !Array.isArray(run.rows)) {
     return { problem: `${path}: not an image's run (no image or rows)` };
   }
   return { run: run as ImageRun };
+}
+
+// --- the budget boxes (§7.5's budget rows) ---------------------------------------------------------
+
+/** What gate mode may hold at a forwarder beyond `system` (D16: 24 against 12 for family 0). */
+export const BUDGET_GATE_EXTRA = 12;
+/** D16's transient after a helper loss, family 0, at a forwarder that does not merge: +8 × q. */
+export const BUDGET_LOSS_TRANSIENT = 16;
+/** dnsmasq's `dns-forward-max` in the box: 150 is the default, 30 is §7.5's. */
+export const BUDGET_FORWARD_MAX = 30;
+/** The names of one silent zone the box asks at once, in each arm. */
+export const BUDGET_NAMES = 150;
+
+export type BudgetArmName = 'system' | 'gate' | 'gate-kill';
+export type Forwarder = 'dnsmasq' | 'resolved';
+
+/** One arm: the probe's resolver in one mode asking every name of a silent zone at once. */
+export interface BudgetArm {
+  readonly arm: BudgetArmName;
+  readonly lookups: number;
+  /** Distinct questions the forwarder had open upstream at once, at their most. */
+  readonly peakHeld: number;
+  /** Distinct questions it sent upstream in the arm's window. */
+  readonly distinct: number;
+  /** dnsmasq's "Maximum number of concurrent DNS queries reached" lines (dnsmasq only). */
+  readonly maxReached?: number;
+  /** Gate arms: the check's state at the end (1 on and proven), and the helper's losses. */
+  readonly checkState?: number;
+  readonly helperLosses?: number;
+  /** Gate arms: `nameQuestionsOpen` at its most over the arm. */
+  readonly questionsPeak?: number;
+}
+
+export interface BudgetRun {
+  readonly kind: 'budget';
+  readonly forwarder: Forwarder;
+  readonly image: string;
+  /** dnsmasq's or systemd's version line. */
+  readonly version: string;
+  readonly names: number;
+  readonly family: 0 | 4 | 6;
+  readonly windowMs: number;
+  readonly arms: readonly BudgetArm[];
+  readonly setup?: readonly string[];
+}
+
+/** The arms each forwarder's box must run. */
+export const BUDGET_BOXES: Readonly<Record<Forwarder, readonly BudgetArmName[]>> = {
+  dnsmasq: ['system', 'gate', 'gate-kill'],
+  resolved: ['system', 'gate'],
+};
+
+/**
+ * A budget box against §7.5: dnsmasq at `dns-forward-max=30` with a 150-name silent zone never
+ * says its table is full, in either mode; gate mode holds at most `system` + 12 distinct questions
+ * at the forwarder at once, and after a helper SIGKILL at most that and D16's transient; and the
+ * same bound for systemd-resolved's distinct upstream questions. Each gate arm ran with the check
+ * on and proven, the killed one lost its helper, and `system` held the zone's questions at all.
+ */
+export function budgetProblems(run: BudgetRun): string[] {
+  const at = `budget box ${run.forwarder}`;
+  const out: string[] = (run.setup ?? []).map((why) => `${at}: ${why}`);
+  const arm = (name: BudgetArmName): BudgetArm | undefined =>
+    run.arms.find((each) => each.arm === name);
+  for (const name of BUDGET_BOXES[run.forwarder]) {
+    if (arm(name) === undefined) out.push(`${at}: the ${name} arm did not run`);
+  }
+  if (run.names !== BUDGET_NAMES || run.family !== 0) {
+    out.push(
+      `${at}: asked ${String(run.names)} names for family ${String(run.family)}, not ${String(BUDGET_NAMES)} for family 0`,
+    );
+  }
+  const system = arm('system');
+  if (system === undefined) return out;
+  if (system.peakHeld < 2) {
+    out.push(
+      `${at}: system held ${String(system.peakHeld)} questions at its most: the silent zone was not asked`,
+    );
+  }
+  for (const each of run.arms) {
+    if (run.forwarder === 'dnsmasq' && each.maxReached !== 0) {
+      out.push(
+        `${at}, ${each.arm}: dnsmasq said its forward table was full ${String(each.maxReached ?? 'an unknown number of')} times`,
+      );
+    }
+    if (each.arm === 'system') continue;
+    if (each.checkState !== 1) {
+      out.push(
+        `${at}, ${each.arm}: the check was not on and proven (nameCheckState ${String(each.checkState)})`,
+      );
+    }
+    const bound =
+      system.peakHeld + BUDGET_GATE_EXTRA + (each.arm === 'gate-kill' ? BUDGET_LOSS_TRANSIENT : 0);
+    if (each.peakHeld > bound) {
+      out.push(
+        `${at}, ${each.arm}: held ${String(each.peakHeld)} distinct questions at once, over ${String(bound)} (system ${String(system.peakHeld)})`,
+      );
+    }
+    if (each.arm === 'gate-kill' && (each.helperLosses ?? 0) < 1) {
+      out.push(`${at}, gate-kill: the helper was not lost`);
+    }
+  }
+  return out;
+}
+
+// --- the boxes with the check off (`P-461`) -------------------------------------------------------
+
+export type OffCase = 'nscd' | 'resolve' | 'mdns4_minimal' | 'ld-preload' | 'ld-so-preload';
+
+/** A box in which the check must be off, in situ: the policy loaded against the box as it is. */
+export interface OffRun {
+  readonly kind: 'off';
+  readonly case: OffCase;
+  readonly image: string;
+  readonly check: 'on' | 'off';
+  readonly off?: { readonly code: string; readonly why: string };
+  /** What the box was, read in it: its hosts: line, nscd's socket, and what ld.so preloads. */
+  readonly hostsLine: string | undefined;
+  readonly nscdSocket: boolean;
+  readonly ldPreload: string | undefined;
+  readonly ldSoPreload: string | undefined;
+  /** A name the check was asked to route in the box: `unvouched:off`, with nothing asked. */
+  readonly route: string | undefined;
+  readonly setup?: readonly string[];
+}
+
+interface OffCaseClaim {
+  readonly image: string;
+  /** The rule the policy must name (`CheckOff.code`), and words its reason must have. */
+  readonly code: string;
+  readonly why: RegExp;
+  /** Why the box is not as the case says, or undefined. */
+  readonly inSitu: (run: OffRun) => string | undefined;
+}
+
+const hostsLineHas =
+  (pattern: RegExp, what: string) =>
+  (run: OffRun): string | undefined =>
+    run.hostsLine !== undefined && pattern.test(run.hostsLine)
+      ? undefined
+      : `the box’s hosts: line is ${JSON.stringify(run.hostsLine)}, with no ${what}`;
+
+/** Each box with the check off, by the rule it must be off by. */
+export const OFF_CASES: Readonly<Record<OffCase, OffCaseClaim>> = {
+  nscd: {
+    image: 'debian12',
+    code: 'nscd',
+    why: /nscd is running/u,
+    inSitu: (run) =>
+      run.nscdSocket ? undefined : 'nscd’s socket is not there: nscd is not running',
+  },
+  resolve: {
+    image: 'ubuntu2404',
+    code: 'nsswitch',
+    why: /hosts: line/u,
+    inSitu: hostsLineHas(/(^|\s)resolve \[!UNAVAIL=return\](\s|$)/u, 'resolve [!UNAVAIL=return]'),
+  },
+  mdns4_minimal: {
+    image: 'debian12',
+    code: 'nsswitch',
+    why: /hosts: line/u,
+    inSitu: hostsLineHas(/(^|\s)mdns4_minimal(\s|$)/u, 'mdns4_minimal'),
+  },
+  'ld-preload': {
+    image: 'debian12',
+    code: 'env',
+    why: /LD_PRELOAD is set/u,
+    inSitu: (run) =>
+      (run.ldPreload ?? '') !== '' ? undefined : 'LD_PRELOAD is not set in the box',
+  },
+  'ld-so-preload': {
+    image: 'debian12',
+    code: 'env',
+    why: /ld\.so\.preload is not empty/u,
+    inSitu: (run) =>
+      (run.ldSoPreload ?? '') !== ''
+        ? undefined
+        : '/etc/ld.so.preload is empty or absent in the box',
+  },
+};
+
+/** A box with the check off against its case: in situ as it says, and the check off by its rule. */
+export function offProblems(run: OffRun): string[] {
+  const claim = OFF_CASES[run.case];
+  const at = `off box ${run.case}`;
+  const out: string[] = (run.setup ?? []).map((why) => `${at}: ${why}`);
+  if (run.image !== claim.image) out.push(`${at}: ran in ${run.image}, not ${claim.image}`);
+  const unlike = claim.inSitu(run);
+  if (unlike !== undefined) out.push(`${at}: ${unlike}`);
+  if (run.check !== 'off' || run.off === undefined) {
+    out.push(`${at}: the policy loaded in the box has the check on`);
+    return out;
+  }
+  if (run.off.code !== claim.code || !claim.why.test(run.off.why)) {
+    out.push(
+      `${at}: the policy has the check off by ${run.off.code} (${run.off.why}), not by ${claim.code}`,
+    );
+  }
+  if (run.route !== 'unvouched:off') {
+    out.push(`${at}: the check routed a name ${String(run.route)}, not unvouched:off`);
+  }
+  return out;
+}
+
+/** Every budget box and box with the check off, each run once and holding. */
+export function verifyBoxes(budget: readonly BudgetRun[], off: readonly OffRun[]): string[] {
+  const out: string[] = [];
+  for (const forwarder of Object.keys(BUDGET_BOXES) as Forwarder[]) {
+    const found = budget.filter((run) => run.forwarder === forwarder);
+    if (found.length === 0) out.push(`budget box ${forwarder}: not run`);
+    if (found.length > 1) out.push(`budget box ${forwarder}: run ${String(found.length)} times`);
+    for (const run of found) out.push(...budgetProblems(run));
+  }
+  for (const run of budget) {
+    if (!Object.hasOwn(BUDGET_BOXES, run.forwarder))
+      out.push(`budget box ${run.forwarder}: no such box`);
+  }
+  for (const name of Object.keys(OFF_CASES) as OffCase[]) {
+    const found = off.filter((run) => run.case === name);
+    if (found.length === 0) out.push(`off box ${name}: not run`);
+    if (found.length > 1) out.push(`off box ${name}: run ${String(found.length)} times`);
+    for (const run of found) out.push(...offProblems(run));
+  }
+  for (const run of off) {
+    if (!Object.hasOwn(OFF_CASES, run.case)) out.push(`off box ${run.case}: no such box`);
+  }
+  return out;
 }
 
 /**
@@ -550,5 +1339,29 @@ function udpQuestion(ip: Buffer): Asked | undefined {
   if (at + 2 > dns.length) return undefined;
   const type = dns.readUInt16BE(at);
   const qtype = type === 1 ? 'A' : type === 28 ? 'AAAA' : `TYPE${String(type)}`;
-  return { server, qname: labels.join('.'), qtype, transport: 'udp' };
+  return { server, qname: labels.join('.'), qtype, transport: 'udp', opt: carriesOpt(dns, at + 4) };
+}
+
+/** A domain name's end in a message, its labels or a pointer to them skipped; -1 if it runs out. */
+function pastName(dns: Buffer, from: number): number {
+  for (let at = from; at < dns.length;) {
+    const length = dns[at] ?? 0;
+    if (length === 0) return at + 1;
+    if ((length & 0xc0) === 0xc0) return at + 2;
+    at += 1 + length;
+  }
+  return -1;
+}
+
+/** Whether a query's answer, authority and additional sections, from `at`, hold an OPT record (type 41). */
+function carriesOpt(dns: Buffer, from: number): boolean {
+  const records = dns.readUInt16BE(6) + dns.readUInt16BE(8) + dns.readUInt16BE(10);
+  let at = from;
+  for (let k = 0; k < records; k += 1) {
+    const end = pastName(dns, at);
+    if (end === -1 || end + 10 > dns.length) return false;
+    if (dns.readUInt16BE(end) === 41) return true;
+    at = end + 10 + dns.readUInt16BE(end + 8);
+  }
+  return false;
 }

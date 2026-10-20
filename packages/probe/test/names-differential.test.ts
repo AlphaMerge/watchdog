@@ -9,30 +9,58 @@ import { describe, it } from 'node:test';
 import { DnsSimulator, dnsQuery, replies } from '@ms/simulators';
 import { startCapture, type CaptureOptions } from './differential/names-capture.js';
 import {
+  ANSWER_PLAN,
+  ANSWER_ROWS,
+  BUDGET_FORWARD_MAX,
+  BUDGET_GATE_EXTRA,
+  BUDGET_LOSS_TRANSIENT,
+  BUDGET_NAMES,
   NAMESERVER,
+  OFF_CASES,
   STUB,
+  WITHIN_MS,
+  answerExpectation,
+  answerProblems,
+  budgetProblems,
   canonicalAddress,
   classificationProblem,
   digestOf,
   expectationIn,
+  firstAsks,
   judgePlan,
   listenerOf,
+  modesProblems,
   nameserversOf,
+  offProblems,
+  optOf,
+  optProblems,
   parseRun,
   pcapQuestions,
   recordingsFile,
   resolvedObserved,
   unplayable,
   verify as verifyAt,
+  verifyBoxes,
+  walkProblems,
   wireOf,
+  type AnswerRow,
+  type BudgetRun,
+  type Classification,
   type Current,
   type Expectation,
+  type GlibcOpt,
   type ImageRun,
   type InImage,
+  type ModesRun,
+  type OffCase,
+  type OffRun,
+  type Plan,
   type PlanRun,
+  type RecordingsFile,
   type Row,
   type RowRun,
   type RowsFile,
+  type WalkRun,
   type Wire,
 } from './differential/names-differential.js';
 import { within } from './support/within.js';
@@ -148,21 +176,112 @@ const CURRENT: Current = { rowsDigest: 'r0', policyDigest: 'p0' };
 const verify = (rows: RowsFile, runs: readonly ImageRun[]): ReturnType<typeof verifyAt> =>
   verifyAt(rows, runs, CURRENT);
 
+const ANSWERED = 'answer:192.0.2.53';
+
+/** Each question of a wire once, at its first try, the transport aside: what a faithful walk asks. */
+function firstWire(wire: readonly Wire[]): Wire[] {
+  const out: Wire[] = [];
+  for (const [server, name, type] of wire) {
+    const bare = server.replace(/\/tcp$/u, '');
+    if (!out.some(([s, n, t]) => s === bare && n === name && t === type))
+      out.push([bare, name, type, 1]);
+  }
+  return out;
+}
+
+/** Whether a plan leaves some server silent: glibc then waits out a try, and the walk is not heard. */
+function silentIn(plan: Plan): boolean {
+  return Object.values(plan.answers).some((byType) => Object.values(byType).includes('silent'));
+}
+
+/**
+ * The walk a faithful check sends for a plan whose glibc wire is `wire` (`P-460`): what glibc
+ * asked first, to the first silent server when there is one; under `rotate` every server at once.
+ */
+function faithfulWalk(e: Expectation, plan: Plan, wire: readonly Wire[]): WalkRun {
+  if (e.class !== 'walk') return { route: 'local', wire: [], opt: [], ms: 0.1 };
+  const silent = silentIn(plan);
+  const types = e.types ?? ['A', 'AAAA'];
+  let walked: Wire[];
+  if (e.rotate && e.servers.length > 1) {
+    const names = [...new Set(wire.map(([, name]) => name))];
+    walked = (silent ? names.slice(0, 1) : names).flatMap((name) =>
+      (silent ? types.slice(0, 1) : types).flatMap((type) =>
+        e.servers.map((server): Wire => [server, name, type, 1]),
+      ),
+    );
+  } else {
+    const first = firstWire(wire);
+    const stop = first.findIndex(
+      ([server, , type]) => plan.answers[server]?.[type as 'A' | 'AAAA'] === 'silent',
+    );
+    walked = stop === -1 ? first : first.slice(0, stop + 1);
+  }
+  return { route: silent ? 'silent' : 'heard', wire: walked, opt: walked.map(() => false), ms: 2 };
+}
+
+const modesFor = (route: string): ModesRun => ({
+  system: ANSWERED,
+  gate: ANSWERED,
+  gateRan: route === 'silent' ? 'helper' : 'lanes',
+  helper: ANSWERED,
+  lanes: ANSWERED,
+});
+
+/** Whether a row's resolv.conf says `options edns0`, as the policy in a faithful image reads it. */
+function edns0Of(rows: RowsFile, row: Row): boolean {
+  const id = row.world.files['/etc/resolv.conf'];
+  return id !== undefined && /^options .*\bedns0\b/mu.test(rows.texts[id] ?? '');
+}
+
+const optFor = (expected: GlibcOpt, wire: readonly Wire[]): boolean[] =>
+  wire.map((_, k) => expected === 'every' || (expected === 'then-none' && k === 0));
+
+/** An answer row played by a glibc and a check that did what it claims. */
+function faithfulAnswer(row: AnswerRow): RowRun {
+  const walked = firstWire(row.wire).slice(0, row.walk === 'heard' ? undefined : 1);
+  return {
+    id: row.id,
+    inImage: classified({ ...answerExpectation(row), plans: [] }),
+    edns0: row.glibcOpt !== 'none',
+    plans: [
+      {
+        plan: ANSWER_PLAN,
+        wire: row.wire,
+        opt: optFor(row.glibcOpt, row.wire),
+        outcome: ANSWERED,
+        ms: row.fast ? 3 : 1_500,
+        walk: { route: row.walk, wire: walked, opt: walked.map(() => false), ms: 2 },
+        modes: modesFor(row.walk),
+      },
+    ],
+  };
+}
+
 /** A run in which glibc did exactly what the policy says: each plan's wire, the first offset. */
 function faithful(rows: RowsFile, image: string, glibc = rows.images[image]): ImageRun {
   const out: RowRun[] = [];
   for (const row of rows.rows) {
     const e = expectationIn(row, image);
     if (e === null) continue;
+    const edns0 = edns0Of(rows, row);
     out.push({
       id: row.id,
       inImage: classified(e),
-      plans: e.plans.map((plan) => ({
-        plan: plan.plan,
-        wire: plan.wire ?? plan.wireByOffset?.[0] ?? [],
-        outcome: 'answer:1',
-        ms: 3.4,
-      })),
+      edns0,
+      plans: e.plans.map((plan) => {
+        const wire = plan.wire ?? plan.wireByOffset?.[0] ?? [];
+        const walk = faithfulWalk(e, plan, wire);
+        return {
+          plan: plan.plan,
+          wire,
+          opt: wire.map(() => edns0),
+          outcome: 'answer:1',
+          ms: walk.route === 'silent' ? 5_000 : 3.4,
+          walk,
+          modes: modesFor(walk.route),
+        };
+      }),
     });
   }
   return {
@@ -175,27 +294,28 @@ function faithful(rows: RowsFile, image: string, glibc = rows.images[image]): Im
     policyDigest: CURRENT.policyDigest,
     resolved: rows.resolved.includes(image),
     rows: out,
+    answers: ANSWER_ROWS.map(faithfulAnswer),
   };
 }
 
 describe('the differential: a wire from what the servers saw', () => {
   it('numbers each try of a question at a server, and marks one over TCP', () => {
-    assert.deepEqual(
-      wireOf([
-        { server: '10.0.0.1', qname: 'sw1', qtype: 'A', transport: 'udp' },
-        { server: '10.0.0.1', qname: 'sw1', qtype: 'AAAA', transport: 'udp' },
-        { server: '10.0.0.2', qname: 'sw1', qtype: 'A', transport: 'udp' },
-        { server: '10.0.0.1', qname: 'sw1', qtype: 'A', transport: 'udp' },
-        { server: '10.0.0.1', qname: 'sw1', qtype: 'A', transport: 'tcp' },
-      ]),
-      [
-        ['10.0.0.1', 'sw1', 'A', 1],
-        ['10.0.0.1', 'sw1', 'AAAA', 1],
-        ['10.0.0.2', 'sw1', 'A', 1],
-        ['10.0.0.1', 'sw1', 'A', 2],
-        ['10.0.0.1/tcp', 'sw1', 'A', 1],
-      ],
-    );
+    const asked = [
+      { server: '10.0.0.1', qname: 'sw1', qtype: 'A', transport: 'udp', opt: true },
+      { server: '10.0.0.1', qname: 'sw1', qtype: 'AAAA', transport: 'udp', opt: true },
+      { server: '10.0.0.2', qname: 'sw1', qtype: 'A', transport: 'udp', opt: false },
+      { server: '10.0.0.1', qname: 'sw1', qtype: 'A', transport: 'udp', opt: true },
+      { server: '10.0.0.1', qname: 'sw1', qtype: 'A', transport: 'tcp', opt: false },
+    ] as const;
+    assert.deepEqual(wireOf(asked), [
+      ['10.0.0.1', 'sw1', 'A', 1],
+      ['10.0.0.1', 'sw1', 'AAAA', 1],
+      ['10.0.0.2', 'sw1', 'A', 1],
+      ['10.0.0.1', 'sw1', 'A', 2],
+      ['10.0.0.1/tcp', 'sw1', 'A', 1],
+    ]);
+    // Each question's OPT record, in the same order.
+    assert.deepEqual(optOf(asked), [true, true, false, true, false]);
   });
 });
 
@@ -310,7 +430,10 @@ describe('the differential: every image’s run against the rows', () => {
       ],
     );
     const file = recordingsFile(runs, verified);
-    assert.equal(file.schema, 2);
+    assert.equal(file.schema, 3);
+    // Every answer row in each image, with glibc's OPT records.
+    assert.equal(file.answerRecordings.length, 2 * ANSWER_ROWS.length);
+    assert.ok(file.recordings.every((r) => Array.isArray(r.opt) && r.opt.length === r.wire.length));
     assert.deepEqual(file.images['ubuntu2404'], {
       base: 'base-of-ubuntu2404',
       digest: 'sha256:0',
@@ -613,16 +736,22 @@ describe('the differential: what glibc sent the stub, read off a capture', () =>
       ipv6('2001:db8:0:0:0:0:0:1', udp(53, dnsMessage('sw2', 28))),
     ]);
     assert.deepEqual(pcapQuestions(file), [
-      { server: '127.0.0.53', qname: 'sw1', qtype: 'A', transport: 'udp' },
-      { server: '127.0.0.53', qname: 'sw1', qtype: 'AAAA', transport: 'udp' },
-      { server: '127.0.0.53', qname: 'sw1.corp.example', qtype: 'TYPE65', transport: 'udp' },
-      { server: '2001:db8::1', qname: 'sw2', qtype: 'AAAA', transport: 'udp' },
+      { server: '127.0.0.53', qname: 'sw1', qtype: 'A', transport: 'udp', opt: false },
+      { server: '127.0.0.53', qname: 'sw1', qtype: 'AAAA', transport: 'udp', opt: false },
+      {
+        server: '127.0.0.53',
+        qname: 'sw1.corp.example',
+        qtype: 'TYPE65',
+        transport: 'udp',
+        opt: false,
+      },
+      { server: '2001:db8::1', qname: 'sw2', qtype: 'AAAA', transport: 'udp', opt: false },
     ]);
   });
 
   it('reads Linux cooked captures and raw IP too, and refuses a file that is not pcap', () => {
     const packet = ipv4([127, 0, 0, 53], udp(53, dnsMessage('sw1', 1)));
-    const want = [{ server: '127.0.0.53', qname: 'sw1', qtype: 'A', transport: 'udp' }];
+    const want = [{ server: '127.0.0.53', qname: 'sw1', qtype: 'A', transport: 'udp', opt: false }];
     assert.deepEqual(pcapQuestions(pcap([packet], 113, Buffer.alloc(16))), want);
     assert.deepEqual(pcapQuestions(pcap([packet], 276, Buffer.alloc(20))), want);
     assert.deepEqual(pcapQuestions(pcap([packet], 101, Buffer.alloc(0))), want);
@@ -688,6 +817,15 @@ describe('the differential: the verdict over the files the runs left', () => {
       assert.ok('problem' in parsed, text);
       assert.match(parsed.problem, /^\/out\/rocky8\.json: not an image's run/u);
     }
+    // The boxes beside the images, by their kind.
+    const budget = budgetRun('dnsmasq');
+    assert.deepEqual(parseRun('/out/budget-dnsmasq.json', JSON.stringify(budget)), { budget });
+    const off = JSON.parse(JSON.stringify(offRun('nscd'))) as OffRun;
+    assert.deepEqual(parseRun('/out/off-nscd.json', JSON.stringify(off)), { off });
+    const notBudget = parseRun('/out/budget.json', '{"kind":"budget"}');
+    assert.ok('problem' in notBudget && /not a budget box's run/u.test(notBudget.problem));
+    const notOff = parseRun('/out/off.json', '{"kind":"off","case":"nscd"}');
+    assert.ok('problem' in notOff && /not an off box's run/u.test(notOff.problem));
   });
 
   it('judges every run it can read, and fails the one it cannot, with the digests of what it judges by', () => {
@@ -703,8 +841,21 @@ describe('the differential: the verdict over the files the runs left', () => {
       const debian = join(dir, 'debian12.json');
       const ubuntu = join(dir, 'ubuntu2404.json');
       writeFileSync(debian, JSON.stringify(runOf('debian12')));
+      // Every box beside the images, each as it should be.
+      const boxes = [
+        ...(['dnsmasq', 'resolved'] as const).map((forwarder) => {
+          const path = join(dir, `budget-${forwarder}.json`);
+          writeFileSync(path, JSON.stringify(budgetRun(forwarder)));
+          return path;
+        }),
+        ...(Object.keys(OFF_CASES) as OffCase[]).map((name) => {
+          const path = join(dir, `off-${name}.json`);
+          writeFileSync(path, JSON.stringify(offRun(name)));
+          return path;
+        }),
+      ];
       const verdict = (...runs: string[]): ReturnType<typeof spawnSync> =>
-        spawnSync(process.execPath, [VERIFY, rowsPath, ...runs], {
+        spawnSync(process.execPath, [VERIFY, rowsPath, ...runs, ...boxes], {
           encoding: 'utf8',
           timeout: 30_000,
         });
@@ -723,7 +874,12 @@ describe('the differential: the verdict over the files the runs left', () => {
         schema: number;
         images: Record<string, { rowsDigest: string; policyDigest: string }>;
       };
-      assert.equal(file.schema, 2);
+      assert.equal(file.schema, 3);
+      assert.match(
+        String(passed.stderr),
+        /^budget dnsmasq gate-kill: \d+ distinct questions held at once at most/mu,
+      );
+      assert.match(String(passed.stderr), /^off nscd in debian12: check off by nscd/mu);
       const recorded = file.images['debian12'];
       assert.ok(recorded !== undefined);
       assert.equal(recorded.rowsDigest, current.rowsDigest);
@@ -898,5 +1054,724 @@ describe('the differential: a simulator server as a row’s nameserver', () => {
     } finally {
       await sim.stop();
     }
+  });
+});
+
+// --- P-460: the walk's wire beside glibc's, the regressions, the answer rows, the budget boxes --
+
+const W = (server: string, name: string, type: string, tries = 1): Wire => [
+  server,
+  name,
+  type,
+  tries,
+];
+const S1 = '10.0.0.53';
+const S2 = '10.0.0.54';
+const TWO: Classification = {
+  class: 'walk',
+  candidates: ['sw1.corp.example', 'sw1'],
+  types: ['A', 'AAAA'],
+  servers: [S1, S2],
+  rotate: false,
+  timeout: 5,
+  attempts: 2,
+};
+
+/** A plan glibc played, with the walk and the regression beside it. */
+function played(
+  wire: readonly Wire[],
+  ms: number,
+  walk: Partial<WalkRun> & Pick<WalkRun, 'route' | 'wire'>,
+  more: Partial<PlanRun> = {},
+): PlanRun {
+  return {
+    plan: 'p',
+    wire,
+    opt: wire.map(() => false),
+    outcome: ms < WITHIN_MS ? 'answer:1' : 'EAI_AGAIN',
+    ms,
+    walk: { opt: walk.wire.map(() => false), ms: 2, ...walk },
+    modes: modesFor(walk.route),
+    ...more,
+  };
+}
+
+describe('P-460: a wire read as its first asks', () => {
+  it('asks each question once, at its first try, whatever the transport, its name in lower case', () => {
+    assert.deepEqual(
+      firstAsks([
+        W(S1, 'SW1.Corp', 'A'),
+        W(S1, 'sw1.corp', 'AAAA'),
+        W(S1, 'sw1.corp', 'A', 2),
+        W(`${S1}/tcp`, 'sw1.corp', 'AAAA'),
+        W(S2, 'sw1.corp', 'A'),
+      ]),
+      [`${S1} sw1.corp A`, `${S1} sw1.corp AAAA`, `${S2} sw1.corp A`],
+    );
+  });
+});
+
+describe('P-460: the walk’s wire held to glibc’s', () => {
+  const both = (server: string, name: string, tries = 1): Wire[] => [
+    W(server, name, 'A', tries),
+    W(server, name, 'AAAA', tries),
+  ];
+  const nx = [...both(S1, 'sw1.corp.example'), ...both(S1, 'sw1')];
+
+  it('a heard walk asked what glibc asked first, in order, and glibc returned within 1 s', () => {
+    assert.deepEqual(walkProblems(TWO, played(nx, 4, { route: 'heard', wire: nx })), []);
+    // glibc's tries and its TCP retry after TC are its own: the walk asked each question once.
+    const retried = [...both(S1, 'sw1.corp.example'), ...both(`${S1}/tcp`, 'sw1.corp.example')];
+    assert.deepEqual(
+      walkProblems(TWO, played(retried, 4, { route: 'heard', wire: both(S1, 'sw1.corp.example') })),
+      [],
+    );
+    for (const wire of [nx.slice(0, 2), [...nx, W(S2, 'sw1', 'A')], [nx[1], nx[0], nx[2], nx[3]]]) {
+      const said = walkProblems(TWO, played(nx, 4, { route: 'heard', wire: wire as Wire[] }));
+      assert.equal(said.length, 1, JSON.stringify(wire));
+      assert.match(said[0] ?? '', /^p, the walk: heard after asking .* where glibc asked/u);
+    }
+  });
+
+  it('a silent walk stopped at a question glibc asked too: a prefix of glibc’s, never nothing', () => {
+    const glibc = [
+      ...both(S1, 'sw1.corp.example'),
+      ...both(S2, 'sw1.corp.example'),
+      ...both(S1, 'sw1.corp.example', 2),
+    ];
+    const silent = (wire: Wire[]): string[] =>
+      walkProblems(TWO, played(glibc, 8_000, { route: 'silent', wire }));
+    assert.deepEqual(silent([W(S1, 'sw1.corp.example', 'A')]), []);
+    assert.deepEqual(silent(both(S1, 'sw1.corp.example')), []);
+    assert.match(
+      silent([W(S2, 'sw1.corp.example', 'A')])[0] ?? '',
+      /silent after asking .* not how glibc began/u,
+    );
+    assert.match(silent([W(S1, 'sw1', 'A')])[0] ?? '', /not how glibc began/u);
+    assert.deepEqual(silent([]), ['p, the walk: asked nothing']);
+  });
+
+  it('heard if and only if glibc returned within 1 s', () => {
+    assert.deepEqual(
+      walkProblems(TWO, played(nx, WITHIN_MS - 1, { route: 'heard', wire: nx })),
+      [],
+    );
+    assert.match(
+      walkProblems(TWO, played(nx, WITHIN_MS, { route: 'heard', wire: nx })).join(''),
+      /^p, the walk: heard, and glibc returned in 1000 ms \(EAI_AGAIN\)$/u,
+    );
+    const first = [W(S1, 'sw1.corp.example', 'A')];
+    assert.match(
+      walkProblems(TWO, played(nx, 4, { route: 'silent', wire: first })).join(''),
+      /^p, the walk: silent, and glibc returned in 4 ms/u,
+    );
+  });
+
+  it('never asks a question again over UDP, and is routed by its walk', () => {
+    const again = [...nx, W(S1, 'sw1', 'A', 2)];
+    assert.match(
+      walkProblems(TWO, played(nx, 4, { route: 'heard', wire: again })).join('\n'),
+      /asked a question again: \[\["10\.0\.0\.53","sw1","A",2\]\]/u,
+    );
+    for (const route of ['unvouched:unproven', 'sampled', 'local']) {
+      assert.deepEqual(walkProblems(TWO, played(nx, 4, { route, wire: [] })), [
+        `p, the walk: routed ${route}, not by a walk`,
+      ]);
+    }
+  });
+
+  it('a local name is routed local with nothing asked', () => {
+    const local: Classification = { ...TWO, class: 'local', via: 'hosts' };
+    assert.deepEqual(walkProblems(local, played([], 1, { route: 'local', wire: [] })), []);
+    assert.deepEqual(
+      walkProblems(local, played([], 1, { route: 'heard', wire: [W(S1, 'printer', 'A')] })),
+      [
+        'p, the walk: routed heard, and the row is local',
+        'p, the walk: asked [["10.0.0.53","printer","A",1]] for a name glibc answers unasked',
+      ],
+    );
+  });
+
+  it('says so when the walk was not recorded', () => {
+    const { walk: _walk, ...without } = played(nx, 4, { route: 'heard', wire: nx });
+    assert.deepEqual(walkProblems(TWO, without), ['p: the walk was not recorded']);
+  });
+
+  it('under rotate asks every server at once, glibc’s names in order, and heard means glibc was quick', () => {
+    const rotating: Classification = { ...TWO, rotate: true, types: ['A'] };
+    const glibc = [W(S2, 'sw1.corp.example', 'A'), W(S1, 'sw1', 'A')];
+    const every = [
+      W(S1, 'sw1.corp.example', 'A'),
+      W(S2, 'sw1.corp.example', 'A'),
+      W(S2, 'sw1', 'A'),
+      W(S1, 'sw1', 'A'),
+    ];
+    assert.deepEqual(walkProblems(rotating, played(glibc, 4, { route: 'heard', wire: every })), []);
+    assert.match(
+      walkProblems(rotating, played(glibc, 4, { route: 'heard', wire: every.slice(1) })).join(''),
+      /asked sw1\.corp\.example of 1 of 2 servers under rotate, not of 10\.0\.0\.53/u,
+    );
+    assert.match(
+      walkProblems(
+        rotating,
+        played(glibc, 4, {
+          route: 'heard',
+          wire: [every[2], every[3], every[0], every[1]] as Wire[],
+        }),
+      ).join(''),
+      /asked the names \["sw1","sw1\.corp\.example"\], where glibc asked/u,
+    );
+    assert.match(
+      walkProblems(
+        rotating,
+        played(glibc, 4, { route: 'heard', wire: [...every, W('10.0.0.99', 'sw1', 'A')] }),
+      ).join(''),
+      /of a server the row does not name/u,
+    );
+    // glibc may start at the one server that answers: a silent walk and a quick glibc agree.
+    assert.deepEqual(
+      walkProblems(rotating, played(glibc, 4, { route: 'silent', wire: every.slice(0, 2) })),
+      [],
+    );
+    // Heard, its names are all of glibc's: heard after the first name is not how glibc ended.
+    assert.match(
+      walkProblems(rotating, played(glibc, 4, { route: 'heard', wire: every.slice(0, 2) })).join(
+        '',
+      ),
+      /asked the names \["sw1\.corp\.example"\], where glibc asked \["sw1\.corp\.example","sw1"\]/u,
+    );
+    assert.match(
+      walkProblems(rotating, played(glibc, 5_000, { route: 'heard', wire: every })).join(''),
+      /heard, and glibc returned in 5000 ms/u,
+    );
+  });
+
+  it('P-454’s known limit is asserted as it is: heard, and glibc not within 1 s', () => {
+    const wire = [W(S1, 'sw1', 'A'), W(S1, 'sw1', 'AAAA')];
+    assert.deepEqual(walkProblems(TWO, played(wire, 1_200, { route: 'heard', wire }), 'P-454'), []);
+    for (const [route, ms] of [
+      ['heard', 4],
+      ['silent', 1_200],
+    ] as const) {
+      assert.match(
+        walkProblems(TWO, played(wire, ms, { route, wire: wire.slice(0, 1) }), 'P-454').join(''),
+        /P-454's known limit has moved/u,
+      );
+    }
+  });
+});
+
+describe('P-460: the OPT record on each wire, a known limit asserted as it is', () => {
+  const wire = [W(S1, 'sw1', 'A'), W(S1, 'sw1', 'AAAA'), W(S1, 'sw1', 'A', 2)];
+  const withOpt = (glibc: boolean[], walk: boolean[] = [false]): PlanRun =>
+    played(wire, 4, { route: 'heard', wire: wire.slice(0, 1), opt: walk }, { opt: glibc });
+
+  it('glibc’s carry one under options edns0 and none without; the check’s never', () => {
+    assert.deepEqual(optProblems(withOpt([true, true, true]), 'every'), []);
+    assert.deepEqual(optProblems(withOpt([false, false, false]), 'none'), []);
+    assert.match(
+      optProblems(withOpt([true, false, true]), 'every').join(''),
+      /under options edns0 every one/u,
+    );
+    assert.match(
+      optProblems(withOpt([false, true, false]), 'none').join(''),
+      /without options edns0 none/u,
+    );
+    assert.match(
+      optProblems(withOpt([false, false, false], [true]), 'none').join(''),
+      /the check’s questions carry an OPT record now, where c-ares 1\.34\.6 sent none: P-454’s known limit has moved/u,
+    );
+  });
+
+  it('glibc drops EDNS after its first questions where the row says so, and never takes it up again', () => {
+    assert.deepEqual(optProblems(withOpt([true, true, false]), 'then-none'), []);
+    for (const opt of [
+      [true, true, true],
+      [false, false, false],
+      [true, false, true],
+    ]) {
+      assert.equal(optProblems(withOpt(opt), 'then-none').length, 1, JSON.stringify(opt));
+    }
+  });
+
+  it('says so when a wire’s OPT records were not all recorded', () => {
+    assert.match(
+      optProblems(withOpt([true]), 'every').join(''),
+      /glibc’s OPT records were not recorded/u,
+    );
+    const { opt: _opt, ...none } = withOpt([true, true, true]);
+    assert.match(optProblems(none, 'every').join(''), /glibc’s OPT records were not recorded/u);
+    assert.match(
+      optProblems(withOpt([true, true, true], []), 'every').join(''),
+      /the walk’s OPT records were not recorded/u,
+    );
+  });
+});
+
+describe('P-460: the regressions, gate against system and the helper against the lanes', () => {
+  const wire = [W(S1, 'sw1', 'A')];
+  const with_ = (modes: Partial<ModesRun>, route = 'heard'): PlanRun =>
+    played(wire, 4, { route, wire }, { modes: { ...modesFor(route), ...modes } });
+
+  it('agrees when every lookup answered alike and gate mode ran it where its walk said', () => {
+    assert.deepEqual(modesProblems(with_({})), []);
+    assert.deepEqual(modesProblems(with_({}, 'silent')), []);
+    assert.deepEqual(modesProblems(with_({}, 'local')), []);
+  });
+
+  it('names an answer that differs, and a lookup run where its walk did not say', () => {
+    assert.deepEqual(modesProblems(with_({ gate: 'error:ENOTFOUND' })), [
+      `p, regression: gate mode answered error:ENOTFOUND, system mode ${ANSWERED}`,
+    ]);
+    assert.deepEqual(modesProblems(with_({ helper: 'answer:192.0.2.54' })), [
+      `p, regression: the helper’s child answered answer:192.0.2.54, the probe’s lanes ${ANSWERED}`,
+    ]);
+    assert.deepEqual(modesProblems(with_({ gateRan: 'helper' })), [
+      'p, regression: gate mode ran it in the helper, and its walk was heard',
+    ]);
+    assert.deepEqual(modesProblems(with_({ gateRan: 'lanes' }, 'silent')), [
+      'p, regression: gate mode ran it on the probe’s lanes, and its walk was silent',
+    ]);
+    const { modes: _modes, ...none } = with_({});
+    assert.deepEqual(modesProblems(none), ['p: the regression’s lookups were not recorded']);
+  });
+});
+
+describe('P-460: the answer rows', () => {
+  it('each row is one in every image, says how glibc and the walk end, and names P-454 where they part', () => {
+    assert.equal(new Set(ANSWER_ROWS.map((row) => row.id)).size, ANSWER_ROWS.length);
+    const titles = ANSWER_ROWS.map((row) => row.title).join('\n');
+    for (const want of [
+      /TC .*TCP\/53 refused/u,
+      /TC .*TCP\/53 refused.*edns0/u,
+      /^FORMERR/mu,
+      /A answered and AAAA SERVFAIL from server 1, server 2 silent/u,
+    ]) {
+      assert.match(titles, want);
+    }
+    for (const row of ANSWER_ROWS) {
+      assert.ok(row.divergence === undefined || (row.walk === 'heard' && !row.fast), row.id);
+      assert.ok(row.divergence !== undefined || (row.walk === 'heard') === row.fast, row.id);
+      assert.equal(row.glibcOpt !== 'none', /\bedns0\b/u.test(row.resolvConf), row.id);
+      assert.deepEqual(firstAsks(row.wire).length > 0, true, row.id);
+    }
+  });
+
+  it('holds when glibc and the walk did what the row says', () => {
+    for (const row of ANSWER_ROWS)
+      assert.deepEqual(answerProblems(row, faithfulAnswer(row)), [], row.id);
+  });
+
+  it('names each way a row can disagree', () => {
+    const row = ANSWER_ROWS.find((each) => each.id === 'answer-formerr');
+    assert.ok(row !== undefined);
+    const good = faithfulAnswer(row);
+    const plan = good.plans[0];
+    assert.ok(plan !== undefined && plan.walk !== undefined && plan.modes !== undefined);
+    const changed = (change: Partial<PlanRun>, run: Partial<RowRun> = {}): string[] =>
+      answerProblems(row, { ...good, ...run, plans: [{ ...plan, ...change }] });
+    assert.match(
+      changed({
+        wire: [...plan.wire, W(S2, 'sw1.example.test', 'A')],
+        opt: [...(plan.opt ?? []), false],
+      }).join('\n'),
+      /the row expects .* glibc sent/u,
+    );
+    assert.match(
+      changed({ ms: 2_000 }).join('\n'),
+      /glibc returned in 2000 ms .* the row says it returns within 1000 ms/u,
+    );
+    assert.match(
+      changed({ walk: { ...plan.walk, route: 'silent', wire: plan.walk.wire.slice(0, 1) } }).join(
+        '\n',
+      ),
+      /the walk was silent, and the row says heard/u,
+    );
+    assert.match(
+      changed({}, { edns0: true }).join('\n'),
+      /reads edns0 as true, the row says false/u,
+    );
+    assert.match(
+      changed({}, { inImage: { class: 'off', off: 'nscd: running' } }).join('\n'),
+      /check is off in the image/u,
+    );
+    assert.deepEqual(answerProblems(row, { ...good, plans: [] }), ['plan plan not played']);
+    assert.match(
+      answerProblems(row, { ...good, plans: [plan, { ...plan, plan: 'other' }] }).join('\n'),
+      /played other, which the row has no plan for/u,
+    );
+    assert.deepEqual(answerProblems(row, { ...good, setup: ['no'] }).slice(0, 1), ['no']);
+    // Its walk, its OPT records and its regression are held as every plan's are.
+    assert.match(
+      changed({
+        walk: { ...plan.walk, wire: [W(S2, 'sw1.example.test', 'A')], opt: [false] },
+      }).join('\n'),
+      /^plan, the walk: heard after asking .* where glibc asked/mu,
+    );
+    assert.match(
+      changed({ opt: plan.wire.map(() => true) }).join('\n'),
+      /^plan: glibc’s questions carried OPT records \[true,true\], and without options edns0/mu,
+    );
+    assert.match(
+      changed({ modes: { ...plan.modes, gate: 'answer:192.0.2.1' } }).join('\n'),
+      /^plan, regression: gate mode answered answer:192\.0\.2\.1, system mode/mu,
+    );
+  });
+
+  it('every image must play every answer row, and only those, and each is recorded', () => {
+    const [debian, ubuntu] = [
+      faithful(RESOLV_ROWS, 'debian12'),
+      faithful(RESOLV_ROWS, 'ubuntu2404'),
+    ];
+    const first = ANSWER_ROWS[0];
+    assert.ok(first !== undefined);
+    const missing = { ...debian, answers: (debian.answers ?? []).slice(1) };
+    assert.deepEqual(verify(RESOLV_ROWS, [missing, ubuntu]).problems, [
+      `debian12, answer row ${first.id} (${first.title}): not replayed`,
+    ]);
+    const stray = {
+      ...debian,
+      answers: [...(debian.answers ?? []), { ...faithfulAnswer(first), id: 'answer-none' }],
+    };
+    assert.deepEqual(verify(RESOLV_ROWS, [stray, ubuntu]).problems, [
+      'debian12, answer row answer-none: played, and is no answer row',
+    ]);
+    const verified = verify(RESOLV_ROWS, [debian, ubuntu]);
+    assert.deepEqual(
+      verified.answerRecordings.filter((r) => r.image === 'debian12').map((r) => [r.id, r.plan]),
+      ANSWER_ROWS.map((row) => [row.id, ANSWER_PLAN]),
+    );
+    // A row that disagrees records nothing.
+    const wrong = {
+      ...debian,
+      answers: (debian.answers ?? []).map((run) => ({ ...run, edns0: !(run.edns0 ?? false) })),
+    };
+    assert.equal(
+      verifyAt(RESOLV_ROWS, [wrong, ubuntu], CURRENT).answerRecordings.filter(
+        (r) => r.image === 'debian12',
+      ).length,
+      0,
+    );
+  });
+});
+
+describe('P-460: every plan of S4’s rows is held to its walk, its OPT records and its regression', () => {
+  const at = `debian12, row ${ROW.id} (${ROW.title})`;
+  const changed = (
+    change: (plan: PlanRun) => PlanRun,
+    run: (row: RowRun) => RowRun = (row) => row,
+  ): string[] => {
+    const good = faithful(RESOLV_ROWS, 'debian12');
+    const rows = good.rows.map((row) =>
+      row.id === ROW.id ? run({ ...row, plans: row.plans.map(change) }) : row,
+    );
+    return verify(RESOLV_ROWS, [{ ...good, rows }, faithful(RESOLV_ROWS, 'ubuntu2404')]).problems;
+  };
+
+  it('names a walk that disagrees, an OPT record, a regression and a reading not recorded', () => {
+    assert.deepEqual(
+      changed((plan) => plan),
+      [],
+    );
+    assert.deepEqual(
+      changed((plan) => (plan.plan === 'answer' ? { ...plan, ms: 2_000 } : plan)),
+      [`${at}: answer, the walk: heard, and glibc returned in 2000 ms (answer:1)`],
+    );
+    assert.deepEqual(
+      changed((plan) =>
+        plan.plan === 'answer' ? { ...plan, opt: plan.wire.map(() => true) } : plan,
+      ),
+      [
+        `${at}: answer: glibc’s questions carried OPT records [true,true], and without options edns0 none of glibc’s questions carries an OPT record`,
+      ],
+    );
+    assert.deepEqual(
+      changed((plan) =>
+        plan.plan === 'answer'
+          ? { ...plan, modes: { ...modesFor('heard'), gate: 'error:EAI_AGAIN' } }
+          : plan,
+      ),
+      [`${at}: answer, regression: gate mode answered error:EAI_AGAIN, system mode ${ANSWERED}`],
+    );
+    const { edns0: _edns0, ...unsaid } =
+      faithful(RESOLV_ROWS, 'debian12').rows[0] ?? ({} as RowRun);
+    assert.deepEqual(
+      changed(
+        (plan) => plan,
+        () => unsaid as RowRun,
+      ),
+      [
+        `${at}: whether the policy read options edns0 was not recorded`,
+        `${at}: whether the policy read options edns0 was not recorded`,
+      ],
+    );
+  });
+});
+
+/** A budget box's run that holds: system's peak, gate's within 12 of it, the killed one within 28. */
+function budgetRun(
+  forwarder: 'dnsmasq' | 'resolved',
+  arms: Partial<Record<string, Partial<BudgetRun['arms'][number]>>> = {},
+): BudgetRun {
+  const names =
+    forwarder === 'dnsmasq'
+      ? (['system', 'gate', 'gate-kill'] as const)
+      : (['system', 'gate'] as const);
+  return {
+    kind: 'budget',
+    forwarder,
+    image: forwarder === 'dnsmasq' ? 'debian12' : 'ubuntu2404',
+    version: 'test',
+    names: BUDGET_NAMES,
+    family: 0,
+    windowMs: 30_000,
+    arms: names.map((arm) => ({
+      arm,
+      lookups: BUDGET_NAMES,
+      peakHeld: arm === 'system' ? 8 : 10,
+      distinct: 40,
+      ...(forwarder === 'dnsmasq' ? { maxReached: 0 } : {}),
+      ...(arm === 'system'
+        ? {}
+        : { checkState: 1, helperLosses: arm === 'gate-kill' ? 1 : 0, questionsPeak: 10 }),
+      ...arms[arm],
+    })),
+  };
+}
+
+describe('P-460: the budget boxes', () => {
+  it('holds a forwarder below its table, gate within 12 of system, and a helper SIGKILL within the transient', () => {
+    assert.equal(BUDGET_FORWARD_MAX, 30);
+    assert.equal(BUDGET_NAMES, 150);
+    assert.deepEqual(budgetProblems(budgetRun('dnsmasq')), []);
+    assert.deepEqual(budgetProblems(budgetRun('resolved')), []);
+    const edge = 8 + BUDGET_GATE_EXTRA;
+    assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { gate: { peakHeld: edge } })), []);
+    assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { gate: { peakHeld: edge + 1 } })), [
+      `budget box dnsmasq, gate: held ${String(edge + 1)} distinct questions at once, over ${String(edge)} (system 8)`,
+    ]);
+    const killed = edge + BUDGET_LOSS_TRANSIENT;
+    assert.deepEqual(
+      budgetProblems(budgetRun('dnsmasq', { 'gate-kill': { peakHeld: killed } })),
+      [],
+    );
+    assert.equal(
+      budgetProblems(budgetRun('dnsmasq', { 'gate-kill': { peakHeld: killed + 1 } })).length,
+      1,
+    );
+    assert.deepEqual(
+      budgetProblems(budgetRun('resolved', { gate: { peakHeld: edge + 1 } })).length,
+      1,
+    );
+  });
+
+  it('names a full table, a check not on, a helper not lost, a zone not asked, an arm not run', () => {
+    assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { system: { maxReached: 3 } })), [
+      'budget box dnsmasq, system: dnsmasq said its forward table was full 3 times',
+    ]);
+    assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { gate: { checkState: 3 } })), [
+      'budget box dnsmasq, gate: the check was not on and proven (nameCheckState 3)',
+    ]);
+    assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { 'gate-kill': { helperLosses: 0 } })), [
+      'budget box dnsmasq, gate-kill: the helper was not lost',
+    ]);
+    assert.match(
+      budgetProblems(budgetRun('dnsmasq', { system: { peakHeld: 1 } })).join('\n'),
+      /system held 1 questions at its most: the silent zone was not asked/u,
+    );
+    const run = budgetRun('dnsmasq');
+    assert.deepEqual(budgetProblems({ ...run, arms: run.arms.slice(0, 2) }), [
+      'budget box dnsmasq: the gate-kill arm did not run',
+    ]);
+    assert.match(
+      budgetProblems({ ...run, names: 10 }).join(''),
+      /asked 10 names for family 0, not 150/u,
+    );
+    assert.deepEqual(budgetProblems({ ...run, setup: ['dnsmasq did not start'] }), [
+      'budget box dnsmasq: dnsmasq did not start',
+    ]);
+    const { maxReached: _max, ...unsaid } = run.arms[0] ?? ({} as BudgetRun['arms'][number]);
+    assert.match(
+      budgetProblems({ ...run, arms: [unsaid, ...run.arms.slice(1)] }).join(''),
+      /full an unknown number of times/u,
+    );
+  });
+});
+
+/** A box with the check off as its case says. */
+function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
+  const claim = OFF_CASES[name];
+  return {
+    kind: 'off',
+    case: name,
+    image: claim.image,
+    check: 'off',
+    off: {
+      code: claim.code,
+      why: {
+        nscd: 'nscd is running (/var/run/nscd/socket)',
+        resolve: 'nsswitch.conf’s hosts: line has an action group',
+        mdns4_minimal: 'nsswitch.conf’s hosts: line has an action group',
+        'ld-preload':
+          'LD_PRELOAD is set in ms-probe’s environment: what ld.so loads with it may answer for glibc',
+        'ld-so-preload': '/etc/ld.so.preload is not empty: ld.so loads what it names',
+      }[name],
+    },
+    hostsLine: {
+      nscd: 'files dns',
+      resolve: 'files resolve [!UNAVAIL=return] dns',
+      mdns4_minimal: 'files mdns4_minimal [NOTFOUND=return] dns',
+      'ld-preload': 'files dns',
+      'ld-so-preload': 'files dns',
+    }[name],
+    nscdSocket: name === 'nscd',
+    ldPreload: name === 'ld-preload' ? '/usr/lib/aarch64-linux-gnu/libresolv.so.2' : undefined,
+    ldSoPreload:
+      name === 'ld-so-preload' ? '/usr/lib/aarch64-linux-gnu/libresolv.so.2\n' : undefined,
+    route: 'unvouched:off',
+    ...change,
+  };
+}
+
+describe('P-461: the boxes with the check off in situ', () => {
+  it('holds each box that is as its case says, with the check off by its rule', () => {
+    for (const name of Object.keys(OFF_CASES) as OffCase[])
+      assert.deepEqual(offProblems(offRun(name)), [], name);
+  });
+
+  it('fails a box with the check on, off by another rule, not in situ, or routing a name otherwise', () => {
+    const { off: _off, ...on } = offRun('nscd');
+    assert.deepEqual(offProblems({ ...on, check: 'on' }), [
+      'off box nscd: the policy loaded in the box has the check on',
+    ]);
+    assert.deepEqual(offProblems(offRun('nscd', { check: 'on' })), [
+      'off box nscd: the policy loaded in the box has the check on',
+    ]);
+    assert.deepEqual(
+      offProblems(offRun('nscd', { off: { code: 'module', why: 'nscd is running' } })),
+      ['off box nscd: the policy has the check off by module (nscd is running), not by nscd'],
+    );
+    assert.equal(
+      offProblems(offRun('ld-preload', { off: { code: 'env', why: 'LOCALDOMAIN is set' } })).length,
+      1,
+    );
+    assert.deepEqual(offProblems(offRun('nscd', { nscdSocket: false })), [
+      'off box nscd: nscd’s socket is not there: nscd is not running',
+    ]);
+    assert.deepEqual(offProblems(offRun('resolve', { hostsLine: 'files dns' })), [
+      'off box resolve: the box’s hosts: line is "files dns", with no resolve [!UNAVAIL=return]',
+    ]);
+    assert.deepEqual(offProblems(offRun('mdns4_minimal', { hostsLine: undefined })), [
+      'off box mdns4_minimal: the box’s hosts: line is undefined, with no mdns4_minimal',
+    ]);
+    assert.deepEqual(offProblems(offRun('ld-preload', { ldPreload: '' })), [
+      'off box ld-preload: LD_PRELOAD is not set in the box',
+    ]);
+    assert.deepEqual(offProblems(offRun('ld-so-preload', { ldSoPreload: undefined })), [
+      'off box ld-so-preload: /etc/ld.so.preload is empty or absent in the box',
+    ]);
+    assert.deepEqual(offProblems(offRun('nscd', { route: 'heard' })), [
+      'off box nscd: the check routed a name heard, not unvouched:off',
+    ]);
+    assert.deepEqual(offProblems(offRun('nscd', { image: 'rocky9' })), [
+      'off box nscd: ran in rocky9, not debian12',
+    ]);
+    assert.deepEqual(offProblems(offRun('nscd', { setup: ['nscd did not start'] })).slice(0, 1), [
+      'off box nscd: nscd did not start',
+    ]);
+  });
+
+  it('every box is run once, and none other', () => {
+    const budget = [budgetRun('dnsmasq'), budgetRun('resolved')];
+    const off = (Object.keys(OFF_CASES) as OffCase[]).map((name) => offRun(name));
+    assert.deepEqual(verifyBoxes(budget, off), []);
+    assert.deepEqual(verifyBoxes(budget.slice(1), off.slice(1)), [
+      'budget box dnsmasq: not run',
+      'off box nscd: not run',
+    ]);
+    assert.deepEqual(verifyBoxes([...budget, budgetRun('resolved')], [...off, offRun('nscd')]), [
+      'budget box resolved: run 2 times',
+      'off box nscd: run 2 times',
+    ]);
+    assert.deepEqual(
+      verifyBoxes(
+        [...budget, { ...budgetRun('resolved'), forwarder: 'unbound' as 'resolved' }],
+        off,
+      ).slice(-1),
+      ['budget box unbound: no such box'],
+    );
+    assert.deepEqual(
+      verifyBoxes(budget, [...off, { ...offRun('nscd'), case: 'sss' as OffCase }]).slice(-1),
+      ['off box sss: no such box'],
+    );
+  });
+});
+
+describe('P-460: an OPT record read off a capture', () => {
+  /** A query with an OPT record in its additional section, as glibc sends one under edns0. */
+  function withOpt(name: string, type: number): Buffer {
+    const message = dnsMessage(name, type);
+    message.writeUInt16BE(1, 10);
+    const opt = Buffer.from([0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0]);
+    return Buffer.concat([message, opt]);
+  }
+
+  it('says which questions carried one', () => {
+    const stub = [127, 0, 0, 53];
+    const file = pcap([
+      ipv4(stub, udp(53, withOpt('sw1', 1))),
+      ipv4(stub, udp(53, dnsMessage('sw1', 28))),
+    ]);
+    assert.deepEqual(
+      pcapQuestions(file).map((one) => [one.qtype, one.opt]),
+      [
+        ['A', true],
+        ['AAAA', false],
+      ],
+    );
+    // An authority record before it, its name a pointer, is walked past to the OPT record.
+    const ns = dnsMessage('sw1', 1);
+    ns.writeUInt16BE(1, 8);
+    ns.writeUInt16BE(1, 10);
+    const authority = Buffer.from([0xc0, 0x0c, 0, 2, 0, 1, 0, 0, 0, 60, 0, 2, 0xc0, 0x0c]);
+    const opt = Buffer.from([0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(
+      pcapQuestions(pcap([ipv4(stub, udp(53, Buffer.concat([ns, authority, opt])))])).map(
+        (one) => one.opt,
+      ),
+      [true],
+    );
+    // A record that runs past the packet is no OPT record.
+    const cut = withOpt('sw1', 1).subarray(0, -9);
+    assert.deepEqual(
+      pcapQuestions(pcap([ipv4(stub, udp(53, cut))])).map((one) => one.opt),
+      [false],
+    );
+  });
+});
+
+describe('P-460: the committed recordings are of the committed rows', () => {
+  it('every image’s run replayed the rows file as it is committed, and recorded every answer row', () => {
+    const rowsBytes = readFileSync(
+      fileURLToPath(new URL('../../test/fixtures/system-names-rows.json', import.meta.url)),
+    );
+    const recorded = JSON.parse(readFileSync(RECORDINGS, 'utf8')) as RecordingsFile;
+    assert.equal(recorded.schema, 3);
+    const images = Object.keys(ROWS.images).sort();
+    assert.deepEqual(Object.keys(recorded.images).sort(), images);
+    for (const image of images) {
+      assert.equal(recorded.images[image]?.rowsDigest, digestOf(rowsBytes), image);
+    }
+    for (const image of images) {
+      for (const row of ANSWER_ROWS) {
+        const found = recorded.answerRecordings.filter((r) => r.id === row.id && r.image === image);
+        assert.equal(found.length, 1, `${row.id} in ${image}`);
+        const one = found[0];
+        assert.ok(one !== undefined, `${row.id} in ${image}`);
+        assert.deepEqual(one.wire, row.wire, `${row.id} in ${image}`);
+        assert.equal(one.opt.length, row.wire.length, `${row.id} in ${image}`);
+      }
+    }
+    assert.equal(recorded.answerRecordings.length, images.length * ANSWER_ROWS.length);
   });
 });
