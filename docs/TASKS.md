@@ -33454,7 +33454,7 @@ because each is a decision rather than a defect:
         they cannot look one up either; the fix is a ticket of its own, the walk extended to the
         document `build-hygiene.test.ts` already builds. The core's start-up log has one too:
         `logSensorTypes` warns with `unblocks: 'P-08'`. **Fixed by review round 1, with the two
-        migration lines this note missed.**
+        migration lines this note missed.** The document is `U-93`.
       - **The two together, 2026-10-20** (three commits): shared 602 tests green; sensors 2,314,
         2,312 passing and two skipped for the machine, not the code (the dev PostgreSQL offers no
         TLS, and an IPv6 routing case found its port taken on 127.0.0.1); the web suite 96 files
@@ -33657,6 +33657,123 @@ because each is a decision rather than a defect:
         and none cites a ticket; the one match for the test's pattern is 004's hint, which names
         `docs/ADR-001-architecture.md`, a file. Holding a new one is a ticket of its own if it
         is wanted.
+
+- [x] **U-93 — the API reference cites internal tickets: "(`A-49`)", "the answer `D-04` will act
+      on"** · S · U-92 · Found 2026-10-20 by `U-92`'s *Seen* note. The OpenAPI document `GET
+      /api/v1/openapi.json` serves, which `docs/api-reference.md` is rendered from, cited this
+      repository's tickets 126 times on 98 lines of the reference: 98 descriptions, 68 different
+      texts, written in 17 files under `packages/core/src/api`. Its readers write clients rather
+      than run the product, and cannot look one up either: the release ships `docs/`, but a
+      ticket sends them into a backlog of 46,000 lines for a sentence the description can say
+      itself. Nothing held it: the core's walk left a `description` and a `summary` under `api/`
+      out on purpose, for this ticket. **Done when** the document cites none, each sentence still
+      reads correctly and is useful to a client's author, the reference is regenerated, and a test
+      over the whole document fails on a ticket in a summary, a description, a title or an
+      example.
+      - **U-93 outcome.** Every citation was rewritten where it is written. Most were a
+        parenthesis that told a client nothing — "(`A-41`)", "(`U-21`)", "(A-80)", "(`ADR-003`)"
+        — and went, the sentence otherwise unchanged and the ticket moved to a comment beside the
+        property or the route, as `U-92` moved its own. Where the ticket was what the sentence
+        was about, the sentence names what a client can call or read instead, and where it was
+        history, the sentence says what holds now. Seven needed more than the parenthesis gone,
+        the first four because they had gone stale:
+        - `POST /reports/{id}/runs`: "The rendered document is not kept — `E-09` decides where a
+          report goes", stale since `E-09` landed. It is kept, mailed, or mailed and kept until it
+          has been sent, as the report's `delivery` says, and `outputs` lists what the run still
+          holds; the description says so now.
+        - A probe branch's `gid`: "R-01 replaces setting it by hand with an enrolment flow; until
+          then it is how a probe is told which subtree it owns", stale since `R-01`. Approving the
+          probe with `POST /probes/{gid}/approve` sets it and is the usual way; setting it by hand
+          still binds the branch, and a GID another probe object holds is refused (`P-391`).
+        - `POST /probes/{gid}/approve` told the story of a sentence it once carried, "It said
+          'starts scanning without reconnecting' until `P-189`, which was not implemented". It
+          says instead why a connected probe's connection is closed: one admitted before the
+          approval would scan nothing.
+        - A clone's `clonedCount.trigger` described the defect `P-141` fixed as if it were how a
+          clone behaves ("The clone already carried the trigger *fence* and none of the triggers
+          behind it"). A copy carries the fence and the triggers together, and it says so.
+        - A sensor's `params` told a client about this repository's tests, "build-hygiene checks
+          that every parameter named like a secret is marked (P-344)". It tells them where to
+          look instead: the type's `paramsSchema` says which parameters are never returned.
+        - The channels without their declared lookup: "a clone made before `P-302` lost, which
+          migration 073 left empty", now "whose lookup a clone made by an earlier release lost,
+          which the upgrade did not fill", as 073's own log line has said since `U-92`.
+        - Provisioning's "An administrator is answered as before", which meant something only
+          beside the ticket: "An administrator sees every device, and is answered about each."
+        The plan routes' "the answer `D-04` will act on" and "before letting `D-04` create
+        anything" name `POST /discovery/{id}/provision`, and a rediscovery rule's "A schedule
+        (`M-09`)" names `GET /schedules`. `docs/api-reference.md` regenerated: the 98 lines, and
+        no match for the pattern left in it. `docs/sensor-reference.md` unchanged and current.
+      - **Tests** (`operator-text.test.ts`, core, 4 to 6). **The document**: a new test builds it
+        as `build-hygiene.test.ts` builds it, by running `scripts/docs/api-reference.mjs
+        --openapi` — a child process, killed at its own `timeout` and its wait bounded by
+        `within` — and walks it with the reader the registries' walk uses, which now reads a
+        `summary` and OpenAPI's own `example` as well. It asserts the walk reaches the
+        document's description, a route's summary and description, a query parameter's, a
+        request body field's, a response field's, a shared schema's field, a response's
+        description, a default and an enum value, about 1,800 strings, and that none of them
+        cites a ticket. A second new test pins what that reader takes from a route: a title, a
+        summary, a description, a parameter's name and description, an example spelled either
+        way, a default and an enum's values, and not an `operationId`, an `in`, a type or a
+        format. **The source**: the third test no longer leaves out a `description` and a
+        `summary` under `api/`, and asserts it reaches the access route's description, the
+        stream route's summary and description, and a log line's field. **Mutants (12), each
+        failing:** a ticket written into a route's summary (`GET /probes`'s), and `U-40` put
+        back in a shared schema's field (`counterBits`), `D-04` in the plan route's description
+        and `ADR-003` in the map background's, each failing both walks; a ticket after a spaced
+        double dash in a field's description, which only the document walk fails, the source
+        walk taking it for a SQL comment (M5); one in the stream route's
+        summary, which only the source walk fails, the route being in no document (M6); one in a
+        field's `examples`, which both fail, and which `@fastify/swagger` serves as OpenAPI's
+        `example`, the spelling the document walk had to learn (M12); `unblocks: 'P-08'` back in
+        the start-up warning (M8); and the reader's rules broken one at a time: a route's
+        `description` and `summary` under `api/` left out again, a `summary` not read, an
+        `example` not read, and the document walk reading its `paths` alone.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the document and the
+        source are both walked, not one of them. The document is what a client is served and
+        reads, its descriptions assembled from templates and constants; the source holds the one
+        route the document cannot carry, the stream's WebSocket, which `@fastify/swagger` hides
+        and the reference renders from its schema. And each walk misses what the other holds:
+        the source walk takes a SQL comment, `--` to the end of the line, out of every string,
+        so a description that used a spaced double dash for a dash would hide a ticket after it
+        from that walk and not from the document's (mutant M5), and the stream's summary is in
+        no document (M6).
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the document walk reads
+        what the reference shows — a summary, a description, a title, a name and a pattern
+        sentence; every string of an example, a default, an enum and a constant — and not every
+        string in the document. An `operationId`, a `$ref`, a type, a format and a `required`
+        list are identifiers a client's generator reads, not sentences; and the source walk,
+        which reads every string, holds them as they are written.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a decision record's
+        number goes as a ticket's does, though the release ships `docs/` and the record with it.
+        Each description that cited one already says the reason in its own words — SVG is a
+        document and a background is drawn in the application's own page; an expiry because a
+        link without one is a permanent route nobody remembers creating — and the pattern
+        `U-92` chose refuses `ADR-` and digits in a file name too.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a log line's fields are
+        operator text, as its message is. `pino` writes a line as one JSON object, and the
+        journal and any log shipper show its fields beside `msg`: `unblocks: 'P-08'` reads as
+        plainly as the sentence it was beside. A field's value is held by the same walks as the
+        message — the core's reads every string under `src` since `U-92`'s review round 2, and
+        the sensors', the probe's and shared's every string of theirs — so the rule needs no new
+        reader, only to be written down and asserted: the core's walk now asserts it reaches a
+        field's value (`phase: 'declare-channels-on-ingest'` in `state/declared-limits.ts`), and
+        `unblocks: 'P-08'` put back fails it (M8). A field's name is an identifier and cannot
+        hold a ticket; a quoted one is a string and is read. **Nothing was left to act on**: the
+        empty-catalogue warning lost `unblocks: 'P-08'` in `U-92`'s review round 1 (`db1d8e8d`),
+        and the four walks find no other field that cites one.
+      - **Seen, not this ticket's, for whoever orders the queue to file.** The reference sends a
+        client's author to repository documents by section: `CAPABILITIES.MD §5.2` twice, `§6`
+        and `§10`, and `WORKFLOW.MD §7`. They ship in `docs/` and are not tickets, so nothing
+        here refuses them, but `CAPABILITIES.MD` is the scope contract against PRTG, written
+        for this repository's developers, and "the six modes of `CAPABILITIES.MD §5.2`" is a
+        sentence the description could finish itself.
+      - **Together, 2026-10-20** (two commits, this note the second): the core's operator-text,
+        build-hygiene, API reference renderer, strict-schema, pattern-message, API route,
+        entry-title and device-template files, eight of them, 229 tests green and none skipped;
+        both references `--check` current; prettier and eslint clean on every changed file.
+        **Mutants 12, 12 killed**, each restored byte for byte, and the tree rebuilt with no
+        marker left in `dist` before the run above.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
