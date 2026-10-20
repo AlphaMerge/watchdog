@@ -33064,6 +33064,105 @@ because each is a decision rather than a defect:
         Not walked in a browser again: what changed is class names, accessible names and the
         description text, each read by a test as the browser is handed it.
 
+- [x] **U-91 — the program method's arguments are named for their key: "Args 1"** · XS · U-23,
+      U-88 · Found 2026-10-20 by `U-88`'s sweep. The core's `program` notification method
+      declares `args` and `secretArgs` with no `title`, on the list or on its item
+      (`packages/core/src/notifications/methods.ts`), so a template's form names each list for its
+      key and each entry for the list: "Args 1", "Remove Args 1", "Secret args 1", "Add secret
+      args". **Done when** every list in every schema the core serves a form names itself and its
+      entry, with a test over all of them as the sensors' `entry-titles.test.ts` is over theirs.
+      - **U-91 outcome.** *Arguments* and *Argument*, *Secret arguments* and *Secret argument*:
+        "Argument 1", "Remove Argument 1", "Add secret argument", "Replace Secret arguments". The
+        sweep found no other. The trigger kinds and the settings declare no list; discovery and
+        the device templates hand the UI no schema to draw (`SchemaForm` draws sensor parameters,
+        credential kinds, method settings and trigger settings, and a setting's value is one
+        control); and every list of the sensor types and credential kinds had both since `U-88`.
+      - **Test** (`entry-titles.test.ts`, core, 2): the program method's two lists read so; and
+        every list in every schema a form is generated from — `GET /sensor-types` (the full
+        profile), `/credential-kinds`, `/notification-methods`, `/trigger-kinds` and each
+        setting's own — has a title on the list and on its item, walked through `properties`,
+        `items` and `additionalProperties`. The web suite's program fixture
+        (`secret-shapes.test.tsx`) carries the titles as the core now sends them, and the names
+        it presses follow. **Mutants (2), each failing:** the visible argument's item title taken
+        off; the secret list's own title taken off.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the core's test asks for
+        the list's title as well as the entry's, where the sensors' asks only the entry's. A list
+        with no title is named for its key, "Args" and "Secret args", which is half of what this
+        ticket is; every list the core serves but these two had one already, so the stricter rule
+        costs nothing and holds that half too.
+
+- [x] **U-92 — operator text cites internal tickets: "(`P-07`)", "(`A-41b`)"** · S · U-23, U-88
+      · Found 2026-10-20 by `U-88`'s sweep. Ping's and jitter's *Seconds between packets* and an
+      SSH set's *Host keys* explain themselves with a ticket of this repository, which nobody
+      running the product can look up. **Done when** nothing the API serves an operator to read
+      cites a ticket, each sentence still reads correctly without it, and a test over every
+      registry the core serves fails on one, so a new one cannot creep in.
+      - **U-92 outcome.** Every string, template and JSX text in `packages/*/src` was read,
+        parsed with TypeScript so that comments are left out, and every one an operator reads
+        that cites a ticket or a decision record was rewritten, twelve:
+        - `icmp.ping`'s and `icmp.jitter`'s *Seconds between packets* "(`P-07`)" and an SSH set's
+          *Host keys* "(`A-41b`)": the citation dropped, the sentence otherwise unchanged.
+        - Why the v1 build leaves out `flow.netflow`, the sensor's message: "flow monitoring is
+          v2", without "(`V2-01`)".
+        - The device templates *Windows server*, "`T-09` needs a Windows-hosted probe", now
+          "Those checks need a Windows-hosted probe"; and *Hypervisor*, "`D-05`'s VMware
+          transport in v2", which was a wrong reference as well (`D-05` is the default master
+          dependency), now "waits for a VMware transport in v2".
+        - A map background refused as SVG, "(ADR-003)".
+        - NetFlow v5's decoder, "versions 9 and 10 arrive with B-03", stale since `B-03` landed:
+          now "is not v5, the only version this decoder reads".
+        - The UI's own: the empty catalogue on *Overview* and on *Sensor types* ("P-05 shipped
+          the contract and the registry … P-08 (Ping), P-09 (HTTP), P-10 (Port) and P-11 (DNS)
+          are the first four types"), now that the core registers its sensor types when it starts
+          and its log says when it found none, as `logSensorTypes` does; the *Sensor types*
+          stat's "none registered — P-08 adds the first"; and an empty channel table's "(P-05)".
+        `docs/sensor-reference.md` regenerated (the two `P-07`s); `docs/api-reference.md`
+        unchanged, its `--check` passing. `docs/adding-a-sensor-type.md` says a title, a
+        description, a channel's name and unit and a limit's message are the operator's and cite
+        nothing, the comment beside them being where a ticket goes.
+      - **Tests.** `operator-text.test.ts` (core, 2) walks what the routes serve, as they serve
+        it: every sensor type's summary and its channels, the reason v1 leaves a type out, every
+        credential kind, notification method, trigger kind, summarisation mode, setting, built-in
+        lookup, device template and discovery level — the strings under `title`, `description`,
+        `name`, `text`, `unit`, `x-patternMessage` and a limit's two messages, more than 1,500 —
+        asserting that it reaches each of those and that none cites a ticket. Its web
+        counterpart (`operator-text.test.ts`, web, 2) reads every string, template and JSX text
+        under `src`, as `control-edges.test.ts` reads its classes. `map-images.test.ts` and the
+        sensors' `netflow5.test.ts` assert their refusals cite none. **Mutants (16), each
+        failing:** each of the eight citations put back in its place (`P-07`, `A-41b`, `V2-01`,
+        `T-09`, `ADR-003`, `B-03`, the channel table's `P-05`, the stat's `P-08`), and a ticket
+        written into a trigger kind's description, a setting's, a lookup's state text, a
+        summarisation mode's, a discovery level's, a channel's name, a pattern sentence and a
+        method's description.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the pattern is the shape
+        the repository names its tickets with — one capital letter or `V2`, a hyphen, digits and
+        perhaps a letter — and its decision records, `ADR-` and digits. Any capitals before the
+        hyphen would refuse `SHA-256`, `AES-256` and `UTF-8`, which an operator needs: the probe
+        registry's refusal of a fingerprint says SHA-256 already.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a test over what ships,
+        not a rule the catalogue or a registry enforces when it is built, for `U-88`'s reason. A
+        ticket in a description spoils a sentence and breaks nothing, and the core's and the
+        probe's tests register types and lookups whose text nobody reads.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the UI's own text is in,
+        though the API does not serve it. It is the first thing an operator reads, and four of
+        the twelve were there.
+      - **Seen, not this ticket's, for whoever orders the queue to file.** The OpenAPI document
+        (`GET /api/v1/openapi.json`, rendered into `docs/api-reference.md`) cites tickets in
+        route and field descriptions, 126 times on 98 lines of the reference: "(`A-49`)", "the
+        answer `D-04` will act on". Its readers write clients rather than run the product, but
+        they cannot look one up either; the fix is a ticket of its own, the walk extended to the
+        document `build-hygiene.test.ts` already builds. The core's start-up log has one too:
+        `logSensorTypes` warns with `unblocks: 'P-08'`.
+      - **The two together, 2026-10-20** (three commits): shared 602 tests green; sensors 2,314,
+        2,312 passing and two skipped for the machine, not the code (the dev PostgreSQL offers no
+        TLS, and an IPv6 routing case found its port taken on 127.0.0.1); the web suite 96 files
+        and 1,290 tests green; the core's catalogue, lookup, notification, template, trigger, map
+        and documentation files, 30 of them, 1,075 tests green; both references `--check`
+        current. **Mutants 18, 18 killed**, each restored byte for byte and the tree rebuilt
+        before the suites above. Under load one web run failed `retired-history-poll.test.tsx`
+        on a poll's timing, a file nothing here touches; alone, and in the whole suite again, it
+        passed.
+
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
       sensor the reader can see — exactly a probe getting its first sensor — sends no frame, so
