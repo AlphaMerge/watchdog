@@ -13904,6 +13904,76 @@ because each is a decision rather than a defect:
             warm arms' walk 0.87 and 1.13 a second at steady state against 3; 19 file
             descriptors before and after every arm and no lookup left on the lanes; P3's reply
             sent during its stall.
+        - **S7 review round 2, fixed** 2026-10-20, on `feat/p432-s7-perf` (three findings: round
+          1's P3 setup only partly fixed, and two new in its loss windows), in commits after round
+          1's: test code and docs only, no production code.
+          - **What changed.**
+            - **P3's setup is three facts, each measured.** The reply to the stall's own question
+              sent before the stall ended, by the simulator's log, now to a question asked since
+              its lookup began (it was any question of its name in the second before); the lookup
+              still open on the probe's lanes as the stall began, read in the send's callback from
+              each name's open lookups (`ProbeSide.openFor`); and that lookup answered, and when,
+              from the stall's end. The judge fails each apart, so the round's own case, a reply
+              the probe read before the busy loop began, now fails where `replyWaited` held.
+            - **P2's losses are seen by a poll that reads before it looks.** Until the `hung` loss
+              each 50 ms look first reads the forwarder's peak (`PeakWindows.cut`), and a loss it
+              sees takes the window that read closed as well as the one it opens
+              (`PeakWindows.lossSeen`). The poll is `stoppedLook`, run in the third block on a
+              clock the test moves.
+            - **The windows must reach the arm's end, and a failed read fails the arm.**
+              `PeakWindows.finish` records where it cut the last window, `peakFacts` carries it
+              and any failure into the facts, and the judge fails a last window short of the end,
+              an end not measured, and any read that failed.
+          - **Decided 2026-10-20 by Claude, under the user's delegation:**
+            - **N1 by reading before each look, not by a window from the SIGSTOP**: that would
+              allow the transient through the seconds before the detach, while the stopped
+              child's tokens are still held and nothing can pass 18; nor by a hook on the helper's
+              route, which is production code. The loss came after the look before, so after every
+              read but the last: the transient is allowed from at most one poll and a read's round
+              trip before the loss was seen. P1's losses are its own kills, cut at once as before:
+              the read is posted in the kill's own turn, before the helper can see the exit, fork,
+              and have the next child ask again. The printed windows merge runs of one kind.
+            - **A failed read fails the arm**, not only a print: the stretch it ends was held to
+              no bound, as an unread stretch is, which round 1 already fails.
+            - **P3's answer after the stall has no upper bound**: after a 15 s stall the timers
+              run first, a quarter of the sensors due at once, so the read of the waiting reply
+              can come late without being another reply's. The three facts together say it was
+              the waiting one; the time is printed. `repliesDuring` stays a print: it counts every
+              client's replies, so it cannot say the stall's own was among them.
+            - **The lookup's state is read off the probe's lanes, not the model**: a lookup
+              settles in the turn its reply is read (the model's promise and the lanes'
+              continuation run before the next I/O callback), so one whose reply was read before
+              the send's callback is not open there.
+          - **Tests**, each run after the last change: `name-lookups.test.ts`'s third block, 85 of
+            85 in about three seconds (74 before: six judge cases, three for P3's setup and three
+            for the windows' end and a failed read; and five on their own: a loss a poll sees on
+            a clock the test moves, with the window judged both ways; P2's look through its
+            detach, `hung` loss and next child; a last read that fails, through `peakFacts`;
+            P3's setup from flights and a simulator log; the probe lanes' open lookups at the
+            simulator, answered and failed). P1, P2 and P3 scaled down again, all held (276 s).
+            Prettier and eslint on the changed files.
+          - **Mutants: 24, on the toolchain**, each restored with `shutil.copy` and `os.utime`,
+            checked with `filecmp`, its marker seen in `dist` before its run and none left after
+            the last rebuild, `dist` read back against the source:
+            - the judge, 7, each killed by the case made to break it: P3's lookup settled, never
+              answered, answered during the stall, reply not sent; a failed read; a last window
+              short of the end; an end not measured;
+            - the windows, 9: `lossSeen` not taking the last window, or not the open one; a cut
+              that opens the transient again after a loss's window ended; the timer's next
+              window decided once its read is in (an overlapping loss then reached back); no
+              `endMs`; P2's look not reading first, or cutting a loss rather than taking the
+              window read; `peakFacts` without the failure, or without the end;
+            - P3's setup and the lanes, 7: the lookup always open; a failed lookup counted as
+              answered; no bound on the reply's time, or on the question's; a settled lookup
+              left open; an answer, or a failure, not recorded;
+            - through its arm, 1: P3's stall begun only once its lookup had settled, the item's
+              own case. The arm failed with the lookup settled before the stall and never
+              answered after it, while its reply read as sent before the stall ended, which is
+              all round 1's judge asked.
+          - **Shown to run, scaled down**: P2 read its peak 401 times, its detach's window from
+            the read before that look 10.6 s long, the peak at most 3 in and out of its windows;
+            P1's as before; both reached their end. P3's stall held its own lookup's reply
+            unread: open as the stall began, its reply sent before it ended, answered 66 ms after.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

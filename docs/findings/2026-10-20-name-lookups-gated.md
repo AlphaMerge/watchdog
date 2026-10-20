@@ -67,7 +67,7 @@ passing.
 | Assertion | Why |
 | --- | --- |
 | `system`: the forwarder's most slots held at once for the probe ≤ q × 6 | P-426's six lanes are its bound (§1.6). q is 1: SNMP's family 4 asks one question. |
-| gate: ≤ q × 6 + 12 = 18; in P1 and P2, 8q more only in each loss's window | D16: six tokens, the walk's heard 8 and discovery 4; the transient for at most 10 s after a loss, at a forwarder that merges per client. P1 and P2 read the forwarder's peak in windows cut at each loss and 10.5 s after it (`gauge` with `resetPeak`), the half second being the read's own round trip and timer: the windows after a loss are held to 26 and every other stretch, the cold start included, to 18. |
+| gate: ≤ q × 6 + 12 = 18; in P1 and P2, 8q more only in each loss's window | D16: six tokens, the walk's heard 8 and discovery 4; the transient for at most 10 s after a loss, at a forwarder that merges per client. P1 and P2 read the forwarder's peak in windows cut at each loss and 10.5 s after it (`gauge` with `resetPeak`), the half second being the read's own round trip and timer: the windows after a loss are held to 26 and every other stretch, the cold start included, to 18. The windows must reach the arm's end, and a read that failed fails the arm, since the stretch it ends was held to nothing. P2's losses are seen by a poll that reads the peak before each look, so the window that read closed is the loss's too: its transient can form before the look. |
 | No question dropped at the forwarder | 30 slots are left for the probe: a bound broken by more than 12 shows as drops, not only as a peak. |
 | `system` asks no walk question | `system` is P-426 with P-438 exactly (N9). |
 | gate: the walk's questions to each server within D19's bucket | 20 at once, refilled at 10 a second, with one more for the time between a token and its datagram. Check now's walk is cut (S6), so every question the check sends counts. |
@@ -91,9 +91,11 @@ group; the gate's Probe Health counters; the helper's state, losses, poisoned na
 wheel's start, its most at a 1 s sample and at the drain, and its file descriptors before the arm
 and once it is torn down (`/proc/self/fd`); the resolver's most running and queued at a 1 s sample;
 the walk's channels and their busiest second; the lookups each of the helper's children was asked,
-by group; in P1 and P2 the forwarder's peak by window; in P3 the replies the simulator sent while
-the main thread was held. Not printed, by decision (below): the helper's at-risk peak, first
-looks, overshoot and class caps hit.
+by group; in P1 and P2 the forwarder's peak by window (runs of windows of one kind merged, with the
+number read and the arm's end); in P3 the replies the simulator sent to every client while the main
+thread was held, and its own lookup's three facts with how long after the stall it was answered.
+Not printed, by decision (below): the helper's at-risk peak, first looks, overshoot and class caps
+hit.
 
 ## The arms
 
@@ -105,8 +107,8 @@ looks, overshoot and class caps hit.
 | `partial` | zone b silent upstream, half its names in the forwarder's cache, cold | both | gate: the answering zone and the cached names 0 given up; zone b's uncached names never on the probe's lanes; with the check on, zone b at most 3 in the helper | `system`'s and check-off's lanes |
 | `steady` (new) | every name answering in two zones, a scan interval then `MS_DNS_STEADY_MINUTES` | both | 0 given up; gate: the walk ≤ 1 + keys × q = 3 a second at steady state (from the scan interval plus 30 s) | the walk against the probe lanes' `getaddrinfo` rate |
 | P1 | zone, the child SIGKILLed at 5 s and 95 s, per-client forwarder | gate | the answering zone 0 given up; zone b never on the probe's lanes; 2 `exit` losses and no other; `lookupHelperTrouble` 0; the forwarder's peak ≤ 26 in the 10.5 s after each kill and ≤ 18 everywhere else | each child's lookups, by group |
-| P2 | zone, the child SIGSTOPped at 10 s, per-client forwarder | gate | as P1, with 1 `hung` loss, the windows after the detach (the route leaving `up`) and after the `hung` loss; from the stop, the route off `up` by 4 s, the `hung` loss by 22 s, the next child up by 23 s | checks failed meanwhile (the silent zone's) |
-| P3 | zone, the main thread held 15 s at 40 s | gate | no helper loss, and the helper never judged not answering; no zone marked unsafe and no answering name said passed-stuck by the stall (D25); the stall begun on a probe-lane lookup of an answering name, whose reply the simulator sent before the stall ended, by its log | given up by the stall itself |
+| P2 | zone, the child SIGSTOPped at 10 s, per-client forwarder | gate | as P1, with 1 `hung` loss, the windows after the detach (the route leaving `up`) and after the `hung` loss, each from the read before the look that saw it; from the stop, the route off `up` by 4 s, the `hung` loss by 22 s, the next child up by 23 s | checks failed meanwhile (the silent zone's) |
+| P3 | zone, the main thread held 15 s at 40 s | gate | no helper loss, and the helper never judged not answering; no zone marked unsafe and no answering name said passed-stuck by the stall (D25); the stall begun on a probe-lane lookup of an answering name whose reply waited through it: the reply sent before the stall ended, by the simulator's log; the lookup still open as the stall began; and answered after it | given up by the stall itself; how long after the stall its lookup was answered |
 | `forwarder` | three devices in five silent, 300 names over 100 keys (`k<n>.zone-b.test`) and 200 answering, cold, at a forwarder that merges per client and goes silent when full | both | gate: the answering zone 0 given up. `system`: only every arm's (0 dropped) | `system`'s answering given up beside the gate's; routes by kind |
 | P5 | every name answering, the child SIGKILLed 4 times 30 s apart, the pool at its full size | gate | 0 given up; fork to `ready` ≤ 1,000 ms; the event loop's most within 1 s of each fork ≤ its most in the 20 s before the first kill + 100 ms; the helper's resident set at 55 s ≤ 128 MB | each fork's time; the probe's resident set at each kill |
 | P5b (new) | P5, with the pool's ceiling held to half its size by memory | gate | as P5, and held at the memory gate at every kill | as P5 |
@@ -236,6 +238,47 @@ Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.m
   building any of them later is small; if they are wanted after 1.0, one ticket, for the
   orchestrator to number.
 
+### The review's second round (2026-10-20)
+
+Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.md`, under S7):
+
+- **P3's setup is three facts, each measured.** Round 1's fact, a reply to a question of the
+  stall's name sent before the stall ended, held where the probe had already read that reply
+  before the busy loop began: the send's callback, where the stall begins, can come after the
+  reply's read, and a question in the second before bounded the reply from neither side. The
+  stall's own lookup is now read as it begins, from the probe lanes' list of each name's open
+  lookups (`ProbeSide.openFor`), and again for how it settled. The judge fails a reply not sent
+  before the stall ended (to a question asked since its lookup began), a lookup that had settled
+  before the stall began, and one never answered or answered during it. Together they say the
+  reply waited unread in the socket while the lookup's stuck timer came due. The lanes' list is
+  right at the send's callback because a lookup settles in the turn its reply is read: the
+  model's promise and the lanes' continuation run before the next I/O callback. Nothing bounds
+  how long after the stall the lookup is answered: after a 15 s stall the timers run first, a
+  quarter of the sensors due at once, so the read of the waiting reply can come late without
+  being another reply's; it is printed. The replies the simulator sent during the stall stay a
+  print: they are every client's, so they cannot say the stall's own was among them.
+- **P2's polled losses take the window read before the look that saw them.** The detach is
+  seen by a 50 ms poll after the resolver has acted on it: it falls the helper's queued lookups
+  back to the probe's lanes at once (D24), while the stopped child's questions are still held at
+  the per-client forwarder, so D16's transient (up to 6 old, 6 new and 12 for the walk, 24 of 26)
+  can peak before the poll looks, and the read the loss's cut asked for came after. That peak
+  was judged against 18. Until the `hung` loss the poll now reads the peak before each look, and
+  a loss it sees takes the window that read closed as well as the one it opens
+  (`PeakWindows.lossSeen`): the loss came after the look before, so after every read but the
+  last. The transient is allowed from at most a poll and a read's round trip before the loss was
+  seen, and no earlier. Not a window from the SIGSTOP: that would allow the transient through the
+  seconds before the detach, while the stopped child's tokens are still held and nothing can pass
+  18. Not a hook on the helper's route: that is production code, and S7 changes none. P1's losses
+  are its own kills and are cut as before: the read is posted in the kill's own turn, before the
+  helper can see the exit, fork and have the next child ask again. The printed windows merge
+  runs of one kind, since P2 reads one every 50 ms or so until its `hung` loss.
+- **The windows reach the arm's end, and a read that failed fails the arm.** A read that failed
+  in the middle of the run left a gap the judge named, but the last one, at the arm's end, only
+  dropped its window, and the failure was printed. `PeakWindows` now records where it cut the
+  last window, the facts carry that and any failure, and the judge fails a last window short of
+  the end, an end not measured, and any failed read: a stretch held to no bound is not a stretch
+  that held one.
+
 ## How each arm was shown to run
 
 Scaled down to 500 sensors on 50 devices, a pool of 16 and a minute an arm, on the VM with other
@@ -296,6 +339,24 @@ arm reaches what it asserts, not that it holds at full size (the numbers are the
   answering and cached names all answered (450 and 30) and the silent ones given up (20).
 - **Read, not asserted:** after four kills in two minutes `lookupHelperTrouble` reads 1 in P5 and
   P5b, as D27's three failures in ten minutes say it should, and P6 logs the poisoned name once.
+
+The review's second round ran P1, P2 and P3 again after its changes, in one run of 276 s, all
+held (`MS_DNS_SENSORS=500 MS_DNS_POOL=16 MS_DNS_MINUTES=1 MS_DNS_RESOLVER=gate
+MS_DNS_ARMS=P1,P2,P3`, the same scale, not on a quiet machine, so not a measurement):
+
+- **P2 read its peak 401 times**, every 50 ms or so from the SIGSTOP to its `hung` loss. The
+  detach was seen 3.3 s after the SIGSTOP and its window, from the read before that look, ran
+  18.0 to 28.6 s on the forwarder's clock (10.6 s); the `hung` loss's ran 35.0 to 45.6 s. The
+  peak was 3 and 2 in them and at most 3 outside: still no transient at this size. P1's five
+  windows were as before (5 and 2 after its kills, at most 5 outside), and both arms' windows
+  reached their end (134.7 s and 64.8 s).
+- **P3's stall held its own lookup's reply unread**: the lookup was open as the stall began, its
+  reply was sent before it ended (the simulator sent one reply in all during it), and the lookup
+  was answered 66 ms after it.
+- **The round's own case fails the arm.** A P3 made to begin its stall only once its lookup had
+  settled (the probe having read the reply first) failed with that lookup settled before the
+  stall began and never answered after it, while its reply was still sent before the stall
+  ended: round 1's fact alone passed it.
 
 ## The quiet-window command
 
