@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, send, useApi } from '../api/client';
 import type {
   DeviceTemplateSummary,
@@ -8,7 +8,7 @@ import type {
   ScheduleSummary,
 } from '../api/types';
 import { Card, CorrelationId, Empty } from '../components/Panels';
-import { ReadState } from '../components/ReadRegion';
+import { ReadRegion, ReadState } from '../components/ReadRegion';
 import {
   PROBE_ABOVE,
   PROBE_ABOVE_LABEL,
@@ -44,7 +44,22 @@ import {
  *
  * **An edit sends what changed and the version it was made against**, and a refusal because
  * somebody else saved first says so and offers the rule as it now is.
+ *
+ * **Focus is put where it is next needed after every action** (`U-23` review, WCAG 2.4.3). It
+ * used to fall to the page after nearly all of them: the button pressed was taken away (New rule,
+ * Delete, Keep, the form's), disabled as it was pressed (Edit, a switch, the confirmed Delete), or
+ * went with the whole list while it was read again. Now the form's heading takes it as the form
+ * opens; Cancel and *Show the rule as it is now* give it back to the button that opened the form;
+ * a delete asked about puts it on the question, and Keep back on Delete; a save or a delete puts it
+ * on the line that says what was done; a switch and a confirmed Delete keep it while they are out,
+ * unavailable rather than disabled; and the list stays on screen while it is read again.
  */
+
+/** Where focus is owed once the panel has its new shape. */
+type FocusTarget =
+  | { readonly to: 'new' }
+  | { readonly to: 'notice' }
+  | { readonly to: 'edit' | 'delete'; readonly id: number };
 export function RediscoveryPanel({
   probes,
   groups,
@@ -61,6 +76,20 @@ export function RediscoveryPanel({
   const [problem, setProblem] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<number | null>(null);
+  /** What the last save or delete did, said and left on screen, and focused (`U-23` review). */
+  const [notice, setNotice] = useState<string | null>(null);
+  const [owed, setOwed] = useState<FocusTarget | null>(null);
+  const noticeRef = useRef<HTMLParagraphElement>(null);
+  const newButton = useRef<HTMLButtonElement>(null);
+  const editButtons = useRef(new Map<number, HTMLButtonElement>());
+  const deleteButtons = useRef(new Map<number, HTMLButtonElement>());
+
+  // **The list as last read stays on screen while it is read again** (`U-23` review), and when
+  // that read fails, which is said above it. `useApi` goes back to `loading` for a reload, which
+  // took the whole panel down after every switch, save and delete, and the focus with it.
+  const [held, setHeld] = useState<RediscoveryRule[] | null>(null);
+  if (rules.status === 'ready' && rules.data.items !== held) setHeld(rules.data.items);
+  const items = rules.status === 'ready' ? rules.data.items : held;
 
   const names = useMemo(() => {
     const byId = new Map<number, string>();
@@ -68,16 +97,45 @@ export function RediscoveryPanel({
     return byId;
   }, [probes, groups]);
 
+  // Given once the target is on the page, and only from the page or from inside the panel: an
+  // operator who moved on while a request was out is left where they are. A target that is not
+  // there once the list has been read — a rule somebody else deleted — is owed nothing.
+  const reloading = rules.status !== 'ready';
+  useEffect(() => {
+    if (owed === null) return;
+    const target =
+      owed.to === 'new'
+        ? newButton.current
+        : owed.to === 'notice'
+          ? noticeRef.current
+          : (owed.to === 'edit' ? editButtons : deleteButtons).current.get(owed.id);
+    if ((target === null || target === undefined) && reloading) return;
+    setOwed(null);
+    // The panel is the card the notice is in, which is there whenever the list is.
+    const card = noticeRef.current?.closest('section');
+    const at = document.activeElement;
+    const ours = at === null || at === document.body || (card?.contains(at) ?? false);
+    if (ours) target?.focus();
+  }, [owed, reloading, items]);
+
   const act = useCallback(
-    (rule: RediscoveryRule, change: () => Promise<unknown>, failed: string) => {
+    (
+      rule: RediscoveryRule,
+      change: () => Promise<unknown>,
+      failed: string,
+      after: { done?: () => void; refused?: () => void } = {},
+    ) => {
       setBusy(rule.id);
       setProblem(null);
+      setNotice(null);
       change()
         .then(() => {
+          after.done?.();
           rules.reload();
         })
         .catch((failure: unknown) => {
           setProblem(failure instanceof ApiError ? failure : new ApiError(0, 'UNKNOWN', failed));
+          after.refused?.();
         })
         .finally(() => {
           setBusy(null);
@@ -87,8 +145,10 @@ export function RediscoveryPanel({
     [rules],
   );
 
-  if (rules.status !== 'ready') return <ReadState read={rules} what="rediscovery rules" />;
+  if (items === null) return <ReadState read={rules} what="rediscovery rules" />;
   const windowList = windows.status === 'ready' ? windows.data.items : [];
+  const opener = (rule: RediscoveryRule | 'new'): FocusTarget =>
+    rule === 'new' ? { to: 'new' } : { to: 'edit', id: rule.id };
 
   return (
     <Card
@@ -96,9 +156,11 @@ export function RediscoveryPanel({
       actions={
         editing === null ? (
           <button
+            ref={newButton}
             type="button"
             onClick={() => {
               setProblem(null);
+              setNotice(null);
               setEditing('new');
             }}
             // The control grey, as every button here is (`U-87`): they were edged in the hairline,
@@ -115,6 +177,23 @@ export function RediscoveryPanel({
         finds is a separate choice: without it, each run leaves a plan for somebody to review.
       </p>
 
+      {/* What a save or a delete did. Always in the document, so it is said as it is written
+          rather than only when the region is new, and focusable, because the control used to get
+          here has gone (`U-23` review), as the Credentials tab's notice is (`U-21`). */}
+      <p
+        ref={noticeRef}
+        role="status"
+        aria-live="polite"
+        tabIndex={-1}
+        className={
+          notice === null
+            ? 'sr-only'
+            : 'mt-3 border border-border bg-surface px-3 py-2 text-sm text-text'
+        }
+      >
+        {notice ?? ''}
+      </p>
+
       {editing !== null && (
         <RuleForm
           rule={editing === 'new' ? null : editing}
@@ -122,14 +201,22 @@ export function RediscoveryPanel({
           groups={groups}
           templates={templates}
           windows={windowList}
-          onSaved={() => {
+          onSaved={(name) => {
+            setNotice(
+              editing === 'new'
+                ? `Created ${name}. It is off until it is switched on from its row.`
+                : `Saved ${name}.`,
+            );
+            setOwed({ to: 'notice' });
             setEditing(null);
             rules.reload();
           }}
           onCancel={() => {
+            setOwed(opener(editing));
             setEditing(null);
           }}
           onStale={() => {
+            setOwed(opener(editing));
             setEditing(null);
             rules.reload();
           }}
@@ -137,16 +224,30 @@ export function RediscoveryPanel({
       )}
 
       {/* A refused switch or delete. **Always there, empty until a refusal** (`U-54`, as `U-48`
-          did): focus is on the row's button when the core refuses, and a region added with its
-          text already in it is not reliably announced (`U-41`). `act` empties it as an attempt
-          starts, so a second refusal in the same words is said again; `empty:mt-0` gives back
-          its margin while it says nothing (`U-45`). */}
+          did): focus is on the row's button when the core refuses — a switch keeps it, being
+          unavailable rather than disabled while it is out, and a refused delete gives it back to
+          the row's Delete (`U-23` review) — and a region added with its text already in it is not
+          reliably announced (`U-41`). `act` empties it as an attempt starts, so a second refusal
+          in the same words is said again; `empty:mt-0` gives back its margin while it says
+          nothing (`U-45`). */}
       <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
         {problem?.message}
         <CorrelationId id={problem?.correlationId} />
       </p>
 
-      {rules.data.items.length === 0 ? (
+      {/* The list could not be read again after a change that was made: it stays, said to be the
+          old one, with *Try again*, in a region there, empty, while the list is (`U-58`). */}
+      <ReadRegion
+        error={rules.status === 'error' ? rules.error : null}
+        retry={rules.retry}
+        className="mt-3 empty:mt-0"
+      >
+        <p className="text-sm text-text">
+          The rules below could not be read again, so they may not show the last change.
+        </p>
+      </ReadRegion>
+
+      {items.length === 0 ? (
         <div className="mt-3">
           <Empty because="Nothing rediscovers on its own until somebody writes a rule.">
             No rules.
@@ -154,7 +255,7 @@ export function RediscoveryPanel({
         </div>
       ) : (
         <ul className="mt-3 divide-y divide-border" aria-label="Rediscovery rules">
-          {rules.data.items.map((rule) => {
+          {items.map((rule) => {
             const status = ruleStatus(rule);
             // No probe id is a probe its reader cannot see (`A-80`), said as such and not as a
             // number nobody can look up.
@@ -193,10 +294,13 @@ export function RediscoveryPanel({
                       }.`}
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {/* Unavailable while it is out, not `disabled`, so it keeps the focus it was
+                      pressed with (`U-23` review); a press then sends nothing. */}
                   <button
                     type="button"
-                    disabled={busy === rule.id}
+                    aria-disabled={busy === rule.id}
                     onClick={() => {
+                      if (busy === rule.id) return;
                       act(
                         rule,
                         () =>
@@ -206,15 +310,21 @@ export function RediscoveryPanel({
                         'the rule could not be switched',
                       );
                     }}
-                    className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
+                    className="border border-control px-2 py-1 text-sm text-text hover:bg-surface aria-disabled:opacity-50"
                   >
                     {rule.enabled ? `Switch off ${rule.name}` : `Switch on ${rule.name}`}
                   </button>
+                  {/* Disabled as it is pressed, which is safe: the form's heading takes focus. */}
                   <button
+                    ref={(node) => {
+                      if (node === null) editButtons.current.delete(rule.id);
+                      else editButtons.current.set(rule.id, node);
+                    }}
                     type="button"
                     disabled={busy === rule.id || editing !== null}
                     onClick={() => {
                       setProblem(null);
+                      setNotice(null);
                       setEditing(rule);
                     }}
                     className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
@@ -222,37 +332,40 @@ export function RediscoveryPanel({
                     Edit <span className="sr-only">{rule.name}</span>
                   </button>
                   {confirming === rule.id ? (
-                    <span className="flex items-center gap-2" role="group" aria-label="Confirm">
-                      <span className="text-sm text-text">Delete {rule.name}?</span>
-                      <button
-                        type="button"
-                        disabled={busy === rule.id}
-                        onClick={() => {
-                          act(
-                            rule,
-                            () => send('DELETE', `/discovery/schedules/${String(rule.id)}`),
-                            'the rule could not be deleted',
-                          );
-                        }}
-                        className="border border-down-fg px-2 py-1 text-sm text-down-fg hover:bg-surface disabled:opacity-50"
-                      >
-                        Delete
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setConfirming(null);
-                        }}
-                        className="border border-control px-2 py-1 text-sm text-text hover:bg-surface"
-                      >
-                        Keep
-                      </button>
-                    </span>
+                    <ConfirmDelete
+                      name={rule.name}
+                      busy={busy === rule.id}
+                      onDelete={() => {
+                        act(
+                          rule,
+                          () => send('DELETE', `/discovery/schedules/${String(rule.id)}`),
+                          'the rule could not be deleted',
+                          {
+                            done: () => {
+                              setNotice(`Deleted ${rule.name}.`);
+                              setOwed({ to: 'notice' });
+                            },
+                            refused: () => {
+                              setOwed({ to: 'delete', id: rule.id });
+                            },
+                          },
+                        );
+                      }}
+                      onKeep={() => {
+                        setConfirming(null);
+                        setOwed({ to: 'delete', id: rule.id });
+                      }}
+                    />
                   ) : (
                     <button
+                      ref={(node) => {
+                        if (node === null) deleteButtons.current.delete(rule.id);
+                        else deleteButtons.current.set(rule.id, node);
+                      }}
                       type="button"
                       disabled={busy === rule.id}
                       onClick={() => {
+                        setNotice(null);
                         setConfirming(rule.id);
                       }}
                       className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
@@ -267,6 +380,60 @@ export function RediscoveryPanel({
         </ul>
       )}
     </Card>
+  );
+}
+
+/**
+ * The question a row's Delete asks (`U-23` review). **Focus goes to it as it opens**: the button
+ * pressed is gone, and a reader on the page heard nothing of the question. A group that can take
+ * focus, named for what it asks, as the Credentials tab's removal is (`U-21`). Its Delete and Keep
+ * are unavailable while the delete is out, not disabled, so the one pressed keeps focus.
+ */
+function ConfirmDelete({
+  name,
+  busy,
+  onDelete,
+  onKeep,
+}: {
+  name: string;
+  busy: boolean;
+  onDelete: () => void;
+  onKeep: () => void;
+}): React.JSX.Element {
+  const group = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    group.current?.focus();
+  }, []);
+  return (
+    <span
+      ref={group}
+      tabIndex={-1}
+      className="flex items-center gap-2"
+      role="group"
+      aria-label={`Confirm deleting ${name}`}
+    >
+      <span className="text-sm text-text">Delete {name}?</span>
+      <button
+        type="button"
+        aria-disabled={busy}
+        onClick={() => {
+          if (!busy) onDelete();
+        }}
+        className="border border-down-fg px-2 py-1 text-sm text-down-fg hover:bg-surface aria-disabled:opacity-50"
+      >
+        Delete
+      </button>
+      <button
+        type="button"
+        aria-disabled={busy}
+        onClick={() => {
+          if (!busy) onKeep();
+        }}
+        className="border border-control px-2 py-1 text-sm text-text hover:bg-surface aria-disabled:opacity-50"
+      >
+        Keep
+      </button>
+    </span>
   );
 }
 
@@ -288,10 +455,17 @@ function RuleForm({
   groups: ObjectPage['items'];
   templates: DeviceTemplateSummary[];
   windows: ScheduleSummary[];
-  onSaved: () => void;
+  /** Saved, under the name it was saved with. */
+  onSaved: (name: string) => void;
   onCancel: () => void;
   onStale: () => void;
 }): React.JSX.Element {
+  // **Focus comes to the form as it opens** (`U-23` review): the button that opened it is gone or
+  // disabled, and focus fell to the page with it.
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus();
+  }, []);
   const [draft, setDraft] = useState<RuleDraft>(() =>
     rule === null ? EMPTY_RULE : draftFromRule(rule),
   );
@@ -316,6 +490,7 @@ function RuleForm({
   const save = (): void => {
     setSaving(true);
     setFailure(null);
+    const name = draft.name.trim();
     const request =
       rule === null
         ? send('POST', '/discovery/schedules', createBody(draft))
@@ -326,7 +501,9 @@ function RuleForm({
             ifMatch(rule),
           );
     request
-      .then(onSaved)
+      .then(() => {
+        onSaved(name);
+      })
       .catch((error: unknown) => {
         setFailure(
           error instanceof ApiError
@@ -347,10 +524,12 @@ function RuleForm({
       className="mt-4 border border-border p-4"
       onSubmit={(event) => {
         event.preventDefault();
-        if (blocked === null && !unchanged) save();
+        // Enter in a box, or the button pressed again, while the save is out: it only says it is
+        // unavailable (below), so this is what keeps it to one request.
+        if (blocked === null && !unchanged && !saving) save();
       }}
     >
-      <h3 className="text-sm font-medium text-text">
+      <h3 ref={heading} tabIndex={-1} className="text-sm font-medium text-text">
         {rule === null ? 'New rule' : `Editing ${rule.name}`}
       </h3>
 
@@ -644,17 +823,26 @@ function RuleForm({
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
+        {/* **Unavailable while the save is out, not `disabled`** (`U-23` review, as `U-73` made
+            the template form's): disabled, it dropped the focus it held to the page as it was
+            pressed, and a refusal came back to focus on nothing. Still `disabled` while there is
+            nothing to save, when focus is in the box that needs changing. Cancel is unavailable
+            the same way, so the form is not closed under a save still out. */}
         <button
           type="submit"
-          disabled={blocked !== null || unchanged || saving}
-          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          disabled={blocked !== null || unchanged}
+          aria-disabled={saving}
+          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 aria-disabled:opacity-50"
         >
           {saving ? 'Saving…' : rule === null ? 'Create the rule (off)' : 'Save changes'}
         </button>
         <button
           type="button"
-          onClick={onCancel}
-          className="border border-control px-3 py-1 text-sm text-text hover:bg-surface"
+          aria-disabled={saving}
+          onClick={() => {
+            if (!saving) onCancel();
+          }}
+          className="border border-control px-3 py-1 text-sm text-text hover:bg-surface aria-disabled:opacity-50"
         >
           Cancel
         </button>

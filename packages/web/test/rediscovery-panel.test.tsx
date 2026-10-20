@@ -1,8 +1,14 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectSummary, RediscoveryRule } from '../src/api/types';
 import { RediscoveryPanel } from '../src/routes/RediscoveryPanel';
-import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
+import {
+  alertSaying,
+  expectCorrelation,
+  expectQuiet,
+  speaking,
+  statusSaying,
+} from './support/refusal-region';
 
 /**
  * The rediscovery rules on the discovery page, rendered (`D-11`).
@@ -68,11 +74,17 @@ type Answer = { status: number; body: unknown };
 
 /**
  * Answers by path; a write answers `answer` when given, so a refusal can be staged — or, given a
- * list, each write the next one, and accepted once the list is spent.
+ * list, each write the next one, and accepted once the list is spent. `listing` answers the list's
+ * reads by their number from 1 where it gives an answer: a refusal, or a read held until `hold`.
  */
-function stubApi(rules: RediscoveryRule[], answer?: Answer | Answer[]): { calls: Call[] } {
+function stubApi(
+  rules: RediscoveryRule[],
+  answer?: Answer | Answer[],
+  listing?: (read: number) => Answer | { hold: Promise<void> } | undefined,
+): { calls: Call[] } {
   const calls: Call[] = [];
   const queue = Array.isArray(answer) ? [...answer] : undefined;
+  let reads = 0;
   vi.stubGlobal('fetch', (path: string, init?: RequestInit) => {
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined;
     const method = init?.method ?? 'GET';
@@ -89,7 +101,13 @@ function stubApi(rules: RediscoveryRule[], answer?: Answer | Answer[]): { calls:
       const one = Array.isArray(next) ? undefined : next;
       return reply(one?.status ?? 200, one?.body ?? RULE);
     }
-    if (path.endsWith('/discovery/schedules')) return reply(200, { items: rules });
+    if (path.endsWith('/discovery/schedules')) {
+      reads += 1;
+      const staged = listing?.(reads);
+      if (staged === undefined) return reply(200, { items: rules });
+      if ('hold' in staged) return staged.hold.then(() => reply(200, { items: rules }));
+      return reply(staged.status, staged.body);
+    }
     if (path.endsWith('/schedules'))
       return reply(200, { items: [{ id: 2, name: 'Change freeze', description: '' }] });
     throw new Error(`no stub for ${method} ${path}`);
@@ -97,8 +115,12 @@ function stubApi(rules: RediscoveryRule[], answer?: Answer | Answer[]): { calls:
   return { calls };
 }
 
-const show = async (rules: RediscoveryRule[], answer?: Answer | Answer[]) => {
-  const api = stubApi(rules, answer);
+const show = async (
+  rules: RediscoveryRule[],
+  answer?: Answer | Answer[],
+  listing?: (read: number) => Answer | { hold: Promise<void> } | undefined,
+) => {
+  const api = stubApi(rules, answer, listing);
   render(<RediscoveryPanel probes={PROBES} groups={GROUPS} templates={[]} />);
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'New rule' })).toBeDefined();
@@ -236,13 +258,13 @@ describe('the rediscovery rules', () => {
     const api = await show([RULE], { status: 204, body: null });
     fireEvent.click(screen.getByRole('button', { name: 'Delete Nightly' }));
     expect(writes(api.calls)).toHaveLength(0);
-    const confirm = screen.getByRole('group', { name: 'Confirm' });
+    const confirm = screen.getByRole('group', { name: 'Confirm deleting Nightly' });
     fireEvent.click(within(confirm).getByRole('button', { name: 'Keep' }));
     expect(writes(api.calls)).toHaveLength(0);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Nightly' }));
     fireEvent.click(
-      within(screen.getByRole('group', { name: 'Confirm' })).getByRole('button', {
+      within(screen.getByRole('group', { name: 'Confirm deleting Nightly' })).getByRole('button', {
         name: 'Delete',
       }),
     );
@@ -288,10 +310,9 @@ describe('a refused rule change (U-54)', () => {
     expectCorrelation(region, undefined);
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
-        'disabled',
-        false,
-      );
+      expect(
+        screen.getByRole('button', { name: 'Switch off Nightly' }).getAttribute('aria-disabled'),
+      ).toBe('false');
     });
     switchOff();
     // Committed empty before the core answers: React did not fold the two into one.
@@ -310,17 +331,15 @@ describe('a refused rule change (U-54)', () => {
       expect(region.textContent).toBe('no such rule');
     });
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
-        'disabled',
-        false,
-      );
+      expect(
+        screen.getByRole('button', { name: 'Switch off Nightly' }).getAttribute('aria-disabled'),
+      ).toBe('false');
     });
     switchOff();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Switch off Nightly' })).toHaveProperty(
-        'disabled',
-        false,
-      );
+      expect(
+        screen.getByRole('button', { name: 'Switch off Nightly' }).getAttribute('aria-disabled'),
+      ).toBe('false');
     });
     expect(region.matches(':empty')).toBe(true);
     expect(speaking()).toEqual([]);
@@ -338,7 +357,7 @@ describe('a refused rule change (U-54)', () => {
     fireEvent.click(save);
     expect(await alertSaying('that range is not valid')).toBe(region);
     await waitFor(() => {
-      expect(save).toHaveProperty('disabled', false);
+      expect(save.getAttribute('aria-disabled')).toBe('false');
     });
 
     fireEvent.click(save);
@@ -348,7 +367,7 @@ describe('a refused rule change (U-54)', () => {
     });
     expect(within(form).getByRole('alert')).toBe(region);
     await waitFor(() => {
-      expect(save).toHaveProperty('disabled', false);
+      expect(save.getAttribute('aria-disabled')).toBe('false');
     });
 
     // Accepted: the form closes, and nothing on the panel says anything.
@@ -426,5 +445,307 @@ describe('a rule whose probe its reader cannot see (A-80)', () => {
       expect(writes(api.calls)).toHaveLength(1);
     });
     expect(writes(api.calls)[0]?.body).toEqual({ name: 'Nightly, later' });
+  });
+});
+
+/**
+ * Focus through every action on the rules (`U-23` review, WCAG 2.4.3).
+ *
+ * The panel did nothing with focus, so after nearly every action it fell to the page: the button
+ * pressed was taken away (New rule, a row's Delete, Keep, the form's Cancel and Save), disabled
+ * as it was pressed (a switch, the confirmed Delete, Save), or went with the whole list while it
+ * was read again after a change. A keyboard user started the page again each time, and a screen
+ * reader said nothing of the form that opened or the question a Delete asked.
+ */
+describe('focus through the rules (U-23 review)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const press = (element: HTMLElement): void => {
+    act(() => {
+      element.focus();
+    });
+    fireEvent.click(element);
+  };
+  const button = (name: string): HTMLButtonElement =>
+    screen.getByRole<HTMLButtonElement>('button', { name });
+  const reads = (calls: Call[]): number =>
+    calls.filter((call) => call.method === 'GET' && call.path.endsWith('/discovery/schedules'))
+      .length;
+
+  it('puts focus on a new rule’s form as it opens, and back on New rule when it is cancelled', async () => {
+    await show([RULE]);
+    press(button('New rule'));
+    const heading = screen.getByRole('heading', { name: 'New rule' });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(heading);
+    });
+    expect(heading.getAttribute('tabindex')).toBe('-1');
+
+    press(button('Cancel'));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('New rule'));
+    });
+  });
+
+  it('puts focus on an edit’s form as it opens, and back on that rule’s Edit when it is cancelled', async () => {
+    const other: RediscoveryRule = { ...RULE, id: 6, name: 'Weekly' };
+    await show([RULE, other]);
+    press(button('Edit Weekly'));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Editing Weekly' }));
+    });
+    press(button('Cancel'));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Edit Weekly'));
+    });
+  });
+
+  it('puts focus on the question a Delete asks, and back on Delete when the rule is kept', async () => {
+    await show([RULE]);
+    press(button('Delete Nightly'));
+    const group = screen.getByRole('group', { name: 'Confirm deleting Nightly' });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(group);
+    });
+    expect(group.getAttribute('tabindex')).toBe('-1');
+    expect(group.textContent).toContain('Delete Nightly?');
+
+    press(within(group).getByRole('button', { name: 'Keep' }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Delete Nightly'));
+    });
+  });
+
+  it('keeps focus on the confirmed Delete while it is out, then says the rule went and puts focus there', async () => {
+    const rules = [RULE];
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = await show(rules, { status: 204, body: null }, (read) =>
+      read === 2 ? { hold } : undefined,
+    );
+    press(button('Delete Nightly'));
+    const group = screen.getByRole('group', { name: 'Confirm deleting Nightly' });
+    const confirmed = within(group).getByRole<HTMLButtonElement>('button', { name: 'Delete' });
+    rules.length = 0;
+    press(confirmed);
+    expect(confirmed.disabled).toBe(false);
+    expect(confirmed.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(confirmed);
+
+    const notice = await statusSaying('Deleted Nightly.');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(notice);
+    });
+    expect(notice.getAttribute('tabindex')).toBe('-1');
+    expect(writes(api.calls)).toHaveLength(1);
+    // Read again, the rule is gone, and focus stays on what was said.
+    release();
+    await screen.findByText('No rules.');
+    expect(document.activeElement).toBe(notice);
+  });
+
+  it('leaves focus where the operator moved it while the delete was out', async () => {
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stubApi([RULE]);
+    const answering = globalThis.fetch;
+    vi.stubGlobal('fetch', (path: string, init?: RequestInit) =>
+      (init?.method ?? 'GET') === 'GET'
+        ? answering(path, init)
+        : hold.then(() => new Response(null, { status: 204 })),
+    );
+    render(
+      <>
+        <RediscoveryPanel probes={PROBES} groups={GROUPS} templates={[]} />
+        <button type="button">Elsewhere</button>
+      </>,
+    );
+    press(await screen.findByRole('button', { name: 'Delete Nightly' }));
+    press(
+      within(screen.getByRole('group', { name: 'Confirm deleting Nightly' })).getByRole('button', {
+        name: 'Delete',
+      }),
+    );
+    const elsewhere = button('Elsewhere');
+    act(() => {
+      elsewhere.focus();
+    });
+    release();
+    await statusSaying('Deleted Nightly.');
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('gives focus back to the row’s Delete when the core refuses the delete', async () => {
+    await show([RULE], {
+      status: 404,
+      body: { error: { code: 'NOT_FOUND', message: 'no such rule' } },
+    });
+    press(button('Delete Nightly'));
+    press(
+      within(screen.getByRole('group', { name: 'Confirm deleting Nightly' })).getByRole('button', {
+        name: 'Delete',
+      }),
+    );
+    await alertSaying('no such rule');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Delete Nightly'));
+    });
+  });
+
+  it('keeps focus on a switch while it is out, through the list being read again', async () => {
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = await show([RULE], undefined, (read) => (read === 2 ? { hold } : undefined));
+    const pressed = button('Switch off Nightly');
+    press(pressed);
+    expect(pressed.disabled).toBe(false);
+    expect(pressed.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(pressed);
+    // A second press while it is out sends nothing.
+    fireEvent.click(pressed);
+
+    // Accepted, and the list read again: held, and the list stays on screen with focus in it.
+    await waitFor(() => {
+      expect(reads(api.calls)).toBe(2);
+    });
+    expect(screen.queryByText('Loading rediscovery rules…')).toBeNull();
+    expect(pressed.isConnected).toBe(true);
+    expect(document.activeElement).toBe(pressed);
+    release();
+    await waitFor(() => {
+      expect(pressed.getAttribute('aria-disabled')).toBe('false');
+    });
+    expect(pressed.isConnected).toBe(true);
+    expect(document.activeElement).toBe(pressed);
+    expect(writes(api.calls)).toHaveLength(1);
+  });
+
+  it('keeps the list and the focus when it cannot be read again, and says so', async () => {
+    const api = await show([RULE], undefined, (read) =>
+      read === 2
+        ? { status: 500, body: { error: { code: 'INTERNAL', message: 'the database went away' } } }
+        : undefined,
+    );
+    const pressed = button('Switch off Nightly');
+    press(pressed);
+    await statusSaying('could not be read again');
+    expect(pressed.isConnected).toBe(true);
+    expect(document.activeElement).toBe(pressed);
+    expect(screen.getByRole('list', { name: 'Rediscovery rules' })).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => {
+      expect(reads(api.calls)).toBe(3);
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(/could not be read again/u)).toBeNull();
+    });
+  });
+
+  it('keeps focus on Save while a save is out and when it is refused', async () => {
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const refused = {
+      status: 400,
+      body: { error: { code: 'DISCOVERY_SCHEDULE_INVALID', message: 'that range is not valid' } },
+    };
+    stubApi([RULE]);
+    // Reads as the stub answers them; the save held, then refused.
+    const answering = globalThis.fetch;
+    let saves = 0;
+    vi.stubGlobal('fetch', (path: string, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') return answering(path, init);
+      saves += 1;
+      return hold.then(
+        () =>
+          new Response(JSON.stringify(refused.body), {
+            status: refused.status,
+            headers: { 'content-type': 'application/json' },
+          }),
+      );
+    });
+    render(<RediscoveryPanel probes={PROBES} groups={GROUPS} templates={[]} />);
+    press(await screen.findByRole('button', { name: 'Edit Nightly' }));
+    const form = screen.getByRole('form', { name: 'Edit Nightly' });
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Mine' } });
+    const save = within(form).getByRole<HTMLButtonElement>('button', { name: 'Save changes' });
+    press(save);
+    expect(save.textContent).toBe('Saving…');
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(save);
+    // Pressed again, or Enter in a box, while it is out: nothing more is sent.
+    fireEvent.click(save);
+    fireEvent.submit(form);
+    expect(saves).toBe(1);
+    // Cancel is unavailable too, so the form is not closed under the save.
+    fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('form', { name: 'Edit Nightly' })).toBe(form);
+
+    release();
+    await alertSaying('that range is not valid');
+    await waitFor(() => {
+      expect(save.getAttribute('aria-disabled')).toBe('false');
+    });
+    expect(document.activeElement).toBe(save);
+  });
+
+  it('says a save was made and puts focus there, for an edit and for a new rule', async () => {
+    await show([RULE]);
+    press(button('Edit Nightly'));
+    const form = screen.getByRole('form', { name: 'Edit Nightly' });
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Nightly, later' } });
+    press(within(form).getByRole('button', { name: 'Save changes' }));
+    const saved = await statusSaying('Saved Nightly, later.');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(saved);
+    });
+    expect(screen.queryByRole('form')).toBeNull();
+
+    press(button('New rule'));
+    // Opening the form takes what was said away.
+    expect(saved.textContent).toBe('');
+    const next = screen.getByRole('form', { name: 'New rediscovery rule' });
+    fireEvent.change(within(next).getByLabelText('Name'), { target: { value: 'Weekly sweep' } });
+    fireEvent.change(within(next).getByLabelText('Range'), { target: { value: '10.1.0.0/24' } });
+    fireEvent.change(within(next).getByLabelText('Probe'), { target: { value: '10' } });
+    fireEvent.change(within(next).getByLabelText('Group'), { target: { value: '20' } });
+    press(within(next).getByRole('button', { name: 'Create the rule (off)' }));
+    const created = await statusSaying(
+      'Created Weekly sweep. It is off until it is switched on from its row.',
+    );
+    expect(created).toBe(saved);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(created);
+    });
+  });
+
+  it('gives focus back to the rule’s Edit when the form gives way to the rule as it is now', async () => {
+    await show([RULE], {
+      status: 412,
+      body: { error: { code: 'DISCOVERY_SCHEDULE_CHANGED', message: 'this rule has changed' } },
+    });
+    press(button('Edit Nightly'));
+    const form = screen.getByRole('form', { name: 'Edit Nightly' });
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Mine' } });
+    press(within(form).getByRole('button', { name: 'Save changes' }));
+    const alert = await alertSaying(/Somebody else changed this rule/u);
+    press(within(alert).getByRole('button', { name: 'Show the rule as it is now' }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Edit Nightly'));
+    });
   });
 });
