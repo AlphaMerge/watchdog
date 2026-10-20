@@ -1943,6 +1943,7 @@ describe('scripts/test-all.sh', () => {
           'case "$*" in',
           '  *"npm run lint"*) exit "${STUB_LINT_STATUS:-0}" ;;',
           'esac',
+          'printf "%s" "${STUB_TEST_OUT:-}"',
           "printf 'ℹ tests 2\\nℹ pass 2\\nℹ fail 0\\nℹ cancelled 0\\nℹ skipped 0\\n'",
           'exit "${STUB_TEST_STATUS:-0}"',
           '',
@@ -1995,6 +1996,109 @@ describe('scripts/test-all.sh', () => {
       assert.equal(refused.status, 2, `${bound}: ${refused.out}`);
       assert.deepEqual(refused.calls, [], bound);
     }
+  });
+  it('names the reasons of skipped suites only, not a title that holds a `#` (`H-53`)', () => {
+    // rc.3's cut listed "and ;, blank lines and lines of blanks" as a missing dependency: a
+    // passing test whose title says "# and ;", read as a skip's `# reason`.
+    const out = [
+      '  ﹣ talks TLS to the real driver (0.5ms) # the dev PostgreSQL offers no TLS',
+      '✔ comments: # and ;, blank lines and lines of blanks (1.0ms)',
+      '',
+    ].join('\n');
+    const result = run({ MS_TEST_TIMEOUT: '77', STUB_TEST_OUT: out });
+    assert.equal(result.status, 0, result.out);
+    assert.match(result.out, /1 suite\(s\) skipped for a missing dependency/);
+    assert.match(result.out, /1 x the dev PostgreSQL offers no TLS/);
+    assert.doesNotMatch(result.out, /blank lines/);
+  });
+});
+
+/**
+ * `npm run lint` lints each workspace in a process of its own (`H-53`).
+ *
+ * `eslint .` held every package's TypeScript program in one heap and ran out of it at rc.3's cut.
+ * Run here against an `eslint` that records its targets and the heap it was given.
+ */
+describe('scripts/lint.sh', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+  const read = (path: string): Promise<string> => readFile(join(repoRoot, path), 'utf8');
+
+  const lint = (
+    env: Record<string, string>,
+    args: readonly string[] = [],
+  ): { status: number | null; out: string; calls: string[] } => {
+    const dir = mkdtempSync(join(tmpdir(), 'lint-'));
+    try {
+      mkdirSync(join(dir, 'scripts'));
+      for (const pkg of ['alpha', 'beta'])
+        mkdirSync(join(dir, 'packages', pkg), { recursive: true });
+      copyFileSync(join(repoRoot, 'scripts', 'lint.sh'), join(dir, 'scripts', 'lint.sh'));
+      const eslint = join(dir, 'eslint');
+      writeFileSync(
+        eslint,
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s | %s\\n" "$*" "${NODE_OPTIONS:-}" >> "$(dirname "$0")/calls"',
+          'case "$*" in *packages/alpha*) exit 1 ;; esac',
+          'exit 0',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const result = spawnSync('bash', [join(dir, 'scripts', 'lint.sh'), ...args], {
+        encoding: 'utf8',
+        env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin', MS_ESLINT: eslint, ...env },
+        timeout: 30_000,
+      });
+      const calls = existsSync(join(dir, 'calls'))
+        ? readFileSync(join(dir, 'calls'), 'utf8').trimEnd().split('\n')
+        : [];
+      return { status: result.status, out: `${result.stdout}${result.stderr}`, calls };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('lints every workspace and the rest, each in its own process, and goes on past a failure', () => {
+    const result = lint({});
+    assert.equal(result.status, 1, result.out);
+    assert.deepEqual(result.calls, [
+      'packages/alpha | --max-old-space-size=4096',
+      'packages/beta | --max-old-space-size=4096',
+      '--ignore-pattern packages/** . | --max-old-space-size=4096',
+    ]);
+  });
+
+  it('passes its arguments on, keeps NODE_OPTIONS, and takes the heap it is given', () => {
+    const result = lint({ MS_LINT_HEAP_MB: '6144', NODE_OPTIONS: '--trace-warnings' }, ['--fix']);
+    assert.deepEqual(result.calls, [
+      '--fix packages/alpha | --trace-warnings --max-old-space-size=6144',
+      '--fix packages/beta | --trace-warnings --max-old-space-size=6144',
+      '--fix --ignore-pattern packages/** . | --trace-warnings --max-old-space-size=6144',
+    ]);
+  });
+
+  it('refuses a heap that is not a whole number of megabytes, and lints nothing', () => {
+    for (const heap of ['0', '04096', '4g', '-1']) {
+      const refused = lint({ MS_LINT_HEAP_MB: heap });
+      assert.equal(refused.status, 2, `${heap}: ${refused.out}`);
+      assert.deepEqual(refused.calls, [], heap);
+    }
+  });
+
+  it('is what npm run lint runs, and npm test builds every package first', async () => {
+    // A fresh checkout runs core's tests before the probe is built, and core's launcher test
+    // runs the probe's compiled `main.js` (rc.3's cut, step 0.4).
+    const pkg = JSON.parse(await read('package.json')) as { scripts: Record<string, string> };
+    assert.equal(pkg.scripts['lint'], 'scripts/lint.sh');
+    assert.equal(pkg.scripts['lint:fix'], 'scripts/lint.sh --fix');
+    assert.equal(pkg.scripts['pretest'], 'tsc -b');
+    const root = JSON.parse(await read('tsconfig.json')) as { references: { path: string }[] };
+    const referenced = root.references.map((ref) => ref.path).sort();
+    const built = ['shared', 'simulators', 'sensors', 'core', 'probe']
+      .map((name) => `packages/${name}`)
+      .sort();
+    assert.deepEqual(referenced, built);
   });
 });
 

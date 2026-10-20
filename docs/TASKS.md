@@ -16408,6 +16408,17 @@ because each is a decision rather than a defect:
         count under the new record.
       - **Runs.** The test alone, 20 runs in a row at a load held near 21 (19–24): 20 of 20.
 
+- [ ] **P-475 — a lookup's route deadline and its first step's verdict deadline can split under load** ·
+      XS · P-432, P-470 · Filed 2026-10-20 by the coordinator, from `P-470`'s outcome. S6 decided
+      that a step sent as its lookup was asked takes its key's verdict at the lookup's deadline, so
+      the two never disagree. `DnsCheck` decides "as it was asked" by comparing two clock reads
+      within `SAME_DEADLINE_MS` (2 ms), and a loaded host can pause the thread between them: a reply
+      landing between the two deadlines is then Heard for the key while the lookup has already gone
+      to the helper. It errs on the safe side (the lookup goes to the helper), but it breaks the
+      decision. **Done when** the walk's first step, sent with nothing awaited before it, is
+      recognised without reading the clock, with a test that pauses between the reads (an injected
+      `realNow` stepping 3 ms, as `P-470`'s diagnosis did) and a mutant.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
@@ -44234,6 +44245,36 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       Two mutants, both killed by *has docs/sensor-reference.md in step with the code*: the
       Traffic note taken out (the generator stops), and the note and the check taken out (the
       reference differs from the committed one).
+
+- [x] **H-53 — `npm test` and `npm run lint` fail on a fresh checkout** · XS · H-50, P-62 · Found
+      2026-10-20 at rc.3's cut, step 0.4 (`scripts/test-all.sh` in a detached worktree at
+      `fc8f9947`), after the suite passed in the integration worktree. Three things, none of them
+      in the product. **Core's launcher test** (`package-provenance`, `H-32`) runs the probe's
+      compiled `main.js`, and the root `npm test` runs core's suite before the probe's, so in a tree
+      with no `dist` yet it failed with `Cannot find module …/probe/dist/src/main.js`. **The lint**:
+      `eslint .` lints with type information, one process holding every package's program, and ran
+      out of Node's default heap two minutes in (`FATAL ERROR: … JavaScript heap out of memory`).
+      `npm run lint` had not been run over the whole tree since the gate's slices landed: agents
+      linted the files they changed. **The skip report** listed three passing tests whose titles
+      hold a `#` as suites skipped for a missing dependency, since it read any `# …` at a line's
+      end as a skip's reason.
+      - **Fixed** 2026-10-20 by the coordinator. The root `pretest` is `tsc -b`, which builds the
+        five packages the root `tsconfig.json` references before any workspace's tests (web runs
+        from source). `npm run lint` is `scripts/lint.sh`: one eslint process for each workspace and
+        one for everything outside `packages/`, each with a 4,096 MB heap (`MS_LINT_HEAP_MB`),
+        every target linted even after one fails. The whole tree passes it, exit 0. `test-all.sh`
+        reads reasons from the `﹣` lines only.
+      - **Tests** (`build-hygiene`, 4 new and 1 changed, the file's `test-all` and `lint` blocks 8 of
+        8): the reasons of skipped suites only; each workspace and the rest in a process of its own,
+        going on past a failure; arguments passed on, `NODE_OPTIONS` kept and the heap taken; a heap
+        that is not a whole number refused; `npm run lint` and `pretest` as above, and the root
+        references exactly the five packages. **Mutants**, 5, all killed: the old reason grep;
+        stopping at the first failing workspace; the heap not exported; a leading zero accepted;
+        `pretest` removed.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** one process per workspace,
+        not only a bigger heap. A heap raised for the whole tree grows with every package, and the
+        VM holds two heavy runs; a workspace's program is the unit that grows, and the largest fits
+        in 4 GB beside another run.
 
 ---
 

@@ -108,7 +108,9 @@ if [ "${skipped_suites}" -gt 0 ]; then
   echo
   echo "==> ${skipped_suites} suite(s) skipped for a missing dependency — those tests did not run,"
   echo "    and are not in the counts above:"
-  grep -oE '# [^#]+$' "${log}" 2>/dev/null | sed 's/^# //' | sort | uniq -c | sort -rn |
+  # The reasons of the skipped lines only: a test's own title can hold a `#` (H-53).
+  grep -E '^ *﹣ .+ # ' "${log}" 2>/dev/null | grep -oE '# [^#]+$' | sed 's/^# //' | sort |
+    uniq -c | sort -rn |
     awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "      %4d x %s\n", n, $0 }' | head -8
   # Naming the profile because it is not discoverable: `npm run dev` starts the default services
   # and leaves MySQL and SQL Server behind a profile, which is most of what stays skipped after
