@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, posix, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
+import { referenceMarks } from './support/api-reference-marks.js';
 import {
   parseReleaseDocs,
   releaseDocs as readReleaseDocs,
@@ -142,18 +143,29 @@ function danglingLinks(doc: string, markdown: string, shipped: readonly string[]
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
+/** A route `docs/api-reference.md` lists. */
+interface ReferenceRoute {
+  readonly key: string;
+  /** Matches the route whatever stands for a parameter. */
+  readonly pattern: RegExp;
+  /** Whether a 1.0 core registers it: the page marks each one it does not. */
+  readonly inRelease: boolean;
+}
+
 /**
- * Every route `docs/api-reference.md` lists, with a pattern that matches it whatever stands for a
- * parameter. `build-hygiene.test.ts` holds that page to the routes the core registers.
+ * Every route `docs/api-reference.md` lists. `build-hygiene.test.ts` holds that page to the routes
+ * the full build registers, and `candidate-surface.test.ts` its marks to the routes a v1 core does.
  */
-function referenceRoutes(): { readonly key: string; readonly pattern: RegExp }[] {
-  const page = readFileSync(join(docsDir, 'api-reference.md'), 'utf8');
-  return [...page.matchAll(/^### `([A-Z]+) (\/\S*)`$/gmu)].map(([, method = '', path = '']) => {
+function referenceRoutes(): ReferenceRoute[] {
+  const marks = referenceMarks(readFileSync(join(docsDir, 'api-reference.md'), 'utf8'));
+  return [...marks].map(([key, marked]) => {
+    const [method = '', path = ''] = key.split(' ');
     // `{id}` is one segment, whatever fills it; the rest is literal.
     const segments = path.split(/\{[^}/]+\}/u).map(escapeRegExp);
     return {
-      key: `${method} ${path}`,
+      key,
       pattern: new RegExp(`^${method} ${segments.join('[^/]+')}$`, 'u'),
+      inRelease: !marked,
     };
   });
 }
@@ -169,6 +181,26 @@ function routeReadings(method: string, path: string): string[] {
   const bare = (path.split('?')[0] ?? '').replace(/:[A-Za-z]+|<[A-Za-z]+>|\{[A-Za-z]+\}/gu, '1');
   return [bare, ...(bare.startsWith('/api/') ? [] : [`/api/v1${bare}`])].map(
     (one) => `${method} ${one}`,
+  );
+}
+
+/** A route a document names in code, where, and each route of the reference it can be. */
+interface NamedRoute {
+  readonly where: string;
+  readonly listed: readonly ReferenceRoute[];
+}
+
+function routesNamed(docs: readonly string[], routes: readonly ReferenceRoute[]): NamedRoute[] {
+  return docs.flatMap((doc) =>
+    [...readFileSync(join(docsDir, doc), 'utf8').matchAll(ROUTE_SPAN)].map(
+      ([span, method = '', path = '']) => {
+        const readings = routeReadings(method, path);
+        return {
+          where: `${doc}: ${span}`,
+          listed: routes.filter(({ pattern }) => readings.some((one) => pattern.test(one))),
+        };
+      },
+    ),
   );
 }
 
@@ -333,9 +365,10 @@ describe('the documents a release ships (`H-51`)', () => {
    * The release's index told operators the OpenAPI document was at `/openapi.json`, copied from
    * the repository's map; the core serves it at `GET /api/v1/openapi.json` only, which the API
    * reference beside it said (`H-51` review). So a route a shipped document names is looked up in
-   * the reference, and the document's file name is never written without its route.
+   * the reference, and the document's file name is never written without its route. The reference
+   * lists the full build's routes; whether 1.0 has the one named is the next test's.
    */
-  it('name only routes the core registers, and the OpenAPI document at its own', () => {
+  it('name only routes the API reference lists, and the OpenAPI document at its own', () => {
     const { ship } = releaseDocs();
     const routes = referenceRoutes();
     // Presence, so that a page whose headings were not read cannot pass.
@@ -343,35 +376,77 @@ describe('the documents a release ships (`H-51`)', () => {
     assert.ok(routes.some(({ key }) => key === 'GET /api/v1/openapi.json'));
 
     // The shipped documents, and the repository's map the release's index was written from.
-    const named: string[] = [];
-    const unknown: string[] = [];
-    const misnamed: string[] = [];
-    for (const doc of [...ship, 'README.md']) {
-      const text = readFileSync(join(docsDir, doc), 'utf8');
-      for (const [span, method = '', path = ''] of text.matchAll(ROUTE_SPAN)) {
-        named.push(`${doc}: ${span}`);
-        const readings = routeReadings(method, path);
-        if (!routes.some(({ pattern }) => readings.some((one) => pattern.test(one)))) {
-          unknown.push(`${doc}: ${span}`);
-        }
-      }
-      for (const [mention, before = ''] of text.matchAll(/(\S*)openapi\.json/gu)) {
-        if (!before.endsWith('/api/v1/')) misnamed.push(`${doc}: ${mention}`);
-      }
-    }
+    const docs = [...ship, 'README.md'];
+    const named = routesNamed(docs, routes);
     // A route in full, one shortened as prose shortens it, and the one this was written for.
     for (const expected of [
       'troubleshooting.md: `GET /api/v1/build`',
       'troubleshooting.md: `GET /objects/:id/settings`',
       'index.md: `GET /api/v1/openapi.json`',
     ]) {
-      assert.ok(named.includes(expected), `${expected} was not found`);
+      assert.ok(
+        named.some(({ where }) => where === expected),
+        `${expected} was not found`,
+      );
     }
-    assert.deepEqual(unknown, [], 'routes a document names that the core does not register');
+    assert.deepEqual(
+      named.filter(({ listed }) => listed.length === 0).map(({ where }) => where),
+      [],
+      'routes a document names that the API reference does not list',
+    );
+
+    const misnamed: string[] = [];
+    for (const doc of docs) {
+      const text = readFileSync(join(docsDir, doc), 'utf8');
+      for (const [mention, before = ''] of text.matchAll(/(\S*)openapi\.json/gu)) {
+        if (!before.endsWith('/api/v1/')) misnamed.push(`${doc}: ${mention}`);
+      }
+    }
     assert.deepEqual(
       misnamed,
       [],
       'the OpenAPI document named other than at GET /api/v1/openapi.json, the route that serves it',
+    );
+  });
+
+  /**
+   * A route the reference lists may be one a 1.0 core answers `404`: the page marks the 38 it
+   * does not register (`H-51` review), and a hand-written document has no mark to carry. So every
+   * route a shipped document names that 1.0 lacks is listed here, and one more fails.
+   *
+   * The list is `H-51` fix round 1's open item, as it stands: `administration.md`'s stored-report
+   * sections name seven and say nothing of 1.0 lacking them. Its ticket says so under each heading
+   * and replaces this list with a check that such a route is named only under that line.
+   */
+  it('name no route a 1.0 core lacks, beyond the report routes administration.md is known to', () => {
+    const { ship } = releaseDocs();
+    const routes = referenceRoutes();
+    const lacking = routes.filter(({ inRelease }) => !inRelease).map(({ key }) => key);
+    // Presence both ways, so that a reader that found no mark, or marked everything, cannot pass.
+    assert.ok(lacking.includes('GET /api/v1/reports/{id}/runs'), 'the report routes are unmarked');
+    assert.ok(!lacking.includes('GET /api/v1/build'), 'GET /api/v1/build is marked');
+
+    // The reference marks its own, which `candidate-surface.test.ts` holds to a v1 core, and
+    // `README.md` does not ship.
+    const named = routesNamed(
+      ship.filter((doc) => doc !== 'api-reference.md'),
+      routes,
+    )
+      .filter(({ listed }) => listed.length > 0 && listed.every(({ inRelease }) => !inRelease))
+      .map(({ where }) => where);
+    assert.deepEqual(
+      named,
+      [
+        'administration.md: `GET /reports/:id/subjects`',
+        'administration.md: `GET /reports/:id/render`',
+        'administration.md: `POST /reports/:id/runs`',
+        'administration.md: `GET /reports/:id`',
+        'administration.md: `GET /reports/:id/runs`',
+        'administration.md: `GET /reports/:id/runs`',
+        'administration.md: `GET /reports/:id/runs/:runId/:format`',
+      ],
+      'routes a shipped document names that a 1.0 core does not register, against those known ' +
+        'open: a new one is v2 and its document says nothing of it, and one fixed comes off the list',
     );
   });
 

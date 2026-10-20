@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { referenceMarks } from './support/api-reference-marks.js';
 
 /**
  * The API reference's renderer, against a fixture small enough to read (`P-318`).
@@ -626,6 +627,26 @@ describe('the API reference renderer', () => {
         false,
         sectionOf('state').join('\n'),
       );
+    });
+
+    it('as the tests that read the shipped page read them, a tag’s mark and a route’s alike', () => {
+      // `candidate-surface.test.ts` and `release-docs.test.ts` read the shipped page's marks with
+      // this reader. The shipped page marks no route alone today, so only this holds that case.
+      const marks = referenceMarks(releasePage);
+      const keyed = (marked: boolean): string[] =>
+        [...marks]
+          .filter(([, mark]) => mark === marked)
+          .map(([key]) => key)
+          .sort();
+      assert.deepEqual(
+        keyed(true),
+        lacking.map((key) => key.replace(/^[a-z]+/u, (method) => method.toUpperCase())).sort(),
+      );
+      assert.deepEqual(keyed(false), [
+        'GET /api/v1/probes',
+        'GET /api/v1/probes/{gid}',
+        'GET /api/v1/state',
+      ]);
     });
 
     it('in what it says the live document lists', () => {

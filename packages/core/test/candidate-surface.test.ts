@@ -8,6 +8,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import { BUILT_IN_SENSOR_TYPES } from '@ms/sensors';
 import { BUILD_MANIFEST, readBuildStamp, type BuildStamp } from '@ms/shared';
 import { APP_ERROR_STATUS } from '../src/api/errors.js';
+import { referenceMarks } from './support/api-reference-marks.js';
 import {
   baseOptions,
   concrete,
@@ -99,31 +100,6 @@ function readTable(runbook: string): Table {
   }
   assert.deepEqual(unread, [], 'rows in the runbook’s surface tables that this test cannot read');
   return { routes, sensorTypes };
-}
-
-/** What `docs/api-reference.md` starts a mark with, under a tag's heading or a route's (`H-51`). */
-const NOT_IN_RELEASE = '**Not in 1.0 — v2, in the full build only.**';
-
-/**
- * Every route the API reference lists, and whether it is marked as not in 1.0: by the note under
- * its tag's heading, or by one under its own. The shared schemas' headings are not routes.
- */
-function referenceMarks(page: string): Map<RouteKey, boolean> {
-  const lines = page.split('\n');
-  /** The first line after `index` that is not blank. */
-  const next = (index: number): string =>
-    lines.slice(index + 1).find((line) => line.trim() !== '') ?? '';
-  const marks = new Map<RouteKey, boolean>();
-  let wholeTag = false;
-  lines.forEach((line, index) => {
-    if (line.startsWith('## ')) wholeTag = next(index).startsWith(NOT_IN_RELEASE);
-    const route = /^### `([A-Z]+) (\/[^`\s]*)`$/u.exec(line);
-    if (route === null) return;
-    const key: RouteKey = `${route[1] ?? ''} ${route[2] ?? ''}`;
-    assert.equal(marks.has(key), false, `the API reference lists ${key} twice`);
-    marks.set(key, wholeTag || next(index).startsWith(NOT_IN_RELEASE));
-  });
-  return marks;
 }
 
 /** A manifest in the shape `scripts/package.sh` writes, read the way a packaged core reads its own. */
