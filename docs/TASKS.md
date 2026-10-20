@@ -13473,6 +13473,29 @@ because each is a decision rather than a defect:
         - **S6's re-check gaps are closed before the cut.** The D27 invariant is on the design's
           never-cut list: an avoided name started from the probe's queues (`#pumpProbe`), and an
           avoided name settled after `stop()` with the probe's pool.
+      - **Decided 2026-10-20 by Claude, under the user's delegation**, on `integ/r6-1020`:
+        - **S6's eight Probe Health fields come out, and protocol 39 with them.** The user decided
+          on 2026-10-18 (OPEN-5, the coordinator's P-432 decisions file) that Probe Health has
+          six name fields at protocol 38, not the design's fourteen: `nameResolverMode`,
+          `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck` and
+          `nameQuestionsOpen`. The other eight are to be left out, and what they would carry
+          logged at the design's levels, with the helper's memory in the log and the hourly
+          summary. The coordinator's S6 brief asked for the eight, against that decision, and
+          S6 built them (`lookupHelperState`, `lookupHelperLosses`, `lookupHelperMemory`,
+          `nameCheckState`, `nameLookupsHeard`, `nameLookupsToHelper`, `nameCheckMisses`,
+          `nameWalksDeferred`, with the `nameCheck` capability). The user's decision stands:
+          the fields, their channels, lookups and `/metrics` series go, and the log carries them.
+        - **`P-462`, `P-463` and `P-465` are in before the rc.3 cut.** The field test runs the
+          gate, and the cut is the build it runs. `P-465` measures what the design's verdict on
+          `gate` reads before the runbook sets it, and `P-462` and `P-463` are the differential's
+          remaining rows and the last names D27's avoidance does not cover. Measuring before
+          the cut costs hours. Finding a defect after it costs an rc.4. No field-test hardware
+          exists yet, so the cut has no date to meet.
+        - **A SIGKILL the probe sent is told apart from one from outside.** The helper's loss
+          line says which, so the runbook sends an operator to `journalctl -k` only for a kill
+          the probe did not send.
+        - **`P-464` is release 1.1** (Windows). **`P-466` is the user's**, since it edits
+          CLAUDE.md.
       - **The gate track's second round built** 2026-10-20, on `feat/p432-gate-r2` (on
         `integ/r5-1019`, `a95c3302`), for the coordinator to land. It closes S6's re-check gaps,
         and `P-453` is built with it (its outcome is under that ticket).
