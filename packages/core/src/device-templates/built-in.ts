@@ -90,7 +90,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
     description:
       'Ping, plus the WMI set where WinRM is reachable. Those checks need a Windows-hosted ' +
       'probe, so they are created only when port 5985 or 5986 answered — on a Linux-only ' +
-      'installation that is never, which is the honest outcome rather than four failing sensors.',
+      'installation that is never, which is the honest outcome rather than three failing sensors.',
     match: { kind: ['windows'] },
     sensors: [
       { type: 'icmp.ping', name: 'Ping', master: true },

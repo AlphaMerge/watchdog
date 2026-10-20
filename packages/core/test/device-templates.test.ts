@@ -399,7 +399,7 @@ describe('the built-in set', () => {
 
   it('gives a Windows device its WMI set only where WinRM answered', () => {
     // T-09 needs a Windows-hosted probe. On a Linux-only installation this is never, which is
-    // the honest outcome rather than four sensors failing for ever.
+    // the honest outcome rather than three sensors failing for ever.
     const windows = fingerprint({ ports: ports(3389), sysDescr: 'Windows Version 6.3' });
     const plan = held.plan(windows, new Set(['windows']));
     assert.deepEqual(
@@ -410,6 +410,20 @@ describe('the built-in set', () => {
     const reachable = fingerprint({ ports: ports(3389, 5985), sysDescr: 'Windows Version 6.3' });
     const better = held.plan(reachable, new Set(['windows']));
     assert.ok(better.sensors.some((one) => one.type === 'windows.cpu'));
+  });
+
+  it('counts, in its description, the WMI set a Linux-only installation never creates', () => {
+    // "Rather than four failing sensors" came from `D-03` and was carried into `U-92`'s rewrite,
+    // for a set of three: the ping is the fourth sensor, and nothing about WinRM fails it. Held to
+    // the set, so a sensor added to it or taken out says the sentence is wrong too.
+    const windows = BUILT_IN_DEVICE_TEMPLATES.find((one) => one.id === 'ms.windows');
+    assert.ok(windows !== undefined);
+    const gated = windows.sensors.filter(
+      (one) => one.requires?.portsAny?.includes(5985) === true && one.type.startsWith('windows.'),
+    );
+    const said = ['no', 'one', 'two', 'three', 'four', 'five', 'six'][gated.length];
+    assert.match(windows.description, new RegExp(`\\b${String(said)} failing sensors\\b`, 'u'));
+    assert.equal(windows.sensors.length, gated.length + 1, 'the WMI set and the ping');
   });
 });
 
