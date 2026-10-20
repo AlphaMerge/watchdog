@@ -211,10 +211,10 @@ export async function repairChannelShapes(
     options.logger?.warn(
       { unjudged, listedPerType: listed, phase: 'migration-073' },
       'these channels have no lookup though their sensor type declares one, so nothing judges ' +
-        'them: cleared on purpose, or lost by a clone made before P-302. The upgrade does not ' +
-        'set them, because a lookup set where it was cleared raises every alarm it was cleared ' +
-        'to silence; set the ones you want by hand (PATCH /api/v1/objects/:id/channels/:key ' +
-        'with a lookupId)',
+        'them: cleared on purpose, or lost by a clone made by an earlier release. The upgrade ' +
+        'does not set them, because a lookup set where it was cleared raises every alarm it was ' +
+        'cleared to silence; set the ones you want by hand (PATCH ' +
+        '/api/v1/objects/:id/channels/:key with a lookupId)',
     );
   }
   return { counters, limitSources, byType, unjudged, unregistered, unanswerable };

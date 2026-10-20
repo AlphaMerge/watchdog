@@ -564,7 +564,7 @@ export function logSensorTypes(logger: Logger, catalogue: SensorCatalogue): void
   const ids = catalogue.ids();
   if (ids.length === 0) {
     logger.warn(
-      { registered: 0, unblocks: 'P-08' },
+      { registered: 0 },
       'no sensor types are registered: sensors cannot be created and nothing can be checked',
     );
     return;

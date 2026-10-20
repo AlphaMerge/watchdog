@@ -70,7 +70,7 @@ async function rewrite(context: {
   readonly logger: Logger;
 }): Promise<void> {
   const rewritten = await rewriteDeliveryErrors(context.db);
-  context.logger.info({ rewritten }, 'delivery errors stored before N-24 made legible');
+  context.logger.info({ rewritten }, 'delivery errors stored by an earlier release made legible');
 }
 
 /**
