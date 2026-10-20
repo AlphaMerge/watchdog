@@ -8,10 +8,16 @@ import { notAnswered, RESOLVER_FAULT, RESOLVER_HELD, type ResolvedAddress } from
 import type { Logger } from '@ms/shared';
 import { ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
-import { ANSWER_MS, NameResolver, STALE_MS, type Family } from '../src/resolver/name-resolver.js';
+import {
+  ANSWER_MS,
+  GATE_SUMMARY_MS,
+  NameResolver,
+  STALE_MS,
+  type Family,
+} from '../src/resolver/name-resolver.js';
 import { ScriptedAsker, WalkPolicy } from './support/fake-dns.js';
 import { FakeHelper } from './support/fake-helper.js';
-import { pollWithin } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * The resolver in gate mode with the name check built (`P-432` S6, §1.3): a lookup whose walk was
@@ -36,6 +42,7 @@ const A: readonly ResolvedAddress[] = [{ address: '192.0.2.10', family: 4 }];
 
 /** A log line, by the fields the test reads. */
 interface Line {
+  readonly [field: string]: unknown;
   readonly level?: unknown;
   readonly host?: unknown;
   readonly route?: unknown;
@@ -76,6 +83,8 @@ async function make(
     readonly tickMs?: number;
     readonly maxQueued?: number;
     readonly logger?: Logger;
+    /** The check's routing wait, and its miss a little after it: `ROUTE` and `MISS` unless set. */
+    readonly routeMs?: number;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -108,7 +117,11 @@ async function make(
       budget,
       keys: new HelperKeys(),
       tickMs: setup.tickMs ?? 3_600_000,
-      check: { asker, routeMs: ROUTE, missMs: MISS },
+      check: {
+        asker,
+        routeMs: setup.routeMs ?? ROUTE,
+        missMs: setup.routeMs === undefined ? MISS : setup.routeMs + MISS - ROUTE,
+      },
     },
   });
   helper.onChange = (change) => {
@@ -577,6 +590,232 @@ describe('gate mode with the name check: a rest, a full queue and a silent name�
       /its zone zone-b\.test did not answer the check 0 s ago, and the name was not asked/u,
     );
     assert.equal(asker.askedFor('dev-61.zone-b.test').length, 0);
+    resolver.stop();
+  });
+});
+
+/**
+ * D27 over every path to the probe's own `getaddrinfo` (`P-432` gate, round 2): a name the probe
+ * may not ask, by a crash of its family-4 lookup in the helper while it is asked for family 0, or
+ * by poison in its own family, becomes so at its ask (`start`), while its walk is out (`verdict`),
+ * or while its lookup, heard, waits on the probe's lanes behind four others (`pump`), with the
+ * helper up, rejoining, down or resting, and the resolver stopped or not. In no row is it asked on
+ * the probe's lanes; the check is answered in the helper, or fails at once saying why.
+ *
+ * The routing wait is the probe's own 250 ms here, not `ROUTE`: a row whose walk is heard must be
+ * heard on a loaded machine too, or a `verdict` row is routed silent instead and tests nothing.
+ */
+const D27_ROUTE = 250;
+const X = 'x.zone-a.test';
+const AVOIDED = /does not ask its own getaddrinfo for x\.zone-a\.test/u;
+const POISON = /asking getaddrinfo for x\.zone-a\.test made the lookup helper fail/u;
+const STOPPING = /^the probe is stopping: x\.zone-a\.test was not answered$/u;
+
+interface D27Row {
+  readonly path: 'start' | 'verdict' | 'pump';
+  readonly kind: 'crashed' | 'poison';
+  readonly route: 'up' | 'rejoining' | 'down' | 'resting';
+  /** The resolver stopped, as the probe's shutdown stops it, once the name is avoided. */
+  readonly stopped?: true;
+  /** Queued for the helper while it rejoins, the helper then goes down. */
+  readonly then?: 'down';
+  /** Answered in the helper, or failed at once in these words. */
+  readonly expect: 'helper' | RegExp;
+}
+
+const D27_ROWS: readonly D27Row[] = [
+  { path: 'start', kind: 'crashed', route: 'up', expect: 'helper' },
+  { path: 'start', kind: 'crashed', route: 'rejoining', expect: 'helper' },
+  { path: 'start', kind: 'crashed', route: 'down', expect: AVOIDED },
+  { path: 'start', kind: 'crashed', route: 'resting', expect: AVOIDED },
+  { path: 'start', kind: 'poison', route: 'up', expect: POISON },
+  { path: 'start', kind: 'poison', route: 'resting', expect: POISON },
+  { path: 'verdict', kind: 'crashed', route: 'up', expect: 'helper' },
+  { path: 'verdict', kind: 'crashed', route: 'rejoining', expect: 'helper' },
+  { path: 'verdict', kind: 'crashed', route: 'rejoining', then: 'down', expect: AVOIDED },
+  { path: 'verdict', kind: 'crashed', route: 'down', expect: AVOIDED },
+  { path: 'verdict', kind: 'crashed', route: 'resting', expect: AVOIDED },
+  { path: 'verdict', kind: 'poison', route: 'up', expect: POISON },
+  { path: 'verdict', kind: 'crashed', route: 'up', stopped: true, expect: STOPPING },
+  { path: 'verdict', kind: 'crashed', route: 'down', stopped: true, expect: STOPPING },
+  { path: 'verdict', kind: 'crashed', route: 'resting', stopped: true, expect: STOPPING },
+  { path: 'pump', kind: 'crashed', route: 'up', expect: 'helper' },
+  { path: 'pump', kind: 'crashed', route: 'rejoining', expect: 'helper' },
+  { path: 'pump', kind: 'crashed', route: 'rejoining', then: 'down', expect: AVOIDED },
+  { path: 'pump', kind: 'crashed', route: 'down', expect: AVOIDED },
+  { path: 'pump', kind: 'crashed', route: 'resting', expect: AVOIDED },
+  { path: 'pump', kind: 'poison', route: 'up', expect: POISON },
+  { path: 'pump', kind: 'poison', route: 'down', expect: POISON },
+  { path: 'pump', kind: 'crashed', route: 'up', stopped: true, expect: STOPPING },
+  { path: 'pump', kind: 'crashed', route: 'down', stopped: true, expect: STOPPING },
+];
+
+const titleOf = (row: D27Row): string =>
+  `${row.path}, ${row.kind}, ${row.route}${row.then === undefined ? '' : ` then ${row.then}`}` +
+  `${row.stopped === true ? ', stopped' : ''}: ` +
+  (row.expect === 'helper' ? 'asked in the helper' : `fails at once (${row.expect.source})`);
+
+/** One row: what X's check is told, and every call of the probe's own getaddrinfo for X. */
+async function d27(row: D27Row): Promise<void> {
+  const made = await make({ stuckMs: 5_000, routeMs: D27_ROUTE });
+  const { resolver, helper, asker, calls, callsFor, clock, ask } = made;
+  const title = titleOf(row);
+  const avoid = (): void => {
+    if (row.kind === 'crashed') helper.avoided.add(`4:${X}`);
+    else helper.markPoison(X, 0, clock.now + 3_600_000);
+    if (row.route !== 'up') helper.move(row.route);
+    if (row.stopped === true) resolver.stop();
+  };
+  // Four heard names of four zones hold the probe's first lanes: a lookup queued there waits.
+  const held =
+    row.path === 'start'
+      ? []
+      : [0, 1, 2, 3].map((zone) =>
+          ask(`dev-1.zone-c${String(zone)}.test`, { waitMs: 10_000 }).catch(() => undefined),
+        );
+  await pollWithin(1_000, `${title}: four on lanes`, () => calls.length === held.length, 2);
+  let got: Promise<{ code: unknown; message: string }>;
+  if (row.path === 'start') {
+    avoid();
+    got = failed(ask(X, { waitMs: 2_000 }, 0));
+    assert.equal(asker.askedFor(X).length, 0, `${title}: never walked`);
+  } else if (row.path === 'verdict') {
+    asker.rule = () => ({ reply: 'answer', delayMs: 30 });
+    got = failed(ask(X, { waitMs: 2_000 }, 0));
+    await pollWithin(1_000, `${title}: walked`, () => asker.askedFor(X).length > 0, 1);
+    avoid();
+  } else {
+    got = failed(ask(X, { waitMs: 2_000 }, 0));
+    await pollWithin(
+      1_000,
+      `${title}: heard`,
+      () => asker.askedFor(X).length > 0 && asker.askedFor(X).every((q) => q.replied !== undefined),
+      2,
+    );
+    await wait(ROUTE);
+    assert.equal(resolver.stats().queued, 1, `${title}: queued on a probe lane`);
+    avoid();
+    // A lane free: X is the next to leave the probe's queue.
+    calls[0]?.answer();
+  }
+  if (row.then === 'down') {
+    await wait(ROUTE * 2);
+    assert.equal(helper.asksFor(X).length, 0, `${title}: queued for the next child`);
+    helper.move('down');
+  }
+  if (row.expect === 'helper') {
+    if (row.route === 'rejoining') {
+      await wait(ROUTE * 2);
+      assert.equal(helper.asksFor(X).length, 0, `${title}: waits for the next child`);
+      helper.move('up');
+    }
+    await pollWithin(1_000, `${title}: in the helper`, () => helper.asksFor(X).length === 1, 2);
+    assert.equal(helper.last(X).family, 0, title);
+    helper.last(X).answer(A);
+    const said = await within(5_000, title, got);
+    assert.equal(said.message, 'answered', title);
+  } else {
+    const said = await within(5_000, title, got);
+    assert.equal(said.code, RESOLVER_FAULT, `${title}: ${said.message}`);
+    assert.match(said.message, row.expect, title);
+  }
+  assert.equal(callsFor(X).length, 0, `${title}: never on the probe’s own getaddrinfo`);
+  for (const call of calls) call.answer();
+  await Promise.all(held);
+  resolver.stop();
+}
+
+describe('D27 at every path to the probe’s own getaddrinfo (P-432 gate, round 2)', () => {
+  for (const row of D27_ROWS) {
+    it(titleOf(row), async () => {
+      await d27(row);
+    });
+  }
+});
+
+describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-432 gate, round 2)', () => {
+  it('a sampled refresh moved off the probe’s lanes no longer counts against its zone’s samples (D20)', async () => {
+    const { helper, asker, callsFor, clock, ask, resolver } = await make({ stuckMs: 5_000 });
+    const others = [0, 1, 2, 3].map((zone) => `dev-1.zone-c${String(zone)}.test`);
+    const kept = ['dev-23.zone-a.test', 'dev-24.zone-a.test', 'dev-25.zone-a.test'];
+    for (const name of [...others, ...kept]) {
+      const first = ask(name);
+      await pollWithin(1_000, `${name} on a lane`, () => callsFor(name).length === 1, 2);
+      callsFor(name)[0]?.answer();
+      await first;
+    }
+    clock.now += ANSWER_MS + 1;
+    // Four refreshes walked, heard and left running: the refresh lanes are full.
+    for (const name of others) {
+      assert.deepEqual(await ask(name), A);
+      await pollWithin(1_000, `${name} refreshing`, () => callsFor(name).length === 2, 2);
+    }
+    // Zone A heard this second, by a new name on a first lane.
+    const fresh = ask('dev-26.zone-a.test');
+    await pollWithin(1_000, 'the new name', () => callsFor('dev-26.zone-a.test').length === 1, 2);
+    callsFor('dev-26.zone-a.test')[0]?.answer();
+    await fresh;
+    // Two refreshes ride the zone's sample, its two, and wait for a refresh lane.
+    const [one, two, three] = kept as [string, string, string];
+    for (const name of [one, two]) {
+      assert.deepEqual(await ask(name), A);
+      assert.equal(asker.askedFor(name).length, 1, `${name} sampled: no walk of its own`);
+    }
+    // Both become names the probe may not ask, and two refresh lanes come free.
+    helper.avoided.add(`4:${one}`);
+    helper.avoided.add(`4:${two}`);
+    callsFor(others[0] ?? '')[1]?.answer();
+    callsFor(others[1] ?? '')[1]?.answer();
+    await pollWithin(1_000, 'both in the helper', () => helper.asks.length === 2, 2);
+    assert.deepEqual(
+      helper.asks.map((asked) => asked.host),
+      [one, two],
+    );
+    assert.equal(
+      callsFor(one).length + callsFor(two).length,
+      2,
+      'never again on the probe’s lanes',
+    );
+    // Their samples ended as they left: a third refresh of the zone still rides one.
+    assert.deepEqual(await ask(three), A);
+    await pollWithin(1_000, 'the third refreshing', () => callsFor(three).length === 2, 2);
+    assert.equal(asker.askedFor(three).length, 1, 'sampled, not walked');
+    for (const asked of helper.inFlight()) asked.answer(A);
+    for (const name of [...others, three]) for (const call of callsFor(name)) call.answer();
+    resolver.stop();
+  });
+
+  it('a name failed as it leaves the probe’s queues is counted in the hour’s summary as faulted', async () => {
+    const { logger, lines } = captured();
+    const { resolver, helper, calls, clock, ask } = await make({
+      stuckMs: 5_000,
+      tickMs: 5,
+      logger,
+      routeMs: D27_ROUTE,
+    });
+    const held = [0, 1, 2, 3].map((zone) =>
+      ask(`dev-1.zone-c${String(zone)}.test`, { waitMs: 10_000 }).catch(() => undefined),
+    );
+    await pollWithin(1_000, 'four on lanes', () => calls.length === 4, 2);
+    const got = failed(ask(X, { waitMs: 2_000 }, 0));
+    await wait(ROUTE * 2);
+    helper.avoided.add(`4:${X}`);
+    helper.move('down');
+    calls[0]?.answer();
+    assert.equal((await got).code, RESOLVER_FAULT);
+    clock.now += GATE_SUMMARY_MS;
+    await pollWithin(
+      1_000,
+      'the hour’s summary',
+      () => lines.some((line) => line['msg'] === 'the probe’s resolver in gate mode, this hour'),
+      5,
+    );
+    const summary = lines.find(
+      (line) => line['msg'] === 'the probe’s resolver in gate mode, this hour',
+    );
+    assert.equal((summary?.['routed'] as { faulted?: unknown } | undefined)?.faulted, 1);
+    for (const call of calls) call.answer();
+    await Promise.all(held);
     resolver.stop();
   });
 });

@@ -1,5 +1,6 @@
 import type { ResolvedAddress } from '@ms/sensors';
 import {
+  familiesMet,
   HelperLookupError,
   HelperLostError,
   mayRequeue,
@@ -73,6 +74,10 @@ export class FakeHelper implements HelperPort {
   readonly held: number[] = [];
   readonly asks: FakeAsk[] = [];
   readonly poisoned = new Map<string, PoisonMark>();
+  /**
+   * Names kept off the probe's lanes, as `family:host`: what the real helper keeps for a name in
+   * flight at a loss. `avoidsSystem` reads it as the real one does, poison marks with it.
+   */
   readonly avoided = new Set<string>();
   readonly skewed: string[] = [];
   readonly snapshots: (HelperSnapshot | undefined)[] = [];
@@ -238,8 +243,12 @@ export class FakeHelper implements HelperPort {
     this.held.push(forMs);
   }
 
+  /** As the real helper answers: a mark in any family a lookup of `family` asks for (D27). */
   avoidsSystem(host: string, family: 0 | 4 | 6): boolean {
-    return this.avoided.has(`${String(family)}:${host}`);
+    return familiesMet(family).some((met) => {
+      const key = `${String(met)}:${host}`;
+      return this.avoided.has(key) || this.poisoned.has(key);
+    });
   }
 
   poison(host: string, family: 0 | 4 | 6): PoisonMark | undefined {

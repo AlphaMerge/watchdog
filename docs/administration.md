@@ -1279,10 +1279,14 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
 - **When the check is off, every name not the hosts file's is asked in the helper.** It is off
   while the system's name settings say it cannot vouch for what glibc would do (`nscd`, an NSS
   module it does not model, `LD_PRELOAD`, `RES_OPTIONS`, and the like: the probe's log says
-  which, at start, or when the settings move or are slow to read under a running probe, which
-  turns it off until the probe restarts); and until a server has answered it (it asks
-  `localhost.` of the first server every minute until one does). A change to `resolv.conf`,
-  `nsswitch.conf` or the hosts file starts it again from nothing.
+  which, at start, or when the settings move under a running probe, which turns it off until the
+  probe restarts); while they are slow to read; and until a server has answered it (it asks
+  `localhost.` of the first server every minute until one does). **A slow read turns it off for
+  now, not until restart**: a read of the settings that has not ended in 10 s (30 s for the one at
+  start) is let go, logged, and `nameCheckState` reads 2. At the next look, every 5 s, a read that
+  has ended since turns the check back on; one still not ended is taken as hung, and the check is
+  off until the probe restarts. At start that look comes as soon as the 30 s are up. A change to
+  `resolv.conf`, `nsswitch.conf` or the hosts file starts it again from nothing.
 - **A name the check misses is skipped, then its zone, then the check stands down.** A miss is
   a name the helper answered within a second whose walk the check had found silent, its
   question still unanswered 3 s after it was sent. **One miss** skips that name's walk for an
@@ -1347,9 +1351,10 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   answering is the helper's job to carry, and leaves it at 0. The probe's log says why, in the
   lines of its `lookup-helper` component.
 - `nameCheckOnSeconds`: the seconds with the name check on and the helper up.
-- `nameCheckState`: 1 on, 2 off for the system's name settings or platform (the probe's log
-  says why: at start, or when the settings moved), 3 not proven, 4 stood down, 0 the helper
-  resting. Every entry Up: off, the helper carries every name.
+- `nameCheckState`: 1 on, 2 off for the system's name settings or platform, or while they are
+  slow to read (the probe's log says why: at start, when the settings moved, or when a read was
+  slow), 3 not proven, 4 stood down, 0 the helper resting. Every entry Up: off, the helper
+  carries every name.
 - `nameLookupsHeard`, `nameLookupsToHelper`: the lookups the check sent to the probe's own lanes,
   and those asked in the helper. `nameCheckMisses`: names the helper answered that the check had
   found silent. `nameWalksDeferred`: names sent to the helper unwalked, for any of four

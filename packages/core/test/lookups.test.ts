@@ -148,7 +148,7 @@ describe('lookup validation', () => {
     assert.equal(applyLookup(check, 1).text, 'on');
     assert.match(
       applyLookup(check, 2).text,
-      /^off for this system’s name settings or platform: the probe log says why \(at start, or when the settings moved\)$/u,
+      /^off for this system’s name settings or platform, or while they are slow to read: the probe log says why \(at start, when the settings moved, or when a read was slow\)$/u,
     );
     assert.match(applyLookup(check, 4).text, /^stood down after misses/u);
   });

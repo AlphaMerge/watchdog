@@ -32,6 +32,9 @@ import { FakeHelper, StubPolicy, type FakeAsk } from './support/fake-helper.js';
  * Seeded runs of random commands (asks and "Check now", answers, denials, stuck, losses of every
  * kind with requeues, charges and isolation, answers after a loss, a failed send, the child going
  * quiet and being heard again, U rising and falling, time passing); after every command, I1 to I9.
+ * And at every call of the probe's own `getaddrinfo`, I10 (D27): the name is not one the helper
+ * keeps off the probe's lanes, each name in flight at an `exit` or `memory` loss marked as the
+ * real helper marks it, and every poison mark.
  * The generator is a seeded PRNG of its own: `fast-check` is not one of the probe's dependencies,
  * and a failing run prints its seed and its last commands, which replay it exactly.
  *
@@ -147,10 +150,16 @@ function model(seed: number) {
   const budget = new RecordingBudget({ now: () => clock.now });
   const keys = new HelperKeys();
   const calls: ProbeCall[] = [];
+  const log: string[] = [];
+  const violations: string[] = [];
   const resolver = new NameResolver({
     logger: silent,
-    lookup: (host) =>
+    lookup: (host, family) =>
       new Promise((resolve, reject) => {
+        // I10 (D27): never a name the helper says may be what crashed it.
+        if (helper.avoidsSystem(host, family)) {
+          violations.push(`I10: ${host} (${String(family)}) asked on the probe’s own getaddrinfo`);
+        }
         const call: ProbeCall = {
           host,
           done: false,
@@ -176,8 +185,6 @@ function model(seed: number) {
     resolver.onHelperChange(change);
   };
 
-  const log: string[] = [];
-  const violations: string[] = [];
   const untokened = new Set<object>();
   let uMax = 0;
   /** Lookups lost with a child and asked again in the next: a late answer may name them. */
@@ -418,6 +425,11 @@ function model(seed: number) {
     if (charged !== undefined) {
       helper.markPoison(charged.host, charged.family, clock.now + LONG);
     }
+    // Each name in flight may be what ended the child, crash or not (D27, `P-453`): the real
+    // helper keeps it off the probe's lanes for ten minutes after it is next up, here for good.
+    if (reason === 'exit' || reason === 'memory') {
+      for (const lost of inFlight()) helper.avoided.add(`${String(lost.family)}:${lost.host}`);
+    }
     helper.lose(reason, route, {
       ...(charged === undefined ? {} : { charged }),
       suspects: isolate,
@@ -555,7 +567,7 @@ function model(seed: number) {
 }
 
 describe('LR7: a model of the lookup helper’s lanes (P-432 S3, §7.2)', () => {
-  it(`holds I1 to I9 over ${String(RUNS)} seeded runs of ${String(COMMANDS)} commands`, async () => {
+  it(`holds I1 to I10 over ${String(RUNS)} seeded runs of ${String(COMMANDS)} commands`, async () => {
     let asks = 0;
     for (let seed = FIRST_SEED; seed < FIRST_SEED + RUNS; seed += 1) {
       const run = model(seed);

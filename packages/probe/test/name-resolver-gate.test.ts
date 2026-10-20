@@ -206,6 +206,23 @@ describe('gate mode routes by the helper’s state (P-432 S3, §1.3)', () => {
     assert.equal(notAnswered(refused.error), false, 'N2: not counted as given up');
   });
 
+  it('N1: down, a suspect not yet asked again fails at once, on the resolver’s own word, and never reaches the probe’s lanes (D27)', async () => {
+    const { helper, callsFor, ask } = make();
+    const got = outcome(ask('sus.zone-a.test', 4, { waitMs: 5_000 }));
+    assert.equal(helper.asksFor('sus.zone-a.test').length, 1);
+    // A crash while isolating: it is to be asked again alone, and the next child is not up.
+    helper.isolatingNow = true;
+    helper.lose('exit', 'rejoining', { suspects: true });
+    await settled();
+    assert.equal(helper.avoidsSystem('sus.zone-a.test', 4), false, 'the helper says nothing of it');
+    helper.move('down');
+    const said = await within(2_000, 'the suspect’s check', got);
+    assert.ok(!said.ok);
+    assert.equal(codeOf(said.error), RESOLVER_FAULT);
+    assert.match(messageOf(said.error), /does not ask its own getaddrinfo for sus\.zone-a\.test/u);
+    assert.equal(callsFor('sus.zone-a.test').length, 0, 'never in the probe’s own getaddrinfo');
+  });
+
   it('N1: resting, every name routes as system does, a name the helper failed on aside', async () => {
     const { helper, calls, ask } = make({ route: 'resting' });
     const routed = ask('dev-1.zone-b.test');

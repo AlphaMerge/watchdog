@@ -805,12 +805,17 @@ interface HelperBlock {
   readonly ghosts: number;
 }
 
-/** How long a settled `getaddrinfo` ran, when it says: the helper's errors carry the child's. */
 /** A lookup's state as it is now, for a read after a call that may have moved it. */
 function stateOf(pending: Pending): Pending['state'] {
   return pending.state;
 }
 
+/** What a lookup the probe's stop settles tells its checks (gate mode). */
+function stopping(host: string): string {
+  return `the probe is stopping: ${host} was not answered`;
+}
+
+/** How long a settled `getaddrinfo` ran, when it says: the helper's errors carry the child's. */
 function ranMsOf(result: Settled): number | undefined {
   if ('addresses' in result) return result.ranMs;
   if ('error' in result) {
@@ -1975,7 +1980,8 @@ export class NameResolver implements PoolResolver {
   /**
    * A walk's verdict for a lookup that scouted (§1.4): queued where it says, and its checks told
    * at once what a check asking now would be told, a silent name while the helper is down or
-   * lanes every one stuck. Once the probe is stopping, one with no helper to ask it is settled.
+   * lanes every one stuck. Once the probe is stopping, one with no helper to ask it is settled,
+   * and so is an avoided name, whatever its pool (D27).
    */
   #scouted(gate: Gate, pending: Pending, walked: CheckRoute): void {
     gate.scouting.delete(pending);
@@ -1984,7 +1990,13 @@ export class NameResolver implements PoolResolver {
     const entry = pending.entry;
     // Judged again as the ask was (§1.3 row 0): the walk took time, and a crash in it, a rest or
     // the helper going down may have made the name one the probe's own getaddrinfo must not ask.
-    const refusal = this.#stopped ? undefined : this.#gateRefusal(entry);
+    // Once stopped, an avoided name is settled whatever its pool: a verdict that comes after the
+    // stop would otherwise queue it on the probe's lanes while the helper is down or resting.
+    const refusal = this.#stopped
+      ? this.#avoided(gate, entry)
+        ? stopping(entry.host)
+        : undefined
+      : this.#gateRefusal(entry);
     if (refusal !== undefined) {
       gate.routed.faulted += 1;
       this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
@@ -1999,12 +2011,7 @@ export class NameResolver implements PoolResolver {
     pending.pool = this.#poolFor(gate, verdict.route);
     this.#routed(gate, pending, verdict);
     if (this.#stopped && pending.pool === 'helper' && gate.helper.routeState() !== 'up') {
-      this.#settle(pending, {
-        passed: {
-          code: RESOLVER_FAULT,
-          why: `the probe is stopping: ${pending.entry.host} was not answered`,
-        },
-      });
+      this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: stopping(entry.host) } });
       return;
     }
     this.#enqueue(pending);
@@ -2241,7 +2248,12 @@ export class NameResolver implements PoolResolver {
     return undefined;
   }
 
+  /**
+   * Starts a lookup on the probe's lanes: the one place the probe's own `getaddrinfo` is asked. In
+   * gate mode a name avoided by now (D27) does not start here (`#offProbe`).
+   */
   #run(pending: Pending): void {
+    if (this.#gate !== undefined && this.#offProbe(this.#gate, pending)) return;
     pending.state = 'running';
     pending.startedAt = this.#now();
     pending.startedSeq = this.#events;
@@ -2595,9 +2607,44 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
+   * D27 as a lookup leaves the probe's queues to start (`#run`): one for a name avoided by now is
+   * not started. It goes to the helper, unvouched, as `#start` sends an avoided name, while the
+   * helper can ask it; it fails its checks at once (`RESOLVER_FAULT`) as `#fallBack` fails one,
+   * when the helper cannot or the name is poison; and once the probe is stopping it is settled as
+   * the stop settles the helper's. True when the lookup was moved or settled.
+   *
+   * Checked here rather than where lookups are queued, because a name becomes avoided while its
+   * lookup waits: a crash of the name's other family in the helper, a poison mark or a suspect
+   * comes at any time, and every path to the probe's lanes (a route at the ask, a walk's verdict,
+   * a sample, a fall-back, Check now's promotion) ends in this start. It is the state at the moment
+   * `getaddrinfo` would be asked that D27 is about, and only here is that moment.
+   */
+  #offProbe(gate: Gate, pending: Pending): boolean {
+    const entry = pending.entry;
+    if (!this.#avoided(gate, entry)) return false;
+    const refusal = this.#stopped ? stopping(entry.host) : this.#gateRefusal(entry);
+    if (refusal !== undefined) {
+      gate.routed.faulted += 1;
+      this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
+      return true;
+    }
+    // A sample out for its zone is no longer (D20): it is not asked on the probe's lanes.
+    if (pending.route === 'sampled') gate.check?.sampledEnded(pending.key, pending);
+    pending.route = 'unvouched';
+    pending.pool = 'helper';
+    this.#logger.debug(
+      { host: entry.host, family: entry.family, key: pending.key },
+      'a lookup queued on the probe’s lanes for a name the probe may no longer ask: moved to the lookup helper',
+    );
+    this.#enqueue(pending);
+    return true;
+  }
+
+  /**
    * Why gate mode fails a name's check at once rather than queue a lookup for it, or undefined
    * (§1.3 row 0, S2's names kept off the probe's lanes): a poison name in any state, and while the
-   * helper rests or is down, a name the probe's own `getaddrinfo` must not be asked for.
+   * helper rests or is down, a name the probe's own `getaddrinfo` must not be asked for (`#avoided`,
+   * a suspect included).
    */
   #gateRefusal(entry: Entry): string | undefined {
     const gate = this.#gate;
@@ -2612,10 +2659,7 @@ export class NameResolver implements PoolResolver {
       );
     }
     const state = gate.helper.routeState();
-    if (
-      (state === 'resting' || state === 'down') &&
-      gate.helper.avoidsSystem(entry.host, entry.family)
-    ) {
+    if ((state === 'resting' || state === 'down') && this.#avoided(gate, entry)) {
       return (
         `the probe’s resolver does not ask its own getaddrinfo for ${entry.host}: the lookup ` +
         `helper failed while asking for it lately, and is ${state === 'resting' ? 'resting' : 'not answering'}`
@@ -2971,9 +3015,7 @@ export class NameResolver implements PoolResolver {
       return;
     }
     if (error.reason === 'stop') {
-      this.#settle(pending, {
-        passed: { code: RESOLVER_FAULT, why: `the probe is stopping: ${host} was not answered` },
-      });
+      this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: stopping(host) } });
       return;
     }
     const stuck = pending.stuck || error.stuck;
@@ -3149,9 +3191,7 @@ export class NameResolver implements PoolResolver {
           pending.token = undefined;
         }
         const refusal =
-          which === 'stopped'
-            ? `the probe is stopping: ${pending.entry.host} was not answered`
-            : this.#gateRefusal(pending.entry);
+          which === 'stopped' ? stopping(pending.entry.host) : this.#gateRefusal(pending.entry);
         if (refusal !== undefined) {
           gate.routed.faulted += 1;
           this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });

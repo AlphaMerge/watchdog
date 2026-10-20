@@ -13473,6 +13473,83 @@ because each is a decision rather than a defect:
         - **S6's re-check gaps are closed before the cut.** The D27 invariant is on the design's
           never-cut list: an avoided name started from the probe's queues (`#pumpProbe`), and an
           avoided name settled after `stop()` with the probe's pool.
+      - **The gate track's second round built** 2026-10-20, on `feat/p432-gate-r2` (on
+        `integ/r5-1019`, `a95c3302`), for the coordinator to land. It closes S6's re-check gaps,
+        and `P-453` is built with it (its outcome is under that ticket).
+        - **An avoided name never starts on the probe's lanes** (`#run`, `#offProbe`). A lookup
+          queued there is judged by `#avoided` again as it starts. If the name is avoided by
+          then, one of three things happens:
+          - while the helper can ask it, it goes there as unvouched; a sample it was counted
+            in ends there (D20);
+          - where `#fallBack` would fail it, it fails at once with `RESOLVER_FAULT`, counted in
+            `routed.faulted`: poison in any state, or the helper down or resting;
+          - once the resolver has stopped, it is settled with the stop's words.
+        - **A walk that ends after `stop()` settles an avoided name with the stop's words**,
+          whatever its pool (`#scouted`), so it is never queued on the probe's lanes.
+        - **`#gateRefusal` reads `#avoided`.** A suspect the resolver holds now fails at once
+          while the helper is down or resting, even when the helper no longer lists it.
+        - **The slow read.** `administration.md` now says what the code does: a read of the
+          name settings that has not ended in 10 s turns the check off for now, not until
+          restart. The next look after it ends turns the check back on. A read still not ended
+          at that look turns it off until restart. `nameCheckState` 2's text in `built-in.ts`
+          names the case.
+        - **Tests, D27 at every path.**
+          - `name-resolver-check.test.ts`: a table of 24 rows. A name becomes avoided at its
+            ask, while its walk is out, or while it waits on the probe's lanes. That happens with
+            the helper up, rejoining, rejoining then down, down or resting, with the resolver
+            stopped or not, as a crash in another family or as poison. In every row it is never
+            on the probe's own `getaddrinfo`. Two more tests: a sample ends as its lookup moves,
+            and a refusal is counted in the hour's summary.
+          - `helper-lanes-model.test.ts`: LR7's I10. The probe's `getaddrinfo` port is never
+            asked for a name `avoidsSystem` names. This holds over 1,000 seeded runs of 200
+            commands, covering starts, verdicts, rejoins, pumps, stops, rests and isolation. The
+            model's losses mark every name in flight at an `exit` or `memory` loss, as the
+            helper does.
+          - `name-resolver-gate.test.ts`: N1 for a suspect while the helper is down.
+          - `FakeHelper.avoidsSystem` now meets families as the helper does.
+        - **Mutants of the resolver: 8, all killed.**
+          - `#run` without `#offProbe`: 13 tests fail, LR7's I10 and every `pump` row among them.
+          - Never refused: the `pump` rows that fail at once.
+          - No stopped branch: the stopped `pump` rows.
+          - No `sampledEnded`: the sample test.
+          - The route left as walked: `pump`, rejoining then down.
+          - No `faulted` count: the summary test.
+          - `#scouted`'s stopped branch put back to S6's: the stopped `verdict` rows.
+          - `#gateRefusal` put back to `avoidsSystem`: N1.
+        - **Runs**, on the final build. These ran beside another session's suite, not in a quiet
+          window. Prettier and eslint are clean on the changed files.
+          - The eleven targeted unit files: 948 of 948. They are `lookup-helper`, `name-resolver`,
+            `-gate`, `-check`, `-resting`, `helper-lanes-model` (at its default 1,000 runs of
+            200), `dns-check`, `forward-budget`, `name-resolution`, `lane-rule` and
+            `system-names`.
+          - The core's `lookups`: 54 of 54.
+          - Then one file at a time: `name-lookup-outage-scenario` 14 of 14, and
+            `name-resolution-process` 4 of 4.
+        - **Quiet window, not run here.** Stop `ms-server` and run
+          `./scripts/dev.sh "timeout 600 npx tsc -b"` first. Then:
+          - `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-lookup-outage-scenario.test.js"`;
+          - `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-resolution-process.test.js"`;
+          - LR7 at 30,000 runs:
+            `./scripts/dev.sh "timeout 3600 sh -c 'cd packages/probe && MS_LR7_RUNS=30000 node --test dist/test/helper-lanes-model.test.js'"`.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **One check, at the point of start, rather than one at each path that queues on the
+            probe's lanes.**
+            - A name becomes avoided while its lookup waits: a crash of its other family, a
+              poison mark, a suspect.
+            - Many paths queue a lookup there: the route at the ask, a walk's verdict, a sample,
+              the fall-back when the helper goes down or rests, Check now's promotion.
+            - Only the start is the moment `getaddrinfo` is asked, which is the moment D27 is
+              about. One check there covers every path, including any added later.
+            - The cost is one set lookup per start in gate mode.
+          - **A moved lookup goes to the helper as unvouched, even when its walk was heard.**
+            The walk vouched for the probe's lanes, which the name may no longer use. As
+            unvouched it falls back as any avoided name does when the helper goes down.
+            `#fallBack` moves only unvouched lookups, and `#gateRefusal` then fails it. Left as
+            heard, it waited out its check's bound in a queue nothing serves: the route mutant.
+          - **The D27 rows route at the probe's own 250 ms, not the file's 60 ms.** At 60 ms the
+            `verdict` row with the helper rejoining then down was routed silent in four of eight
+            mutant runs while another session's suite shared the VM. When that happens it tests
+            nothing.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
