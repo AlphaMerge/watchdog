@@ -14784,11 +14784,14 @@ because each is a decision rather than a defect:
       Not decided: whether any of them goes in before the rc.3 cut. **Done when** each is a box
       or a row of the differential, or a reason it is not is recorded here.
 
-      **P-462 outcome.** Every row is now a box or a row of the differential, and the run fails
-      unless each holds. The shapes the check is off for are boxes like `P-461`'s. The shapes it is
-      on for are rows with plans: two sequence rows of the answer rows' kind, and three of S4's
-      rows. Run 8 (`docs/findings/2026-10-20-name-gate-differential.md`, run 8) is the whole run
-      on this build, in all seven images, and its recordings are the committed ones.
+      **P-462 outcome.** Every row the ticket lists is now a box or a row of the differential, and
+      the run fails unless each holds. The list left out one of §7.5's rows, `nameserver 10.1`,
+      which run 8 did not cover; fix round 1 (below) adds its box, so every row §7.5 lists is now a
+      box or a row. The shapes the check is off for are boxes like `P-461`'s. The shapes it is on
+      for are rows with plans: two sequence rows of the answer rows' kind, and three of S4's rows.
+      Run 8 (`docs/findings/2026-10-20-name-gate-differential.md`, run 8) is the whole run on the
+      first build, in all seven images. Run 9, after fix round 1, is the whole run again, and its
+      recordings are the committed ones.
       - **Five off boxes** (`OFF_CASES`, `names-off.ts`). Each loads the policy in situ and must
         report the check off with the rule named, route a name `unvouched:off`, and ask nothing
         from the check's start to its stop:
@@ -14949,6 +14952,106 @@ because each is a decision rather than a defect:
         - no gateway;
         - the cache not primed;
         - `LOCALDOMAIN` not set.
+      - **Review, fix round 1** (2026-10-20, on `5a503ef5`): six findings, two of them the same
+        (five distinct). Every one fixed:
+        - **A look after a read-once file moved named another file** (medium). `#policyMoved`
+          fell back to the first read-once file whenever the policy was skewed and the look had
+          moved nothing. At 2.31 an edit to gai.conf logged "/etc/gai.conf changed: restart
+          ms-probe to apply it" at its look and "/etc/nsswitch.conf changed: …" at the next, five
+          seconds later. At 2.36 an edit to /etc/ld.so.preload named gai.conf. A move found while
+          the policy loaded is in no look's moves, so there the rest until restart named the first
+          file too. The policy now names its skewed files (`skewedFiles`: each read-once file whose
+          latest digest is not the one at load, in the order it reads them), and the resolver
+          marks exactly those after every look.
+        - **The skew boxes could not see it.** Each read the restart lines as the edit's look
+          ended, before the next one, and both read-once cases edited the first file read once at
+          their glibc. The box now counts the looks the policy is told of, waits after its hold for
+          a look after the edit's to end, and reads the lines again (`killed.restartSaid`,
+          `looksAfterEdit`); the verdict holds both readings to D28. A fourth case, `gai-not-first`
+          (gai.conf at Debian 11, behind nsswitch.conf), can fail it, and each case now names every
+          file read once at its glibc, so that the case goes on editing a file that is not first.
+          Against the resolver as it was before the fix, that box read
+          `["/etc/gai.conf","/etc/nsswitch.conf"]` by the run's end, as the review said.
+        - **`nameserver 10.1` had no box, no row and no reason** (medium, found twice). The
+          ticket's list left it out, and the outcome claimed every row. It is now an off box,
+          `nameserver-aton`: Debian 12, resolv.conf naming `10.1` alone, off by `resolv` ("one
+          IPv4 or IPv6 address"). Against a policy that maps `10.1` to 10.0.0.1, the box fails:
+          the check is on, and its canary asks.
+        - **Part of the partial key's world sat outside the digest** (low). The addresses the
+          server's cache held and their TTL were a constant and a literal in the replay. The row
+          now holds them (`cached: [{ name, addresses, ttl }]`), the replay primes the cache from
+          the row (`setSequencePlan`), and the digest moves with any of them. The committed
+          recordings are run 9's, under the new digest.
+        - **`respawned` was false whenever the helper rested** (low), so "no new child" was never
+          observed. The box records the helper's child (`pid`, `killedPid`, `inFlight`). Any child
+          but the one killed is a new one, whatever the state says, and a rest until restart must
+          hold no child at all.
+        - **Two docstrings in `names-off.ts`** (low). `stubOff`'s described the symlink that the
+          first narrowed run showed broken, and the header said every `P-462` case writes a hosts:
+          line with no action group. Both now say what the box does.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (fix round 1):
+        - **The resolver asks the policy which files are skewed, by name, at every look.** The
+          other way was to mark the look's moves and skip the fallback once the helper was
+          marked. But only the policy knows which read-once files differ from what this process's
+          glibc read, and a move found during load reaches no look's moves; one question covers
+          both paths. The helper says each file once, so asking at every look logs nothing more.
+        - **`nameserver 10.1` is a box, not a recorded reason**, as `LOCALDOMAIN=""` was (decision
+          7 above). The user's allowlist takes a nameserver line only as a literal, which the
+          policy reads as a dotted quad or an IPv6 address, so the check is off for `10.1`. The
+          box shows that in situ, and fails if a policy change starts taking the form. It claims
+          no wire: what glibc asks of 10.0.0.1 is not measured, since the check claims nothing for
+          it.
+        - **The cache's contents are in the row**, not in a constant the digest names beside it.
+          Then what the replay plays a row with is in the row or the world and nowhere else, so a
+          constant added later cannot sit outside the digest the same way.
+        - **The skew box counts looks by wrapping the policy's `looked`**, in the box only, and
+          waits for one more look to end, rather than sleeping for a look's period. Under load a
+          sleep can end before the look does, and the verdict needs a look after the edit's, not a
+          time.
+        - **The script's box lists are held to the claims by a unit test.** Until now, a box named
+          in one and not the other surfaced only at the end of a 73-minute run, as "not run".
+      - **Run 9**, the whole differential on this round's build, 09:56 to 10:52 UTC, not a quiet
+        run (the VM gate was at 1 at its start). It passed in all seven images with every box: the
+        same 3,008 plans as run 8 (2,170 heard, 70 silent, 768 local), 49 sequence lookups, eleven
+        off boxes and four skew boxes, each named the one build (`7cf684b8…`), which none saw
+        change. `nameserver-aton` was off by `resolv` with 0 questions asked. Each skew box had one
+        look after the edit's by its end, and the restart line for the file alone, or for none in
+        `nsswitch-reloaded`; a helper resting until restart had no child. Its recordings are the
+        committed ones, under the new answer rows' digest (`e7ed6c37…`). Its numbers are in the
+        findings, run 9.
+      - **Tests**, each run after the last change: `names-differential.test.ts` 98, 6 of them new
+        (the end of a skew box held to D28 and a look after the edit's; the script's box lists
+        held to the claims; `nameserver-aton` held to its world and its rule, and the policy
+        loaded on its world off by that rule while the same world with `10.0.0.1` is on; the
+        digest moving with a cache's addresses, TTL or names; the cache primed with the row's
+        own entries). The skew box tests now also hold the read-once list at each glibc, the
+        helper's child while it rests, and the summary line names-verify prints.
+        `name-resolver-gate.test.ts` 65, 2 new: at 2.31 an edit to gai.conf names gai.conf alone
+        at every later look, and nsswitch.conf and ld.so.preload each when they move; a skewed
+        file no look moved is the one marked, not the first read once. `system-names.test.ts`
+        444, 2 new: `skewedFiles` in the policy's order, and a move found during load named in no
+        look's moves.
+      - **Mutants: 21 on the toolchain, all killed**, each restored with `shutil.copy` and
+        `os.utime` and checked with `filecmp`, with no marker left in `dist` and `dist` newer than
+        its source after the last rebuild:
+        - the resolver as it was before the fix; its fallback to the first read-once file; the
+          first skewed file only; the mark before the policy's look; `skewedFiles` without its
+          digest comparison, or reversed;
+        - the end's restart lines unchecked; the look after the edit's unchecked; the child of a
+          resting helper unchecked; the read-once list unchecked; `gai-not-first` in Debian 12,
+          where gai.conf is first; the box missing from the script;
+        - `nameserver-aton`'s world unchecked, or read through `nameserversOf`; its rule or its
+          words changed; its line missing from the script; the policy mapping `10.1` to 10.0.0.1;
+        - the cache primed with a TTL of its own, or not primed; the digest without the cache.
+
+        Two did not compile as first written (`false &&` narrowed a variable to `undefined`) and
+        were rewritten.
+      - **Mutants in the boxes: two, both killed**, in one narrowed run of the off and skew
+        boxes: the resolver before the fix (`gai-not-first` read
+        `["/etc/gai.conf","/etc/nsswitch.conf"]` by the end, while the other three skew boxes
+        passed), and the policy taking `10.1` (`nameserver-aton` had the check on). Each failed
+        the run with its own `DISAGREES` line, and every box not mutated passed. A narrowed run
+        before them, of the same boxes on this build, had every box pass.
 - [x] **P-463 — names in flight when the lookup helper goes quiet are not kept off the probe's
       lanes** · XS · P-432, P-453 · Filed 2026-10-20 by `P-453`. D27 keeps every name in flight
       at an `exit` or `memory` loss off the probe's own `getaddrinfo` until ten minutes after

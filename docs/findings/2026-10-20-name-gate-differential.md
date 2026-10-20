@@ -7,8 +7,9 @@ adds the walk's wire, the regressions, the answer rows, the budget boxes and the
 check off (`P-460`, `P-461`). Runs 5 and 6 follow the review of run 4. Run 7 follows the second
 fix round, which put the answer rows' world in their digest. Run 8, on `feat/p432-s8-r3`, adds
 §7.5's other rows (`P-462`): five more boxes with the check off, two sequence rows, three of S4's
-rows and three boxes with a file edited mid-run. Its recordings are the committed ones. Built
-first, then:
+rows and three boxes with a file edited mid-run. Run 9 follows the review of run 8: one more box
+with the check off, for `nameserver 10.1`, and a fourth skew box. Its recordings are the committed
+ones. Built first, then:
 
 ```
 MS_DIFF_WRITE=1 ./scripts/smoke/name-gate-differential.sh
@@ -320,8 +321,8 @@ server glibc started at (its wire and OPT flags with it).
 2026-10-20 (07:45 to 08:58 UTC), on `feat/p432-s8-r3` (on `1b6bd68a`), on the bases run 4 pinned.
 Built first, then the whole run, as above, bounded at 150 minutes.
 
-**What it adds.** Each of §7.5's rows that `P-460` and S4 had left out is now a row or a box, and
-the run fails unless each holds:
+**What it adds.** Each of the §7.5 rows that `P-462` listed, which `P-460` and S4 had left out, is
+now a row or a box, and the run fails unless each holds:
 
 | §7.5's row | Played as | What it must show |
 | --- | --- | --- |
@@ -334,6 +335,9 @@ the run fails unless each holds:
 | a partial key | sequence row `sequence-partial-key` | four lookups through one check, each heard or silent as its key is |
 | `_gateway` for family 6 on a v4-only host | sequence row `sequence-gateway-v4-only` | nothing asked for families 4 and 0, `_gateway` AAAA once for 6 |
 | mid-run edits, then a helper SIGKILL | skew boxes `gai` (Debian 12), `nsswitch-frozen` (Debian 11) and `nsswitch-reloaded` (Debian 12) | D28's rest until restart for a file read once, and none for one reloaded |
+
+The list missed one of §7.5's rows, `nameserver 10.1`, which run 8 therefore did not cover; run 9
+adds its box.
 
 Every off box is held as `P-461`'s are: the policy loaded in situ, the check off by the rule
 named, a name routed `unvouched:off`, and nothing asked from the check's start to its stop.
@@ -434,12 +438,72 @@ the same answer rows, sequence rows and world (`782847aa…`), and the same poli
   `files resolve [!UNAVAIL=return] dns myhostname`.
 - **The three skew boxes**, as claimed:
   - In `gai` and `nsswitch-frozen` the check went off by `skew`, naming the file ("changed since
-    ms-probe started … the check is off until ms-probe restarts"), and the restart line was
-    logged once, for that file. After the SIGKILL the helper rested with no timed rest, at mode
-    3 with trouble 1 and one resting line, and the next name was answered with 0 lookups to the
-    helper.
+    ms-probe started … the check is off until ms-probe restarts"), and the restart line was logged
+    once, for that file, as the edit's look ended. That was read before any later look, and each
+    case edited the first file read once at its glibc, so it could not fail for the fallback the
+    review found (run 9). After the SIGKILL the helper rested with no timed rest, at mode 3 with
+    trouble 1 and one resting line, and the next name was answered with 0 lookups to the helper.
   - In `nsswitch-reloaded` the check went off by `skew` with no restart line. After the SIGKILL
     the helper was up in a new child, at mode 2 with trouble 0, and took the next name.
+
+## Run 9: the review's fixes (`P-462` fix round 1)
+
+2026-10-20 (09:56 to 10:52 UTC), on `feat/p432-s8-r3`, on the bases run 4 pinned. Built first,
+then the whole run, as above, bounded at 150 minutes. Not a quiet run: the VM gate was at 1 when it
+started, and the host's load average at 14.
+
+**What the review found, and what changed.**
+- **A look after a read-once file moved named another file.** When the policy was skewed and a
+  look had moved nothing, ms-probe marked the helper with the first file read once. At glibc 2.31
+  an edit to gai.conf logged "/etc/gai.conf changed: restart ms-probe to apply it" at its look, and
+  "/etc/nsswitch.conf changed: …" at the next, five seconds later. ms-probe now marks exactly the
+  files the policy names as skewed, at every look.
+- **Run 8's skew boxes could not have seen it.** Each read the restart lines as the edit's look
+  ended, and each read-once case edited the first file read once at its glibc. Each box now waits
+  for a look after the edit's to end and reads the lines again, and a fourth box, `gai-not-first`,
+  edits gai.conf at Debian 11, where nsswitch.conf comes first. Against ms-probe as it was, that box
+  read `["/etc/gai.conf","/etc/nsswitch.conf"]` by the run's end (a narrowed run, `P-462` in
+  `TASKS.md`).
+- **`nameserver 10.1` had no box.** It is now the off box `nameserver-aton`: Debian 12, resolv.conf
+  naming `10.1` alone. The policy reads a nameserver line only as a dotted quad or an IPv6 address,
+  so the check is off for it, by `resolv`.
+- **The partial key's cache sat outside the digest.** The addresses it held and their TTL are now
+  in the row, so the answer rows' digest names them, and the replay primes the cache from the row.
+  The digest moved, so the recordings had to be made again: this run's are the committed ones.
+- **A helper resting until restart is held to having no child**, the one killed included, and any
+  child but the one killed counts as a new one whatever the helper's state says.
+
+**Run 9 passed**, in all seven images and with every box. Each image played 263 rows (254 on
+Rocky 8), 3,008 plans in all: 2,170 heard, 70 silent and 768 local, the same plans as run 8.
+Every image's run and every box's named the same build (`7cf684b8…`), and none saw it change.
+Every image's run named the same rows file (`330e92b9…`), the same answer rows, sequence rows and
+world (`e7ed6c37…`), and the same policy build (`ae2c892f…`). The recordings are rewritten from
+it: 3,008 recordings, 42 answer recordings and 49 sequence recordings.
+- **Pace.** Each image's replay took 350–726 s from its box's start.
+- **Walks.** A heard walk took a median of 2.2 ms, 18.4 ms at the 99th percentile and at most
+  51.8 ms. A silent one took 250–262 ms. glibc took at most 164 ms on a plan whose walk was heard.
+  Where the walk was silent and glibc slow, glibc took at least 1,009 ms. A `local` plan returned in
+  at most 85 ms.
+- **The answer rows and the sequence rows** returned what each claims in every image. The partial
+  key's cached names returned `answer:2` in 7–33 ms on the probe's lanes, and its uncached ones
+  `EAI_AGAIN` after 1,007–1,035 ms in the helper. The `_gateway` lookups returned `answer:1` in
+  6–14 ms, every one in the helper.
+- **The budget boxes.** dnsmasq held 6, 8 and 10 distinct questions at once (`system`, gate, and
+  gate after a helper SIGKILL; 18, 20 and 22 in the window), and its table was never full.
+  systemd-resolved held 9 in `system` and 9 in gate mode (12 and 14 in all).
+- **The eleven off boxes**: each off by its rule, the check started and routing `unvouched:off`,
+  and 0 questions asked. In `nameserver-aton`, resolv.conf was `nameserver 10.1` alone, and the
+  check was off by `resolv`: "resolv.conf line 1: a nameserver line names one IPv4 or IPv6
+  address, no scope, and nothing after it".
+- **The four skew boxes**, as claimed, each with one look after the edit's by its end:
+  - In `gai`, `gai-not-first` and `nsswitch-frozen` the check went off by `skew` naming the file,
+    and the restart line was logged for that file alone, both as the edit's look ended and by the
+    run's end. The policy read gai.conf and /etc/ld.so.preload as read once at 2.36, and
+    nsswitch.conf, gai.conf and /etc/ld.so.preload at 2.31. After the SIGKILL the helper rested
+    with no timed rest and no child, at mode 3 with trouble 1, and the next name was answered with
+    0 lookups to the helper.
+  - In `nsswitch-reloaded` the check went off by `skew` with no restart line, then or later. After
+    the SIGKILL the helper was up in a new child, at mode 2 with trouble 0, and took the next name.
 
 ## Through systemd-resolved
 
@@ -466,9 +530,9 @@ upstream.
 ## Not measured here
 
 - The check's own OPT record: c-ares sends none, and run 4 asserts that it does not (`P-454`).
-- What glibc asks under `resolve`, `sss` or `mdns4_minimal`, or with the stub refused: the check
-  is off for each, so each is a box that claims no wire, only the check off by its rule and
-  nothing asked (`P-461`, `P-462`).
+- What glibc asks under `resolve`, `sss` or `mdns4_minimal`, with the stub refused, or of a server
+  named `10.1` (10.0.0.1 to glibc): the check is off for each, so each is a box that claims no
+  wire, only the check off by its rule and nothing asked (`P-461`, `P-462`).
 - Timings: no run here is a quiet one, and none needs to be. The 1 s line is far from where load
   could move a plan across it: glibc took at most 137 ms on a plan whose walk was heard (232 ms in
   run 8, on a loaded VM), and load only slows it; where the walk was silent and glibc slow, glibc took at least 1,009 ms, waiting
