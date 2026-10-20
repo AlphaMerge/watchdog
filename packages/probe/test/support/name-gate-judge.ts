@@ -12,7 +12,9 @@ import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
  *   most q × 6, P-426's six lanes; gate at most q × 6 + 12, the walk's heard and discovery pools
  *   beside the six tokens (D16). In the arms with a helper loss (P1, P2) the peak is read in
  *   windows cut at each loss and `LOSS_WINDOW_MS` after it: those windows may hold the transient
- *   8 × q more, and every other one is held to q × 6 + 12, as the design's bound table says;
+ *   8 × q more, and every other one is held to q × 6 + 12, as the design's bound table says. The
+ *   windows run on from the forwarder's start to the arm's end with no stretch unread, and a read
+ *   that failed fails the arm, since the stretch it ends was judged against nothing;
  * - no question dropped at the forwarder for want of a slot;
  * - the walk's questions to each server within D19's bucket: 20 at once, refilled at 10 a second
  *   (one more for the time between a token taken and its datagram sent). Check now's walk is cut
@@ -72,6 +74,13 @@ export interface WorldFacts {
    * `LOSS_WINDOW_MS` after it, from the forwarder's start to the arm's end.
    */
   readonly peakWindows?: readonly PeakWindow[];
+  /**
+   * Where those windows must reach: the arm's end, on their clock, as the last read was asked.
+   * A last read that failed leaves the stretch before it judged against nothing, not a gap.
+   */
+  readonly peakWindowsEndMs?: number;
+  /** Why a read of the forwarder's peak failed, if one did: its stretch was judged against nothing. */
+  readonly peakReadFailed?: string;
   /** Questions the forwarder dropped with every slot held. */
   readonly dropped: number;
   /** The walk's questions, by server: when each was sent, in ms. */
@@ -109,15 +118,24 @@ export interface WorldFacts {
     readonly hungAfterMs: number | undefined;
     readonly upAfterMs: number | undefined;
   };
-  /** P3: the stall, and what the probe's lanes said of it. */
+  /**
+   * P3: the stall, begun as a probe-lane lookup of an answering name sent its question, and what
+   * the probe's lanes said of it. The case D25's marks must survive is that lookup's reply waiting
+   * in the probe's socket, unread, while its stuck timer comes due: its reply sent before the stall
+   * ended, the lookup not settled when the stall began, and answered only once it was over. Each
+   * of the three is measured, since each can fail apart from the others.
+   */
   readonly stall?: {
     readonly ms: number;
+    /** The reply to that lookup's question was sent before the stall ended, by the simulator's log. */
+    readonly replySent: boolean;
+    /** The lookup was still open on the probe's lanes as the stall began: its reply not yet read. */
+    readonly unsettledAtStart: boolean;
     /**
-     * The reply to the question the stall began on (a probe-lane lookup of an answering name) was
-     * sent before the stall ended, by the simulator's log: so it waited in the probe's socket,
-     * unread, while its lookup's stuck timer came due, the case D25's marks must survive.
+     * When the lookup was answered, in ms from the stall's end: below 0 is during it, undefined
+     * never (or it failed).
      */
-    readonly replyWaited: boolean;
+    readonly answeredAfterMs: number | undefined;
     readonly unsafeMarks: number;
     readonly passedStuck: number;
   };
@@ -301,6 +319,11 @@ function peaksHeld(facts: WorldFacts, said: (violation: string) => void): void {
     return;
   }
   if (windows.length === 0) said('no window of the forwarder’s peak was read');
+  if (facts.peakReadFailed !== undefined) {
+    said(
+      `a read of the forwarder’s peak failed, so its stretch was judged against nothing: ${facts.peakReadFailed}`,
+    );
+  }
   let from = 0;
   for (const w of windows) {
     if (w.fromMs !== from)
@@ -317,6 +340,14 @@ function peaksHeld(facts: WorldFacts, said: (violation: string) => void): void {
         `the transient was allowed at ${stretch(w)}, past the ${String(LOSS_WINDOW_MS)} ms after a loss it lasts`,
       );
     }
+  }
+  // The last stretch, to the arm's end: a last read that failed pushes no window and leaves no gap.
+  const end = facts.peakWindowsEndMs;
+  if (end === undefined) said('the arm’s end was not measured for the forwarder’s peak');
+  else if (from !== end) {
+    said(
+      `the forwarder’s peak was not read from ${String(from)} ms to the arm’s end at ${String(end)} ms`,
+    );
   }
 }
 
@@ -403,9 +434,22 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
       said('the stall was not begun: no probe-lane lookup of an answering name sent its question');
       return;
     }
-    if (!stall.replyWaited) {
+    // The case D25 must survive, set up: the reply sent, unread as the stall began, read after it.
+    if (!stall.replySent) {
       said(
-        'the stall’s own lookup had no reply waiting through it: the case D25 must survive was not set up',
+        'no reply to the stall’s own question was sent before it ended: the case D25 must survive was not set up',
+      );
+    }
+    if (!stall.unsettledAtStart) {
+      said(
+        'the stall’s own lookup had settled before the stall began: its reply was read, not left waiting',
+      );
+    }
+    if (stall.answeredAfterMs === undefined) {
+      said('the stall’s own lookup was never answered: its reply was not the one waiting');
+    } else if (stall.answeredAfterMs < 0) {
+      said(
+        `the stall’s own lookup was answered ${String(Math.round(-stall.answeredAfterMs))} ms before the stall ended`,
       );
     }
     if (stall.unsafeMarks > 0)

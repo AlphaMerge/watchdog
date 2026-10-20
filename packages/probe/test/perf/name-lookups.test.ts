@@ -9,7 +9,7 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
-import { DnsSimulator, replies, type DnsBehaviour } from '@ms/simulators';
+import { DnsSimulator, replies, type DnsBehaviour, type DnsQueryRecord } from '@ms/simulators';
 import { systemResolve, type ResolvedAddress } from '@ms/sensors';
 import { lookupsBesideThePool, ProbeHealthReporter } from '../../src/health/report.js';
 import { AnswerFile, answerFilePath } from '../../src/resolver/answer-file.js';
@@ -1132,10 +1132,18 @@ interface WorldRecord {
   silencedAt?: number;
   stopped?: { downAt?: number; hungAt?: number; upAt?: number; at: number };
   /**
-   * P3: the stall, the name whose question began it, and when it began and ended on the
-   * simulator's clock (the wall's, as its log has it), with the replies it sent meanwhile.
+   * P3: the stall, the name whose question began it, when it began and ended (this thread's
+   * `performance.now()`), that name's lookups open on the probe's lanes as it began, and the
+   * replies the simulator sent meanwhile, to every client.
    */
-  stall?: { ms: number; host: string; from: number; to: number; repliesDuring: number };
+  stall?: {
+    ms: number;
+    host: string;
+    from: number;
+    to: number;
+    flights: readonly LaneFlight[];
+    repliesDuring: number;
+  };
   kills: { at: number; heldBack: boolean; probeRss: number }[];
   helperRssAt60s?: number | undefined;
 }
@@ -1232,28 +1240,13 @@ const WORLD_ARMS: readonly WorldArm[] = [
       const stopped: NonNullable<WorldRecord['stopped']> = { at: performance.now() };
       record.stopped = stopped;
       killChild(names, 'SIGSTOP');
-      // The judge says which of the three never came: a bound passed here is not a failure.
+      // Its losses: the lookups detached as it goes quiet, then the child replaced (D26). The
+      // SIGSTOP itself asks nothing again. The judge says which of the three never came: a bound
+      // passed here is not a failure.
       await pollWithin(
         40_000,
         'the stopped child replaced and the next up',
-        () => {
-          const now = performance.now();
-          const stats = helper.stats();
-          // Its losses: the lookups detached as it goes quiet, then the child replaced (D26). The
-          // SIGSTOP itself asks nothing again.
-          if (stopped.downAt === undefined && stats.route !== 'up') {
-            stopped.downAt = now;
-            void peaks?.loss();
-          }
-          if (stopped.hungAt === undefined && stats.lossesByReason.hung > 0) {
-            stopped.hungAt = now;
-            void peaks?.loss();
-          }
-          if (stopped.hungAt !== undefined && stopped.upAt === undefined && stats.state === 'up') {
-            stopped.upAt = now;
-          }
-          return stopped.upAt !== undefined;
-        },
+        stoppedLook(() => helper.stats(), stopped, peaks),
         50,
       ).catch(() => undefined);
     },
@@ -1267,25 +1260,29 @@ const WORLD_ARMS: readonly WorldArm[] = [
     events: async ({ at, probe, record, sim }) => {
       await at(40_000);
       // Held from the moment a probe-lane lookup of an answering name has sent its question, so
-      // that its reply is in the socket, and its stuck timer due, all through the stall. None in
-      // the next 10 s is a run the judge fails, and so is one whose reply did not come meanwhile:
-      // the simulator answers in its own thread, so its log says when.
+      // that its reply is in the socket, and its stuck timer due, all through the stall. The judge
+      // fails a run with none in the next 10 s, and one whose lookup's reply was not sent before
+      // the stall ended (the simulator answers in its own thread, so its log says when), had been
+      // read before the stall began (the send's callback can come after the reply's read), or was
+      // not read after it.
       const triggered = new Promise<void>((resolve) => {
         probe.onSent = (group, host) => {
           if (group !== 'answering' || record.stall !== undefined) return;
           probe.onSent = undefined;
+          // Its name's lookups open as the stall begins, read again for how each settled.
+          const flights = probe.openFor(host);
           const repliesBefore = sim.repliesSent;
           const from = performance.now();
           while (performance.now() - from < STALL_MS) {
             // The probe's main thread, busy: nothing else in this process runs.
           }
           const to = performance.now();
-          // On the simulator's clock, as its worker reads it: the wall's, from each thread's origin.
           record.stall = {
             ms: to - from,
             host,
-            from: performance.timeOrigin + from,
-            to: performance.timeOrigin + to,
+            from,
+            to,
+            flights,
             repliesDuring: sim.repliesSent - repliesBefore,
           };
           resolve();
@@ -1371,11 +1368,21 @@ function worldZones(arm: WorldArm): Record<string, DnsBehaviour> {
 /** The arms whose zone b is silent from the start. */
 const WORLD_ARMS_SILENT = new Set(['zone', 'partial', 'forwarder', 'P1', 'P2', 'P3']);
 
+/** One lookup on the probe's lanes: when it began, and when and how it settled. */
+interface LaneFlight {
+  readonly startedAt: number;
+  settledAt?: number;
+  /** With addresses; false for a failure. */
+  answered?: boolean;
+}
+
 /** The probe's own lanes' `getaddrinfo`: the model, counted by group, and never the crash name. */
 class ProbeSide {
   readonly calls: Partial<Record<Group, number>> = {};
   readonly peak: Partial<Record<Group, number>> = {};
   readonly #running: Partial<Record<Group, number>> = {};
+  /** Each name's lookups begun and not yet settled. */
+  readonly #open = new Map<string, Set<LaneFlight>>();
   /** When each name was answered with addresses. */
   readonly answeredAt = new Map<string, number[]>();
   crashes = 0;
@@ -1399,6 +1406,15 @@ class ProbeSide {
   }
 
   /**
+   * `host`'s lookups open on the probe's lanes now: begun, and not settled. A lookup settles in
+   * the turn its reply is read (the model's promise and this side's continuation run before the
+   * next I/O callback), so one read before a later callback is no longer here.
+   */
+  openFor(host: string): readonly LaneFlight[] {
+    return [...(this.#open.get(host) ?? [])];
+  }
+
+  /**
    * Ends every lookup on the probe's lanes now, and every one asked from here on at once: the
    * resolver's `stop` lets its lane lookups run, and starts the next it has queued as each ends.
    */
@@ -1416,15 +1432,71 @@ class ProbeSide {
     }
     this.#running[group] = (this.#running[group] ?? 0) + 1;
     this.peak[group] = Math.max(this.peak[group] ?? 0, this.#running[group]);
+    const flight: LaneFlight = { startedAt: performance.now() };
+    const open = this.#open.get(host) ?? new Set<LaneFlight>();
+    open.add(flight);
+    this.#open.set(host, open);
     try {
       const found = await this.#model.lookup(host, family);
+      const now = performance.now();
+      flight.settledAt = now;
+      flight.answered = true;
       const times = this.answeredAt.get(host) ?? [];
-      times.push(performance.now());
+      times.push(now);
       this.answeredAt.set(host, times);
       return found.map(({ address, family: f }) => ({ address, family: f === 6 ? 6 : 4 }));
+    } catch (error) {
+      flight.settledAt = performance.now();
+      flight.answered = false;
+      throw error;
     } finally {
+      open.delete(flight);
+      if (open.size === 0 && this.#open.get(host) === open) this.#open.delete(host);
       this.#running[group] = (this.#running[group] ?? 1) - 1;
     }
+  };
+}
+
+/** Between this thread's wall clock and the simulator worker's: each reads its own `timeOrigin`. */
+const THREAD_CLOCK_SLACK_MS = 50;
+
+/**
+ * P3's setup, as measured (the judge's `stall`): the reply to its name's question sent by the
+ * simulator before the stall ended, by its log on the wall's clock; its lookup still open on the
+ * probe's lanes as the stall began; and that lookup answered, and when, from the stall's end.
+ */
+function stallSetUp(
+  stall: NonNullable<WorldRecord['stall']>,
+  queries: readonly DnsQueryRecord[],
+): Pick<
+  NonNullable<WorldFacts['stall']>,
+  'ms' | 'replySent' | 'unsettledAtStart' | 'answeredAfterMs'
+> {
+  const wall = (at: number): number => performance.timeOrigin + at;
+  const { flights } = stall;
+  // Asked since its lookup began; with none open, which the judge fails, in the second before.
+  const since =
+    flights.length > 0
+      ? wall(Math.min(...flights.map(({ startedAt }) => startedAt))) - THREAD_CLOCK_SLACK_MS
+      : wall(stall.from) - 1_000;
+  const answeredAt = flights.flatMap(({ answered, settledAt }) =>
+    answered === true && settledAt !== undefined ? [settledAt] : [],
+  );
+  return {
+    ms: stall.ms,
+    replySent: queries.some(
+      (query) =>
+        query.client.address === PROBE_SOURCE &&
+        query.qname.toLowerCase() === stall.host.toLowerCase() &&
+        query.at >= since &&
+        query.reply !== undefined &&
+        query.reply.at <= wall(stall.to),
+    ),
+    unsettledAtStart: flights.length > 0,
+    answeredAfterMs:
+      flights.length > 0 && answeredAt.length === flights.length
+        ? Math.min(...answeredAt) - stall.to
+        : undefined,
   };
 }
 
@@ -1566,11 +1638,18 @@ const realClock: PeakClock = {
  * that the stretches a loss's transient may fill are judged apart from the rest. The arms with a
  * helper loss (P1, P2). A loss's window is its own until its end, wherever the timer that ends it
  * fires: the next window takes the transient only from another loss whose window ends later.
+ *
+ * A loss the arm makes itself (P1's kill) is cut at once (`loss`): the read is asked before
+ * anything the loss sets off can be seen. A loss a poll sees (P2's detach) may have set off its
+ * transient before the poll looked, and before the read the cut asks for, so the poll reads first
+ * (`cut`) and looks after, and a loss it sees takes the window that read closed (`lossSeen`).
  */
 class PeakWindows {
   readonly windows: PeakWindow[] = [];
-  /** Why a read failed, if one did: the judge then has a gap to name. */
+  /** Why a read failed, if one did: the judge fails the arm on it. */
   failed: string | undefined;
+  /** Where `finish` cut the last window: the arm's end, which the windows must reach. */
+  endMs: number | undefined;
   readonly #read: () => Promise<number>;
   readonly #clock: PeakClock;
   readonly #windowMs: number;
@@ -1607,42 +1686,154 @@ class PeakWindows {
     return this.#clock.now() - this.#origin;
   }
 
-  /** A loss now: the window before it ends, and one with the transient runs `windowMs`. */
-  loss(): Promise<void> {
-    const at = this.#now();
+  /** A loss's window, to `windowMs` from `at`: its timer cuts it there. */
+  #lossUntil(at: number): void {
     const until = at + this.#windowMs;
     this.#transientUntil = Math.max(this.#transientUntil, until);
     const timer = this.#clock.after(this.#windowMs, () => {
       this.#timers.delete(timer);
-      // A timer may fire a little early on the clock: this window was this loss's to its end.
-      void this.#cut(this.#now(), this.#transientUntil > until);
+      // A timer may fire a little early on the clock: this window was this loss's to its end. The
+      // next is a loss's only if one made by now ends later: one made after opens its own.
+      const later = this.#transientUntil > until;
+      void this.#cut(this.#now(), () => later);
     });
     this.#timers.add(timer);
-    return this.#cut(at, true);
+  }
+
+  /** A loss now: the window before it ends, and one with the transient runs `windowMs`. */
+  loss(): Promise<void> {
+    const at = this.#now();
+    this.#lossUntil(at);
+    return this.#cut(at, () => true);
+  }
+
+  /**
+   * A read now and no loss: the next window keeps the transient only while it is inside a loss's
+   * window. For a poll that reads before each look (`lossSeen`).
+   */
+  cut(): Promise<void> {
+    const at = this.#now();
+    const until = this.#transientUntil;
+    return this.#cut(at, (closing) => closing && at < until);
+  }
+
+  /**
+   * A loss a poll saw, the poll reading (`cut`) before each look. The loss came after the look
+   * before, which came after the read before this one: so of the windows read, only the last can
+   * hold any of its transient, and that one is the loss's too. The window open now runs with the
+   * transient for `windowMs` from now. A last read that failed left a gap, which the judge names.
+   */
+  lossSeen(): Promise<void> {
+    this.#lossUntil(this.#now());
+    this.#reads = this.#reads.then(() => {
+      const last = this.windows.at(-1);
+      if (last !== undefined && last.toMs === this.#from) {
+        this.windows[this.windows.length - 1] = { ...last, transient: true };
+      }
+      this.#transient = true;
+    });
+    return this.#reads;
   }
 
   /** The last window, to now, once the arm is over; the windows, in order. */
   async finish(): Promise<readonly PeakWindow[]> {
     for (const timer of this.#timers) timer.cancel();
     this.#timers.clear();
-    await this.#cut(this.#now(), false);
+    const at = this.#now();
+    this.endMs = at;
+    await this.#cut(at, () => false);
     return this.windows;
   }
 
-  /** Ends the open window at `at`, read as the gauge has it, and opens the next. */
-  #cut(at: number, nextTransient: boolean): Promise<void> {
+  /**
+   * Ends the open window at `at`, read as the gauge has it, and opens the next, with the transient
+   * as `next` says given the window it closes, once the reads before it are in.
+   */
+  #cut(at: number, next: (closing: boolean) => boolean): Promise<void> {
     this.#reads = this.#reads.then(async () => {
+      const closing = this.#transient;
       try {
         const peak = await this.#read();
-        this.windows.push({ fromMs: this.#from, toMs: at, peak, transient: this.#transient });
+        this.windows.push({ fromMs: this.#from, toMs: at, peak, transient: closing });
       } catch (error) {
         this.failed ??= String(error);
       }
       this.#from = at;
-      this.#transient = nextTransient;
+      this.#transient = next(closing);
     });
     return this.#reads;
   }
+}
+
+/**
+ * The forwarder's peak for the judge: the gauge's for the run, or, with windows once `finish` has
+ * cut the last, each window's, where they must reach, and why a read failed if one did.
+ */
+function peakFacts(
+  gaugePeak: number,
+  peaks: PeakWindows | undefined,
+): Pick<WorldFacts, 'peakHeld' | 'peakWindows' | 'peakWindowsEndMs' | 'peakReadFailed'> {
+  if (peaks === undefined) return { peakHeld: gaugePeak };
+  return {
+    // With windows, the gauge's own peak is the last window's: the run's is theirs.
+    peakHeld: Math.max(0, ...peaks.windows.map(({ peak }) => peak)),
+    peakWindows: peaks.windows,
+    ...(peaks.endMs === undefined ? {} : { peakWindowsEndMs: peaks.endMs }),
+    ...(peaks.failed === undefined ? {} : { peakReadFailed: peaks.failed }),
+  };
+}
+
+/** What P2's poll reads of the helper. */
+type StoppedStats = Pick<LookupHelperStats, 'route' | 'state' | 'lossesByReason'>;
+
+/**
+ * P2's look at the stopped child, once a poll: the route leaving `up` (the detach), the `hung`
+ * loss and the next child up, each stamped when seen. A loss is seen after the resolver has acted
+ * on it: at the detach the helper's queued lookups fall back to the probe's lanes at once (D24),
+ * while the stopped child's questions are still held at a forwarder that merges per client, so
+ * the transient can form before the poll looks. So until the `hung` loss each look reads the
+ * forwarder's peak first, and a loss it sees takes the window that read closed
+ * (`PeakWindows.lossSeen`): the transient is allowed from at most a poll and a read's round trip
+ * before the loss was seen, and no earlier.
+ */
+function stoppedLook(
+  stats: () => StoppedStats,
+  stopped: NonNullable<WorldRecord['stopped']>,
+  peaks: PeakWindows | undefined,
+  now: () => number = () => performance.now(),
+): () => Promise<boolean> {
+  return async () => {
+    if (stopped.hungAt === undefined) await peaks?.cut();
+    const at = now();
+    const seen = stats();
+    if (stopped.downAt === undefined && seen.route !== 'up') {
+      stopped.downAt = at;
+      await peaks?.lossSeen();
+    }
+    if (stopped.hungAt === undefined && seen.lossesByReason.hung > 0) {
+      stopped.hungAt = at;
+      await peaks?.lossSeen();
+    }
+    if (stopped.hungAt !== undefined && stopped.upAt === undefined && seen.state === 'up') {
+      stopped.upAt = at;
+    }
+    return stopped.upAt !== undefined;
+  };
+}
+
+/**
+ * The windows as printed: each run of windows with the transient or without, as one stretch with
+ * its most (P2's poll reads every 50 ms until its `hung` loss).
+ */
+function stretches(windows: readonly PeakWindow[]): PeakWindow[] {
+  const merged: PeakWindow[] = [];
+  for (const w of windows) {
+    const last = merged.at(-1);
+    if (last !== undefined && last.toMs === w.fromMs && last.transient === w.transient) {
+      merged[merged.length - 1] = { ...last, toMs: w.toMs, peak: Math.max(last.peak, w.peak) };
+    } else merged.push(w);
+  }
+  return merged;
 }
 
 interface Routed {
@@ -2110,13 +2301,8 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       mode,
       checkOn: !CHECK_OFF,
       q: Q,
-      // With windows, the gauge's own peak is the last window's: the run's is theirs.
-      peakHeld:
-        peakWindows === undefined
-          ? (gauge?.peakHeldByClass['other'] ?? 0)
-          : Math.max(0, ...peakWindows.map(({ peak }) => peak)),
+      ...peakFacts(gauge?.peakHeldByClass['other'] ?? 0, peaks),
       transient: arm.transient === true ? 8 * Q : 0,
-      ...(peakWindows === undefined ? {} : { peakWindows }),
       dropped: gauge?.dropped ?? 0,
       walkSends: walks.sends,
       givenUp: {
@@ -2161,15 +2347,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
         ? {}
         : {
             stall: {
-              ms: stall.ms,
-              replyWaited: queries.some(
-                (query) =>
-                  query.client.address === PROBE_SOURCE &&
-                  query.qname.toLowerCase() === stall.host.toLowerCase() &&
-                  query.at >= stall.from - 1_000 &&
-                  query.reply !== undefined &&
-                  query.reply.at <= stall.to,
-              ),
+              ...stallSetUp(stall, queries),
               unsafeMarks: log.unsafe,
               passedStuck: log.passedStuck.filter((host) => groupOf(host) === 'answering').length,
             },
@@ -2204,7 +2382,14 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     const windowsRead =
       peakWindows === undefined
         ? ''
-        : `; by window, ${peakWindows.map((w) => `${(w.fromMs / 1_000).toFixed(1)}–${(w.toMs / 1_000).toFixed(1)} s ${String(w.peak)}${w.transient ? ' (after a loss)' : ''}`).join(', ')}${peaks?.failed === undefined ? '' : `; a read failed: ${peaks.failed}`}`;
+        : `; by window (${String(peakWindows.length)} read), ${stretches(peakWindows)
+            .map(
+              (w) =>
+                `${(w.fromMs / 1_000).toFixed(1)}–${(w.toMs / 1_000).toFixed(1)} s ${String(w.peak)}${w.transient ? ' (after a loss)' : ''}`,
+            )
+            .join(
+              ', ',
+            )}, to the arm's end at ${peaks?.endMs === undefined ? 'unread' : `${(peaks.endMs / 1_000).toFixed(1)} s`}${peaks?.failed === undefined ? '' : `; a read failed: ${peaks.failed}`}`;
     const tally = (label: string, t: WorldTally): string =>
       `${label} ${String(t.answered)} of ${String(t.results)} answered, ${String(t.givenUp)} given up, ${String(t.other)} failed otherwise`;
     lines = [
@@ -2252,7 +2437,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       ...(facts.stall === undefined
         ? []
         : [
-            `the stall: ${ms(facts.stall.ms)}, its lookup's reply waiting through it ${String(facts.stall.replyWaited)}, ${String(record.stall?.repliesDuring)} replies sent meanwhile; unsafe marks ${String(facts.stall.unsafeMarks)}, answering names said passed-stuck ${String(facts.stall.passedStuck)}`,
+            `the stall: ${ms(facts.stall.ms)}; its lookup open as it began ${String(facts.stall.unsettledAtStart)}, its reply sent before it ended ${String(facts.stall.replySent)}, answered ${facts.stall.answeredAfterMs === undefined ? 'never' : `${ms(facts.stall.answeredAfterMs)} after it`}; ${String(record.stall?.repliesDuring)} replies sent meanwhile to every client; unsafe marks ${String(facts.stall.unsafeMarks)}, answering names said passed-stuck ${String(facts.stall.passedStuck)}`,
           ]),
       ...(respawn === undefined
         ? []
@@ -2595,47 +2780,64 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     }
   });
 
-  it('the forwarder’s peak windows: a loss’s window ends at its own end though its timer fires early, and an overlapping loss keeps the transient to the later end', async () => {
+  /** A clock a test moves, and its timers, each fired `early` ms before it is due, as Node's may. */
+  const manualClock = (): {
+    readonly clock: PeakClock;
+    set(ms: number): void;
+    fire(early?: number): void;
+  } => {
     let now = 0;
     const due: { readonly at: number; readonly run: () => void; cancelled: boolean }[] = [];
-    const clock: PeakClock = {
-      now: () => now,
-      after: (ms, run) => {
-        const timer = { at: now + ms, run, cancelled: false };
-        due.push(timer);
-        return {
-          cancel: () => {
-            timer.cancelled = true;
-          },
-        };
+    return {
+      clock: {
+        now: () => now,
+        after: (ms, run) => {
+          const timer = { at: now + ms, run, cancelled: false };
+          due.push(timer);
+          return {
+            cancel: () => {
+              timer.cancelled = true;
+            },
+          };
+        },
+      },
+      set: (ms) => {
+        now = ms;
+      },
+      fire: (early = 0.5) => {
+        const next = due.filter((timer) => !timer.cancelled).sort((a, b) => a.at - b.at)[0];
+        assert.ok(next !== undefined, 'a timer due');
+        next.cancelled = true;
+        now = next.at - early;
+        next.run();
       },
     };
-    /** Fires the next timer due, half a millisecond early on the clock, as Node's may. */
-    const fireEarly = (): void => {
-      const next = due.filter((timer) => !timer.cancelled).sort((a, b) => a.at - b.at)[0];
-      assert.ok(next !== undefined, 'a timer due');
-      next.cancelled = true;
-      now = next.at - 0.5;
-      next.run();
-    };
+  };
+  const windowRows = (
+    windows: readonly PeakWindow[],
+  ): (readonly [number, number, number, boolean])[] =>
+    windows.map(({ fromMs, toMs, peak, transient }) => [fromMs, toMs, peak, transient] as const);
+
+  it('the forwarder’s peak windows: a loss’s window ends at its own end though its timer fires early, and an overlapping loss keeps the transient to the later end', async () => {
+    const time = manualClock();
     let read = 0;
     const peaks = new PeakWindows(
       () => {
         read += 1;
         return Promise.resolve(read);
       },
-      { clock, windowMs: 10_000 },
+      { clock: time.clock, windowMs: 10_000 },
     );
-    now = 2_000;
+    time.set(2_000);
     await peaks.loss();
-    fireEarly();
-    now = 20_000;
+    time.fire();
+    time.set(20_000);
     await peaks.loss();
-    now = 25_000;
+    time.set(25_000);
     await peaks.loss();
-    fireEarly();
-    fireEarly();
-    now = 50_000;
+    time.fire();
+    time.fire();
+    time.set(50_000);
     const windows = await peaks.finish();
     assert.deepEqual(
       windows.map(({ fromMs, toMs, transient }) => [fromMs, toMs, transient]),
@@ -2650,6 +2852,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       ],
     );
     assert.equal(peaks.failed, undefined);
+    assert.equal(peaks.endMs, 50_000);
   });
 
   it('a table glibc does not follow is told apart: a type too many, a try too many, no floor on the wait', () => {
@@ -2689,6 +2892,15 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     helperRssAt60s: 50 * MIB,
   };
 
+  const cleanStall: NonNullable<WorldFacts['stall']> = {
+    ms: 15_000,
+    replySent: true,
+    unsettledAtStart: true,
+    answeredAfterMs: 3,
+    unsafeMarks: 0,
+    passedStuck: 0,
+  };
+
   /**
    * The forwarder's peak in a clean P1 and P2, by window from its start: a loss's window holds the
    * transient, every other one the bound. P1's kills at about 8 s and 98 s from the forwarder's
@@ -2715,7 +2927,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     q: 1,
     peakHeld: mode === 'system' ? 6 : withLosses(arm) ? 26 : 18,
     transient: withLosses(arm) ? 8 : 0,
-    ...(withLosses(arm) ? { peakWindows: lossWindows(arm) } : {}),
+    ...(withLosses(arm) ? { peakWindows: lossWindows(arm), peakWindowsEndMs: 140_000 } : {}),
     dropped: 0,
     walkSends: new Map([['127.0.0.1', mode === 'system' ? [] : [0, 100, 200]]]),
     givenUp: { answering: 0, silent: 40, cached: 0 },
@@ -2730,7 +2942,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     keptLate: [],
     helper: cleanHelper(arm),
     stopped: { downAfterMs: 3_500, hungAfterMs: 21_000, upAfterMs: 21_500 },
-    stall: { ms: 15_000, replyWaited: true, unsafeMarks: 0, passedStuck: 0 },
+    stall: cleanStall,
     // P5's pool is at its full size, so its kills are never at the memory gate.
     respawn: arm === 'P5' ? { ...cleanRespawn, heldAtEveryKill: false } : cleanRespawn,
     probeCrashes: 0,
@@ -2810,8 +3022,31 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
           { fromMs: 0, toMs: 17_000, peak: 18, transient: false },
           { fromMs: 17_000, toMs: 70_000, peak: 26, transient: true },
         ],
+        peakWindowsEndMs: 70_000,
       },
       says: /transient was allowed at 17\.0–70\.0 s, past the 10500 ms/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'its last stretch unread (a last read that failed, unrecorded)',
+      patch: { peakWindows: lossWindows('P1').filter((w) => w.fromMs !== 108_500) },
+      says: /peak was not read from 108500 ms to the arm’s end at 140000 ms/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a read of its peak failed',
+      patch: { peakReadFailed: 'Error: the DNS simulator did not answer gauge within 10000 ms' },
+      says: /a read of the forwarder’s peak failed, so its stretch was judged against nothing/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'the arm’s end not measured for its windows',
+      patch: {},
+      omit: ['peakWindowsEndMs'],
+      says: /the arm’s end was not measured for the forwarder’s peak/u,
     },
     {
       arm: 'steady',
@@ -2997,15 +3232,36 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       arm: 'P3',
       mode: 'gate',
       breaks: 'a zone marked unsafe by the stall',
-      patch: { stall: { ms: 15_000, replyWaited: true, unsafeMarks: 1, passedStuck: 0 } },
+      patch: { stall: { ...cleanStall, unsafeMarks: 1 } },
       says: /1 zones marked unsafe/u,
     },
     {
       arm: 'P3',
       mode: 'gate',
-      breaks: 'its lookup’s reply not waiting through the stall',
-      patch: { stall: { ms: 15_000, replyWaited: false, unsafeMarks: 0, passedStuck: 0 } },
-      says: /no reply waiting through it/u,
+      breaks: 'its lookup’s reply not sent before the stall ended',
+      patch: { stall: { ...cleanStall, replySent: false } },
+      says: /no reply to the stall’s own question was sent before it ended/u,
+    },
+    {
+      arm: 'P3',
+      mode: 'gate',
+      breaks: 'its lookup settled before the stall began (its reply read first)',
+      patch: { stall: { ...cleanStall, unsettledAtStart: false } },
+      says: /own lookup had settled before the stall began/u,
+    },
+    {
+      arm: 'P3',
+      mode: 'gate',
+      breaks: 'its lookup never answered',
+      patch: { stall: { ...cleanStall, answeredAfterMs: undefined } },
+      says: /own lookup was never answered/u,
+    },
+    {
+      arm: 'P3',
+      mode: 'gate',
+      breaks: 'its lookup answered before the stall ended',
+      patch: { stall: { ...cleanStall, answeredAfterMs: -40 } },
+      says: /own lookup was answered 40 ms before the stall ended/u,
     },
     {
       arm: 'P3',
@@ -3019,7 +3275,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       arm: 'P3',
       mode: 'gate',
       breaks: 'an answering lookup said passed-stuck by the stall',
-      patch: { stall: { ms: 15_000, replyWaited: true, unsafeMarks: 0, passedStuck: 1 } },
+      patch: { stall: { ...cleanStall, passedStuck: 1 } },
       says: /1 answering lookups said passed-stuck/u,
     },
     {
@@ -3273,6 +3529,272 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       );
     });
   }
+
+  it('a loss a poll sees takes the window its last read closed, so a transient formed before the look is the loss’s', async () => {
+    const time = manualClock();
+    // The forwarder's peak at each read. P2's detach falls the helper's lookups back to the
+    // probe's lanes before the poll looks, so the read before that look holds the transient: 24.
+    const read = [10, 10, 24, 20, 12, 9, 9];
+    const peaks = new PeakWindows(() => Promise.resolve(read.shift() ?? 0), {
+      clock: time.clock,
+      windowMs: 10_000,
+    });
+    // A read, then a look, every 50 ms: the look after the third read sees the loss.
+    for (const at of [10_000, 10_050, 10_100]) {
+      time.set(at);
+      await peaks.cut();
+    }
+    await peaks.lossSeen();
+    // Read inside the loss's window: still the loss's. Its timer fires early, and a read just
+    // after that, before the loss's end on the clock, does not open the transient again.
+    time.set(15_000);
+    await peaks.cut();
+    time.fire();
+    time.set(20_099.8);
+    await peaks.cut();
+    time.set(30_000);
+    const windows = await peaks.finish();
+    assert.deepEqual(windowRows(windows), [
+      [0, 10_000, 10, false],
+      [10_000, 10_050, 10, false],
+      [10_050, 10_100, 24, true],
+      [10_100, 15_000, 20, true],
+      [15_000, 20_099.5, 12, true],
+      [20_099.5, 20_099.8, 9, false],
+      [20_099.8, 30_000, 9, false],
+    ]);
+    const facts: WorldFacts = {
+      ...clean('P2', 'gate'),
+      peakHeld: 24,
+      peakWindows: windows,
+      peakWindowsEndMs: 30_000,
+    };
+    assert.deepEqual(judgeWorld(facts), []);
+    // The window before the look judged outside the loss, as a poll that read after it did: the
+    // transient held to the bound, and a run that holds it failed.
+    const readAfter = windows.map((w) => (w.fromMs === 10_050 ? { ...w, transient: false } : w));
+    assert.ok(
+      judgeWorld({ ...facts, peakWindows: readAfter }).some((said) =>
+        /held 24 slots for the probe at 10\.\d–10\.1 s, past 18 outside a loss/u.test(said),
+      ),
+    );
+  });
+
+  it('P2’s look reads the forwarder’s peak before it looks until its hung loss, and each loss it sees takes the window that read closed', async () => {
+    const time = manualClock();
+    const none = { start: 0, skew: 0, exit: 0, hung: 0, memory: 0 };
+    const hung = { ...none, hung: 1 };
+    // What the helper says at each look, and when: stopped at 10 s, the detach seen at 10.1 s,
+    // the hung loss at 30 s, the next child up at 30.05 s.
+    const looks: (readonly [number, StoppedStats])[] = [
+      [10_000, { route: 'up', state: 'up', lossesByReason: none }],
+      [10_050, { route: 'up', state: 'up', lossesByReason: none }],
+      [10_100, { route: 'down', state: 'unresponsive', lossesByReason: none }],
+      [20_000, { route: 'down', state: 'unresponsive', lossesByReason: none }],
+      [29_950, { route: 'down', state: 'unresponsive', lossesByReason: none }],
+      [30_000, { route: 'down', state: 'starting', lossesByReason: hung }],
+      [30_050, { route: 'down', state: 'up', lossesByReason: hung }],
+    ];
+    // The transient in the read before each look that saw a loss: 24 and 22.
+    const read = [10, 10, 24, 20, 12, 13, 22, 8, 7];
+    const peaks = new PeakWindows(() => Promise.resolve(read.shift() ?? 0), {
+      clock: time.clock,
+      windowMs: 10_000,
+    });
+    const stopped: NonNullable<WorldRecord['stopped']> = { at: 10_000 };
+    let seen: StoppedStats = { route: 'up', state: 'up', lossesByReason: none };
+    const look = stoppedLook(
+      () => seen,
+      stopped,
+      peaks,
+      () => time.clock.now(),
+    );
+    const lookAt = async (at: number, stats: StoppedStats): Promise<boolean> => {
+      time.set(at);
+      seen = stats;
+      return look();
+    };
+    const said: boolean[] = [];
+    for (const [at, stats] of looks.slice(0, 4)) said.push(await lookAt(at, stats));
+    // The detach's window ends on its timer, between the looks.
+    time.fire();
+    for (const [at, stats] of looks.slice(4)) said.push(await lookAt(at, stats));
+    time.fire();
+    time.set(50_000);
+    const windows = await peaks.finish();
+    assert.deepEqual(said, [false, false, false, false, false, false, true]);
+    assert.deepEqual(stopped, { at: 10_000, downAt: 10_100, hungAt: 30_000, upAt: 30_050 });
+    // No read after the hung loss but its window's end and the arm's.
+    assert.deepEqual(windowRows(windows), [
+      [0, 10_000, 10, false],
+      [10_000, 10_050, 10, false],
+      [10_050, 10_100, 24, true],
+      [10_100, 20_000, 20, true],
+      [20_000, 20_099.5, 12, true],
+      [20_099.5, 29_950, 13, false],
+      [29_950, 30_000, 22, true],
+      [30_000, 39_999.5, 8, true],
+      [39_999.5, 50_000, 7, false],
+    ]);
+    assert.deepEqual(
+      judgeWorld({
+        ...clean('P2', 'gate'),
+        peakHeld: 24,
+        peakWindows: windows,
+        peakWindowsEndMs: 50_000,
+      }),
+      [],
+    );
+  });
+
+  it('a last read of the forwarder’s peak that fails leaves its windows short of the arm’s end, and the judge fails the arm on both', async () => {
+    const time = manualClock();
+    let failing = false;
+    const peaks = new PeakWindows(
+      () =>
+        failing
+          ? Promise.reject(new Error('the DNS simulator did not answer gauge within 10000 ms'))
+          : Promise.resolve(5),
+      { clock: time.clock, windowMs: 10_000 },
+    );
+    time.set(8_000);
+    await peaks.loss();
+    time.fire(0);
+    // The timer's read, in before the next one fails.
+    await new Promise((resolve) => setImmediate(resolve));
+    time.set(130_000);
+    failing = true;
+    const windows = await peaks.finish();
+    assert.deepEqual(windowRows(windows), [
+      [0, 8_000, 5, false],
+      [8_000, 18_000, 5, true],
+    ]);
+    assert.equal(peaks.endMs, 130_000);
+    const facts = peakFacts(0, peaks);
+    assert.deepEqual(facts, {
+      peakHeld: 5,
+      peakWindows: windows,
+      peakWindowsEndMs: 130_000,
+      peakReadFailed: 'Error: the DNS simulator did not answer gauge within 10000 ms',
+    });
+    // An arm with no loss: the gauge's peak for the run, and no windows to reach its end.
+    assert.deepEqual(peakFacts(7, undefined), { peakHeld: 7 });
+    const said = judgeWorld({ ...clean('P1', 'gate'), ...facts });
+    assert.ok(
+      said.some((one) => /not read from 18000 ms to the arm’s end at 130000 ms/u.test(one)),
+      JSON.stringify(said),
+    );
+    assert.ok(
+      said.some((one) => /a read of the forwarder’s peak failed.*did not answer gauge/u.test(one)),
+      JSON.stringify(said),
+    );
+  });
+
+  it('P3’s setup is read as it happened: its reply sent before the stall ended, its lookup open as the stall began, and answered after it', () => {
+    const wall = (at: number): number => performance.timeOrigin + at;
+    const host = 'dev-1.zone-a.test';
+    const asked = (
+      at: number,
+      replyAt: number | undefined,
+      address = PROBE_SOURCE,
+    ): DnsQueryRecord => ({
+      seq: 1,
+      at: wall(at),
+      server: 'ns1',
+      family: 4,
+      transport: 'udp',
+      client: { address, port: 40_000 },
+      portClass: undefined,
+      id: 1,
+      qname: host,
+      qtype: 'A',
+      opt: false,
+      ednsOptions: [],
+      outcome: 'forwarded',
+      reply:
+        replyAt === undefined
+          ? undefined
+          : { at: wall(replyAt), afterMs: replyAt - at, rcode: 'NOERROR', answers: 1, tc: false },
+      fault: undefined,
+    });
+    // Its lookup began at 39,990 ms and sent its question at 39,999; the stall held 40 to 55 s.
+    const stall = (flights: LaneFlight[]): NonNullable<WorldRecord['stall']> => ({
+      ms: 15_000,
+      host,
+      from: 40_000,
+      to: 55_000,
+      flights,
+      repliesDuring: 1,
+    });
+    const open: LaneFlight = { startedAt: 39_990, settledAt: 55_002, answered: true };
+    assert.deepEqual(stallSetUp(stall([open]), [asked(39_999, 40_000)]), {
+      ms: 15_000,
+      replySent: true,
+      unsettledAtStart: true,
+      answeredAfterMs: 2,
+    });
+    // Its reply read before the stall began: no lookup of its name open as it did.
+    assert.equal(stallSetUp(stall([]), [asked(39_999, 39_999.5)]).unsettledAtStart, false);
+    // The reply sent after the stall; to another client; to a question asked before it began.
+    for (const query of [
+      asked(39_999, 55_001),
+      asked(39_999, 40_000, HELPER_SOURCE),
+      asked(39_000, 39_001),
+      asked(39_999, undefined),
+    ]) {
+      assert.equal(stallSetUp(stall([open]), [query]).replySent, false, JSON.stringify(query));
+    }
+    // Failed after the stall, or never settled: not answered.
+    for (const flight of [{ ...open, answered: false }, { startedAt: 39_990 }]) {
+      assert.equal(
+        stallSetUp(stall([flight]), [asked(39_999, 40_000)]).answeredAfterMs,
+        undefined,
+        JSON.stringify(flight),
+      );
+    }
+  });
+
+  it('the probe’s lanes say which of a name’s lookups are open: from its start until its reply is read, then settled, and how', async () => {
+    const sim = await DnsSimulator.start({
+      servers: [{ name: 'ns1', address: WORLD_ADDRESS }],
+      zones: {
+        'zone-a.test': { reply: replies.addresses('192.0.2.10'), delayMs: 100 },
+        'zone-n.test': { reply: replies.nxdomain },
+      },
+      ipv6: false,
+    });
+    const lanes = new ProbeSide(sim.server('ns1').port, () => 'answering');
+    const openAtSend: number[] = [];
+    lanes.onSent = (_group, name) => {
+      openAtSend.push(lanes.openFor(name).length);
+    };
+    try {
+      const host = 'dev-1.zone-a.test';
+      const answered = lanes.lookup(host, 4);
+      const [flight] = lanes.openFor(host);
+      assert.ok(flight !== undefined, 'open from its start');
+      assert.deepEqual({ ...flight }, { startedAt: flight.startedAt }, 'not settled yet');
+      await within(5_000, 'the answer', answered);
+      assert.deepEqual(openAtSend, [1], 'open as its question was sent');
+      assert.deepEqual(lanes.openFor(host), [], 'settled once its reply was read');
+      assert.equal(flight.answered, true);
+      assert.ok((flight.settledAt ?? 0) - flight.startedAt >= 90, 'settled at its reply');
+      const name = 'dev-2.zone-n.test';
+      const failed = lanes.lookup(name, 4).then(
+        () => 'answered',
+        () => 'failed',
+      );
+      const [lost] = lanes.openFor(name);
+      assert.ok(lost !== undefined, 'open from its start');
+      assert.equal(await within(5_000, 'the failure', failed), 'failed');
+      assert.equal(lost.answered, false);
+      assert.notEqual(lost.settledAt, undefined);
+      assert.deepEqual(lanes.openFor(name), []);
+    } finally {
+      lanes.stop();
+      await sim.stop();
+    }
+  });
 
   it('the bucket admits D19’s burst and rate, and no more', () => {
     assert.equal(
