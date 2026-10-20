@@ -148,6 +148,35 @@ async function isSettled(promise: Promise<unknown>): Promise<boolean> {
   return done;
 }
 
+/**
+ * A 1 ms timer, armed as this is called. `before(promise)`, for a promise asked for once it is
+ * armed, says whether that promise settled before the timer fired: "at once", on no timer
+ * (`P-473`). Timers of one length fire in the order they were armed and a longer one falls due
+ * later, so a failure delivered on any timer loses to this one, however loaded the host and
+ * whichever phase of the loop the test is in. `isSettled` alone cannot say this from the check
+ * phase: its `setImmediate` then runs in the loop's next iteration, after that iteration's timers.
+ */
+function aTimer(): { readonly before: (promise: Promise<unknown>) => Promise<boolean> } {
+  let fired = false;
+  const timer = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      fired = true;
+      resolve();
+    }, 1);
+  });
+  return {
+    before: async (promise) => {
+      let first: boolean | undefined;
+      const mark = (): void => {
+        first ??= !fired;
+      };
+      promise.then(mark, mark);
+      await within(1_000, 'the test’s 1 ms timer', timer);
+      return first === true;
+    },
+  };
+}
+
 /** Waits past the bound for stuck, so every lookup running since before is stuck. */
 const pastStuck = (): Promise<void> =>
   new Promise((resolve) => {
@@ -420,10 +449,12 @@ describe('a name the resolver does not answer is held (P-426)', () => {
     const waiting = ask('slow.test', 4, { waitMs: 10_000 });
     await pastStuck();
     assert.equal(await isSettled(waiting), false, 'still waiting, past the bound for stuck');
-    // At once: settled before the loop's next turn, so on no timer (`P-473`; this was under 20 ms
-    // of wall clock, which a loaded host can exceed).
+    // At once: settled before a 1 ms timer armed just before it, so on no timer (`P-473`; this was
+    // under 20 ms of wall clock, which a loaded host can exceed). `isSettled` here, in the check
+    // phase, let a failure on a 1 ms timer through whenever the loop paused over a millisecond.
+    const timer = aTimer();
     const held = ask('slow.test');
-    assert.equal(await isSettled(held), true, 'a new check fails at once');
+    assert.equal(await timer.before(held), true, 'a new check fails at once');
     await assert.rejects(held, (error: Error) => {
       assert.equal(codeOf(error), RESOLVER_HELD);
       assert.match(error.message, /a lookup for slow\.test has run \d+ s without an answer/u);
@@ -551,9 +582,10 @@ describe('the resolver’s lanes (P-426)', () => {
     });
     await pastStuck();
     await within(1_000, 'the waiting check to fail once the lanes were stuck', failedEarly);
-    // Asked after: fails at once, settled before the loop's next turn (`P-473`).
+    // Asked after: fails at once, before a 1 ms timer armed just before it (`P-473`).
+    const timer = aTimer();
     const late = ask('late.zone-a.test', 4, { waitMs: 60_000 });
-    assert.equal(await isSettled(late), true, 'a check behind stuck lanes fails at once');
+    assert.equal(await timer.before(late), true, 'a check behind stuck lanes fails at once');
     await assert.rejects(late, (error) => codeOf(error) === RESOLVER_STUCK);
     assert.equal(callsFor('early.zone-a.test').length, 0, 'not run yet');
     // A lane comes back: the queued lookup runs, and its answer is kept for the next check.
