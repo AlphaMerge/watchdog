@@ -15094,6 +15094,78 @@ because each is a decision rather than a defect:
         - **The same message, with `stopping: true`.** A reader of the log, and the runbook, finds
           every summary under one message, and the field says that this one covers part of an
           hour.
+      - **Fix round 3** (the review of `b509bc17`, item 8; built 2026-10-20 on
+        `feat/p432-helper-r3`). The runbook only: no code, no protocol change and no migration.
+        - **An end that said nothing is told by its start line** (item 8). Fix round 2 keyed the
+          rule on a start's last summary. A start killed or crashed before its first hourly
+          summary has its `probe.nameResolver is gate` line and no summary, so the rule never
+          fired for it: an `ms-probe` OOM-killed 40 minutes after a start, or crash-looping
+          under systemd, dropped its checks failed at once and its quiets from the week without
+          being named.
+          - A start is now its start line, and each summary the start's above it. A start whose
+            summaries do not end with a `stopping` one, none at all included, ended without
+            stopping. What it counted since its last summary, or since its start line if it said
+            none, was never said.
+          - The write-up names each such end by its start line's time, with the time it leaves
+            uncounted, the `the lookup helper is not answering` lines in that time and the
+            sensors whose checks failed at once in it.
+          - The start still running at the end reading is not an end. Its counts are its
+            summaries before the end reading, and the `stopping` one the drill's stop says after
+            it is not the week's. The sums run to the end reading.
+          - A command lists every start and summary in order, across reboots
+            (`journalctl -u ms-probe --since <day> -o short-iso`, `grep -F` on the two
+            messages). The list holds an earlier boot only where the journal is kept on disk, and
+            a boot of the week missing from `journalctl --list-boots` is a time left uncounted.
+        - **Tests.**
+          - `name-resolution.test.ts`, a new describe, 'the field-test runbook’s ends that said
+            nothing (P-463 fix round 3)', 1 test. It reads step 4's criterion for the gate's
+            summary: a start is its `probe.nameResolver is gate` line; the rule covers a start
+            with no summary and says what it leaves unsaid; the start running at the end reading
+            is not an end; fix round 2's rule is gone. It then runs `buildNameResolution` in gate
+            mode four times on one journal, as journald holds it: stopped after an hour, killed
+            before its first summary, killed after it, and running at the end reading. The
+            runbook's own `grep -F` patterns list 4 start lines and summaries of 2, 0, 1 and 1,
+            step 1 quotes the start line the probe logs, and the rule names the two killed starts
+            and no other.
+          - Run on the final build, on the shared VM and not in a quiet window:
+            `name-resolution` 6 of 6, `name-resolver-gate` 69 of 69 and `name-resolution-process`
+            4 of 4, and the core's `build-hygiene` and `candidate-surface`, which read the
+            runbook, 48 of 48. `tsc` is clean, and prettier and eslint are clean on the changed
+            files.
+          - **Quiet window:** none owed. Nothing here is measured.
+        - **Mutants: 7, all killed**, each by the new test. Each was restored by copy and
+          compared byte for byte; the two in code had their markers found in `dist`, and the
+          final build was checked for none left:
+          - the rule keyed on the last summary, as fix round 2 had it;
+          - the command without the start line's pattern;
+          - no exception for the start running at the end reading;
+          - no definition of a start;
+          - step 1 quoting another start line;
+          - the probe logging another start line (code);
+          - the stop's summary without `stopping` (code).
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (fix round 3):
+        - **Keyed on the start line, as the review suggested.** The start line is the one line
+          every start says, before the helper or the gate's clock starts, so a start that said
+          no summary is still in the list.
+        - **The start running at the end reading is excepted, and the sums stop at the end
+          reading.** Fix round 2's rule, and the review's wording alone, would also name the
+          start still running at the end reading, which has said no `stopping` summary only
+          because it has not stopped. The drill stops that probe after the end reading, and its
+          `stopping` summary then holds time that is not the week's, the drill's refusals among
+          it.
+        - **The write-up names what the log still shows of an unsaid time, not only the time.**
+          The quiets are on the `not answering` lines, rate-limited, so they are a floor. The
+          checks failed at once are in the sensors' own messages, which the probe sends as each
+          check ends rather than at a summary. Naming the end without them would leave the 12
+          checks and 3 quiets of the review's case unnamed.
+        - **The test is in the probe's `name-resolution.test.ts`, not the core's
+          `build-hygiene.test.ts`.** The rule rests on what the probe logs, the start line and
+          the stop's `stopping` summary, and only the probe's tests can produce those lines. The
+          core's tests that read the runbook still pass on it.
+        - **Not changed: the probe does not keep its counts where a kill survives them.** A
+          SIGKILL or a power loss ends a process before it can say anything, and the counts are
+          a field-test measure, which the runbook can bound; keeping them on disk would add a
+          write on the gate's path for the one week that reads them.
 - [ ] **P-464 — a lookup helper crash on Windows is charged to no one** · XS · P-453, Release
       1.1 · Filed 2026-10-20 by `P-453`. Only a crash signal charges a name. On Windows a
       process that crashes reports no signal: it exits with an NTSTATUS code, which Node

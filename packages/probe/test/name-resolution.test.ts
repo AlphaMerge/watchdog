@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -8,6 +9,7 @@ import { DnsSimulator, replies } from '@ms/simulators';
 import type { ResolvedAddress } from '@ms/sensors';
 import { caresAsker } from '../src/resolver/dns-check.js';
 import { buildNameResolution, olderCoreWarning } from '../src/resolver/name-resolution.js';
+import { GATE_SUMMARY_MS } from '../src/resolver/name-resolver.js';
 import type { SystemFiles } from '../src/resolver/system-names.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -274,5 +276,157 @@ describe('a gate probe meeting a core below protocol 38 (P-432, S-F11)', () => {
     assert.equal(warned().length, 2, 'a core at 38 is told');
     olderCoreWarning(logger, 'system').heartbeat(30);
     assert.equal(warned().length, 2, 'system mode has no helper to report');
+  });
+});
+
+/**
+ * The field-test runbook tells a start of `ms-probe` that ended without saying its counts by its
+ * start line, not by its last summary (`P-463` fix round 3). Fix round 2 keyed the rule on a
+ * start's last summary, so a start killed or crashed before its first hourly summary, which has a
+ * start line and no summary, was never named, and the checks it failed at once and the quiets it
+ * saw dropped out of the week unsaid. The rule also excepts the start still running at the end
+ * reading, which has no `stopping` summary because it has not stopped.
+ *
+ * The runbook's command and rule are applied here to the lines `buildNameResolution` logs, as
+ * journald holds them: four starts in a row, one stopped after an hour, one killed before its
+ * first summary, one killed after it, and one running at the end reading.
+ */
+describe('the field-test runbook’s ends that said nothing (P-463 fix round 3)', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+
+  /** What step 4 says of the gate's summary, from its heading to the next criterion. */
+  async function section(): Promise<string> {
+    const runbook = await readFile(join(repoRoot, 'docs', 'runbook-field-test.md'), 'utf8');
+    const start = runbook.indexOf("- **What a quiet helper cost is in the gate's summary**");
+    const end = runbook.indexOf('- `namePassedStuck`', start);
+    assert.ok(start >= 0 && end > start, 'step 4 has no criterion for the gate’s summary');
+    return runbook.slice(start, end);
+  }
+
+  /** One start of the probe in gate mode: its raw log lines up to its end. */
+  async function life(hours: number, end: 'stopped' | 'killed' | 'running'): Promise<string[]> {
+    const lines: string[] = [];
+    const logger = pino(
+      { level: 'info' },
+      {
+        write: (line: string) => {
+          lines.push(line.trimEnd());
+        },
+      },
+    );
+    const base = mkdtempSync(join(dir, 'life-'));
+    const files: SystemFiles = {
+      hosts: join(base, 'hosts'),
+      resolvConf: join(base, 'resolv.conf'),
+      nsswitchConf: join(base, 'nsswitch.conf'),
+      gaiConf: join(base, 'gai.conf'),
+      ldSoPreload: join(base, 'ld.so.preload'),
+      nscdSocket: join(base, 'nscd.socket'),
+    };
+    writeFileSync(files.hosts, '127.0.0.1 localhost\n');
+    writeFileSync(files.resolvConf, 'nameserver 192.0.2.53\n');
+    writeFileSync(files.nsswitchConf, 'hosts: files dns\n');
+    const clock = { now: 0 };
+    const names = buildNameResolution({
+      mode: 'gate',
+      logger,
+      lanes: 6,
+      spoolDir: base,
+      helper: { childModule: CHILD },
+      policy: { files, platform: 'linux', env: {}, checkBuilt: false },
+      resolver: {
+        lookup: () => Promise.resolve(PROBE_LANES),
+        now: () => clock.now,
+        watch: { files: [files.hosts, files.resolvConf, files.nsswitchConf], everyMs: 60_000 },
+      },
+    });
+    const summaries = (): number =>
+      lines.filter((line) => line.includes('the probe’s resolver in gate mode, this hour')).length;
+    let ended = 0;
+    try {
+      await within(WAIT, 'the start', names.start());
+      for (let hour = 1; hour <= hours; hour += 1) {
+        clock.now += GATE_SUMMARY_MS;
+        await pollWithin(WAIT, `the summary of hour ${String(hour)}`, () => summaries() === hour);
+      }
+      ended = lines.length;
+    } finally {
+      await within(WAIT, 'the stop', names.stop());
+      rmSync(base, { recursive: true, force: true });
+    }
+    // A probe killed, or one still running, logs nothing after that moment.
+    return end === 'stopped' ? lines : lines.slice(0, ended);
+  }
+
+  it('names a start killed before its first summary, and not the one running at the end reading', async () => {
+    const text = await section();
+    const flat = text.replace(/\s+/g, ' ');
+
+    // The rule, keyed on the start line.
+    const startLine = /A start is its `([^`]+)` line/.exec(flat)?.[1];
+    assert.equal(startLine, 'probe.nameResolver is gate', 'what the runbook calls a start');
+    assert.match(
+      flat,
+      /A start whose summaries do not end with a `stopping` one, none at all included, ended without stopping/,
+      'the rule for an end that said nothing does not cover a start with no summary',
+    );
+    assert.match(flat, /since its start line if it said none/, 'what such a start leaves unsaid');
+    assert.match(
+      flat,
+      /The start running at the end reading is not an end/,
+      'the rule names the start still running at the end reading',
+    );
+    assert.ok(
+      !flat.includes('A start whose last summary has no `stopping`'),
+      'fix round 2’s rule, which keys on a last summary a start may never have said',
+    );
+
+    // The command that lists the starts and summaries, in order.
+    const block = /```bash\n([\s\S]*?)```/.exec(text)?.[1] ?? '';
+    assert.match(
+      block,
+      /journalctl -u ms-probe /,
+      'the starts and summaries come from the journal',
+    );
+    assert.match(block, /grep -F /, 'patterns read as fixed strings, as `includes` reads them');
+    const patterns = [...block.matchAll(/-e '([^']+)'/g)].map((match) => match[1] ?? '');
+    assert.ok(patterns.includes(startLine), 'the command lists the start lines');
+    const grep = (line: string): boolean => patterns.some((pattern) => line.includes(pattern));
+
+    // Four starts as journald holds them, the last still running at the end reading.
+    const journal = [
+      ...(await life(1, 'stopped')),
+      ...(await life(0, 'killed')),
+      ...(await life(1, 'killed')),
+      ...(await life(1, 'running')),
+    ];
+    const listed = journal.filter(grep).map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    // Step 1 quotes the start line the probe logs.
+    const said = listed.filter((line) => String(line['msg']).startsWith(startLine));
+    assert.equal(said.length, 4, 'one start line for each start');
+    const runbook = (
+      await readFile(join(repoRoot, 'docs', 'runbook-field-test.md'), 'utf8')
+    ).replace(/\s+/g, ' ');
+    assert.ok(runbook.includes(`*${String(said[0]?.['msg'])}*`), 'step 1 quotes the start line');
+
+    // Each summary is the start's above it.
+    const starts: Record<string, unknown>[][] = [];
+    for (const line of listed) {
+      if (String(line['msg']).startsWith(startLine)) starts.push([]);
+      else starts.at(-1)?.push(line);
+    }
+    assert.deepEqual(
+      starts.map((summaries) => summaries.length),
+      [2, 0, 1, 1],
+      'the hour’s summary and the stop’s; none; one; one',
+    );
+    const unsaid = starts
+      .map((summaries, at) => ({ summaries, at }))
+      .filter(
+        ({ summaries, at }) => at < starts.length - 1 && summaries.at(-1)?.['stopping'] !== true,
+      )
+      .map(({ at }) => at);
+    assert.deepEqual(unsaid, [1, 2], 'the two starts killed, the one with no summary included');
   });
 });

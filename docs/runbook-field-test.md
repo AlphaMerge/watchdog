@@ -538,13 +538,33 @@ The numbers that decide the criterion:
     is in none. Under `helper`, `quiets` and `msInState.unresponsive` count the quiets and the
     time not answering since that probe started, and `keptOffPeak` is the most names kept off at
     once since then: each start of `ms-probe` begins them at `0` again.
-    - Record the week's sum of `checksFaulted` over every summary, the stops' included; its
-      quiets, as the sum over each start of the last summary that start said; and the highest
-      `keptOffPeak` of any summary. They are the measure of what keeping names off costs
-      (`P-463`'s decision).
-    - A start whose last summary has no `stopping` ended without stopping (killed, crashed, or
-      the host lost power): up to an hour of its counts was never said. The write-up names each
-      such end and the hour it leaves uncounted.
+    - Record the week's sum of `checksFaulted` over every summary up to the end reading, the
+      stops' included; its quiets, as the sum over each start of the last summary that start
+      said before the end reading, a start that said none adding none; and the highest
+      `keptOffPeak` of any of them. They are the measure of what keeping names off costs
+      (`P-463`'s decision). A start is its `probe.nameResolver is gate` line (step 1), and each
+      summary is the start's above it. On each probe's host, every start and summary in the order
+      they were said, across reboots:
+
+      ```bash
+      sudo journalctl -u ms-probe --since "<the day of step 2's restart, as 2026-10-04>" \
+        -o short-iso --no-pager \
+        | grep -F -e 'probe.nameResolver is gate' -e 'resolver in gate mode, this hour'
+      ```
+
+      The week's starts are step 2's restart and every one after it. The list holds an earlier
+      boot only where the journal is kept on disk (`/var/log/journal`): `journalctl --list-boots`
+      lists the boots it holds, and a boot of the week missing from it is a time the write-up
+      leaves uncounted.
+    - A start whose summaries do not end with a `stopping` one, none at all included, ended
+      without stopping (killed, crashed, or the host lost power): what it counted since its last
+      summary, or since its start line if it said none, was never said, up to an hour. The
+      write-up names each such end by its start line's time, with the time it leaves uncounted,
+      the `the lookup helper is not answering` lines in that time (each a quiet no summary holds,
+      and its `alsoNotAnswering` more), and the sensors whose checks failed at once in it, found
+      by their messages as below. The start running at the end reading is not an end: its counts
+      are its summaries before the end reading, and the `stopping` one the drill's stop says is
+      not the week's.
     - Each summary with `checksFaulted` above `0` is a finding, with the sensors whose checks
       failed at once, whose messages say the probe `does not ask its own getaddrinfo` for the
       name.
