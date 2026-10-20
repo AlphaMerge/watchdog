@@ -200,6 +200,8 @@ export class FakeHelper implements HelperPort {
       why: `the test lost it (${reason})`,
       exitCode: options.exitCode ?? null,
       signal: options.signal ?? null,
+      // Who sent a SIGKILL (`P-469`): the fake names no sender, as a loss read before its exit.
+      killedBy: undefined,
       stderr: '',
       fatal: undefined,
       held: 0,
