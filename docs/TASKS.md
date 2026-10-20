@@ -13714,6 +13714,105 @@ because each is a decision rather than a defect:
           - **The fake helper is not changed.** Moving `nextAskAt` in `FakeHelper.ask` would
             reach the nine other marks made in three test files, each read for its due time.
             The two rows about a carried re-ask move it themselves, with a comment saying why.
+      - **S7 built** 2026-10-20, on `feat/p432-s7-perf` (on `integ/r5-1019`'s `a95c3302`), for the
+        coordinator to land: **the gate's perf arms**, `test:perf` only, in
+        `packages/probe/test/perf/name-lookups.test.ts` (its second and third blocks), with
+        `docs/findings/2026-10-20-name-lookups-gated.md` for the method and the quiet window's
+        command. No production code changed.
+        - **The world.** Each arm runs in each mode `MS_DNS_RESOLVER` names (`system,gate`) on S5's
+          DNS simulator, in a worker, playing dnsmasq: 150 forwards with 120 held by other
+          clients, a slot held 10 s for a silent upstream, identical questions merged (per client
+          in P1, P2 and `forwarder`). `getaddrinfo` is a model of glibc's wire over real UDP
+          (`test/support/glibc-model.ts`), on the probe's lanes and in the real helper's child
+          (`test/support/dns-world-child.ts`); the policy is the real `GlibcNamePolicy` on files
+          the arm writes, the walk the shipped c-ares one, all built by `main.ts`'s
+          `buildNameResolution`, under `P-426`'s pool, wheel and Probe Health at 5,000 sensors.
+        - **The arms**: `slow`, `warmzone`, `zone`, `partial`, `steady` and `forwarder` in both
+          modes; P1, P2, P3, P5, P5b and P6 in gate mode. In every one: `system`'s forwarder slots
+          for the probe ≤ q × 6 and the gate's ≤ q × 6 + 12 (+ 8q in P1 and P2), none dropped,
+          `system` walking nothing, and the gate's walk within D19's bucket at each server.
+          Printed in every one: event-loop delay p50, p99 and max, routes by kind, sampled, and
+          keys routed both heard and silent. Each arm's own assertions are the findings' table.
+        - **The judge is a pure function** (`test/support/name-gate-judge.ts`) of what an arm
+          measured, so that every assertion is seen failing, not only passing: 34 runs made to
+          break one each, and a clean run of every arm in every mode it runs in, judged in every
+          `test:perf`.
+        - **`GLIBC_QUESTIONS` is held to D30's recording (A)**, never to `system-names.ts`: the 427
+          recordings it can play (217 of family 0, 84 of family 4, 126 of family 6, 21 silent), in
+          all seven images, wire exact try by try and a silent plan's time within a second; four
+          wrong tables are shown to fail it.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **A world, not the lane model.** The gate's invariants are about what reaches the
+            site's DNS server, which `P-426`'s lane model does not have. Its arms stay as they
+            are, so their committed numbers stay comparable; `MS_DNS_ARMS` takes `world/<name>`
+            and `lanes/<name>` where the blocks' names overlap.
+          - **The gate's arms are skipped while `MS_DNS_RESOLVER` is unset**, and say how to run
+            them. Twelve arms, six of them in both modes, take about half an hour at the default's
+            minute an arm, past the coffee break CLAUDE.md keeps `test:perf` to. The model's table
+            and the judge's cases still run in every `test:perf`, in about a second.
+          - **"Walk questions a second ≤ 10" is D19's bucket**, 20 at once and 10 a second after,
+            with one more for the time between a token and its datagram. Read as at most 10 in
+            every second, it would fail a cold start by D19's own burst.
+          - **A silent lookup is 15 s × 2 tries**, not the design's 5 s resends to 30 s: six tries
+            is more than glibc ever makes (`RES_MAXRETRY` 5), so a table held to glibc's
+            recordings cannot play it. `timeout:15 attempts:2` gives up at the same 30 s, and each
+            try outlasts the forwarder's 10 s hold.
+          - **Mixed keys are printed as "keys routed both heard and silent"**, from the resolver's
+            debug log (`routed a lookup`), which also gives the routes, their pools and the
+            unvouched reasons. The check's own count is not exposed, and adding a hook for a perf
+            print would touch the file another track is changing.
+          - **P3's "no helper lookup with `ranMs` ≤ 1,000 judged stuck"** is asserted as no helper
+            loss and the helper never judged not answering: only the child says stuck, on its own
+            clock, so the probe's stall can wrong a helper lookup only by judging the child. The
+            stall begins the moment a probe-lane lookup of an answering name has sent its
+            question, the case D25's marks must survive.
+          - **S6's cuts:** with overflow cut, `slow` reads its check run p95 with no overflow
+            lanes; with the pressure detector cut, nothing is asserted of walks off at a server;
+            with per-name walks when a key is heard again cut, no arm asserts recovery speed; with
+            Check now's walk cut, no arm asks it and every walk question counts.
+          - **P5 and `forwarder` are built**, though S7's list named only the arms round 3
+            changed: the design's verdict on `gate` as the field test's setting needs both
+            committed, and the user has decided the field test sets `gate`. Each is an arm's
+            settings in this world. `spread10` and `walkrate`, the verdict's other reads, are
+            `P-465`.
+          - **`MS_DNS_STEADY_MINUTES`** is `steady`'s own time after its scan interval, so that it
+            can be the design's 10 minutes beside the other arms' 7.
+        - **Shown to run, scaled down** (500 sensors on 50 devices, a pool of 16, a minute an
+          arm; the VM with another session's run beside it, so not a measurement): all 18 runs
+          held every assertion, in 1,424 s and 293 s, and so did `partial` with the check off
+          (every lookup `unvouched (off)` in the helper). Each reached what it asserts: the gate's
+          walks asked 49 to 182 questions, none past the bucket; the forwarder's peak for the
+          probe was 0 to 12 of 18 in the gate and 0 to 5 of 6 in `system`, none dropped; in
+          `zone`, `partial` and P1 to P3 zone b's one key was routed to the helper, at most 3 of
+          its lanes, never the probe's; P1 made two `exit` losses, P2 was off `up` at 3.8 s and
+          `hung` at 20.8 s, P3's 15 s stall left nothing unsafe or passed-stuck, P5's and P5b's
+          forks were ready within 274 ms, and P6 poisoned its crash name after three. `forwarder` already shows the gate's point: `system`
+          answered 24 of its 200 answering checks, the gate all 200. The findings file has the
+          rest and both commands.
+        - **Tests**, each run after the last change: `name-lookups.test.ts`'s third block, 38 in
+          every `test:perf` in about a second (the recordings, four wrong tables, the clean runs,
+          34 runs made to break one assertion each, the bucket); the second block's 18 arm runs,
+          skipped unless `MS_DNS_RESOLVER` is set; the first block's lane-model arms unchanged.
+        - **Mutants: 25, on the toolchain, all killed**, each restored with `shutil.copy` and
+          `os.utime`, checked with `filecmp`, and no marker left in `dist` after the last rebuild:
+          - the judge, 19, each by the case made to break it: the drop check; `system`'s bound
+            loosened to the gate's; the bucket; `system` walking; a silent name on the probe's
+            lanes; the helper's 3; `SAMPLED_PER_KEY`; an answering name's gap and one kept late;
+            answering given up; the latch; P2's bound for the next child; P3's unsafe marks and its
+            lookup in flight; P6's crash name on the probe's lanes and not poisoned; P5b's memory
+            gate, and P5 held to it; `forwarder`'s gate rule;
+          - the model, 2: the wire compared by its length alone, and every plan one try;
+          - the code under test, 4, each by its arm scaled down: the gate's silent route on the
+            probe's lanes (`zone`: 6 `getaddrinfo` for zone b there); `KEY_QUIET` 3 more (`zone`:
+            zone b on 4 of the helper's lanes); a suspect never charged with a crash (P6: 5 `exit`
+            losses and none poisoned); D25's marks on the raw timer with `LATE_MS` ignored (P3: 3
+            zones unsafe and 3 lookups passed-stuck).
+          - Not run against the code under test: refresh sampling off and the bucket ignored show
+            only with 5,000 sensors' refreshes, and are left to the check's unit tests, as the
+            design's mutant table leaves them; the timing bounds (P2's, P5's) are judge mutants
+            only.
+        - **Owed:** the full-size run in a quiet window, its command in the findings file (about
+          100 minutes, `ms-server` stopped); `P-465`; `P-466`.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
@@ -14168,6 +14267,26 @@ because each is a decision rather than a defect:
       kept off the probe's lanes. **Done when** `crashedBy` also reads those exit codes on
       `win32`, with a table test of codes and platforms and a mutant. Release 1.1's Windows
       field run must confirm the code of a real crash of the child before the release.
+- [ ] **P-465 — the gate's verdict reads an event-loop p99 that no arm measures yet** · S ·
+      P-432 · Filed 2026-10-20 by `P-432` S7. The design's verdict on `gate` as the field test's
+      setting, and its open risk 19 (the pick's cost with thousands of lookups queued, O(keys +
+      admitted), unmeasured), need `spread10` and `walkrate`'s event-loop p99 read before the
+      runbook sets `gate`. S7 built the world they would run in (the DNS simulator as dnsmasq,
+      glibc's wire, the real helper, policy and walk) and the arms its list named, but not these:
+      `spread10`, 20 silent keys of 10 names with the check off (answering given up ≤ `system`'s;
+      at risk ≤ 5 plus the overshoot counted; event-loop p99 printed), and `walkrate`, 10,000
+      names (event-loop p99 ≤ the lane model's `addresses` arm's + 10 ms; channels ≤ 300 a
+      second). **Done when** both are arms of `name-lookups.test.ts`'s world block with their
+      assertions in `name-gate-judge.ts`, each shown failing on a run made to break it, and a
+      quiet window's p99 for each is in `docs/findings/2026-10-20-name-lookups-gated.md`.
+- [ ] **P-466 — CLAUDE.md's `test:perf` paragraph does not say the gate's arms are skipped** · XS ·
+      P-432 · Filed 2026-10-20 by `P-432` S7. A default `test:perf` skips the name gate's
+      eighteen arm runs and prints how to run them (`MS_DNS_RESOLVER=system,gate`, with
+      `MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 MS_DNS_STEADY_MINUTES=10` at full size), as
+      it does `MS_BENCH_FILL`, `MS_BENCH_SWEEP` and `MS_PING_SWEEP`. CLAUDE.md lists those three
+      as the cases "skipped outright", so a green run reads as a claim about the gate that it is
+      not. CLAUDE.md is the user's to edit. **Done when** its list names `MS_DNS_RESOLVER` and the
+      findings file the command is in.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

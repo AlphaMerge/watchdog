@@ -1,0 +1,389 @@
+import { SAMPLED_PER_KEY } from '../../src/resolver/dns-check.js';
+import { WALK_BURST, WALK_RATE } from '../../src/resolver/forward-budget.js';
+import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
+
+/**
+ * What the name gate's perf arms assert (`P-432` S7, the design's §7.6), as one pure function of
+ * what an arm measured, so that each assertion can be shown to fail on a run made to break it
+ * (`name-lookups.test.ts`'s judge cases) and is not only ever seen passing.
+ *
+ * **In every arm, in both modes:**
+ * - the forwarder's most slots held at once for the probe, the background's aside: `system` at
+ *   most q × 6, P-426's six lanes; gate at most q × 6 + 12, the walk's heard and discovery pools
+ *   beside the six tokens (D16), plus the transient 8 × q in the arms with a helper loss (P1, P2);
+ * - no question dropped at the forwarder for want of a slot;
+ * - the walk's questions to each server within D19's bucket: 20 at once, refilled at 10 a second
+ *   (one more for the time between a token taken and its datagram sent). Check now's walk is cut
+ *   (S6), so every question the check sends counts. In `system` mode the check sends none.
+ *
+ * Each arm adds its own (`ARM_RULES`), from the design's table.
+ */
+
+export type GateMode = 'system' | 'gate';
+
+/** A lookup's group in the world: what its zone does. */
+export type Group = 'answering' | 'silent' | 'cached' | 'crash';
+
+/** A helper loss count by reason, as `LookupHelperStats.lossesByReason` gives it. */
+export interface Losses {
+  readonly start: number;
+  readonly skew: number;
+  readonly exit: number;
+  readonly hung: number;
+  readonly memory: number;
+}
+
+export interface WorldFacts {
+  readonly arm: string;
+  readonly mode: GateMode;
+  /** Whether the name check was on (the policy vouching): `MS_DNS_CHECK=off` turns it off. */
+  readonly checkOn: boolean;
+  /** Questions one lookup holds at the forwarder: 1 for SNMP's family 4. */
+  readonly q: number;
+  /** The forwarder's most slots held at once for the probe, background aside. */
+  readonly peakHeld: number;
+  /** The transient this arm allows past the bound, at a helper loss (D16). */
+  readonly transient: number;
+  /** Questions the forwarder dropped with every slot held. */
+  readonly dropped: number;
+  /** The walk's questions, by server: when each was sent, in ms. */
+  readonly walkSends: ReadonlyMap<string, readonly number[]>;
+  /** Checks given up (failed naming the resolver), by group. */
+  readonly givenUp: Readonly<Partial<Record<Group, number>>>;
+  readonly refused: number;
+  /** `getaddrinfo` calls on the probe's own lanes, by group. */
+  readonly probeLanes: Readonly<Partial<Record<Group, number>>>;
+  /** The most lookups in the helper's child at once, by group. */
+  readonly helperPeak: Readonly<Partial<Record<Group, number>>>;
+  /** `warmzone`: the silent zone's lookups routed to the probe's lanes after it went silent. */
+  readonly afterSilence?: { readonly sampled: number; readonly other: number };
+  /** `warmzone`: answering names that went longer between answers than their bound. */
+  readonly gapsOver?: readonly string[];
+  /** The walk's questions a second over the arm's steady window, and its keys. */
+  readonly steady?:
+    { readonly perSecond: number; readonly keys: number } | { readonly notReached: string };
+  /** `zone`: answering names first kept more than a second after their first ask, or never. */
+  readonly keptLate?: readonly string[];
+  /** The helper, in gate mode. */
+  readonly helper?: {
+    readonly losses: Losses;
+    readonly poisoned: number;
+    /** `lookupHelperTrouble`: the latch's value at the arm's end. */
+    readonly trouble: number;
+    /** ms the helper spent not answering, `unresponsive` (D26). */
+    readonly unresponsiveMs: number;
+  };
+  /** P2: from the SIGSTOP, when the route left `up`, the `hung` loss, and the next child up. */
+  readonly stopped?: {
+    readonly downAfterMs: number | undefined;
+    readonly hungAfterMs: number | undefined;
+    readonly upAfterMs: number | undefined;
+  };
+  /** P3: the stall, and what the probe's lanes said of it. */
+  readonly stall?: {
+    readonly ms: number;
+    /** A probe-lane lookup of an answering name was in flight when it began. */
+    readonly lookupInFlight: boolean;
+    readonly unsafeMarks: number;
+    readonly passedStuck: number;
+  };
+  /** P5b: the respawns at the memory gate. */
+  readonly respawn?: {
+    readonly kills: number;
+    /** At every kill the pool held fewer workers than its ceiling allows, for memory. */
+    readonly heldAtEveryKill: boolean;
+    readonly forkToReadyMs: readonly number[];
+    readonly lagAroundForkMs: readonly number[];
+    readonly lagBaselineMs: number;
+    readonly helperRssAt60s: number | undefined;
+  };
+  /** P6: `getaddrinfo` asked on the probe's own lanes for the crash name: the probe would crash. */
+  readonly probeCrashes?: number;
+}
+
+/** How many sends a token bucket of `burst` refilled at `perSecond` could not have admitted. */
+export function overBucket(
+  sends: readonly number[],
+  perSecond: number = WALK_RATE,
+  burst: number = WALK_BURST + 1,
+): number {
+  const times = [...sends].sort((a, b) => a - b);
+  let tokens = burst;
+  let at = times[0] ?? 0;
+  let over = 0;
+  for (const time of times) {
+    tokens = Math.min(burst, tokens + ((time - at) * perSecond) / 1_000);
+    at = time;
+    if (tokens >= 1) tokens -= 1;
+    else over += 1;
+  }
+  return over;
+}
+
+/** The most sends in any one second, for the record. */
+export function busiestSecond(sends: readonly number[]): number {
+  const times = [...sends].sort((a, b) => a - b);
+  let most = 0;
+  let from = 0;
+  for (let to = 0; to < times.length; to += 1) {
+    while ((times[to] ?? 0) - (times[from] ?? 0) >= 1_000) from += 1;
+    most = Math.max(most, to - from + 1);
+  }
+  return most;
+}
+
+/** The bound on the forwarder's slots for the probe (D16). */
+export function heldBound(facts: Pick<WorldFacts, 'mode' | 'q' | 'transient'>): number {
+  return facts.mode === 'system' ? facts.q * 6 : facts.q * 6 + 12 + facts.transient;
+}
+
+const count = (facts: Readonly<Partial<Record<Group, number>>>, group: Group): number =>
+  facts[group] ?? 0;
+
+/** The helper's 6 general lanes: a zone that is not answering holds at most 3 (D1). */
+const QUIET_KEY_LANES = 3;
+/** P2, from the SIGSTOP: not answering by 4 s, `hung` by 22 s, the next child up by 23 s. */
+const DOWN_BY_MS = 4_000;
+const HUNG_BY_MS = 22_000;
+const UP_BY_MS = 23_000;
+/** P5, P5b: fork to `ready`, the main thread's block at a fork past the baseline, the child's RSS. */
+const FORK_TO_READY_MS = 1_000;
+const FORK_LAG_OVER_MS = 100;
+const HELPER_RSS_MAX = 128 * 1024 * 1024;
+
+type Rule = (facts: WorldFacts, said: (violation: string) => void) => void;
+
+function noneGivenUp(facts: WorldFacts, said: (violation: string) => void, groups: Group[]): void {
+  for (const group of groups) {
+    if (count(facts.givenUp, group) > 0) {
+      said(`${String(count(facts.givenUp, group))} ${group} checks given up`);
+    }
+  }
+}
+
+function silentOffProbeLanes(facts: WorldFacts, said: (violation: string) => void): void {
+  if (count(facts.probeLanes, 'silent') > 0) {
+    said(
+      `${String(count(facts.probeLanes, 'silent'))} getaddrinfo for the silent zone on the probe’s lanes`,
+    );
+  }
+}
+
+function silentHelperCapped(facts: WorldFacts, said: (violation: string) => void): void {
+  if (count(facts.helperPeak, 'silent') > QUIET_KEY_LANES) {
+    said(
+      `the silent zone held ${String(count(facts.helperPeak, 'silent'))} of the helper’s lanes at once, past ${String(QUIET_KEY_LANES)}`,
+    );
+  }
+}
+
+function steadyWalks(facts: WorldFacts, said: (violation: string) => void): void {
+  const steady = facts.steady;
+  if (steady === undefined || 'notReached' in steady) return;
+  const bound = 1 + steady.keys * facts.q;
+  if (steady.perSecond > bound) {
+    said(
+      `the walk asked ${steady.perSecond.toFixed(2)} questions a second at steady state, past 1 + ${String(steady.keys)} keys × q = ${String(bound)}`,
+    );
+  }
+}
+
+function lossesWere(
+  facts: WorldFacts,
+  said: (violation: string) => void,
+  expected: Partial<Losses>,
+): void {
+  const losses = facts.helper?.losses;
+  if (losses === undefined) {
+    said('no helper was measured');
+    return;
+  }
+  for (const reason of ['start', 'skew', 'exit', 'hung', 'memory'] as const) {
+    const want = expected[reason] ?? 0;
+    if (losses[reason] !== want) {
+      said(`${String(losses[reason])} ${reason} losses, where ${String(want)} were made`);
+    }
+  }
+}
+
+function untroubled(facts: WorldFacts, said: (violation: string) => void): void {
+  if ((facts.helper?.trouble ?? 0) !== 0) {
+    said(`lookupHelperTrouble read ${String(facts.helper?.trouble)}`);
+  }
+}
+
+/** P5 and P5b (§7.6): fork to `ready`, the main thread's block at each fork, the child's size. */
+function respawned(facts: WorldFacts, said: (violation: string) => void, gated: boolean): void {
+  noneGivenUp(facts, said, ['answering']);
+  const respawn = facts.respawn;
+  if (respawn === undefined) {
+    said('the respawns were not measured');
+    return;
+  }
+  if (gated && !respawn.heldAtEveryKill) {
+    said('the pool was not held at its memory gate at every kill');
+  }
+  if (respawn.forkToReadyMs.length < respawn.kills) {
+    said(
+      `${String(respawn.forkToReadyMs.length)} children ready after ${String(respawn.kills)} kills`,
+    );
+  }
+  for (const ms of respawn.forkToReadyMs) {
+    if (ms > FORK_TO_READY_MS) said(`a child took ${String(Math.round(ms))} ms from fork to ready`);
+  }
+  for (const ms of respawn.lagAroundForkMs) {
+    if (ms > respawn.lagBaselineMs + FORK_LAG_OVER_MS) {
+      said(
+        `the event loop was held ${String(Math.round(ms))} ms around a fork, past the baseline ${String(Math.round(respawn.lagBaselineMs))} + ${String(FORK_LAG_OVER_MS)}`,
+      );
+    }
+  }
+  if (respawn.helperRssAt60s === undefined || respawn.helperRssAt60s > HELPER_RSS_MAX) {
+    said(`the helper’s resident set at 60 s was ${String(respawn.helperRssAt60s)}`);
+  }
+}
+
+/** Each arm's own assertions, from the design's table; `system` and gate as each says. */
+const ARM_RULES: Readonly<Record<string, Rule>> = {
+  slow(facts, said) {
+    noneGivenUp(facts, said, ['answering']);
+    if (facts.refused > 0) said(`${String(facts.refused)} checks refused`);
+  },
+  warmzone(facts, said) {
+    noneGivenUp(facts, said, ['answering']);
+    if (facts.mode === 'system') return;
+    const after = facts.afterSilence;
+    if (after === undefined) {
+      said('the silence was not measured');
+      return;
+    }
+    if (after.other > 0) {
+      said(
+        `${String(after.other)} of the silent zone’s lookups on the probe’s lanes after the silence were not sampled refreshes`,
+      );
+    }
+    if (after.sampled > SAMPLED_PER_KEY) {
+      said(
+        `${String(after.sampled)} of the silent zone’s refreshes sampled onto the probe’s lanes after the silence, past ${String(SAMPLED_PER_KEY)}`,
+      );
+    }
+    for (const name of facts.gapsOver ?? []) said(`an answering name went too long: ${name}`);
+    steadyWalks(facts, said);
+  },
+  zone(facts, said) {
+    if (facts.mode === 'system') return;
+    noneGivenUp(facts, said, ['answering']);
+    silentOffProbeLanes(facts, said);
+    silentHelperCapped(facts, said);
+    for (const name of facts.keptLate ?? []) said(`an answering name kept late: ${name}`);
+  },
+  partial(facts, said) {
+    if (facts.mode === 'system') return;
+    noneGivenUp(facts, said, ['answering', 'cached']);
+    silentOffProbeLanes(facts, said);
+    if (facts.checkOn) silentHelperCapped(facts, said);
+  },
+  steady(facts, said) {
+    noneGivenUp(facts, said, ['answering']);
+    if (facts.mode === 'gate') steadyWalks(facts, said);
+  },
+  P1(facts, said) {
+    noneGivenUp(facts, said, ['answering']);
+    silentOffProbeLanes(facts, said);
+    lossesWere(facts, said, { exit: 2 });
+    untroubled(facts, said);
+  },
+  P2(facts, said) {
+    noneGivenUp(facts, said, ['answering']);
+    silentOffProbeLanes(facts, said);
+    lossesWere(facts, said, { hung: 1 });
+    untroubled(facts, said);
+    const stopped = facts.stopped;
+    if (stopped === undefined) {
+      said('the SIGSTOP was not measured');
+      return;
+    }
+    const by = (what: string, after: number | undefined, bound: number): void => {
+      if (after === undefined || after > bound) {
+        said(
+          `${what} ${after === undefined ? 'never' : `${String(Math.round(after))} ms`} after the SIGSTOP, past ${String(bound)} ms`,
+        );
+      }
+    };
+    by('the route left up', stopped.downAfterMs, DOWN_BY_MS);
+    by('the hung loss came', stopped.hungAfterMs, HUNG_BY_MS);
+    by('the next child was up', stopped.upAfterMs, UP_BY_MS);
+  },
+  P3(facts, said) {
+    lossesWere(facts, said, {});
+    if ((facts.helper?.unresponsiveMs ?? 0) > 0) {
+      said(`the helper was judged not answering for ${String(facts.helper?.unresponsiveMs)} ms`);
+    }
+    const stall = facts.stall;
+    if (stall === undefined || !stall.lookupInFlight) {
+      said('no probe-lane lookup was in flight when the stall began');
+      return;
+    }
+    if (stall.unsafeMarks > 0)
+      said(`${String(stall.unsafeMarks)} zones marked unsafe by the stall`);
+    if (stall.passedStuck > 0) {
+      said(`${String(stall.passedStuck)} answering lookups said passed-stuck by the stall`);
+    }
+  },
+  forwarder(facts, said) {
+    // `system`'s bound is P-426's lanes, and its drops are judged with every arm's.
+    if (facts.mode === 'gate') noneGivenUp(facts, said, ['answering']);
+  },
+  P5(facts, said) {
+    respawned(facts, said, false);
+  },
+  P5b(facts, said) {
+    respawned(facts, said, true);
+  },
+  P6(facts, said) {
+    noneGivenUp(facts, said, ['answering']);
+    lossesWere(facts, said, { exit: 3 });
+    if ((facts.helper?.poisoned ?? 0) !== 1) {
+      said(`${String(facts.helper?.poisoned)} names poisoned, where one crashes the helper`);
+    }
+    if ((facts.probeCrashes ?? 0) > 0) {
+      said(`the crash name was asked on the probe’s own lanes ${String(facts.probeCrashes)} times`);
+    }
+  },
+};
+
+/** Every assertion the arm fails, in words: none for a run that holds. */
+export function judgeWorld(facts: WorldFacts): string[] {
+  const violations: string[] = [];
+  const said = (violation: string): void => {
+    violations.push(violation);
+  };
+  const bound = heldBound(facts);
+  if (facts.peakHeld > bound) {
+    said(`the forwarder held ${String(facts.peakHeld)} slots for the probe, past ${String(bound)}`);
+  }
+  if (facts.dropped > 0) said(`the forwarder dropped ${String(facts.dropped)} questions`);
+  for (const [server, sends] of facts.walkSends) {
+    if (facts.mode === 'system' && sends.length > 0) {
+      said(`system mode walked: ${String(sends.length)} questions to ${server}`);
+    }
+    const over = overBucket(sends);
+    if (facts.mode === 'gate' && over > 0) {
+      said(
+        `${String(over)} walk questions to ${server} past ${String(WALK_RATE)} a second with a burst of ${String(WALK_BURST)}`,
+      );
+    }
+  }
+  const rule = ARM_RULES[facts.arm];
+  if (rule === undefined) said(`no rules for the arm ${facts.arm}`);
+  else rule(facts, said);
+  return violations;
+}
+
+/** The arms the judge knows. */
+export const JUDGED_ARMS: readonly string[] = Object.keys(ARM_RULES);
+
+/** An answering name's bound between answers (§7.6): its kept answer, its own checks, a second. */
+export function gapBound(longestCheckGapMs: number): number {
+  return ANSWER_MS + longestCheckGapMs + 1_000;
+}
