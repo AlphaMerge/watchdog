@@ -43988,6 +43988,63 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
           Maps and Reports and the flow collector's section says it for flow. The fix is a line
           under each heading and an extension of the route check above to the v1 core's routes.
           Not filed: it needs a ticket number.
+      - **Review, fix round 2** (2026-10-20, on `d3d26408`): one finding, low, fixed in new
+        commits on `fix/h51-docs`:
+        - **The route check said more than it checked.** It was titled *name only routes the core
+          registers* and failed with *routes a document names that the core does not register*,
+          but it looked each route up among every route heading of the API reference, the 38 the
+          page marks as not in 1.0 among them. So `administration.md` naming
+          `GET /reports/:id/render` and `POST /reports/:id/runs`, which a 1.0 core answers `404`
+          `ROUTE_NOT_FOUND`, passed it. It is now *name only routes the API reference lists, and
+          the OpenAPI document at its own*, failing with *routes a document names that the API
+          reference does not list*. A second test, *name no route a 1.0 core lacks, beyond the
+          report routes administration.md is known to*, reads the page's marks and lists every
+          route a shipped document names that only a marked route can be. Today that is
+          `administration.md`'s seven mentions: `GET /reports/:id/subjects`,
+          `GET /reports/:id/render`, `POST /reports/:id/runs`, `GET /reports/:id`,
+          `GET /reports/:id/runs` twice and `GET /reports/:id/runs/:runId/:format`. They are held
+          as they are, so one more fails and one fixed has to come off the list. The API reference
+          is left out of it: it marks its own, and `candidate-surface` holds those marks to a v1
+          core. `README.md` is left out too, since it does not ship.
+        - **One reader of the marks.** `referenceMarks` moved from `candidate-surface.test.ts` to
+          `test/support/api-reference-marks.ts`, and both tests read the page with it.
+          `api-reference-render.test.ts` holds it to the renderer: the release fixture's page,
+          with one tag marked whole and one route marked alone, reads back as exactly the routes
+          it was rendered as lacking, and the other three as unmarked. The shipped page marks no
+          route alone, so nothing held that branch of the reader before.
+        - **Tests**: `release-docs` 8 (7 before; one new, one renamed and reworded),
+          `api-reference-render` 37 (36; one new), `candidate-surface` 10 on the shared reader;
+          the three files 55 of 55.
+        - **Mutants**, 9, all killed, each restored with `shutil.copy` and `os.utime` and compared
+          with `filecmp`; after the five in the tests' own code `dist` was rebuilt and compared
+          with its copy from before the mutant. The shared reader with a tag's note marking none
+          of its routes, and with it carrying on to the tags after (each killed by all three
+          files); the reader not reading a route's own mark (killed by `api-reference-render`
+          alone, and `release-docs` and `candidate-surface` both pass it, which is why that test
+          exists); `release-docs` reading every listed route as in 1.0, and holding the API
+          reference to its own marks; `web-ui.md` naming `GET /maps/:id/view`; `administration.md`
+          no longer naming `GET /reports/:id/render`, so the list has one too many; the reports
+          note taken out of the API reference by hand; and `troubleshooting.md` naming
+          `GET /api/v1/builds`, which the renamed test still fails on. After the restore the three
+          files 55 of 55 and `build-hygiene` 39 of 39. `prettier` and `eslint` on the four
+          changed files.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (fix round 2):
+        - **The test is renamed and the gap it left is pinned, not closed.** Closing it is round
+          1's open item: a line under each of `administration.md`'s report and map-tile headings,
+          and a check that a route 1.0 lacks is named only under one. That is new operator text in
+          a shipped document, left for a ticket, and a fix round should not write it unreviewed.
+          Renaming alone would leave the suite silent about the next document to name a route 1.0
+          lacks, so the seven known mentions are listed exactly: a ratchet, which the ticket
+          replaces with the check of the marks. This supersedes round 1's *not checked for a mark
+          here*: it is checked, against the list.
+        - **The list holds each mention, not each route**, so a second unmarked mention of a
+          route already on it fails as well. Editing the prose around a mention does not.
+        - **A named route counts as one 1.0 lacks only when every heading it can be is marked.**
+          A heading's parameter matches any segment, so a named route can be more than one listed
+          route; when one of them is a route 1.0 has, the doubt goes to the document.
+      - **Open, for the coordinator** (fix round 2): round 1's item on `administration.md` stands,
+        with one addition: its ticket also takes the list out of `release-docs.test.ts`'s second
+        route test, replacing it with the check that each route there is named under that line.
 
 - [x] **H-52 — the shipped sensor reference lists `flow.netflow` as though 1.0 had it** · XS ·
       H-51, H-12 · Found 2026-10-20 in `H-51`, deciding to ship `sensor-reference.md`. The v1
