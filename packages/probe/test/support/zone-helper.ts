@@ -22,6 +22,10 @@ import {
  * `EAI_AGAIN` for each ask, `stuck` past the parent's bound for stuck, a beat when the scenario
  * ticks, and an exit when it is killed or a name crashes it. What each name does is the zones'.
  *
+ * A child can be starved (`hold`, `P-463` fix round 1), as on a host whose CPU is taken: from then
+ * it says nothing, its beats lost and its answers kept until `release` says them, so the helper
+ * finds it quiet with its lookups in flight.
+ *
  * And the helper's clock and timers on the scenario's clock: a timeout shorter than a minute is
  * the process's (the backoff, the start's bounds, the stop's), so the helper respawns at once as
  * it would; a longer one (a rest) fires when the scenario's clock passes it; the liveness tick
@@ -59,6 +63,8 @@ export class ZoneChild extends EventEmitter implements HelperProcess {
   #asked = 0;
   readonly #flights = new Map<number, Flight>();
   readonly #stuckMs: number;
+  /** Starved: what it would have said, in order, kept for `release`. */
+  #held: ChildMessage[] | undefined;
 
   constructor(
     readonly pid: number,
@@ -125,8 +131,21 @@ export class ZoneChild extends EventEmitter implements HelperProcess {
 
   unref(): void {}
 
-  /** One beat, with what it is running, as the child sends every `--beat-ms`. */
+  /** Starved from now: no beat, and every answer kept until `release`. */
+  hold(): void {
+    this.#held ??= [];
+  }
+
+  /** No longer starved: what it kept is said now, in the order it would have been. */
+  release(): void {
+    const held = this.#held ?? [];
+    this.#held = undefined;
+    for (const message of held) this.#say(message);
+  }
+
+  /** One beat, with what it is running, as the child sends every `--beat-ms`; none if starved. */
   beat(): void {
+    if (this.#held !== undefined) return;
     this.#seq += 1;
     this.#say({
       t: 'beat',
@@ -155,7 +174,12 @@ export class ZoneChild extends EventEmitter implements HelperProcess {
   }
 
   #say(message: ChildMessage): void {
-    if (this.#alive) this.emit('message', message);
+    if (!this.#alive) return;
+    if (this.#held !== undefined) {
+      this.#held.push(message);
+      return;
+    }
+    this.emit('message', message);
   }
 
   #ask(ask: AskMessage): void {

@@ -163,7 +163,10 @@ export const HELPER_ISOLATION_MAX_MS = 8_000;
 /** How much of the child's stderr is kept, and how much of it a loss's log line carries. */
 const STDERR_KEEP = 4_096;
 const STDERR_SAID = 400;
-/** "Not answering" is warned at most this often, with a count of the times since. */
+/**
+ * "Not answering" is warned at most this often, with the quiets since, and what they detached and
+ * kept off (`P-463` fix round 1); those still unsaid as the helper stops are said then.
+ */
 const NOT_ANSWERING_WARN_MS = 60_000;
 /** How long a loss's log line waits for the child's exit status and the rest of its stderr. */
 export const HELPER_LOSS_SAY_MS = 1_000;
@@ -503,6 +506,17 @@ export interface LookupHelperStats {
   readonly isolating: boolean;
   readonly poisoned: number;
   readonly msInState: Readonly<Record<HelperState, number>>;
+  /**
+   * The times the child went quiet since the start, said or not (`P-463` fix round 1): never a
+   * loss, so however many there are the helper never rests for them.
+   */
+  readonly quiets: number;
+  /**
+   * The most names kept off the probe's lanes at once since the start, each in flight at a quiet,
+   * or at an `exit` or a `memory` loss, whose ten minutes after the helper was next up had not run
+   * (`P-463` fix round 1): by name and the family it was asked in.
+   */
+  readonly keptOffPeak: number;
   /** Liveness: ticks judged, the quiet and heard runs now, and messages read from this child. */
   readonly ticks: number;
   readonly quietTicks: number;
@@ -903,7 +917,13 @@ export class LookupHelper implements HelperPort {
   /** Ticks it was heard on since it stopped answering, too few in a row to bring it back. */
   #heardSince = 0;
   #notAnsweringWarnAt: number | undefined;
+  /** The quiets since the line was last said, and the lookups they detached and kept off. */
   #notAnsweringUnsaid = 0;
+  #detachedUnsaid = 0;
+  #keptOffUnsaid = 0;
+  /** Every quiet since the start, and the most names kept off at once (`P-463` fix round 1). */
+  #quiets = 0;
+  #keptOffPeak = 0;
 
   /** After a loss, until its timer closes it: the resolver keeps lookups for the next child. */
   #rejoinOpen = false;
@@ -1278,6 +1298,8 @@ export class LookupHelper implements HelperPort {
       isolating: this.#isolating,
       poisoned: this.#poison.size,
       msInState,
+      quiets: this.#quiets,
+      keptOffPeak: this.#keptOffPeak,
       ticks: this.#ticks,
       quietTicks: this.#quiet,
       heardTicks: this.#heardTicks,
@@ -1338,8 +1360,28 @@ export class LookupHelper implements HelperPort {
       ]);
       this.#timers.clearTimeout(waited);
     }
+    this.#sayUnsaidQuiets();
     this.#setState('stopped');
     this.#settleStart(false);
+  }
+
+  /**
+   * The quiets since the last "not answering" line, said as the helper stops, when there are any:
+   * no later line would carry them (`P-463` fix round 1). With the lines, every quiet is counted.
+   */
+  #sayUnsaidQuiets(): void {
+    if (this.#notAnsweringUnsaid === 0) return;
+    this.#logger.warn(
+      {
+        alsoNotAnswering: this.#notAnsweringUnsaid,
+        alsoDetached: this.#detachedUnsaid,
+        alsoKeptOff: this.#keptOffUnsaid,
+      },
+      'the lookup helper is stopping: the times it was not answering since it last said so',
+    );
+    this.#notAnsweringUnsaid = 0;
+    this.#detachedUnsaid = 0;
+    this.#keptOffUnsaid = 0;
   }
 
   #onAbort(): void {
@@ -1756,7 +1798,10 @@ export class LookupHelper implements HelperPort {
 
   /**
    * Quiet: its lookups in flight are detached (D26), and the resolver routes as `down`. Every name
-   * in flight, detached now or at an earlier quiet, is kept off the probe's lanes (`P-463`).
+   * in flight, detached now or at an earlier quiet, is kept off the probe's lanes (`P-463`). The
+   * line says how many names are kept off now, from this quiet and every earlier one or loss whose
+   * ten minutes have not run: a quiet the child comes back from is not a loss, so they add up with
+   * how often it goes quiet, and never rest the helper (fix round 1).
    */
   #notAnswering(): void {
     const record = this.#child;
@@ -1774,7 +1819,8 @@ export class LookupHelper implements HelperPort {
     // Any of them may be what quieted it (D27): only through the process, since `getaddrinfo` runs
     // on libuv's threads, and the same lookup could quiet the probe. One let go at an earlier quiet
     // and still running is one of them again, its ten minutes from that rejoin begun anew.
-    this.#keepOff(inFlight, now);
+    const keptOffNow = this.#keepOff(inFlight, now);
+    this.#quiets += 1;
     if (
       this.#notAnsweringWarnAt === undefined ||
       now - this.#notAnsweringWarnAt >= NOT_ANSWERING_WARN_MS
@@ -1786,14 +1832,21 @@ export class LookupHelper implements HelperPort {
           tickMs: this.#limits.tickMs,
           detached: detached.length,
           keptOff: inFlight.length,
+          keptOffNow,
           alsoNotAnswering: this.#notAnsweringUnsaid,
+          alsoDetached: this.#detachedUnsaid,
+          alsoKeptOff: this.#keptOffUnsaid,
         },
         'the lookup helper is not answering: its lookups in flight are detached and their names kept off the probe’s lanes, and other names are asked elsewhere',
       );
       this.#notAnsweringWarnAt = now;
       this.#notAnsweringUnsaid = 0;
+      this.#detachedUnsaid = 0;
+      this.#keptOffUnsaid = 0;
     } else {
       this.#notAnsweringUnsaid += 1;
+      this.#detachedUnsaid += detached.length;
+      this.#keptOffUnsaid += inFlight.length;
     }
     // While the probe stops it stays `stopping`: only the route moves.
     if (this.#state === 'up') this.#setState('unresponsive', { detached });
@@ -2016,15 +2069,21 @@ export class LookupHelper implements HelperPort {
 
   /**
    * Keeps each lookup's name off the probe's lanes from now until ten minutes after the helper is
-   * next up (D27), and lets go of those whose ten minutes have run.
+   * next up (D27), and lets go of those whose ten minutes have run. Returns how many names are
+   * kept off now, these and every other whose ten minutes have not run, and keeps the most there
+   * have been at once (`P-463` fix round 1).
    */
-  #keepOff(flights: readonly InFlight[], now: number): void {
+  #keepOff(flights: readonly InFlight[], now: number): number {
     for (const [key, since] of this.#crashed) {
       if (since !== undefined && now - since >= this.#limits.stableMs) this.#crashed.delete(key);
     }
     for (const flight of flights) {
       this.#crashed.set(poisonKey(flight.host, flight.family), undefined);
     }
+    // Only entries whose ten minutes have not run are left: every one is kept off now.
+    const keptOff = this.#crashed.size;
+    this.#keptOffPeak = Math.max(this.#keptOffPeak, keptOff);
+    return keptOff;
   }
 
   #markPoison(flight: InFlight, now: number): { readonly key: string; readonly kind: ChargedKind } {

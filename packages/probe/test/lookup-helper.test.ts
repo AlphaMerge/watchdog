@@ -3688,6 +3688,23 @@ async function goQuiet(made: FakeMade): Promise<HelperChange> {
   return change;
 }
 
+const NOT_ANSWERING = 'the lookup helper is not answering';
+const STOPPING_UNSAID =
+  'the lookup helper is stopping: the times it was not answering since it last said so';
+
+/** Every "not answering" line said so far. */
+function quietLines(made: Made): Record<string, unknown>[] {
+  return made.lines.filter((line) => String(line['msg']).startsWith(NOT_ANSWERING));
+}
+
+/** The counts a "not answering" line, or the stop's, gives, by name. */
+function countsOf(
+  line: Record<string, unknown> | undefined,
+  fields: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [field, line?.[field]]));
+}
+
 /** Two heard ticks in a row: up again, the clock then. */
 async function answerAgain(made: FakeMade, child: FakeChild, inFlight: number): Promise<number> {
   for (let i = 0; i < 2; i += 1) {
@@ -3748,6 +3765,13 @@ describe('the lookup helper: names in flight when the child goes quiet are kept 
       assert.equal(made.helper.avoidsSystem(host, 4), false, 'ten minutes up, still in flight');
       const again = await goQuiet(made);
       assert.deepEqual(again.detached, [], 'let go at the first quiet');
+      // Ten minutes after the first line: said, with the one still in flight kept off again.
+      const lines = quietLines(made);
+      assert.equal(lines.length, 2, 'both quiets said');
+      const second = lines[1];
+      assert.equal(second?.['detached'], 0, 'none let go at this quiet');
+      assert.equal(second['keptOff'], 1, 'the one let go before, kept off again');
+      assert.equal(second['keptOffNow'], 1, 'its first ten minutes run, it alone');
       assert.equal(made.helper.avoidsSystem(host, 4), true, 'in flight at this quiet too');
       made.timers.clock += 3_600_000;
       assert.equal(made.helper.avoidsSystem(host, 4), true, 'quiet an hour');
@@ -3759,6 +3783,118 @@ describe('the lookup helper: names in flight when the child goes quiet are kept 
     } finally {
       await stop(made);
     }
+  });
+
+  it('names kept off at quiets the child comes back from add up, and never rest it: each line says how many are kept off now, and the stats count the quiets and the most at once (fix round 1)', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    let firstUp = 0;
+    try {
+      const child = await fakeUp(made);
+      // Six quiets a minute apart, more than the five losses that would rest the helper, each
+      // with two new names in flight that answer once the child is back.
+      for (let round = 0; round < 6; round += 1) {
+        const hosts = [`a${String(round)}.example.test`, `b${String(round)}.example.test`];
+        for (const host of hosts) void settled(made.helper.ask({ host, family: 4, max: 64 }));
+        const ids = child.asks.slice(-2).map((asked) => asked.id);
+        await goQuiet(made);
+        const lines = quietLines(made);
+        assert.equal(lines.length, round + 1, 'a minute apart: every quiet said');
+        assert.deepEqual(
+          countsOf(lines.at(-1), ['detached', 'keptOff', 'keptOffNow', 'alsoNotAnswering']),
+          { detached: 2, keptOff: 2, keptOffNow: 2 * (round + 1), alsoNotAnswering: 0 },
+          `round ${String(round)}: two in flight, every quiet’s names kept off now`,
+        );
+        for (const id of ids) child.answer(id);
+        const upAt = await answerAgain(made, child, 0);
+        if (round === 0) firstUp = upAt;
+        made.timers.clock += 61_000;
+      }
+      assert.equal(made.helper.avoidsSystem('a0.example.test', 4), true, 'the first quiet’s');
+      const stats = made.helper.stats();
+      assert.equal(stats.quiets, 6);
+      assert.equal(stats.keptOffPeak, 12, 'the six quiets’ names at once');
+      assert.equal(stats.losses, 0, 'a quiet the child comes back from is not a loss');
+      assert.ok(
+        made.changes.every((change) => change.state !== 'resting' && change.state !== 'backoff'),
+        'never rested',
+      );
+      // Ten minutes after the first quiet's up, its two are let go at the next quiet, and the
+      // count with them; the peak stays.
+      made.timers.clock = firstUp + 600_000;
+      await goQuiet(made);
+      assert.deepEqual(countsOf(quietLines(made).at(-1), ['detached', 'keptOff', 'keptOffNow']), {
+        detached: 0,
+        keptOff: 0,
+        keptOffNow: 10,
+      });
+      assert.equal(made.helper.avoidsSystem('a0.example.test', 4), false, 'its ten minutes run');
+      assert.equal(made.helper.stats().quiets, 7);
+      assert.equal(made.helper.stats().keptOffPeak, 12);
+    } finally {
+      await stop(made);
+    }
+    assert.deepEqual(
+      made.lines.filter((line) => line['msg'] === STOPPING_UNSAID),
+      [],
+      'nothing unsaid: no line at the stop',
+    );
+  });
+
+  it('a quiet inside a minute of the last line is counted on the next, with what it detached and kept off, and one still unsaid as the helper stops is said then (fix round 1)', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    const ask = (host: string): void => {
+      void settled(made.helper.ask({ host, family: 4, max: 64 }));
+    };
+    const ALSO = ['alsoNotAnswering', 'alsoDetached', 'alsoKeptOff'] as const;
+    try {
+      const child = await fakeUp(made);
+      ask('q1.example.test');
+      await goQuiet(made);
+      await answerAgain(made, child, 1);
+      // Ten seconds on, two more asked, and quiet again: inside the minute, not said.
+      made.timers.clock += 10_000;
+      ask('q2.example.test');
+      ask('q3.example.test');
+      await goQuiet(made);
+      assert.equal(quietLines(made).length, 1, 'inside the minute: not said');
+      await answerAgain(made, child, 3);
+      // A minute on, the next quiet is said, and carries the one between.
+      made.timers.clock += 60_000;
+      ask('q4.example.test');
+      await goQuiet(made);
+      const lines = quietLines(made);
+      assert.equal(lines.length, 2);
+      assert.deepEqual(
+        countsOf(lines[1], ['detached', 'keptOff', 'keptOffNow', ...ALSO]),
+        {
+          detached: 1,
+          keptOff: 4,
+          keptOffNow: 4,
+          alsoNotAnswering: 1,
+          alsoDetached: 2,
+          alsoKeptOff: 3,
+        },
+        'q4 let go now, all four in flight; the quiet between let go of q2 and q3, with q1 in flight',
+      );
+      await answerAgain(made, child, 4);
+      // And one more inside the minute, still unsaid when the probe stops.
+      made.timers.clock += 10_000;
+      ask('q5.example.test');
+      await goQuiet(made);
+      assert.equal(quietLines(made).length, 2, 'inside the minute: not said');
+    } finally {
+      await stop(made);
+    }
+    const stopped = made.lines.filter((line) => line['msg'] === STOPPING_UNSAID);
+    assert.equal(stopped.length, 1, 'said as the helper stops');
+    assert.deepEqual(
+      countsOf(stopped[0], ALSO),
+      { alsoNotAnswering: 1, alsoDetached: 1, alsoKeptOff: 5 },
+      'the counts said on the second line not said again',
+    );
+    assert.equal(stopped[0]?.['level'], 40, 'a warning, as the line it stands for');
   });
 
   it('a name in flight at a hung loss is avoided through the backoff, or a rest, and for ten minutes after the next child is up', async () => {

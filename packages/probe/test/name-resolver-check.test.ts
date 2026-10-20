@@ -851,6 +851,27 @@ describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-4
     await Promise.all(held);
     resolver.stop();
   });
+
+  it('the hour’s summary carries the helper’s quiets and the most names it kept off the probe’s lanes at once (P-463 fix round 1)', async () => {
+    const { logger, lines } = captured();
+    const { resolver, helper, clock } = await make({ tickMs: 5, logger });
+    helper.quiets = 4;
+    helper.keptOffPeak = 9;
+    clock.now += GATE_SUMMARY_MS;
+    const SUMMARY = 'the probe’s resolver in gate mode, this hour';
+    await pollWithin(
+      1_000,
+      'the hour’s summary',
+      () => lines.some((line) => line['msg'] === SUMMARY),
+      5,
+    );
+    const summary = lines.find((line) => line['msg'] === SUMMARY);
+    const said = summary?.['helper'] as
+      { readonly quiets?: unknown; readonly keptOffPeak?: unknown } | undefined;
+    assert.equal(said?.quiets, 4, JSON.stringify(summary));
+    assert.equal(said.keptOffPeak, 9);
+    resolver.stop();
+  });
 });
 
 /**

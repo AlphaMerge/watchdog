@@ -516,11 +516,27 @@ The numbers that decide the criterion:
     loss or start before it; and a `resting`, which, like a `the lookup helper is resting` line
     or a `3` in `nameResolverMode`, is a rest.
   - **A quiet helper** (`P-463`). Each `the lookup helper is not answering` line is a finding,
-    explained by the host's load at its time and recorded with its `keptOff`, the names kept off
-    the probe's own lanes from then until ten minutes after the helper answers again, whose
-    checks fail at once while it does not, and its `alsoNotAnswering`, the quiets since the last
-    line (it is said at most once a minute). Their sum over the week is the measure of what a
-    quiet helper costs.
+    explained by the host's load at its time, and recorded with its `keptOffNow`: every name
+    kept off the probe's own lanes then, those in flight at that quiet (`keptOff`) and those of
+    every earlier quiet or loss whose ten minutes after the helper was next up have not run.
+    While the helper does not answer, the check of each one fails at once unless an answer is
+    kept for it. A quiet the child comes back from is not a loss, so it never rests the helper,
+    and `keptOffNow` grows with how often the child goes quiet. The line is said at most once a
+    minute. The quiets between are counted on the next line, or as the probe stops on `the
+    lookup helper is stopping: the times it was not answering since it last said so`
+    (`alsoNotAnswering`, with what they detached and kept off, `alsoDetached` and
+    `alsoKeptOff`).
+  - **What a quiet helper cost is in the hourly summary**, `the probe’s resolver in gate mode,
+    this hour`, said every hour whatever the lines said. `routed.faulted` is the checks the gate
+    failed at once that hour, each for a name kept off the probe's lanes while the helper was
+    not answering or rested, for a poison name, which its crash line names, or as the probe
+    stopped. Under `helper`, `quiets` and `msInState.unresponsive` count the quiets and the time
+    not answering since the probe started, and `keptOffPeak` is the most names kept off at once.
+    Record the week's sum of `routed.faulted`, its quiets and its highest `keptOffPeak`: they are
+    the measure of what keeping names off costs (`P-463`'s decision). Each hour with
+    `routed.faulted` above `0` is a finding, with the sensors whose checks failed at once, whose
+    messages say the probe `does not ask its own getaddrinfo` for the name. A sum of the lines'
+    `keptOff` is not the measure: a lookup in flight across two quiets is counted at each.
   - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
     is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and is explained
     from the log line naming its host, or it is a finding.

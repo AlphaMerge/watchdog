@@ -14829,7 +14829,8 @@ because each is a decision rather than a defect:
         lose a child as hung without its going quiet first.
       - **Docs.** `administration.md`, in the helper's failures, and the release notes. The
         runbook makes each `not answering` line a finding, recorded with its `keptOff`, so the
-        field test measures what this costs.
+        field test measures what this costs (fix round 1, below, moved the measure to the hourly
+        summary).
       - **Tests.**
         - `lookup-helper.test.ts`, 'names in flight when the child goes quiet are kept off the
           probe's lanes (P-463)', 3 tests:
@@ -14853,14 +14854,24 @@ because each is a decision rather than a defect:
       - **Decided 2026-10-20 by Claude, under the user's delegation:**
         - **Kept off, without measuring the cost first.** The ticket allows a decision recorded
           against a measured cost instead. Measuring would not change it.
-          - The cost is bounded by the code, not by the host. At most 8 names per quiet, as many
-            as the helper runs at once (6 lanes and 2 for Check now). A detached lookup keeps its
-            token until it settles, so the next quiet again finds at most 8.
-          - Each fails its check at once only while the helper is not answering or rests. For
-            ten minutes after it answers, each is asked in the helper rather than walked.
-          - A measurement here would only measure that bound. What it cannot show is how often a
-            starved host's child goes quiet. Only the field test shows that, and the warning's
-            `keptOff` and `detached` record it there.
+          - **The cost is not bounded by the code** (corrected in fix round 1, below; this said
+            the code bounds it at 8 names per quiet). At most 8 lookups are in flight at one
+            quiet (6 lanes and 2 for Check now; a detached lookup keeps its token until it
+            settles). But each name stays off until ten minutes after the helper is next up, and
+            a quiet the child comes back from is not a loss, so it never rests the helper. The
+            names kept off at a moment are those of every quiet and loss whose ten minutes have
+            not run, and they grow with how often the child goes quiet, which the host decides.
+            In `SC18`, three quiets a few seconds apart keep 9 names off, where each quiet's
+            line said 3 at most.
+          - Each fails its check at once only while the helper is not answering or rests, and
+            only when no answer is kept for it (30 s, and five minutes' grace past that): a name
+            checked within that passes on its kept answer. For ten minutes after it answers,
+            each is asked in the helper rather than walked.
+          - What it costs is how often a starved host's child goes quiet, and which of the names
+            kept off are then checked with no answer kept. Only the field test shows that, and
+            the hourly summary measures it there: `routed.faulted`, `helper.quiets` and
+            `helper.keptOffPeak` (fix round 1). Each `not answering` line says the names kept off
+            then (`keptOffNow`).
           - Against that cost: a name that quiets the child through its process would quiet the
             probe if asked on the probe's lanes. D27 is on the design's never-cut list. An
             `exit` loss's names already cost the same (`P-453`'s decision).
@@ -14871,6 +14882,101 @@ because each is a decision rather than a defect:
           against the alternative by the second test's mutant.
         - **The same ten minutes, from the next `up`, as an `exit` loss's.** A quiet child that
           answers again has run the name, and a name that quiets it again is kept off again.
+      - **Fix round 1** (the review of `8c9cb5ca`, five items, one of them medium; built
+        2026-10-20 on `feat/p432-helper-r3`). The decision to keep the names off stands. What
+        changed is the cost it was recorded against, and how the field test measures that cost.
+        No protocol change and no migration.
+        - **The cost the decision rested on was wrong** (item 1). Every quiet in a name's ten
+          minutes adds its names, and a quiet the child comes back from never rests the helper:
+          the decision above is corrected, and so is `administration.md`, which said at most 8
+          names are let go at each quiet.
+        - **The `not answering` line says how many names are kept off now** (`keptOffNow`),
+          beside `keptOff`, the lookups in flight at that quiet: every entry whose ten minutes
+          have not run, counted as `#keepOff` lets the run ones go.
+        - **No quiet goes uncounted** (items 2, 3 and 5). The line is still said at most once a
+          minute. A quiet inside the minute adds what it detached and kept off to `alsoDetached`
+          and `alsoKeptOff`, said with `alsoNotAnswering` on the next line. Those still unsaid as
+          the helper stops are said then, on `the lookup helper is stopping: the times it was not
+          answering since it last said so`, a warning as the line it stands for.
+        - **The hourly summary carries the cost.** `helper.quiets`, every quiet since the start,
+          and `helper.keptOffPeak`, the most names kept off at once, beside `routed.faulted` and
+          `helper.msInState.unresponsive`. `LookupHelperStats` has both.
+        - **The runbook takes the measure from the hourly summary**, not from a sum of
+          `keptOff`: the week's `routed.faulted`, its quiets and its highest `keptOffPeak`, with
+          each line's `keptOffNow`. An hour with `routed.faulted` above 0 is a finding. The
+          release notes say the names add up.
+        - **Tests.**
+          - `lookup-helper.test.ts`, P-463's describe: 2 new tests and 1 extended.
+            - Six quiets a minute apart, each with two new names that answer once the child is
+              back. Each line's `keptOffNow` is 2, 4 … 12. The stats count 6 quiets, a peak of
+              12 and no loss, and the helper never rests. Ten minutes after the first up, the
+              next quiet's line says 10, and the peak stays 12. Nothing is said at the stop.
+            - A quiet inside the minute is counted on the next line: `alsoNotAnswering` 1,
+              `alsoDetached` 2 and `alsoKeptOff` 3, beside that line's own `detached` 1,
+              `keptOff` 4 and `keptOffNow` 4. One still unsaid at the stop is said then, as a
+              warning: 1, 1 and 5.
+            - The earlier-quiet test reads its second line: `detached` 0, `keptOff` 1,
+              `keptOffNow` 1 (item 4).
+          - `name-resolver-check.test.ts`: the hour's summary carries the helper's `quiets` and
+            `keptOffPeak`.
+          - `name-lookup-outage-scenario.test.ts`, **SC18**, by CLAUDE.md's rule for alarm
+            volume. The real resolver, pool, `LookupHelper` and latch, on a child starved
+            (`ZoneChild.hold`) three times a few seconds apart, three new names in flight each
+            time, and once more seven minutes later, past their answers' grace. At that quiet
+            the 9 names' checks fail at once, saying the probe does not ask its own
+            `getaddrinfo` for them, and the 10 of zone A, answered at the start, pass on the
+            probe's lanes. The 9 sensors go Warning, then Up at the next scan, once the helper
+            is back; no other sensor changes state; no kept-off name reaches the probe's lanes.
+            No loss and no rest, the latch stays 0, and Probe Health gives no Warning. The two
+            lines said: `keptOff` 3 and `keptOffNow` 3, then `keptOffNow` 9 with
+            `alsoNotAnswering` 2 and `alsoKeptOff` 6. The hour's summary: `routed.faulted` 9,
+            `quiets` 4, `keptOffPeak` 9, and `msInState.unresponsive` 9,000 ms.
+          - Run alone, one file at a time: `lookup-helper.test.ts` 110 of 110, the outage
+            scenarios 15 of 15, `name-resolver.test.ts` 99 of 99, and `name-resolver-check`,
+            `name-resolver-gate`, `helper-lanes-model` and `name-resolution` 123 of 123. Two
+            timing tests failed once each in a run beside another track's suite, and passed
+            alone: SC12, as its record above says it does under load, and P-426's
+            past-the-bound-for-stuck test, three runs of 6 of 6 alone. Neither touches what
+            changed.
+        - **Mutants: 13, all killed**, each with its marker found in `dist`, restored by copy and
+          compared byte for byte:
+          - `keptOffNow` as the lookups in flight: the six-quiet test and SC18;
+          - an unsaid quiet adding nothing to `alsoKeptOff`, or to `alsoDetached`: the
+            inside-a-minute test and SC18, each;
+          - `alsoKeptOff`, or `alsoDetached`, not reset when said: the inside-a-minute test,
+            each;
+          - nothing said at the stop: the inside-a-minute test;
+          - a stop line with nothing unsaid: the six-quiet test and SC18;
+          - the quiets not counted, and the peak not kept: the six-quiet test and SC18, each;
+          - `keptOff` as the lookups detached now (item 4's): the earlier-quiet test, and the
+            inside-a-minute test;
+          - the summary without `quiets`, or without `keptOffPeak`: the summary test and SC18,
+            each;
+          - no name kept off at a quiet: SC18.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (fix round 1):
+        - **The unsaid quiets go on the next line, and on a line at the stop; not at each
+          rejoin, nor at a loss.** The review offered all three. The `answering again` line is
+          said at every rejoin already. Carrying the counts there would leave the next warning's
+          `also` counts always 0, and split one quiet's account across two kinds of line. Between
+          two warnings nothing is lost, since the next carries the quiets between. A loss does
+          not end the helper, so the counts carry across it to the next line. Only a stop ends
+          the record, so only the stop says them.
+        - **The measure is the hourly summary, not the lines.** The lines are rate-limited, and
+          once the quiets stop no line comes until the next quiet or the stop. The summary is
+          said every hour whatever the lines said, and already had `routed.faulted`, the checks
+          refused, which is the cost itself, and `msInState.unresponsive`. So `quiets` and
+          `keptOffPeak` go there too, rather than only on the lines.
+        - **`keptOff` keeps its meaning**: every lookup in flight at the quiet, one carried
+          across quiets counted at each, as item 4's test pins. `keptOffNow` counts names, so a
+          name carried across quiets is counted once there. Neither is summed for the cost.
+        - **`keptOffNow` and `keptOffPeak` count the names kept off for a quiet or a loss**
+          (`#crashed`, by name and the family asked), not poison names or suspects. Those are
+          said elsewhere (`poisoned`, `isolating`), and what the count measures is what `P-453`
+          and `P-463` keep off.
+        - **SC18's burst gives each quiet a zone of its own** (D, E and F), three names each.
+          A domain not known to answer holds at most 3 of the helper's lanes, so all three of a
+          group are in flight at its quiet whatever order the pool's workers ask in, and the
+          counts are exact.
 - [ ] **P-464 — a lookup helper crash on Windows is charged to no one** · XS · P-453, Release
       1.1 · Filed 2026-10-20 by `P-453`. Only a crash signal charges a name. On Windows a
       process that crashes reports no signal: it exits with an NTSTATUS code, which Node

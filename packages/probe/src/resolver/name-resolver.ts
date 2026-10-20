@@ -3664,7 +3664,10 @@ export class NameResolver implements PoolResolver {
    * does not carry (`P-467`): the helper's changes of state and its losses this hour, each loss
    * with its reason and how its child ended, and its resident memory now; the check's state and
    * why; and the lookups heard, run in the helper, the misses and the walks deferred, this hour
-   * and since the probe started.
+   * and since the probe started. Said every hour, it also carries what a quiet helper costs
+   * whatever its rate-limited line said (`P-463` fix round 1): `routed.faulted`, the checks failed
+   * at once, the helper's quiets, the most names it kept off the probe's lanes at once, and its
+   * time not answering (`msInState.unresponsive`).
    */
   #summary(gate: Gate, now: number): void {
     this.#fillLossEnd(gate);
@@ -3713,6 +3716,8 @@ export class NameResolver implements PoolResolver {
           ...(hour.changesNotListed === 0 ? {} : { changesNotListed: hour.changesNotListed }),
           lost: hour.lost.map(({ lossAt: _at, ...loss }) => loss),
           ...(hour.lostNotListed === 0 ? {} : { lostNotListed: hour.lostNotListed }),
+          quiets: helper.quiets,
+          keptOffPeak: helper.keptOffPeak,
         },
       },
       'the probe’s resolver in gate mode, this hour',

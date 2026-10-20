@@ -10,6 +10,7 @@ import { AnswerFile, answerFilePath } from '../src/resolver/answer-file.js';
 import { buildNameResolution, type NameResolution } from '../src/resolver/name-resolution.js';
 import {
   ANSWER_MS,
+  GATE_SUMMARY_MS,
   NameResolver,
   RESOLVER_LANES,
   STALE_MS,
@@ -74,7 +75,9 @@ import {
  * **And the same outages in gate mode** (`P-432` S3, its §7.4's SC1b, SC7, SC8, SC8b, SC10–SC12
  * and SC17), at the end: the lookup helper carries every name not in the hosts file, so a cold
  * probe no longer fails the answering zone's first scans, and the helper's own faults raise one
- * Warning and change no sensor's state. Its probes are built as `main.ts` builds them.
+ * Warning and change no sensor's state. Its probes are built as `main.ts` builds them. **And a
+ * starved helper that keeps going quiet** (SC18, `P-463` fix round 1): the names it keeps off the
+ * probe's lanes add up across its quiets, and only their sensors change state.
  */
 
 const silent = pino({ level: 'silent' });
@@ -183,6 +186,8 @@ async function probe(
   mode: 'system' | 'gate' = 'system',
   /** In gate mode, the name check built (`P-432` S6), asking DNS as the zones answer. */
   checked = false,
+  /** Where the resolver's and the helper's log lines go, when the case reads them. */
+  logged?: Record<string, unknown>[],
 ) {
   const lookups = new Map<string, Lookups>();
   /** One more lookup asked, counted by its zone, or as the hosts file's. */
@@ -225,7 +230,13 @@ async function probe(
     return Promise.resolve(addressOf(host));
   };
   const resolverOptions = {
-    logger: silent,
+    logger:
+      logged === undefined
+        ? silent
+        : pino(
+            { level: 'info' },
+            { write: (line: string) => logged.push(JSON.parse(line) as Record<string, unknown>) },
+          ),
     now: () => clock.now,
     stuckMs,
     random: () => 0.5,
@@ -408,7 +419,7 @@ async function gateRun(
   asker.rule = (_server, name) => (isSilent(zones, name) ? 'silent' : 'answer');
   const names = buildNameResolution({
     mode: 'gate',
-    logger: silent,
+    logger: resolverOptions.logger ?? silent,
     lanes: RESOLVER_LANES,
     spoolDir: dir,
     now: () => clock.now,
@@ -1597,6 +1608,196 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
     const health = healthWarnings(scan.health);
     assert.equal(health.warnings, 1, `one Probe Health Warning: ${health.said}`);
     assert.equal(running.pool.stats().workerCrashes, 0, 'the probe never crashed');
+  });
+
+  /**
+   * `P-463` fix round 1, by CLAUDE.md's rule for alarm volume. A starved host's child goes quiet
+   * for three ticks and is heard for two, three times in a row, a few seconds apart, with three new
+   * names in flight each time (zones D, E and F). Each name is kept off the probe's lanes until ten
+   * minutes after the helper is next up, and a quiet it comes back from is not a loss. So when the
+   * child goes quiet again seven minutes later, past their answers' grace, all nine are refused at
+   * once, where the line of each quiet said 3 at most. Zone A's names, answered at the start and
+   * never in flight at a quiet, go to the probe's lanes then, and pass.
+   */
+  it('SC18: a starved child quiet three times in a burst: its nine names fail their checks at once at the next quiet, past their grace, where each quiet’s line said 3; zone A passes on the probe’s lanes, the helper never rests, the latch stays 0, and the lines and the hour’s summary count it', async () => {
+    const logged: Record<string, unknown>[] = [];
+    const zones: Zones = { bSilent: false };
+    const clock = { now: 0 };
+    const running = await probe(zones, clock, [], 8, 50, 'gate', false, logged);
+    const { gate, helper } = helperOf(running);
+    const scan = scanner(running, clock, 0);
+    const steady = Array.from({ length: 10 }, (_, i) => ({
+      sensorId: i + 1,
+      host: `dev-${String(i)}.zone-a.test`,
+    }));
+    const groups = ['d', 'e', 'f'].map((zone, k) =>
+      Array.from({ length: 3 }, (_, j) => ({
+        sensorId: 100 + 10 * k + j,
+        host: `dev-${String(j)}.zone-${zone}.test`,
+      })),
+    );
+    const keptOff = groups.flat();
+    const keptOffIds = new Set(keptOff.map(({ sensorId }) => sensorId));
+    const child = (): ZoneChild => {
+      const last = gate.children.at(-1);
+      assert.ok(last?.alive === true, `a live child: ${running.state()}`);
+      return last;
+    };
+    /** One liveness tick a second on, heard or not, judged after the polls. */
+    const tickOnce = async (heard: boolean): Promise<void> => {
+      clock.now += 1_000;
+      if (heard) child().beat();
+      gate.timers.tick();
+      for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    };
+    /** Quiet ticks until the helper says it is not answering: three since it was last heard. */
+    const goQuiet = async (what: string): Promise<void> => {
+      for (let i = 0; i < 4 && helper.routeState() !== 'down'; i += 1) await tickOnce(false);
+      assert.equal(helper.state, 'unresponsive', `${what}: ${running.state()}`);
+    };
+    /** Released, and two ticks heard: up again. */
+    const comeBack = async (what: string): Promise<void> => {
+      child().release();
+      await tickOnce(true);
+      await tickOnce(true);
+      assert.equal(helper.state, 'up', `${what}: ${running.state()}`);
+    };
+    const NOT_ANSWERING = 'the lookup helper is not answering';
+    const quietLines = (): Record<string, unknown>[] =>
+      logged.filter((line) => String(line['msg']).startsWith(NOT_ANSWERING));
+    const BURST_AT = 6 * INTERVAL_MS;
+    const DOWN_AT = 13 * INTERVAL_MS;
+    let downResults: CheckResult[] = [];
+    try {
+      await scan.scanAt(0, steady);
+      for (const [k, group] of groups.entries()) {
+        child().hold();
+        await scan.scanAt(BURST_AT + k * 5_000, group, async () => {
+          await pollWithin(
+            5_000,
+            () => `quiet ${String(k)}: its three lookups in the starved child: ${running.state()}`,
+            () => helper.stats().inFlight === 3,
+            5,
+          );
+          await goQuiet(`quiet ${String(k)}`);
+          await comeBack(`back after quiet ${String(k)}`);
+        });
+      }
+      assert.equal(quietLines().length, 1, 'the burst’s later quiets within the minute: unsaid');
+      // Seven minutes on: their answers past their grace, their ten minutes not run.
+      clock.now = DOWN_AT - 4_000;
+      child().hold();
+      await goQuiet('the quiet after the burst');
+      const before = scan.results.length;
+      await scan.scanAt(DOWN_AT, [...steady, ...keptOff]);
+      downResults = scan.results.slice(before);
+      await comeBack('back after the quiet after the burst');
+      await scan.scanAt(DOWN_AT + INTERVAL_MS, [...steady, ...keptOff]);
+      clock.now = GATE_SUMMARY_MS;
+      await pollWithin(
+        5_000,
+        'the hour’s summary',
+        () => logged.some((line) => line['msg'] === 'the probe’s resolver in gate mode, this hour'),
+        5,
+      );
+    } finally {
+      await running.stop();
+    }
+    // The refused: every kept-off name, at once, and nothing else.
+    const failed = downResults.filter(({ outcome }) => outcome !== 'ok');
+    assert.deepEqual(
+      failed.map(({ sensorId }) => sensorId).sort((a, b) => a - b),
+      [...keptOffIds].sort((a, b) => a - b),
+      `the nine kept off failed, and only they: ${scan.why(scan.changes)}; ${running.state()}`,
+    );
+    for (const result of failed) {
+      assert.match(
+        result.message,
+        /does not ask its own getaddrinfo/u,
+        `sensor ${String(result.sensorId)}: refused, not timed out`,
+      );
+      assert.ok(result.durationMs < BOUND_MS / 2, `sensor ${String(result.sensorId)}: at once`);
+    }
+    for (const sensorId of keptOffIds) {
+      const its = scan.changes.filter((change) => change.sensorId === sensorId);
+      assert.deepEqual(
+        its,
+        [
+          { sensorId, at: DOWN_AT, from: 'up', to: 'warning' },
+          { sensorId, at: DOWN_AT + INTERVAL_MS, from: 'warning', to: 'up' },
+        ],
+        `sensor ${String(sensorId)}: ${scan.history(sensorId)}; ${scan.why(its)}`,
+      );
+    }
+    const others = scan.changes.filter(({ sensorId }) => !keptOffIds.has(sensorId));
+    assert.deepEqual(others, [], `zone A never changed state: ${scan.why(others)}`);
+    assert.deepEqual(
+      running.probeAsked.filter((line) => keptOff.some(({ host }) => line.startsWith(host))),
+      [],
+      'no kept-off name on the probe’s lanes',
+    );
+    assert.equal(
+      running.probeAsked.filter((line) => line.endsWith('route down')).length,
+      steady.length,
+      `zone A asked on the probe’s lanes while the helper was not answering: ${running.probeAsked.join('; ')}`,
+    );
+    // Four quiets and no loss: the helper never rested, and the latch never rose.
+    const stats = helper.stats();
+    assert.equal(stats.losses, 0, 'a quiet the child comes back from is not a loss');
+    assert.equal(stats.msInState.resting + stats.msInState.backoff, 0, 'never rested');
+    assert.deepEqual(transitions(gate.trouble), [{ at: 0, value: 0 }], 'the latch stays 0');
+    // What the lines said: the first quiet's three, then the union, and the two quiets between.
+    const said = quietLines().map((line) => ({
+      detached: line['detached'],
+      keptOff: line['keptOff'],
+      keptOffNow: line['keptOffNow'],
+      alsoNotAnswering: line['alsoNotAnswering'],
+      alsoDetached: line['alsoDetached'],
+      alsoKeptOff: line['alsoKeptOff'],
+    }));
+    assert.deepEqual(said, [
+      {
+        detached: 3,
+        keptOff: 3,
+        keptOffNow: 3,
+        alsoNotAnswering: 0,
+        alsoDetached: 0,
+        alsoKeptOff: 0,
+      },
+      {
+        detached: 0,
+        keptOff: 0,
+        keptOffNow: 9,
+        alsoNotAnswering: 2,
+        alsoDetached: 6,
+        alsoKeptOff: 6,
+      },
+    ]);
+    assert.equal(
+      logged.filter((line) => String(line['msg']).startsWith('the lookup helper is stopping'))
+        .length,
+      0,
+      'every quiet said before the stop',
+    );
+    // And the hour's summary: the nine checks failed at once, four quiets, nine kept off at most,
+    // and the nine seconds not answering (2 s for each of the burst's, 3 s for the last).
+    const summary = logged.find(
+      (line) => line['msg'] === 'the probe’s resolver in gate mode, this hour',
+    );
+    const routed = summary?.['routed'] as { readonly faulted?: unknown } | undefined;
+    assert.equal(routed?.faulted, 9, JSON.stringify(summary));
+    const helperSaid = summary?.['helper'] as
+      | {
+          readonly quiets?: unknown;
+          readonly keptOffPeak?: unknown;
+          readonly msInState?: { readonly unresponsive?: unknown };
+        }
+      | undefined;
+    assert.equal(helperSaid?.quiets, 4);
+    assert.equal(helperSaid.keptOffPeak, 9);
+    assert.equal(helperSaid.msInState?.unresponsive, 9_000);
+    const health = healthWarnings(scan.health);
+    assert.equal(health.warnings, 0, `no Probe Health Warning: ${health.said}`);
   });
 });
 

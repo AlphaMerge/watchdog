@@ -94,6 +94,9 @@ export class FakeHelper implements HelperPort {
     hung: 0,
     memory: 0,
   };
+  /** What `stats` says of the child's quiets and the most names kept off at once. */
+  quiets = 0;
+  keptOffPeak = 0;
   onChange: ((change: HelperChange) => void) | undefined;
   readonly #now: () => number;
 
@@ -338,6 +341,8 @@ export class FakeHelper implements HelperPort {
         stopping: 0,
         stopped: 0,
       },
+      quiets: this.quiets,
+      keptOffPeak: this.keptOffPeak,
       ticks: 0,
       quietTicks: 0,
       heardTicks: 0,

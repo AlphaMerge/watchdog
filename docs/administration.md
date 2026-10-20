@@ -1350,9 +1350,21 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   flight when the child goes quiet, and so every name a child killed for being quiet was asking
   (`P-463`): `getaddrinfo` runs on the child's own threads, so only a lookup that reaches its
   whole process (an NSS module holding a lock its main thread needs, or a lookup that grows it
-  until it swaps) can quiet it, and the same lookup could quiet the probe. At most 8 names are
-  let go at each quiet, as many as the helper runs at once. While the helper is not answering
-  their checks fail at once, and once it answers they are asked there. The probe's
+  until it swaps) can quiet it, and the same lookup could quiet the probe. At most 8 lookups are
+  in flight at a quiet, as many as the helper runs at once, but the names kept off add up. Each
+  stays off until ten minutes after the helper is next up, and a quiet the child comes back from
+  is not a loss, so however often a starved host's child goes quiet and comes back the helper
+  never rests, and each quiet in those ten minutes adds its names. While the helper is not
+  answering, the check of each name kept off fails at once (`RESOLVER_FAULT`), unless an answer
+  is kept for it (30 s, and five minutes' grace past that), which the check uses; once it
+  answers they are asked there. The `not answering` warning, said at most once a minute, gives
+  `keptOff`, the lookups in flight at that quiet, and `keptOffNow`, every name kept off then,
+  with the quiets since the last warning (`alsoNotAnswering`) and what they detached and kept
+  off (`alsoDetached`, `alsoKeptOff`); those still unsaid as the probe stops are said then. The
+  hourly summary, `the probe’s resolver in gate mode, this hour`, has the checks failed at once
+  that hour (`routed.faulted`), the quiets since the probe started (`helper.quiets`), the most
+  names kept off at once (`helper.keptOffPeak`) and the time not answering
+  (`helper.msInState.unresponsive`). The probe's
   `the lookup helper was lost` line says who sent a SIGKILL the child ended by (`killedBy`,
   `P-469`): `probe` for its own, for the `why` it gives; `itself` for the child ending itself
   after the `fatal` it gives; `outside` for anyone else, the kernel's OOM killer and a cgroup
