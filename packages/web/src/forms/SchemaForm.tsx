@@ -463,7 +463,9 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
       ) : (
         <ol ref={list} className="mb-2 space-y-3">
           {entries.map((_entry, index) => (
-            <li key={keys[index]} className="border border-border-subtle p-2">
+            // The hairline (`U-23`). It named `border-subtle`, which is no token, so Tailwind made
+            // no rule and the box was drawn in the text colour: black on paper, white on charcoal.
+            <li key={keys[index]} className="border border-border p-2">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-text-muted">
                   {entryLabel} {String(index + 1)}

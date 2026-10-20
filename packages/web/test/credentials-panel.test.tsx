@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1252,6 +1254,78 @@ describe('the credentials tab', () => {
       await alertSaying('needs write on that probe');
       expect(screen.queryByRole('group', { name: 'Confirm removing SNMP credentials' })).toBeNull();
       expect(writes(calls)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * What the tab was found drawn in when it was walked in a browser, light and dark (`U-23`).
+   *
+   * jsdom computes no Tailwind, so these read the classes the browser is handed and hold them to
+   * what the stylesheet defines and to the rule it states for the edge of a control.
+   */
+  describe('as drawn', () => {
+    // Off disk from the package root, as `charts.test.ts` reads it: a CSS import is empty here.
+    const stylesheet = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+    /** The colours `@theme` gives Tailwind: `border-x`, `bg-x` and `text-x` exist for these. */
+    const COLOURS = new Set(
+      [...stylesheet.matchAll(/--color-([a-z0-9-]+):/gu)].map((match) => match[1] ?? ''),
+    );
+    /** What follows `border-`, `bg-` or `text-` when it is a width, a side, a size or a style. */
+    const NOT_A_COLOUR =
+      /^(?:\d+|[tblrxyse](?:-\d+)?|xs|sm|base|lg|\d?xl|left|center|right|justify|solid|dashed|dotted|double|none|hidden|collapse|separate|transparent|current|inherit|wrap|nowrap|balance|pretty|ellipsis|clip|\[.*\])$/u;
+
+    /** Every colour named by a class in `root`, variants and opacity taken off. */
+    const colourNames = (root: Element): string[] =>
+      [root, ...root.querySelectorAll('*')].flatMap((element) =>
+        [...element.classList].flatMap((name) => {
+          const utility = (name.split(':').at(-1) ?? '').split('/')[0] ?? '';
+          const colour = /^(?:border|bg|text|divide|outline|ring)-(.+)$/u.exec(utility)?.[1];
+          return colour === undefined || NOT_A_COLOUR.test(colour) ? [] : [colour];
+        }),
+      );
+
+    /** Controls whose edge is the hairline grey, by what they say. */
+    const hairline = (when: string): string[] =>
+      [...document.querySelectorAll('button, select, input, textarea')]
+        .filter((control) => control.classList.contains('border-border'))
+        .map((control) => `${when}: ${control.textContent.trim() || control.tagName}`);
+
+    it('names no colour the stylesheet lacks, so no edge falls back to the text colour', async () => {
+      const { form } = await editSnmp();
+      // An allowed target is an entry of a list, with a box of its own.
+      expect(within(form).getByLabelText('Allowed targets 1')).toBeDefined();
+      expect(COLOURS.size).toBeGreaterThan(20);
+      expect(colourNames(document.body).filter((colour) => !COLOURS.has(colour))).toEqual([]);
+    });
+
+    it('draws the edge of every control in the control grey or a state colour, never the hairline', async () => {
+      const removal: CredentialRemoval = {
+        kind: 'snmp',
+        removed: true,
+        sensors: 0,
+        nowInherited: null,
+      };
+      await show({
+        sets: [OWN_SNMP],
+        removalPreview: removal,
+        preview: written({ withholds: 6, newlyWithheld: 6 }),
+      });
+      const found = hairline('the list');
+
+      fireEvent.click(within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }));
+      const asked = await screen.findByRole('group', { name: 'Confirm removing SNMP credentials' });
+      found.push(...hairline('a removal asked about'));
+      fireEvent.click(within(asked).getByRole('button', { name: 'Keep it' }));
+
+      fireEvent.click(within(row('SNMP')).getByRole('button', { name: 'Edit SNMP credentials' }));
+      const form = screen.getByRole('form', { name: 'Editing SNMP credentials' });
+      found.push(...hairline('the form'));
+      fireEvent.change(within(form).getByLabelText('SNMP version'), { target: { value: 'v1' } });
+      fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+      await screen.findByRole('group', { name: 'Confirm this save' });
+      found.push(...hairline('a save asked about'));
+
+      expect(found).toEqual([]);
     });
   });
 });

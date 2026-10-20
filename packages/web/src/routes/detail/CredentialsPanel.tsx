@@ -40,8 +40,12 @@ import {
 } from './credentials-model';
 import { ReadRegion, ReadState } from '../../components/ReadRegion';
 
+/**
+ * The edge is the control grey, not the hairline (`U-23`): `--ms-border` is 1.36:1 on the surface,
+ * and every other pressable edge in the UI is held to 1.4.11's 3:1 by `--ms-control-border`.
+ */
 const BUTTON =
-  'border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50';
+  'border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50';
 const PRIMARY =
   'border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50';
 
