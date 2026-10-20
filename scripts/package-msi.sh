@@ -93,7 +93,8 @@ mkdir -p "${staging}"
 cp -R "${stage}/app" "${staging}/app"
 cp -R "${stage}/bin" "${staging}/bin"
 [ -d "${stage}/web" ] && cp -R "${stage}/web" "${staging}/web"
-[ -d "${repo_root}/docs" ] && cp -R "${repo_root}/docs" "${staging}/docs"
+# The staged documents, which are the operator's (`H-51`), not the repository's whole `docs/`.
+[ -d "${stage}/docs" ] && cp -R "${stage}/docs" "${staging}/docs"
 python3 -c "
 import shutil, sys
 shutil.make_archive(sys.argv[1], 'zip', sys.argv[2])

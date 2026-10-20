@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Everything an installation needs after its files are on disk (TASKS.md H-05).
+# Everything an installation needs after its files are on disk (H-05).
 #
 #     ms-setup [--components core,probe] [--confdir /etc/ms] [--prefix /opt/ms]
 #              [--examples DIR] [--units DIR] [--no-start] [--outcome FILE]
@@ -140,7 +140,7 @@ if [ -n "${enrolment}" ]; then
 fi
 
 # --- probe-channel PKI ---------------------------------------------------------------------
-# The core and its probes speak mutual TLS (WORKFLOW.MD §10), so a working install needs a CA
+# The core and its probes speak mutual TLS, so a working install needs a CA
 # and a key pair for each side. We issue them here rather than making the operator do it: an
 # install that will not start until you have read an OpenSSL manual is not an install.
 # Replace these with your own PKI if you have one; per-probe enrolment is `R-07`'s `ms-enrol`.
@@ -191,7 +191,7 @@ EXT
   chmod 600 "${CONFDIR}"/tls/*.key
 fi
 
-# A shared secret the probe presents alongside its certificate (CAPABILITIES.MD §8). Generated
+# A shared secret the probe presents alongside its certificate. Generated
 # once; remote probes are given it at enrolment. Only a core, or a probe configured from nothing on
 # the core's own host, has a use for it: a remote probe's comes in its bundle, and minting one on
 # a probe host would be a key to nothing, left lying about.

@@ -1,0 +1,74 @@
+# What a release ships of docs/, installed as /opt/ms/docs (`H-51`).
+#
+# `scripts/package.sh` stages the `ship` lines and nothing else, so the tarball, the .deb, the
+# .rpm and the MSI all carry this set. It used to copy the whole directory, which installed the
+# backlog, the roadmap, the scope contract, every design record and every measurement on every
+# host. A `keep` line stays in the repository: it is written for whoever works on the code, or it
+# records how a number was measured, and the shipped documents state what an operator needs of it.
+#
+# Every entry at the top of docs/ is on exactly one line, so a new document is decided here when
+# it is added. `packages/core/test/release-docs.test.ts` holds that, holds every document a unit,
+# an installed script or a string in the source names to a `ship` line, and fails on a link from
+# a shipped document to one that is not shipped. `package-provenance.test.ts` holds what
+# `package.sh` stages to this list.
+#
+# One entry a line, `ship` or `keep` and a path relative to docs/; a directory ends in `/` and can
+# only be kept. The reason for a line is the comment above it.
+
+# The release's own index, in place of README.md, which maps the repository's documents.
+ship index.md
+# Installing, the first administrator, remote probes, upgrading and uninstalling. `ms-setup`,
+# `ms-enrol`, both probe installers and the removal send the operator here.
+ship installation.md
+# Running it: roles, credentials, inheritance, pausing, email, what to watch. Both units, `ms-setup`
+# and the web UI's credentials panel send the operator here.
+ship administration.md
+# Backing up and restoring onto another host. `ms-core.service` and `ms-restore` send the operator
+# here.
+ship runbook-backup-restore.md
+# Upgrading to 1.0: what it needs, what reads differently, its known limits. It says it ships here.
+ship release-notes-1.0.md
+# Symptoms, and the number that diagnoses each.
+ship troubleshooting.md
+# How much hardware, from the measurements.
+ship sizing.md
+# Every view of the web UI, and what each is for.
+ship web-ui.md
+# Every sensor type an operator can add: parameters, defaults, channels, requirements. Generated.
+ship sensor-reference.md
+# Every route, for whoever automates against the API. Generated from what the core validates.
+ship api-reference.md
+# Why a sensor is Down, Unknown or still Warning, and what a pause does to a subtree. Migration
+# 040's comment on `sensor_runtime` names it.
+ship state-machine.md
+# Extending it with a sensor type. The catalogue's refusal of a malformed type names it.
+ship adding-a-sensor-type.md
+# The one design record an operator is sent to. Migration 004's refusal of a TimescaleDB without
+# the Community licence names its Decision 4, and the migrator checksums that text, so it cannot be
+# reworded; the installation guide, the release notes and the units cite its decisions on `ping`,
+# protocol skew and the service wrapper.
+ship ADR-001-architecture.md
+
+# The repository's map of every document, internal ones included. `index.md` is the release's.
+keep README.md
+# The backlog.
+keep TASKS.md
+# The phased roadmap and its exit criteria.
+keep PLAN.md
+# The scope contract against PRTG. What 1.0 has and lacks is in the release notes.
+keep CAPABILITIES.MD
+# The behavioural contract for whoever changes the code. What an operator needs of it is in
+# `state-machine.md` and `administration.md`.
+keep WORKFLOW.MD
+# Design records for maps, uploaded files, geographical maps, stored reports and report rendering,
+# none of which the 1.0 build has.
+keep ADR-002-map-exposure.md
+keep ADR-003-uploaded-files.md
+keep ADR-004-geographical-maps.md
+keep ADR-005-stored-reports.md
+keep ADR-006-report-rendering.md
+# How a release candidate is qualified before it is released. It is ours, not an operator's.
+keep runbook-field-test.md
+# The measurements behind the documents' numbers, and the records of each candidate's cut. The
+# shipped documents give the numbers and cite these by name.
+keep findings/

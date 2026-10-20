@@ -5,7 +5,8 @@ The tables `M-02` onwards are built against, written before the code on purpose 
 the exit criterion is a property test proving no sequence of events reaches an undefined state.
 Neither is achievable against a state machine whose rules only exist in its own implementation.
 
-Reviewed against [`WORKFLOW.MD §4`](WORKFLOW.MD) (state machine) and `§5` (dependency and pause).
+Reviewed against `WORKFLOW.MD` §4 (state machine) and §5 (dependency and pause), in the source
+repository.
 Where this document is more specific than `WORKFLOW.MD`, it is filling a gap that would otherwise
 be filled by whoever wrote the code first; those places are marked **decided here**.
 

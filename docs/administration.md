@@ -2278,7 +2278,7 @@ oldest transaction that is neither is usually the one to ask about.
 ### A core that is still starting
 
 A core does not report itself running until it can serve, and there are things it will wait for
-rather than fail on (`P-215`, `P-222`; [findings](findings/2026-09-28-start-exits.md)). **Core
+rather than fail on (`P-215`, `P-222`; measured in `findings/2026-09-28-start-exits.md`). **Core
 Health cannot tell you about any of them**, because the core is not up yet: the service log and
 `systemctl status ms-core` are the only places they show. Every wait keeps systemd waiting on
 purpose, so the unit sits in `activating` rather than failing and restarting.
@@ -2696,7 +2696,7 @@ going missing should page someone, write that rule with `absent()`.
 Rollups, retention and the job that drives them are written in `packages/core`, not delegated to
 the database — so the storage engine could change and this behaviour would not. Native
 compression is the one TimescaleDB feature relied on, and it is worth 12.5× on disk
-([measured](findings/2026-08-25-rollup-storage-spike.md)).
+(measured in `findings/2026-08-25-rollup-storage-spike.md`).
 
 **A full disk costs retention, and it says so.** When free space falls under the reserve, the
 housekeeper evicts the oldest raw chunks early — up to a bounded number of steps per pass — and

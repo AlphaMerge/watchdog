@@ -63,14 +63,14 @@ up to the v1 target** — at 5,000 sensors the dispatch jitter measured 208 ms o
 212 on eight, because a check waits for a packet rather than for a core. Give the core 4 cores
 and 8 GB at that size and the headroom to PostgreSQL.
 
-The storage half is in
-[`docs/findings/2026-08-25-timeseries-sizing.md`](findings/2026-08-25-timeseries-sizing.md):
+The storage half, measured in `findings/2026-08-25-timeseries-sizing.md` (the source
+repository's; a release does not install its findings):
 
 - **99.3 bytes per reading** on disk uncompressed, indexes included.
 - At the v1 target of 5,000 sensors on a 60-second interval — about 21.6 million rows a day —
   that is **~2.8 GB a day**, or **~80 GB** for the 40 days of raw data PRTG keeps.
 - With TimescaleDB's native compression, the same 40 days measured **12.5× smaller: ~6.4 GB**
-  ([the rollup spike](findings/2026-08-25-rollup-storage-spike.md)).
+  (the rollup spike, `findings/2026-08-25-rollup-storage-spike.md`).
 
 The one number worth planning around beyond that is TimescaleDB's: the recent working set should
 fit in roughly a quarter of RAM, which is what the one-day chunk interval was chosen against.

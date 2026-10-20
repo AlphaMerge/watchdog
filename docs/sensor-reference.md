@@ -1183,7 +1183,7 @@ Every sensor of this type has:
 - **Only this exporter** (`sourceIsDevice`) — Counts only flows exported by the device this sensor sits under. Turn it off for a sensor watching every exporter that reaches this probe, which is what you want on a single site-wide traffic sensor and not what you want on a per-router one. A device addressed by name is looked up on the probe, and one whose name resolves to nothing fails the check rather than reporting no flows.
 - **Treat silence as an idle link** (`silenceIsIdle`) — Off by default, and deliberately. A flow exporter with nothing to report sends nothing at all — there is no heartbeat — so an interval with no flows is either an idle link or an exporter that has stopped, and nothing in what arrived can tell them apart. Left off, the check fails and says so. Turn it on for a link that is genuinely quiet much of the time, and accept that a stopped exporter will then read as zero.
 - **Fail when the buffer overflowed** (`warnOnDropped`) — Flows that reached this probe but were overwritten before this sensor read them make every count short by an unknown amount. Failing is the honest reading; turn this off only for an exporter whose flood is expected and whose totals you do not act on.
-- **Extra channels** (`channels`) — Your own channels, each counting the traffic that satisfies **all** of its rules — what `CAPABILITIES.MD` calls custom flow variants. Each reports bytes per second, beside the built-in channels rather than instead of them.
+- **Extra channels** (`channels`) — Your own channels, each counting the traffic that satisfies **all** of its rules — custom flow variants. Each reports bytes per second, beside the built-in channels rather than instead of them.
 
 ## Web
 

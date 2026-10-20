@@ -1,6 +1,6 @@
 # MonitoringSystem core server.
 #
-# Production is a standalone native service (CLAUDE.md hard constraint 1). No container
+# Production is a standalone native service, by design. No container
 # runtime, no orchestrator. Install with deploy/install.sh.
 
 [Unit]
@@ -103,7 +103,7 @@ SystemCallErrorNumber=EPERM
 MemoryDenyWriteExecute=no
 
 # --- Resource limits ---------------------------------------------------------------------
-# Sized for the v1 target of 5,000 sensors on 8 cores / 16 GB (CAPABILITIES.MD §13).
+# Sized for the v1 target of 5,000 sensors on 8 cores / 16 GB (docs/sizing.md).
 # One memory ceiling, and it kills: no MemoryHigh, for the reason ms-probe.service gives (P-213) —
 # a throttled service stalls until the watchdog kills it, and restarts into the same stall. Core
 # Health's `memoryLimitUsage` warns at 80% of it, which catches a core that has settled high or

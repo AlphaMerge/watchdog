@@ -6,6 +6,11 @@ The root [`README.md`](../README.md) is the shortest path from a clone to someth
 This page is the map of everything else. [`CLAUDE.md`](../CLAUDE.md) is the working agreement —
 the hard constraints, the design rules, and the decisions that need an ADR to reopen.
 
+**A release installs the operator's documents only**, in `/opt/ms/docs`, under their own index,
+[index.md](index.md). [`scripts/lib/release-docs.txt`](../scripts/lib/release-docs.txt) says which
+documents ship and why each is shipped or kept here (`H-51`). A shipped document links only to
+other shipped ones, and cites the rest — a finding, a ticket, the backlog — as plain text.
+
 ## Start here
 
 | If you are…                    | Read, in this order                                                                                    |
@@ -80,6 +85,7 @@ one.
 
 | Document                                               | What it is                                                                  |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [index.md](index.md)                                   | The index a release installs with these, in place of this page                |
 | [installation.md](installation.md)                     | Installing, the first administrator, remote probes, upgrading, uninstalling   |
 | [release-notes-1.0.md](release-notes-1.0.md)           | What 1.0 is and needs, what is in it, every upgrade note, and its known limits |
 | [administration.md](administration.md)                 | Roles and rights, device credentials, inheritance, pausing, email, what to watch |

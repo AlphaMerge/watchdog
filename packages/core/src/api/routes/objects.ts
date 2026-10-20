@@ -2217,7 +2217,7 @@ export async function objectRoutes(
         tags: ['credentials'],
         description:
           'Stores the credential set of this kind on this object, where everything below it ' +
-          'inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a ' +
+          'inherits it. **A secret this omits is kept**, exactly as a ' +
           "sensor's `writeOnly` parameter is: a read never returns the value, so a client " +
           'cannot send it back, and replacing the whole record would delete the community ' +
           'string every time somebody corrected the SNMP version beside it. Send the field with ' +

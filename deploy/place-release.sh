@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Put an unpacked release under the prefix, and never run a service on a half-replaced tree
-# (TASKS.md H-21).
+# (H-21).
 #
 #     place-release.sh --from DIR [--prefix /opt/ms] [--confdir /etc/ms]
 #                      [--components core,probe] [--no-start]

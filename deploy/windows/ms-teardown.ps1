@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Stops and deregisters what ms-setup.ps1 registered (TASKS.md H-06).
+    Stops and deregisters what ms-setup.ps1 registered (H-06).
 .DESCRIPTION
     The uninstall half, kept beside the install half so the two cannot disagree about what was
     created. Run by the MSI on removal, and safe to run by hand.

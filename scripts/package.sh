@@ -15,7 +15,7 @@
 #   deploy/place-release.sh       copy, check, stop, swap — the tarball installers' upgrade (H-21)
 #   deploy/uninstall.sh           the tarball's removal, installed as libexec/ms-uninstall (H-39)
 #   deploy/remove-ping-conf.sh    the probe's ping drop-in, taken away by a removal (H-34)
-#   docs/                         this release's documentation, which the units point at
+#   docs/                         the operator's documents, which the units point at (H-51)
 #   etc/{core,probe}.json         example configuration
 #   install.sh                    Linux installer
 #
@@ -287,8 +287,38 @@ chmod +x "${stage}/deploy/setup.sh" "${stage}/deploy/place-release.sh" "${stage}
 # The release's own documentation, staged here so that the tarball, the .deb and the .rpm all
 # install the same copy — the packages used to take the repository's and the tarball none, and
 # install.sh then copied whatever `docs` sat beside the directory it was unpacked in.
+#
+# **The operator's documents, not the repository's** (`H-51`). This copied all of `docs/`, so
+# every host got the backlog, the roadmap, the design records and a hundred findings files in
+# /opt/ms/docs. `release-docs.txt` lists what ships and why, and a listed document that is not
+# there stops the build rather than shipping a release whose units point at nothing.
 rm -rf "${stage}/docs"
-cp -R "${repo_root}/docs" "${stage}/docs"
+mkdir -p "${stage}/docs"
+release_docs="${repo_root}/scripts/lib/release-docs.txt"
+doc_path='^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$'
+while read -r verdict doc rest || [ -n "${verdict:-}" ]; do
+  case "${verdict}" in
+    '' | '#'*) continue ;;
+    keep) ;;
+    ship)
+      if [ -n "${rest}" ] || ! [[ "${doc}" =~ ${doc_path} ]]; then
+        echo "error: release-docs.txt has 'ship ${doc}${rest:+ ${rest}}', which is not the path" \
+          "of a file inside docs/" >&2
+        exit 1
+      fi
+      if [ ! -f "${repo_root}/docs/${doc}" ]; then
+        echo "error: release-docs.txt ships docs/${doc}, and there is no such file" >&2
+        exit 1
+      fi
+      mkdir -p "$(dirname "${stage}/docs/${doc}")"
+      cp "${repo_root}/docs/${doc}" "${stage}/docs/${doc}"
+      ;;
+    *)
+      echo "error: release-docs.txt has '${verdict}', where each line is ship or keep" >&2
+      exit 1
+      ;;
+  esac
+done <"${release_docs}"
 # What starts a service again after the start limit stopped it for crashing (`H-23`): the unit
 # both services name in OnFailure=, and the script it runs. A probe host needs it as much as a
 # core does, more: nobody is there to start it by hand.

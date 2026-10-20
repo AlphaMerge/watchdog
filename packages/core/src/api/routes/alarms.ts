@@ -149,7 +149,7 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
           'Every sensor that is currently in an alarm state, worst first, and every held return',
         description:
           'Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states ' +
-          '`WORKFLOW.MD §7` names. **Paused and Unknown are absent by design**: a paused sensor ' +
+          'that are alarms. **Paused and Unknown are absent by design**: a paused sensor ' +
           'is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap ' +
           'in coverage rather than a fault. Reporting either as an alarm is how a list becomes ' +
           'one an operator scrolls past. `objectId` scopes to that object and everything ' +

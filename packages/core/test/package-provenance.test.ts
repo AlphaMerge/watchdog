@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { releaseDocs } from './support/release-docs.js';
 
 /**
  * A package says exactly which code it is (`H-20`).
@@ -651,10 +652,17 @@ function packagingRepository(): string {
       },
     },
   };
+  // Every document the real list ships, and two of the repository's own that it keeps.
+  const docs = Object.fromEntries(
+    releaseDocs(repoRoot).ship.map((doc) => [`docs/${doc}`, `the operator's ${doc}\n`]),
+  );
   const dir = repository({
     '.gitignore': 'node_modules/\ndist/\n/build/\n/release/\n',
     README: 'a repository to package\n',
-    'docs/README.md': 'what ships beside the package\n',
+    'docs/README.md': "the repository's map\n",
+    'docs/TASKS.md': 'the backlog\n',
+    'docs/findings/2026-01-01-a-measurement.md': 'how a number was measured\n',
+    ...docs,
     'package.json': JSON.stringify({ name: 'monitoring-system', version: '0.1.0', private: true }),
     'package-lock.json': `${JSON.stringify(lock, null, 2)}\n`,
     'packages/shared/package.json': workspace('shared'),
@@ -664,7 +672,12 @@ function packagingRepository(): string {
   });
   // The real `deploy/`, whatever `package.sh` copies out of it this week.
   cpSync(join(repoRoot, 'deploy'), join(dir, 'deploy'), { recursive: true });
-  for (const file of ['package.sh', 'lib/build-tree.sh', 'lib/stage-lock.mjs']) {
+  for (const file of [
+    'package.sh',
+    'lib/build-tree.sh',
+    'lib/stage-lock.mjs',
+    'lib/release-docs.txt',
+  ]) {
     cpSync(join(repoRoot, 'scripts', file), join(dir, 'scripts', file));
   }
   git(dir, 'add', '-A');
@@ -890,6 +903,62 @@ describe(
       assert.equal(started('probe'), '16');
       assert.equal(started('probe', { UV_THREADPOOL_SIZE: '32' }), '32', 'the operator’s own');
       assert.equal(started('core'), 'unset', 'the core resolves nothing on its devices’ behalf');
+    });
+  },
+);
+
+/** Every file under `dir`, as paths relative to it, sorted. */
+function filesIn(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name).slice(dir.length + 1))
+    .sort();
+}
+
+describe(
+  'the documents package.sh stages (`H-51`)',
+  { skip: hasGit && linux ? false : 'needs git, and the Linux tools package.sh uses' },
+  () => {
+    it('are the ones release-docs.txt ships, and none it keeps, for a core and a probe host', () => {
+      // It copied all of `docs/`: the backlog, the roadmap, the design records and every
+      // findings file went to /opt/ms/docs on every host. The .deb, the .rpm and the MSI take
+      // the staged copy.
+      const shipped = [...releaseDocs(repoRoot).ship].sort();
+      for (const args of [[], ['--probe-only']]) {
+        const dir = packagingRepository();
+        const { result } = packageIn(dir, {}, {}, args);
+        assert.equal(result.status, 0, result.stderr);
+        const name = args.length === 0 ? 'ms' : 'ms-probe';
+        const docs = join(dir, 'build', `${name}-9.9.9`, 'docs');
+        assert.ok(shipped.includes('installation.md'), 'the list ships the installation guide');
+        assert.deepEqual(filesIn(docs), shipped, `${name}'s docs`);
+        assert.equal(
+          readFileSync(join(docs, 'installation.md'), 'utf8'),
+          "the operator's installation.md\n",
+        );
+      }
+    });
+
+    it('stop the build on a listed document that is not there, or a line that is not one', () => {
+      for (const [line, refusal] of [
+        ['ship gone.md', /release-docs\.txt ships docs\/gone\.md, and there is no such file/u],
+        ['ship findings', /release-docs\.txt ships docs\/findings, and there is no such file/u],
+        ['ship findings/', /has 'ship findings\/', which is not the path of a file inside docs\//u],
+        ['ship ../README.md', /has 'ship \.\.\/README\.md', which is not the path of a file/u],
+        ['ship /etc/passwd', /has 'ship \/etc\/passwd', which is not the path of a file/u],
+        ['ship a.md b.md', /has 'ship a\.md b\.md', which is not the path of a file/u],
+        ['ship', /has 'ship ', which is not the path of a file/u],
+        ['shop TASKS.md', /release-docs\.txt has 'shop', where each line is ship or keep/u],
+      ] as const) {
+        const dir = packagingRepository();
+        const list = join(dir, 'scripts', 'lib', 'release-docs.txt');
+        writeFileSync(list, `${readFileSync(list, 'utf8')}${line}\n`);
+        git(dir, 'commit', '-q', '-am', line);
+        const { result } = packageIn(dir);
+        assert.equal(result.status, 1, `${line}: ${result.stdout}${result.stderr}`);
+        assert.match(result.stderr, refusal, line);
+        assert.deepEqual(readdirSync(join(dir, 'release')), [], `${line}: no tarball`);
+      }
     });
   },
 );

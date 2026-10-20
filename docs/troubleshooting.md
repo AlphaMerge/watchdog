@@ -388,7 +388,7 @@ cat /opt/ms/app/core/build.json /opt/ms/app/probe/build.json
 ```
 
 A `commit` of `null` is a package that could not say, which is worth reporting as its own
-finding. `docs/findings/` holds the
-measured investigations behind several of the behaviours above, and
-[`docs/findings/2026-08-29-failure-modes.md`](findings/2026-08-29-failure-modes.md) is the
-row-by-row audit of what this system does when each part of it fails.
+finding. The source repository's `docs/findings/` holds the measured investigations behind
+several of the behaviours above, and `docs/findings/2026-08-29-failure-modes.md` there is the
+row-by-row audit of what this system does when each part of it fails. A release does not install
+them.

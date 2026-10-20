@@ -633,7 +633,9 @@ as rc.2's did):
 3. **`docs/release-notes-1.0.md`**: the *Verified* line (the commit, the date, the record), which
    keeps saying that Ubuntu on x86_64 was not run (`H-29`) unless it was, and *What a candidate
    has been installed on* under *Requirements*; and *Name resolution*'s **Before `v1.0.0`**
-   gains the gate's measurement, from step 0.7's run and S7's findings.
+   gains the gate's measurement, from step 0.7's run and S7's findings. The notes ship in
+   `/opt/ms/docs` and `findings/` does not (`H-51`), so the record is named as plain text, as
+   rc.2's is there: a link to it fails `release-docs.test.ts`.
 4. **`docs/README.md`**: the row *Know what the current candidate is and what was checked* names
    rc.3's record.
 5. **`docs/TASKS.md`**: `H-50` is ticked with the record, `P-432`'s outcome names the cut, and

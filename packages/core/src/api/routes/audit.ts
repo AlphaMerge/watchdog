@@ -293,7 +293,7 @@ export async function auditRoutes(
         tags: ['audit'],
         description:
           'Configuration history across the whole installation, newest first — the object ' +
-          'history third of the Logs view (`CAPABILITIES.MD §6`). Filter by `category` (the ' +
+          'history third of the Logs view. Filter by `category` (the ' +
           "action's first segment), by `actorKind`, by time, or to one object. **`objectId` is " +
           'that object exactly, never its subtree**: the entry most worth reading is the one ' +
           'recording a deletion, and an object that has been deleted has no parent left to be ' +

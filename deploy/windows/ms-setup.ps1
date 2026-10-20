@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Everything a Windows installation needs after its files are on disk (TASKS.md H-06).
+    Everything a Windows installation needs after its files are on disk (H-06).
 .DESCRIPTION
     The Windows counterpart of deploy/setup.sh, and it exists for the same reason: the MSI and
     the hand-run PowerShell installer both have to register the services, open the firewall,

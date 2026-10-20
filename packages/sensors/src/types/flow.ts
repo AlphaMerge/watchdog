@@ -235,8 +235,8 @@ export const flowCollector: SensorType = {
         title: 'Extra channels',
         description:
           'Your own channels, each counting the traffic that satisfies **all** of its rules — ' +
-          'what `CAPABILITIES.MD` calls custom flow variants. Each reports bytes per second, ' +
-          'beside the built-in channels rather than instead of them.',
+          'custom flow variants. Each reports bytes per second, beside the built-in channels ' +
+          'rather than instead of them.',
         items: {
           title: 'Channel',
           type: 'object',

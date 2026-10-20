@@ -3,7 +3,7 @@
 What each view is for, and where to go for the thing you are trying to do.
 
 This is the operator's guide. Developing the UI — the stack, the dev server, the design tokens —
-is [`packages/web/README.md`](../packages/web/README.md).
+is `packages/web/README.md` in the source repository.
 
 `ms-core` serves the UI itself as static assets from `api.webRoot`; there is no second web server
 to install ([`ADR-001` Decision 8](ADR-001-architecture.md)). An empty `webRoot` serves no UI at
@@ -26,9 +26,8 @@ Nine sections, in the order the header lists them.
 | **Maps**         | `/maps`          | What did somebody arrange to be looked at, and where?             |
 | **Reports**      | `/reports`       | What is being sent to whom, and did last night's run work?        |
 
-Alarms sits second, ahead of the tree, deliberately: [`WORKFLOW.MD §7`](WORKFLOW.MD) calls it the
-operator's home screen, and the thing somebody opens this product to look at belongs near the
-front.
+Alarms sits second, ahead of the tree, deliberately: it is the operator's home screen, and the
+thing somebody opens this product to look at belongs near the front.
 
 **Maps and Reports appear only where the core built them** (`H-12`). The v1 build — the release
 candidate — constructs neither, so its header has seven sections, and a bookmark to `/maps/3`
@@ -52,7 +51,7 @@ The operator's home screen, and the closest thing v1 has to a dashboard.
 
 - **Severity chips** — Down, Partial, Acknowledged, Warning, Unusual, worst first. A paused
   sensor is deliberately silent and an unscanned one is Unknown; neither is a fault, so neither
-  appears here. Partial and Unusual are `[V2]` ([`WORKFLOW.MD §4`](WORKFLOW.MD)): the chips are
+  appears here. Partial and Unusual are `[V2]` ([the state machine](state-machine.md), §1): the chips are
   there because the severity scale is, but nothing reaches those states in v1.
 - **Scope to a branch**, hide acknowledged, and sort by **priority** or **duration**.
 - **Acknowledge, pause and resume from the row.** A switch failing puts forty sensors on this
@@ -122,8 +121,8 @@ in the pattern, and this tree is a navigation aid rather than a picker.
 
 ### Logs
 
-Three tabs, because they are three different questions rather than one stream with a type column
-([`CAPABILITIES.MD §6`](CAPABILITIES.MD)):
+Three tabs, because they are three different questions rather than one stream with a type
+column:
 
 | Tab                | Answers                                    |
 | ------------------ | ------------------------------------------ |
@@ -514,8 +513,8 @@ says which pages ask and what to use for a screen that must stay up.
 
 ## Accessibility
 
-The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
-([`CLAUDE.md`](../CLAUDE.md)).
+The UI targets WCAG 2.1 AA, and this is one of the project's requirements rather than an
+aspiration.
 
 - **Colour is never the only signal.** Every state has a distinct glyph and its name beside it,
   which is what makes the badge readable to a screen reader and to a colour-blind operator.
@@ -547,8 +546,8 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
 ## What is not here
 
 **Libraries** are `[V2]` and are not built. Reports and the map and dashboard designer were also
-`[V2]` and are now built — see their sections above. See [`CAPABILITIES.MD §6`](CAPABILITIES.MD) for the full
-list and its markers; the remaining v2 candidates are in [TASKS.md](TASKS.md).
+`[V2]` and are now built, in the full build only — see their sections above. What 1.0 has and
+does not have is in [the release notes](release-notes-1.0.md).
 
 For an installation that has no maps arranged yet, the Overview and the Alarms view are what a
 wall display would show.

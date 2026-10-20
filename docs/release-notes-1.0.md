@@ -4,8 +4,8 @@ For an operator installing 1.0, or upgrading to it from an earlier build. This f
 `/opt/ms/docs` with `v1.0.0-rc.3`, and then with `v1.0.0`. One item is marked **Before `v1.0.0`**
 and is rewritten before that tag; the *Verified* line at the end is filled in when rc.3 is cut.
 
-Each item names the section that says it in full, or the ticket (`H-37`) in [TASKS.md](TASKS.md)
-that recorded it. This page says what to do and where to read, and does not repeat those sections.
+Each item names the section that says it in full, or the ticket (`H-37`) that recorded it, in
+the source repository's backlog. This page says what to do and where to read, and does not repeat those sections.
 
 ---
 
@@ -52,7 +52,7 @@ argued:
 install on Debian 12 and on Ubuntu 24.04, the `.deb` on Debian and the `.rpm` on Rocky 9 installed,
 upgraded and removed, and a backup restored onto another host. That was arm64 natively, and x86_64
 under emulation except Ubuntu 24.04, which the emulator cannot boot
-([the rc.2 record](findings/2026-10-04-v1-release-candidate-cut.md); `H-29`). rc.3's runs are the
+(the rc.2 record, `findings/2026-10-04-v1-release-candidate-cut.md`; `H-29`). rc.3's runs are the
 *Verified* line at the end. **Sizing** is [sizing.md](sizing.md), from measurements; the short
 version is in [installation.md → Sizing](installation.md#sizing).
 
@@ -65,7 +65,8 @@ Apache 2.0. So the database has to be TimescaleDB's Community build with
 `timescaledb-2-oss-postgresql-17` or Debian 13's `postgresql-17-timescaledb`, fails migration 004.
 
 The licence permits free self-hosted use, and forbids offering the software to others as a
-database service ([the licensing finding](findings/2026-08-25-timescaledb-licensing.md)). It
+database service ([ADR-001](ADR-001-architecture.md), Decision 4, and the licensing finding,
+`findings/2026-08-25-timescaledb-licensing.md`). It
 attaches to whoever ships TimescaleDB's binaries, which is why 1.0 does not bundle them and you
 install TimescaleDB yourself, from your distribution or the TimescaleDB project's repository.
 Native compression is the only Timescale-licensed feature 1.0 uses: rollups, retention and the job
@@ -74,17 +75,18 @@ that drives them are written in the core (`CLAUDE.md`, hard constraint 4;
 
 ## What is in 1.0, and what is not
 
-[CAPABILITIES.MD](CAPABILITIES.MD) is the scope contract. `[V1]` there is the 1.x line, and a
-`[V1]` row that needs Windows says **not in 1.0** beside it. Leaving those out, 1.0 has:
+The scope contract is `CAPABILITIES.MD`, in the source repository, and the section numbers below
+are its. `[V1]` there is the 1.x line, and a `[V1]` row that needs Windows says **not in 1.0**
+beside it. Leaving those out, 1.0 has:
 
 - **The object model** (§1): probe, group, device, sensor and channel, with inherited settings,
   tags, priority and comments; channel units, scaling, limits and spike filter; lookups (§1.2).
 - **Six of PRTG's eight sensor states** (§2), with the two-step failure rule.
 - **39 sensor types** (§3): ping, port, DNS, HTTP and REST, TLS, SNMP v1/v2c/v3 with a trap
   receiver, SSH, mail, PostgreSQL, MySQL and SQL Server, syslog, EXE/Script, Sensor Factory, and
-  Core Health and Probe Health. The exact list is
-  [the candidate's surface](runbook-field-test.md#appendix-the-candidates-surface), which a test
-  holds against the build.
+  Core Health and Probe Health. The exact list is what an installed core answers at
+  `GET /api/v1/sensor-types` ([the API reference](api-reference.md)); a test holds the build to
+  the candidate's surface, the field-test runbook's appendix in the source repository.
 - **Scanning and alerting** (§4, §5): intervals, the retry policy, schedules, maintenance windows,
   pauses, dependencies; state and threshold triggers; email, webhook, Slack, Teams and program
   delivery; summarisation and acknowledgement.
@@ -353,7 +355,7 @@ From rc.2 or anything older:
   stopped (exit 78), so set the key only on a probe already upgraded. **Until it is upgraded,
   its Probe Health reads Warning**: `protocol` reads `1`, *older than the core*, and the message
   names both protocols and what the probe cannot do until it is upgraded. A Warning state trigger
-  on that sensor, as step 3 of [the field-test runbook](runbook-field-test.md) puts on every
+  on that sensor, as step 3 of the field-test runbook puts on every
   Probe Health sensor, fires for it, and the Warning clears when the probe reconnects at 38.
   rc.1 and rc.2 both spoke 28, so this upgrade is the first in the 1.0 line to show it. Bring
   the probes level.
@@ -438,7 +440,8 @@ ms-probe`: the setting is read only at start
   HTTP, TLS and SNMP meanwhile.
 - **The field test is still to come** (`H-09`): a clean install on Ubuntu, monitoring 100 real
   devices for a week without intervention, which is 1.0's exit criterion
-  ([PLAN.md](PLAN.md), Phase 10; [the runbook](runbook-field-test.md)). It waits on hardware.
+  (`PLAN.md`, Phase 10, by the field-test runbook; both in the source repository). It waits on
+  hardware.
 - **Name resolution.** A probe looks up a device given by host name with the operating system's
   own resolver, `getaddrinfo`, through a resolver of its own (`P-426`), which keeps each answer
   30 s, serves an expired one for up to 5 minutes while the system's resolver does not answer,
@@ -458,9 +461,9 @@ ms-probe`: the setting is read only at start
   up at all.
 
   **Measured** at 5,000 sensors on 500 named devices, one in ten of them in a zone that does not
-  answer: before `P-426` ([the first finding](findings/2026-10-17-name-lookups-a-scan.md)),
-  through its resolver ([the second](findings/2026-10-18-name-lookups-through-the-resolver.md)),
-  and with `P-438` ([the third](findings/2026-10-19-name-lookups-answer-file-and-lanes.md)). A
+  answer: before `P-426` (`findings/2026-10-17-name-lookups-a-scan.md`), through its resolver
+  (`findings/2026-10-18-name-lookups-through-the-resolver.md`), and with `P-438`
+  (`findings/2026-10-19-name-lookups-answer-file-and-lanes.md`). A
   resolver taking 100 ms a lookup, or the silent zone on a running probe, no longer fails the
   answering devices' checks. A cold start in the middle of the outage now gives up none of the
   answering zone's 31,500 checks, where it gave up 2,251 before `P-438`, about half the
@@ -557,12 +560,12 @@ ms-probe`: the setting is read only at start
   policy said, and a hosts line with a `%scope` was skipped by glibc as the policy says. A file
   glibc reads once (`gai.conf`, or `nsswitch.conf` below 2.33), edited under a running probe, rested
   the helper until restart at its next loss, and `nsswitch.conf` at 2.36 did not (D28)
-  ([the differential](findings/2026-10-20-name-gate-differential.md), run 9). The cut ran it again
+  (the differential, `findings/2026-10-20-name-gate-differential.md`, run 9). The cut ran it again
   (*Verified*, below).
 
   **Before `v1.0.0`**: add the gate's measurement to this item: `P-432` S7's arms at 5,000 sensors
   against a simulated dnsmasq, in both modes, `P-465`'s `spread10`, `addresses` and `walkrate` among
-  them, run at the cut ([their method](findings/2026-10-20-name-lookups-gated.md)). The field test
+  them, run at the cut (their method: `findings/2026-10-20-name-lookups-gated.md`). The field test
   runs `"gate"` on every probe (`H-09`), and the default for 1.0 is decided again after it. Say here
   which it is, and why.
 - **Slipped to 1.0.1:**
@@ -607,12 +610,12 @@ ms-probe`: the setting is read only at start
 ## Verified
 
 **Verified:** `v1.0.0-rc.3` at `<commit, filled at the rc.3 cut>`, on `<date>`: the four smoke
-tests of [runbook-field-test.md](runbook-field-test.md) on arm64, and on x86_64 all but the
+tests of the field-test runbook on arm64, and on x86_64 all but the
 Ubuntu install, which this machine's emulator cannot boot (`H-29`); `P-432`'s differential
 against `getaddrinfo` in seven images, glibc's questions and the name check's (`P-460`), with
 the boxes that show the check off (`P-461`) and §7.5's other rows (`P-462`); the full suite; and
 the gate's full-size measurement (S7, with `P-465`'s arms). Run by
-[the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md), with their results in the
+the rc.3 cut checklist (`findings/2026-10-19-rc3-cut-checklist.md`), with their results in the
 rc.3 record.
 rc.2, for comparison, is `0a43b7bf`, cut 2026-10-04
-([its record](findings/2026-10-04-v1-release-candidate-cut.md)).
+(its record: `findings/2026-10-04-v1-release-candidate-cut.md`).

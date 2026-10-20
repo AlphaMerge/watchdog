@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MonitoringSystem restore (TASKS.md H-04).
+# MonitoringSystem restore (H-04).
 #
 #     sudo ./restore.sh /var/backups/ms/ms-backup-20260829T101500Z.tar.gz
 #     sudo ./restore.sh <archive> --database-only     # leave /etc/ms alone

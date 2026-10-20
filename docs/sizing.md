@@ -1,11 +1,12 @@
 # Sizing an installation
 
-Every number here is measured, and each links to the measurement. Where something has not been
-measured this says so rather than estimating — the point of this page is that you can check it.
+Every number here is measured, and each names the measurement: a file under `findings/` in the
+source repository, which a release does not install. Where something has not been measured this
+says so rather than estimating — the point of this page is that you can check it.
 
-- Scheduler and memory across machine tiers: [`2026-09-03-sizing.md`](findings/2026-09-03-sizing.md)
-- 24 hours at the v1 target: [`2026-08-30-soak-24h.md`](findings/2026-08-30-soak-24h.md)
-- Storage: [`2026-08-25-timeseries-sizing.md`](findings/2026-08-25-timeseries-sizing.md)
+- Scheduler and memory across machine tiers: `findings/2026-09-03-sizing.md`
+- 24 hours at the v1 target: `findings/2026-08-30-soak-24h.md`
+- Storage: `findings/2026-08-25-timeseries-sizing.md`
 
 ---
 

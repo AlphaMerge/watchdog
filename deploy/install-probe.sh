@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MonitoringSystem remote probe installer for Linux (systemd) — TASKS.md R-07.
+# MonitoringSystem remote probe installer for Linux, under systemd (R-07).
 #
 # Run from inside an unpacked probe-only tarball:
 #

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue an enrolment bundle for one remote probe (TASKS.md R-07).
+# Issue an enrolment bundle for one remote probe (R-07).
 #
 # Run on the *core* host, which is where the probe-channel CA lives:
 #

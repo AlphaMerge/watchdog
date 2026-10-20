@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MonitoringSystem backup (TASKS.md H-04).
+# MonitoringSystem backup (H-04).
 #
 #     sudo ./backup.sh [--out /var/backups/ms] [--config /etc/ms/core.json]
 #

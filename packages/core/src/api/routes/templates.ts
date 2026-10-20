@@ -353,7 +353,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         tags: ['templates'],
         summary: 'How eagerly a template may send during a storm',
         description:
-          'The six modes of `CAPABILITIES.MD §5.2`. The distinction that matters is between ' +
+          'The six summarisation modes. The distinction that matters is between ' +
           'the *first* modes and the *all* modes: "first Down immediately" turns a forty-sensor ' +
           'outage into one message and a digest, while "all Downs immediately" sends forty. ' +
           'A method whose `summarisable` is false ignores all of this and is stored as ' +
@@ -441,10 +441,10 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         tags: ['templates'],
         summary: 'Which triggers name this template',
         description:
-          '`CAPABILITIES.MD §5.2`’s reverse lookup, and the reason a delete can be refused with ' +
-          'a list rather than a shrug. A trigger names its templates inside a JSON document, so ' +
-          'no foreign key can enforce the reference — this is the query that stands in for one. ' +
-          'Only triggers on objects the caller can read are listed.',
+          'A trigger’s reference to its templates, read backwards, and the reason a delete can ' +
+          'be refused with a list rather than a shrug. A trigger names its templates inside a ' +
+          'JSON document, so no foreign key can enforce the reference — this is the query that ' +
+          'stands in for one. Only triggers on objects the caller can read are listed.',
         params: idParams,
         response: { 200: { $ref: 'ms:templateUsedBy' } },
       },

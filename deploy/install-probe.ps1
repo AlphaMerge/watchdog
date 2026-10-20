@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MonitoringSystem remote probe installer for Windows (TASKS.md R-07).
+    MonitoringSystem remote probe installer for Windows (R-07).
 
 .DESCRIPTION
     Run from inside an unpacked probe-only package, in an elevated PowerShell:
