@@ -4,8 +4,9 @@
 the whole run three times: first on S4's policy as it landed, then on the policy narrowed by what
 the first run found, and then after the review's fixes (run 3). Run 4, on `feat/p432-s8-walk`,
 adds the walk's wire, the regressions, the answer rows, the budget boxes and the boxes with the
-check off (`P-460`, `P-461`). Runs 5 and 6 follow the review of run 4, and run 6's recordings are
-the committed ones. Built first, then:
+check off (`P-460`, `P-461`). Runs 5 and 6 follow the review of run 4. Run 7 follows the second
+fix round, which put the answer rows' world in their digest, and its recordings are the committed
+ones. Built first, then:
 
 ```
 MS_DIFF_WRITE=1 ./scripts/smoke/name-gate-differential.sh
@@ -278,6 +279,39 @@ from it: 2,966 recordings and 42 answer recordings, each image with its answer r
 asked `localhost.` of the box's server), the replay naming answer rows it did not play, and a
 built file written again with its own bytes while Debian 12 replayed ("its build changed while
 it ran").
+
+## Run 7: the answer rows' world in their digest
+
+2026-10-20 (04:11 to 04:56 UTC), on `feat/p432-s8-walk` after `P-460`'s fix round 2, on the bases
+run 4 pinned and the same policy build (`e19f270b…`). Built first, then the whole run, as above.
+
+**What the fix round changed in what a run holds.** The answer rows' digest (`answerRowsDigest`)
+is now the sha256 of the answer rows with their world (`ANSWER_WORLD`: the hostname, the
+environment the lookup gets, the hosts file, nsswitch.conf and gai.conf), where before it was of
+the rows alone. The replay reads that world from one place (`answerRowWorld`), and names in its run
+the digest of the world it played. Nothing the boxes do changed, so run 7 is run 6 again under a
+digest that names more: the committed recordings, which named run 6's digest of the rows alone,
+no longer stood for the answer rows as committed, and were re-made rather than edited.
+
+**Run 7 passed**, in all seven images: 260 rows in each (251 on Rocky 8), 2,966 plans, 2,128
+heard, 70 silent and 768 local, as in runs 4 and 6. Every image's run and every box's named the
+same build (`de95fa8d…`), none saw it change, and every image's run named the same rows file
+(`44aa6cb3…`), answer rows and world (`862bddd8…`) and policy build. The recordings are rewritten
+from it: 2,966 recordings and 42 answer recordings. Against run 6's, the plans and answer rows
+recorded are the same ones; what differs is each lookup's time, and for 32 rotating plans the
+server glibc started at (its wire and OPT flags with it).
+- Each image's replay took 337–384 s from its box's start.
+- A heard walk took a median of 2.0 ms, 9.2 ms at the 99th percentile and at most 25.7 ms. A
+  silent one took 250–263 ms.
+- Every answer row in every image returned what it claims, its walk heard: `answer:2` with and
+  without `edns0` for TC with TCP/53 refused, `ENOTFOUND` for FORMERR, `answer:1` for A answered
+  with AAAA SERVFAIL, `ENOTFOUND` for FORMERR to OPT, and `EAI_AGAIN` after 1,007–1,017 ms for
+  the EDNS-deaf server.
+- The budget boxes: dnsmasq held 6, 8 and 10 distinct questions at once (`system`, gate, gate
+  after a helper SIGKILL; 18, 20 and 22 in the window), its table never full. systemd-resolved
+  held 10 in `system` and 9 in gate mode (12 and 14 in all). All as in run 6.
+- The five off boxes: each off by its rule, the check started and routing `unvouched:off`, and 0
+  questions asked.
 
 ## Through systemd-resolved
 

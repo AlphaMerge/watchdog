@@ -29,11 +29,11 @@ import type { DnsBehaviour, DnsServerPolicy } from '@ms/simulators';
  * the recording keeps which.
  *
  * **A run is tied to what it ran**: each image's run carries the sha256 of the rows file, of the
- * answer rows (`answerRowsDigest`), of the policy's build (`dist/src/resolver/system-names.js`)
- * and of every build the boxes load (`buildDigest`, `names-build.ts`), and says if that build
- * changed while it ran; each box's run carries the build too. The verdict fails a run of other
- * rows or another build, so a run kept from before a change, or made across one, cannot verify
- * after it.
+ * answer rows and their world (`answerRowsDigest`), of the policy's build
+ * (`dist/src/resolver/system-names.js`) and of every build the boxes load (`buildDigest`,
+ * `names-build.ts`), and says if that build changed while it ran; each box's run carries the
+ * build too. The verdict fails a run of other rows or another build, so a run kept from before a
+ * change, or made across one, cannot verify after it.
  *
  * **The walk's wire beside glibc's** (`P-460`, D30's recording (B)). Each plan is played again,
  * in a separate run with every cache cold, through `DnsCheck.route` alone: the name check with a
@@ -215,7 +215,7 @@ export interface ImageRun {
   /** The sha256 of the rows file the run replayed, and of the policy's build it loaded. */
   readonly rowsDigest: string;
   readonly policyDigest: string;
-  /** The sha256 of the answer rows it played (`answerRowsDigest`). */
+  /** The sha256 of the answer rows it played and their world (`answerRowsDigest`). */
   readonly answerRowsDigest: string;
   /** The sha256 of every build the boxes load (`names-build.ts`), as the run began. */
   readonly buildDigest: string;
@@ -610,13 +610,27 @@ export function modesProblems(run: PlanRun): string[] {
 export const ANSWER_PLAN = 'plan';
 export const ANSWER_A = '192.0.2.53';
 export const ANSWER_AAAA = '2001:db8::53';
-/** The answer rows' world, besides each one's resolv.conf. */
-export const ANSWER_WORLD = {
+/**
+ * The answer rows' world, besides each one's resolv.conf: the hostname, the environment the lookup
+ * gets beside `PATH`, and the hosts file, nsswitch.conf and gai.conf, as `answerRowWorld` writes them
+ * for every answer row. It is digested with the rows (`answerRowsDigest`), as S4's rows' worlds
+ * are in the rows file.
+ */
+export interface AnswerWorld {
+  readonly hostname: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly hosts: string;
+  readonly nsswitch: string;
+  readonly gai: string;
+}
+
+export const ANSWER_WORLD: AnswerWorld = {
   hostname: 'probe-1',
+  env: {},
   hosts: '127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n',
   nsswitch: 'hosts: files dns\n',
   gai: '',
-} as const;
+};
 
 export interface AnswerServer {
   readonly address: string;
@@ -844,12 +858,42 @@ export function digestOf(bytes: Uint8Array): string {
 }
 
 /**
- * The sha256 of the answer rows, as JSON: they live here rather than in the rows file, and a run
- * names the ones it played as it names the rows file, so recordings of a row since changed (its
- * resolv.conf, a server's behaviour, what it claims) cannot verify, or stand committed, for it.
+ * The sha256 of the answer rows and their world, as JSON: they live here rather than in the rows
+ * file, and a run names the ones it played as it names the rows file, so recordings of a row since
+ * changed (its resolv.conf, a server's behaviour, what it claims) or played in another world (the
+ * hosts file, nsswitch.conf, gai.conf, the hostname or the environment) cannot verify, or stand
+ * committed, for it.
  */
-export function answerRowsDigest(rows: readonly AnswerRow[] = ANSWER_ROWS): string {
-  return digestOf(Buffer.from(JSON.stringify(rows)));
+export function answerRowsDigest(
+  rows: readonly AnswerRow[] = ANSWER_ROWS,
+  world: AnswerWorld = ANSWER_WORLD,
+): string {
+  return digestOf(Buffer.from(JSON.stringify({ world, rows })));
+}
+
+/**
+ * What an answer row is played in, the one place the replay reads its world from: the world's
+ * hosts file, nsswitch.conf and gai.conf with the row's own resolv.conf, the world's hostname, and
+ * its environment.
+ */
+export function answerRowWorld(
+  row: AnswerRow,
+  world: AnswerWorld = ANSWER_WORLD,
+): {
+  readonly files: Readonly<Record<string, string>>;
+  readonly hostname: string;
+  readonly env: Readonly<Record<string, string>>;
+} {
+  return {
+    files: {
+      '/etc/hosts': world.hosts,
+      '/etc/resolv.conf': row.resolvConf,
+      '/etc/nsswitch.conf': world.nsswitch,
+      '/etc/gai.conf': world.gai,
+    },
+    hostname: world.hostname,
+    env: world.env,
+  };
 }
 
 /**

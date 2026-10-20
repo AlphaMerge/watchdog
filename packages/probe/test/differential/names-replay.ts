@@ -21,6 +21,7 @@ import {
   ANSWER_WORLD,
   NAMESERVER,
   STUB,
+  answerRowWorld,
   answerRowsDigest,
   digestOf,
   expectationIn,
@@ -32,6 +33,7 @@ import {
   unplayable,
   wireOf,
   type AnswerRow,
+  type AnswerWorld,
   type Asked,
   type Expectation,
   type ImageRun,
@@ -568,21 +570,18 @@ async function playRow(
   return { run: { ...said, plans, ...(setup.length > 0 ? { setup } : {}) }, glibc: read.glibc };
 }
 
-/** An answer row (`ANSWER_ROWS`): its world, a simulator of its own, and its one plan. */
+/**
+ * An answer row (`ANSWER_ROWS`): in the world the run's answer rows digest names, with a simulator
+ * of its own, and its one plan.
+ */
 async function playAnswerRow(
   row: AnswerRow,
+  world: AnswerWorld,
   ipv6: boolean,
 ): Promise<{ run: RowRun; glibc: string | undefined }> {
-  const setup = writeFiles(
-    {
-      '/etc/hosts': ANSWER_WORLD.hosts,
-      '/etc/resolv.conf': row.resolvConf,
-      '/etc/nsswitch.conf': ANSWER_WORLD.nsswitch,
-      '/etc/gai.conf': ANSWER_WORLD.gai,
-    },
-    ANSWER_WORLD.hostname,
-  );
-  const env = envOf({});
+  const played = answerRowWorld(row, world);
+  const setup = writeFiles(played.files, played.hostname);
+  const env = envOf(played.env);
   const { name, family } = row.question;
   const read = await inImageOf(env, name, family);
   const specs: DnsServerSpec[] = [];
@@ -671,11 +670,13 @@ async function main(): Promise<void> {
     );
   }
   const answers: RowRun[] = [];
+  // One world for every answer row, and the same in the digest the run names.
+  const world = ANSWER_WORLD;
   for (const row of ANSWER_ROWS) {
     if (a.only !== undefined && !a.only.includes(row.id)) continue;
     build.look(`before answer row ${row.id}`);
     const started = performance.now();
-    const played = await playAnswerRow(row, ipv6);
+    const played = await playAnswerRow(row, world, ipv6);
     glibc ??= played.glibc;
     answers.push(played.run);
     say(
@@ -692,7 +693,7 @@ async function main(): Promise<void> {
     digest: process.env['MS_DIFF_DIGEST'] ?? 'unknown',
     rowsDigest: digestOf(rowsBytes),
     policyDigest: digestOf(readFileSync(POLICY)),
-    answerRowsDigest: answerRowsDigest(ANSWER_ROWS),
+    answerRowsDigest: answerRowsDigest(ANSWER_ROWS, world),
     ...build.fields(),
     resolved: a.viaResolved && resolvedObserved(runs),
     rows: runs,

@@ -12,6 +12,7 @@ import { startCapture, type CaptureOptions } from './differential/names-capture.
 import {
   ANSWER_PLAN,
   ANSWER_ROWS,
+  ANSWER_WORLD,
   BUDGET_FORWARD_MAX,
   BUDGET_GATE_EXTRA,
   BUDGET_LOSS_TRANSIENT,
@@ -22,6 +23,7 @@ import {
   WITHIN_MS,
   answerExpectation,
   answerProblems,
+  answerRowWorld,
   answerRowsDigest,
   budgetProblems,
   canonicalAddress,
@@ -46,6 +48,7 @@ import {
   walkProblems,
   wireOf,
   type AnswerRow,
+  type AnswerWorld,
   type BudgetRun,
   type Classification,
   type Current,
@@ -2080,6 +2083,66 @@ describe('P-460: an OPT record read off a capture', () => {
   });
 });
 
+describe('P-460: the answer rows’ digest names their world as well as the rows', () => {
+  /** The world with one thing changed, each as an edit to it would leave it. */
+  const edits: readonly [string, AnswerWorld][] = [
+    ['nsswitch.conf without dns', { ...ANSWER_WORLD, nsswitch: 'hosts: files\n' }],
+    ['a name in the hosts file', { ...ANSWER_WORLD, hosts: `${ANSWER_WORLD.hosts}10.0.0.9 sw1\n` }],
+    ['a gai.conf rule', { ...ANSWER_WORLD, gai: 'precedence ::ffff:0:0/96 100\n' }],
+    ['another hostname', { ...ANSWER_WORLD, hostname: 'probe-2' }],
+    ['RES_OPTIONS set', { ...ANSWER_WORLD, env: { RES_OPTIONS: 'attempts:1' } }],
+  ];
+
+  it('moves when the world moves, and when a row does', () => {
+    const now = answerRowsDigest();
+    assert.match(now, /^[0-9a-f]{64}$/u);
+    assert.equal(answerRowsDigest(ANSWER_ROWS, ANSWER_WORLD), now);
+    for (const [what, world] of edits) {
+      assert.notEqual(answerRowsDigest(ANSWER_ROWS, world), now, what);
+    }
+    const [first, ...rest] = ANSWER_ROWS;
+    assert.ok(first !== undefined);
+    const edited: AnswerRow = { ...first, resolvConf: `${first.resolvConf}options timeout:2\n` };
+    assert.notEqual(answerRowsDigest([edited, ...rest]), now);
+    assert.notEqual(answerRowsDigest([{ ...first, outcome: 'EAI_AGAIN' }, ...rest]), now);
+  });
+
+  it('is of the world each answer row is played in: its files, hostname and environment', () => {
+    for (const row of ANSWER_ROWS) {
+      assert.deepEqual(answerRowWorld(row), {
+        files: {
+          '/etc/hosts': ANSWER_WORLD.hosts,
+          '/etc/resolv.conf': row.resolvConf,
+          '/etc/nsswitch.conf': ANSWER_WORLD.nsswitch,
+          '/etc/gai.conf': ANSWER_WORLD.gai,
+        },
+        hostname: ANSWER_WORLD.hostname,
+        env: ANSWER_WORLD.env,
+      });
+    }
+    // An edited world is the one played, field by field.
+    const [row] = ANSWER_ROWS;
+    assert.ok(row !== undefined);
+    const other: AnswerWorld = {
+      hostname: 'probe-2',
+      env: { RES_OPTIONS: 'attempts:1' },
+      hosts: '127.0.0.1 localhost\n10.0.0.9 sw1\n',
+      nsswitch: 'hosts: files\n',
+      gai: 'precedence ::ffff:0:0/96 100\n',
+    };
+    assert.deepEqual(answerRowWorld(row, other), {
+      files: {
+        '/etc/hosts': other.hosts,
+        '/etc/resolv.conf': row.resolvConf,
+        '/etc/nsswitch.conf': other.nsswitch,
+        '/etc/gai.conf': other.gai,
+      },
+      hostname: other.hostname,
+      env: other.env,
+    });
+  });
+});
+
 describe('P-460: the committed recordings are of the committed rows', () => {
   it('every image’s run replayed the rows file as it is committed, and recorded every answer row', () => {
     const rowsBytes = readFileSync(
@@ -2093,7 +2156,8 @@ describe('P-460: the committed recordings are of the committed rows', () => {
       const made = recorded.images[image];
       assert.ok(made !== undefined, image);
       assert.equal(made.rowsDigest, digestOf(rowsBytes), image);
-      // The answer rows as they are committed: a row edited since was not what was recorded.
+      // The answer rows and their world as they are committed: a row or the world edited since
+      // was not what was recorded.
       assert.equal(made.answerRowsDigest, answerRowsDigest(), image);
     }
     for (const image of images) {

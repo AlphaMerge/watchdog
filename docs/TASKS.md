@@ -14673,6 +14673,51 @@ because each is a decision rather than a defect:
           - In the boxes, all three in one narrowed run: the canary allowed to ask with the check
             off (each off box said the check asked `localhost.`), the replay naming answer rows it
             did not play, and a built file written again with its own bytes mid-replay.
+      - **Fix round 2** (the review of `69ac8f40`, its item 6: the answer rows' world). Run 7
+        passed, and its recordings are the committed ones.
+        - **The answer rows' digest names their world** (`answerRowsDigest`, the sha256 of
+          `{ world, rows }` as JSON). Before, it was of `ANSWER_ROWS` alone, while the replay wrote
+          `ANSWER_WORLD` (the hostname, the hosts file, `hosts: files dns` and an empty gai.conf)
+          into every answer row's box: an edit to the world left the digest as it was, and the 42
+          committed answer recordings went on passing `names-differential.test` for a world that
+          no longer existed. Only `buildDigest` would have seen it, at verify time, and the
+          committed recordings do not keep it.
+        - **The world is read from one place** (`answerRowWorld`): the world's three files with the
+          row's own resolv.conf, its hostname and its environment. The replay passes one world to
+          every answer row and to the digest its run names.
+        - **Run 7** (`docs/findings/2026-10-20-name-gate-differential.md`, run 7): the whole run
+          again on the same bases and policy build, 04:11 to 04:56 UTC. It passed in all seven
+          images with every box: 2,966 plans (2,128 heard, 70 silent, 768 local), the 42 answer
+          recordings each with its row's outcome, dnsmasq at 6, 8 and 10 and resolved at 10 and 9,
+          the five off boxes with 0 questions asked, and every run of one build (`de95fa8d…`) that
+          none saw change. Each image names the answer rows and world as `862bddd8…`. Against run
+          6's recordings only the lookups' times differ, and for 32 rotating plans the server
+          glibc started at.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **The world includes the lookup's environment** (`ANSWER_WORLD.env`, empty). The
+            review named the hostname and the three files. The replay also wrote an empty
+            environment into each answer row's lookup, hard-coded where it played the row, so an
+            edit there escaped the digest in the same way. S4's rows carry `env` in their world
+            for the same reason.
+          - **Run 7 re-recorded rather than the seven digests rewritten by hand.** The recordings
+            file is written only by a run that passed, and a digest edited in would claim a run
+            that named it. Fix round 1 set the precedent: its `outcome` field moved the digest,
+            and run 6 re-recorded.
+          - **The digest names the answer rows' data, not the replay's code.** The simulator's
+            policy (`NAMESERVER`), the `PATH` the lookup gets and the settle times are the build,
+            held by `buildDigest` at verify time, as they are for S4's rows. The rows file names
+            S4's worlds and not the harness either. The answer rows' digest now names as much as
+            the rows file does.
+        - **Tests**, each run after the last change: `names-differential.test.ts` 75 (2 new: the
+          digest moves when the world moves, field by field, and when a row's resolv.conf or
+          outcome does; each answer row is played in the world's files with its own resolv.conf,
+          the world's hostname and environment, and in an edited world, field by field). The
+          committed-recordings test holds run 7's digest. `system-names.test.ts` 441.
+        - **Mutants: 6 on the toolchain, all killed.** Each was restored with `shutil.copy` and
+          `os.utime`, checked with `filecmp`, and no marker was left in `dist` after the last
+          rebuild. The digest of the rows alone (killed by the new test, and since run 7 by the
+          committed-recordings test too), the digest without the environment, and the played
+          world's gai.conf, nsswitch.conf, hostname or environment not the world's.
 - [x] **P-461 — the differential shows the check off in no box** · XS · P-432 · Filed 2026-10-20
       by `P-432` S8. Every box S8 replays in has the check on, because a row the check is off for
       claims no wire. Rules 3 to 5 are unit-tested against fixtures, but nothing shows the policy
