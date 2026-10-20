@@ -13735,8 +13735,9 @@ because each is a decision rather than a defect:
           keys routed both heard and silent. Each arm's own assertions are the findings' table.
         - **The judge is a pure function** (`test/support/name-gate-judge.ts`) of what an arm
           measured, so that every assertion is seen failing, not only passing: 34 runs made to
-          break one each, and a clean run of every arm in every mode it runs in, judged in every
-          `test:perf`.
+          break one each (three assertions none of them broke, and several rules' calls of shared
+          ones; the review's first round made it 65), and a clean run of every arm in every mode it
+          runs in, judged in every `test:perf`.
         - **`GLIBC_QUESTIONS` is held to D30's recording (A)**, never to `system-names.ts`: the 427
           recordings it can play (217 of family 0, 84 of family 4, 126 of family 6, 21 silent), in
           all seven images, wire exact try by try and a silent plan's time within a second; four
@@ -13780,7 +13781,9 @@ because each is a decision rather than a defect:
         - **Shown to run, scaled down** (500 sensors on 50 devices, a pool of 16, a minute an
           arm; the VM with another session's run beside it, so not a measurement): all 18 runs
           held every assertion, in 1,424 s and 293 s, and so did `partial` with the check off
-          (every lookup `unvouched (off)` in the helper). Each reached what it asserts: the gate's
+          (every lookup `unvouched (off)` in the helper). Each reached what it asserts, but for
+          `warmzone`'s steady walk rate, never read at `MS_DNS_WARM_MINUTES=1` (the review's first
+          round read it at 1.5): the gate's
           walks asked 49 to 182 questions, none past the bucket; the forwarder's peak for the
           probe was 0 to 12 of 18 in the gate and 0 to 5 of 6 in `system`, none dropped; in
           `zone`, `partial` and P1 to P3 zone b's one key was routed to the helper, at most 3 of
@@ -13813,6 +13816,94 @@ because each is a decision rather than a defect:
             only.
         - **Owed:** the full-size run in a quiet window, its command in the findings file (about
           100 minutes, `ms-server` stopped); `P-465`; `P-466`.
+        - **S7 review, fixed** 2026-10-20, on `feat/p432-s7-perf` (fourteen findings, none high),
+          in commits after S7's: test code and docs only, no production code.
+          - **What changed.** Every rule that says a group's checks are not given up now fails a
+            check of that group that failed any other way too (`failedOtherwise` beside
+            `givenUp`), and `zone` in gate mode fails a check refused. P1 and P2 read the
+            forwarder's peak in windows cut at each loss and 10.5 s after it, judged with the
+            transient after a loss and without it everywhere else. `glibcLookup` returns a
+            `close`, sends every type at each try, ends a try left part-answered with its own
+            code, and is played at the simulator on loopback against `glibcWire` and
+            `glibcSchedule`; the recordings are held to cover each of the fixture's images by
+            name. Each arm closes the probe's lanes before the resolver stops and asserts none
+            left. P3's setup is the reply to the stall's own question sent before the stall
+            ended, by the simulator's log, in place of a flag true by construction. Each arm
+            prints its file descriptors, resident set, the resolver's peaks, the walk's channels
+            and each helper child's lookups. The findings file's second quiet-window command
+            prints its own perf conditions.
+          - **Corrected:** S7's "every assertion is seen failing" was not so for three of them
+            (P3's passed-stuck, P5/P5b's helper resident set, a child ready after every kill),
+            nor for several rules' own call of the checks rules share; 65 cases now break each
+            one. S7's "each reached what it asserts" was not so for `warmzone`'s steady walk
+            rate, whose window `MS_DNS_WARM_MINUTES=1` left at about nothing: re-run at 1.5.
+          - **Decided 2026-10-20 by Claude, under the user's delegation:**
+            - **"0 given up" means every check answered**: the gate's own refusals and a lookup
+              lost with the helper end `RESOLVER_FAULT`, which the check never words as given
+              up. P3 alone reads its stall's failures and asserts none, as the design's row does.
+            - **`zone` asserts none refused** beside every answering check answered: the design's
+              "answering 31,500 of 31,500" is every check run.
+            - **A loss's window is 10.5 s**: a lost child's questions were all sent by the loss
+              and are let go `FORWARD_HOLD_MS` after it, and the half second is the gauge's round
+              trip and the timer's rounding. P1's losses are its kills; P2's the detach and the
+              `hung` loss, since the SIGSTOP asks nothing again. A window ends as its own loss's
+              wherever its timer fires (one fired early in a mutant's run and left the next 19 s
+              judged with the transient); the next takes it only from a later loss. A window with
+              the transient that runs more than a second past 10.5 s fails, as do a stretch not
+              read and none read.
+            - **The model sends every type at each try**, as the table and glibc's silent
+              recordings do, and ends a part-answered try with `EMODELPARTIAL` rather than play
+              glibc's single-request switch, which no recording has; no arm meets it (family 4).
+            - **Coverage is by image**, every family and the silent plans in each of the
+              fixture's images: a count was cleared by one image alone.
+            - **The resolver's own `stop` is not changed**: it lets its lane lookups run and
+              `#pumpProbe` starts the next queued as each ends. A probe exits after it, and S7
+              changes no production code: left to the orchestrator to ticket.
+            - **Not printed: the helper's at-risk peak, first looks, overshoot and class caps
+              hit.** The resolver keeps the first only for its hourly summary, which no arm
+              reaches, and exposes none of the others; `spread10` asserts them, so the hook is
+              `P-465`'s. The helper has no queue of its own: the resolver's queued is printed.
+            - **Round 2's other arms are not 1.0's**: `hung`, `hungdead`, `spread`, `deaf`,
+              `warmbig`, `singles`, `deadns1`, `walkmemory` and P4, each with its round-2
+              assertions in the findings file. The design's verdict on `gate` as the field
+              test's setting does not name them; the key rule, the at-risk gate, misses and the
+              stand-down, single labels and the check off are held at the unit and scenario
+              level (`lane-rule`, `helper-lanes-model`, `dns-check`, `name-resolver-gate`'s K4,
+              SC11, SC12); `walkmemory`'s bound is held nowhere. Each is an arm's settings in
+              this world: if wanted after 1.0, one ticket, for the orchestrator to number.
+          - **Tests**, each run after the last change: `name-lookups.test.ts`'s third block, 74 of 74
+            in about four seconds in every `test:perf` (65 runs made to break an assertion each;
+            the recordings held per image, and an image left unplayed told apart; `glibcLookup` at
+            the simulator, families 0, 4 and 6 under each plan and a part-answered try; the
+            model's close; the peak windows on a clock whose timers fire early; the prints; the
+            wrong tables, the clean runs and the bucket as before). The second block's eighteen
+            arm runs scaled down, all held (1,742 s); P1 and P2 again after the windows' fix, and
+            `partial` with the check off, all held. Prettier and eslint on the changed files.
+          - **Mutants: 31, on the toolchain**, each restored with `shutil.copy` and `os.utime`,
+            checked with `filecmp`, its marker seen in `dist` before its run and none left after
+            the last rebuild, `dist` read back against each mutated line:
+            - the judge, 16, each killed by the case made to break it: failures otherwise not
+              judged; `zone`'s refused; the bound outside a loss's window loosened to the
+              transient's; the windows not required; a stretch not read; the transient's length;
+              P3's reply; P3's passed-stuck; the helper's resident set; a child ready after every
+              kill; P3's stall not begun; `warmzone`'s own call; `partial`'s check-on rule; P2's
+              and P6's losses; an arm with no rules;
+            - the model, 7: a third try (its wire and its time); the part-answered try; the
+              images per family; the silent ones by image; the coverage of families; `close` a
+              no-op; a lookup after `close` asked;
+            - the prints, 3; the windows' end read off the clock again (the early timer), 1;
+            - through their arms, 4: the lanes not closed at the end (`zone`, `system`: 3
+              lookups and 3 file descriptors left); the stall begun before its question is sent
+              (P3: no reply waiting); the gate refusing every name while the helper is down (P2:
+              13 answering checks failed otherwise and none given up, which S7's judge passed);
+              heard names routed to the helper (P2: 22 answering checks given up), killed, but
+              by S7's own check, so it does not show the new one.
+          - **Shown to run, scaled down** again, the findings file has the numbers: every check
+            the arms judge answered in every arm (P3's four in its stall aside, which it reads);
+            no check refused; P1's and P2's windows at most 5 after a loss and 5 outside; the
+            warm arms' walk 0.87 and 1.13 a second at steady state against 3; 19 file
+            descriptors before and after every arm and no lookup left on the lanes; P3's reply
+            sent during its stall.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
