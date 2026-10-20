@@ -68,7 +68,8 @@ export const SSH_CREDENTIAL_SCHEMA: Readonly<Record<string, JsonSchema>> = {
   hostKeys: {
     type: 'array',
     maxItems: 64,
-    items: { type: 'string', minLength: 1, maxLength: 128 },
+    // The singular, for `U-12`'s repeating control (`U-88`).
+    items: { title: 'Host key', type: 'string', minLength: 1, maxLength: 128 },
     title: 'Host keys',
     description:
       'Every server this set may log in to, by its key, as `ssh-keygen -lf` prints it (`A-41b`). ' +

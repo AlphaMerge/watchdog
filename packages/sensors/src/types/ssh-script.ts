@@ -85,6 +85,8 @@ export const sshScript: SensorType = {
           'the sensor is judged by. A script printing a key that is not here is reported in the ' +
           'message rather than ignored, which is how you find out the two have drifted apart.',
         items: {
+          // The singular, for `U-12`'s repeating control (`U-88`).
+          title: 'Channel',
           type: 'object',
           additionalProperties: false,
           required: ['key'],

@@ -52,7 +52,9 @@ export interface CredentialKindDefinition {
 const ALLOWED_TARGETS: JsonSchema = {
   type: 'array',
   maxItems: MAX_ALLOWED_TARGETS,
-  items: { type: 'string', minLength: 1, maxLength: 255 },
+  // The singular, for `U-12`'s repeating control (`U-88`): without it each entry and its Remove
+  // were named for the list, "Allowed targets 1" and "Remove Allowed targets 1".
+  items: { title: 'Allowed target', type: 'string', minLength: 1, maxLength: 255 },
   title: 'Allowed targets',
   description:
     'The devices this set may be sent to: host names, *.domain patterns, addresses and CIDR ' +

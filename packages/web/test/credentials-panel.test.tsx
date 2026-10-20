@@ -51,7 +51,7 @@ const KINDS: CredentialKindSummary[] = [
         allowedTargets: {
           type: 'array',
           maxItems: 64,
-          items: { type: 'string', minLength: 1, maxLength: 255 },
+          items: { title: 'Allowed target', type: 'string', minLength: 1, maxLength: 255 },
           title: 'Allowed targets',
         },
       },
@@ -71,7 +71,7 @@ const KINDS: CredentialKindSummary[] = [
         hostKeys: {
           type: 'array',
           maxItems: 64,
-          items: { type: 'string', minLength: 1, maxLength: 128 },
+          items: { title: 'Host key', type: 'string', minLength: 1, maxLength: 128 },
           title: 'Host keys',
         },
       },
@@ -621,8 +621,8 @@ describe('the credentials tab', () => {
   describe('a save', () => {
     /** Narrows the set to one more target, which is what the staged preview answers about. */
     const narrow = (form: HTMLElement): void => {
-      fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
-      fireEvent.change(within(form).getByLabelText('Allowed targets 2'), {
+      fireEvent.click(within(form).getByRole('button', { name: 'Add allowed target' }));
+      fireEvent.change(within(form).getByLabelText('Allowed target 2'), {
         target: { value: '10.9.0.0/16' },
       });
       fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
@@ -726,8 +726,8 @@ describe('the credentials tab', () => {
       'returns focus to the save button when %s is refused (U-23)',
       async (_what, stub, sent) => {
         const { calls, form } = await editSnmp(stub);
-        fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
-        const entry = within(form).getByLabelText('Allowed targets 2');
+        fireEvent.click(within(form).getByRole('button', { name: 'Add allowed target' }));
+        const entry = within(form).getByLabelText('Allowed target 2');
         fireEvent.change(entry, { target: { value: '10.9.0.0/16' } });
         // Enter in the box submits the form, with focus in the box.
         entry.focus();
@@ -742,7 +742,7 @@ describe('the credentials tab', () => {
           );
         });
         // Still open, with what was typed.
-        expect(within(form).getByLabelText<HTMLInputElement>('Allowed targets 2').value).toBe(
+        expect(within(form).getByLabelText<HTMLInputElement>('Allowed target 2').value).toBe(
           '10.9.0.0/16',
         );
       },
@@ -750,8 +750,8 @@ describe('the credentials tab', () => {
 
     it('leaves focus where the operator moved it while the check was out (U-23)', async () => {
       const { calls, form } = await editSnmp({ preview: REFUSED });
-      fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
-      const entry = within(form).getByLabelText('Allowed targets 2');
+      fireEvent.click(within(form).getByRole('button', { name: 'Add allowed target' }));
+      const entry = within(form).getByLabelText('Allowed target 2');
       fireEvent.change(entry, { target: { value: '10.9.0.0/16' } });
       entry.focus();
       fireEvent.submit(form);
@@ -781,13 +781,13 @@ describe('the credentials tab', () => {
     // on this tab.
     it('empties an allowed target to its last character, keeps the entry, and says it cannot be saved empty (U-23)', async () => {
       const { calls, form } = await editSnmp();
-      const box = within(form).getByLabelText<HTMLInputElement>('Allowed targets 1');
+      const box = within(form).getByLabelText<HTMLInputElement>('Allowed target 1');
       expect(box.value).toBe('10.0.0.0/24');
       fireEvent.change(box, { target: { value: '1' } });
       fireEvent.change(box, { target: { value: '' } });
       expect(box.value).toBe('');
-      expect(within(form).getByLabelText<HTMLInputElement>('Allowed targets 1')).toBe(box);
-      expect(within(form).getByRole('button', { name: 'Remove Allowed targets 1' })).toBeDefined();
+      expect(within(form).getByLabelText<HTMLInputElement>('Allowed target 1')).toBe(box);
+      expect(within(form).getByRole('button', { name: 'Remove Allowed target 1' })).toBeDefined();
       // `minLength: 1`: an empty target cannot be saved, and the form says so at the entry.
       expect(within(form).getByText('1 field needs attention')).toBeDefined();
       expect(within(form).getByRole('button', { name: 'Save changes' })).toHaveProperty(
@@ -868,7 +868,7 @@ describe('the credentials tab', () => {
       // Opened now, the form starts from what was saved: nothing in it to put the old set back.
       fireEvent.click(editButton('SNMP'));
       const reopened = screen.getByRole('form', { name: 'Editing SNMP credentials' });
-      expect(within(reopened).getByLabelText<HTMLInputElement>('Allowed targets 2').value).toBe(
+      expect(within(reopened).getByLabelText<HTMLInputElement>('Allowed target 2').value).toBe(
         '10.9.0.0/16',
       );
       expect(within(reopened).getByText('Nothing has changed yet.')).toBeDefined();
@@ -1055,7 +1055,7 @@ describe('the credentials tab', () => {
       });
       narrow(form);
       await alertSaying('allowed target 2');
-      const entry = within(form).getByLabelText('Allowed targets 2');
+      const entry = within(form).getByLabelText('Allowed target 2');
       const describedBy = entry.getAttribute('aria-describedby') ?? '';
       expect(describedBy).not.toBe('');
       expect(document.getElementById(describedBy.trim())?.textContent).toContain(
@@ -1104,7 +1104,7 @@ describe('the credentials tab', () => {
       it('follows the second target when it moves up', async () => {
         const { form } = await editSnmp(refusing);
         const second = await refused(form);
-        fireEvent.click(within(form).getByRole('button', { name: 'Move Allowed targets 2 up' }));
+        fireEvent.click(within(form).getByRole('button', { name: 'Move Allowed target 2 up' }));
         expect(targets(form)[0]).toBe(second);
         expect(second.value).toBe('10.9.0.0/16');
         expect(problemIn(second)).toBe(SAID);
@@ -1119,9 +1119,9 @@ describe('the credentials tab', () => {
       it('is dropped with a removed entry, and not given to one added in its place', async () => {
         const { form } = await editSnmp(refusing);
         await refused(form);
-        fireEvent.click(within(form).getByRole('button', { name: 'Remove Allowed targets 2' }));
+        fireEvent.click(within(form).getByRole('button', { name: 'Remove Allowed target 2' }));
         expect(targets(form)).toHaveLength(1);
-        fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
+        fireEvent.click(within(form).getByRole('button', { name: 'Add allowed target' }));
         const added = targets(form)[1];
         if (added === undefined) throw new Error('an added target expected');
         expect(problemIn(added)).toBe('');
@@ -1338,7 +1338,7 @@ describe('the credentials tab', () => {
     it('names no colour the stylesheet lacks, so no edge falls back to the text colour', async () => {
       const { form } = await editSnmp();
       // An allowed target is an entry of a list, with a box of its own.
-      expect(within(form).getByLabelText('Allowed targets 1')).toBeDefined();
+      expect(within(form).getByLabelText('Allowed target 1')).toBeDefined();
       expect(COLOURS.size).toBeGreaterThan(20);
       expect(colourNames(document.body).filter((colour) => !COLOURS.has(colour))).toEqual([]);
     });
@@ -1583,8 +1583,8 @@ describe('a refused credential change (U-54)', () => {
     expect(region.parentElement?.parentElement).toBe(form);
     expect(form.lastElementChild).toBe(region.parentElement);
 
-    fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
-    fireEvent.change(within(form).getByLabelText('Allowed targets 2'), {
+    fireEvent.click(within(form).getByRole('button', { name: 'Add allowed target' }));
+    fireEvent.change(within(form).getByLabelText('Allowed target 2'), {
       target: { value: '10.9.0.0/16' },
     });
     const save = (): void => {

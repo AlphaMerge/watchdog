@@ -86,12 +86,17 @@ reserves a key of the type's own (`P-348`) says which, as `db-shared.ts` builds 
 `DB_OWN_KEYS`.
 
 **What the generated form draws.** Strings, numbers, integers, booleans, enums and objects that
-declare their `properties` get a real control. Everything else — an array, a free-form object —
-falls back to an editable JSON box (`forms/Control.tsx`). That fallback exists so a save can
-never *delete* a parameter the form could not draw, and it round-trips correctly, but it is JSON
-an operator types by hand. Prefer a shape with a control where one fits; reach for an array when
-the parameter genuinely is a list (`snmp.table.columns`), and know that the form is the thing
-with the gap, not your schema. `U-12` is the ticket to close it.
+declare their `properties` get a real control, and an array whose `items` is one of those gets a
+repeating control with Add, Remove and Move (`U-12`). Anything else — a free-form object, a
+combinator — falls back to an editable JSON box (`forms/Control.tsx`). That fallback exists so a
+save can never *delete* a parameter the form could not draw, and it round-trips correctly, but
+it is JSON an operator types by hand, so prefer a shape with a control where one fits.
+
+**A list's `items` carries a `title`, the singular.** The fieldset is named for the parameter —
+"Columns" — and each entry, and the buttons that move and remove it, for the item: "Column 2",
+"Remove Column 2". Without one they fall back to the plural, "Remove Columns 2", which is all a
+screen reader says of the entry. `entry-titles.test.ts` holds every shipped list to it (`U-88`).
+
 
 ### `listener` (optional)
 

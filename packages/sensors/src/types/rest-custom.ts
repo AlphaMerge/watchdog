@@ -239,6 +239,8 @@ export const restCustom: SensorType = {
           'belongs — “$.status must equal healthy” — because a status is not a number and a ' +
           'channel that encodes one as 1 and 0 loses what it said.',
         items: {
+          // The singular, for `U-12`'s repeating control (`U-88`).
+          title: 'Expected value',
           type: 'object',
           additionalProperties: false,
           required: ['path'],

@@ -107,6 +107,8 @@ function readColumns(params: Readonly<Record<string, unknown>>): TableColumn[] {
 }
 
 const COLUMN_SCHEMA = {
+  // The singular, for `U-12`'s repeating control (`U-88`).
+  title: 'Column',
   type: 'object',
   additionalProperties: false,
   required: ['column', 'name'],

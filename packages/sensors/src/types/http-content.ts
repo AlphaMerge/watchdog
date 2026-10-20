@@ -101,6 +101,8 @@ export const httpContent: SensorType = {
           'is the number, or the whole match when it captures nothing. The first entry is the ' +
           'channel the sensor is judged by.',
         items: {
+          // The singular, for `U-12`'s repeating control (`U-88`).
+          title: 'Number to extract',
           type: 'object',
           additionalProperties: false,
           required: ['key', 'pattern'],

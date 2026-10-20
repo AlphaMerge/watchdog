@@ -73,6 +73,8 @@ export const httpAdvanced: SensorType = {
           'value empty to require only that the header is there. A cache that stopped setting ' +
           'Cache-Control reports as perfectly healthy by status code alone.',
         items: {
+          // The singular, for `U-12`'s repeating control (`U-88`).
+          title: 'Expected header',
           type: 'object',
           additionalProperties: false,
           required: ['name'],

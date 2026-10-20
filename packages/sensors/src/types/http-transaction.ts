@@ -305,6 +305,8 @@ const STEP_SCHEMA: JsonSchema = {
         'Each pattern is matched against this step’s response and the first capture group is ' +
         'kept under the name given, for {{substitution}} into any later step.',
       items: {
+        // The singular, for `U-12`'s repeating control (`U-88`).
+        title: 'Capture',
         type: 'object',
         additionalProperties: false,
         required: ['name', 'pattern'],
