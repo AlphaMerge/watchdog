@@ -28,7 +28,9 @@ import { ANSWER_MS, type RiskSeen } from '../../src/resolver/name-resolver.js';
  * Each arm adds its own (`ARM_RULES`), from the design's table. Where one says a group's checks are
  * not given up, it means every one of them answered: a check that failed in any other way (the
  * gate's own refusals, `RESOLVER_FAULT` at a helper loss, `ENODATA`) fails the arm as one given up
- * does, since `GIVEN_UP`'s words are only the resolver's for a name it did not hear.
+ * does, since `GIVEN_UP`'s words are only the resolver's for a name it did not hear. P2's answering
+ * checks are the one exception, by `P-472`'s decision: an allowance read from the run's own facts
+ * (`hangAllowance`), for the checks its stopped child left nowhere to be answered.
  *
  * Two arms are held to another run of the same process (`baseline`), and fail without it
  * (`P-465`): `walkrate`'s event loop to the `addresses` arm's in its mode, both with the name
@@ -153,6 +155,8 @@ export interface WorldFacts {
     readonly hungAfterMs: number | undefined;
     readonly upAfterMs: number | undefined;
   };
+  /** P2: what its answering checks' allowance is read from (`P-472`). */
+  readonly hang?: HangFacts;
   /**
    * P3: the stall, begun as a probe-lane lookup of an answering name sent its question, and what
    * the probe's lanes said of it. The case D25's marks must survive is that lookup's reply waiting
@@ -223,6 +227,117 @@ export interface WorldFacts {
   readonly risk?: RiskSeen;
   /** The run this arm is held against, of the same process (`walkrate`, `spread10`). */
   readonly baseline?: Baseline;
+}
+
+/** How an answering check that did not answer ended, by its words. */
+export type NotAnsweredEnd = 'givenUp' | 'refused' | 'failed';
+
+/** One answering check that did not answer, in P2 (`P-472`). */
+export interface NotAnswered {
+  readonly host: string;
+  /** The given-up words; D27's refusal, a name the probe's own `getaddrinfo` may not ask; others. */
+  readonly ended: NotAnsweredEnd;
+  /**
+   * When the resolver was handed its ask, in ms from the SIGSTOP: undefined where no ask of its
+   * name could be its own.
+   */
+  readonly askedAtMs: number | undefined;
+  /** How long its ask said it would wait (`waitMs`): a check given up waited that, and no more. */
+  readonly waitMs: number | undefined;
+}
+
+/**
+ * P2's stopped child, as the arm read it (`P-472`), in ms from the SIGSTOP: what its answering
+ * checks' allowance is read from. Every time is the probe's main thread's, where the resolver
+ * decides: the route's changes as the resolver was handed them, and each ask as it was handed it.
+ */
+export interface HangFacts {
+  /** The route leaving `up`, at the third quiet tick: the lookups in flight detached (D26). */
+  readonly downAtMs: number | undefined;
+  /** Its next change from `down`, `rejoining` at the `hung` loss: undefined, never. */
+  readonly downUntilMs: number | undefined;
+  /**
+   * The names in flight in the stopped child as the route left `up`, by group: `P-463` keeps them
+   * off the probe's lanes from then.
+   */
+  readonly keptOff: Readonly<Partial<Record<Group, readonly string[]>>>;
+  /**
+   * The names held back behind it, by group: a lookup routed to the helper before the route left
+   * `up`, and neither sent to a child nor answered by the stopped child's last answer.
+   */
+  readonly heldBack: Readonly<Partial<Record<Group, readonly string[]>>>;
+  /** Every answering check that did not answer, as the checks were counted. */
+  readonly notAnswered: readonly NotAnswered[];
+  /** Each `getaddrinfo` on the probe's own lanes for a kept-off name, begun once the route left `up`. */
+  readonly keptOffOnProbe: readonly { readonly host: string; readonly atMs: number }[];
+}
+
+/** What P2's allowance makes of its answering checks that did not answer (`hangAllowance`). */
+export interface HangVerdict {
+  /** Given up, asked before the route left `up`, for a name the stopped child held or held back. */
+  readonly givenUpAllowed: readonly NotAnswered[];
+  /** D27's refusals of a name in flight at the quiet, asked while the route read `down`. */
+  readonly refusedAllowed: readonly NotAnswered[];
+  /** Every other, and why it is outside. */
+  readonly outside: readonly { readonly check: NotAnswered; readonly why: string }[];
+}
+
+/**
+ * P2's allowance for its answering checks (`P-472`'s decision). The design promises that a hung
+ * child holds no name, not that no check is lost in it (§1.11's `up` → `unresponsive` row, §9's risk
+ * 3), and two kinds of answering check had nowhere to be answered:
+ * - **given up**: allowed only if asked before the route left `up`, for a name the stopped child
+ *   held (in flight at the quiet) or held back (queued behind it), and still waiting at the SIGSTOP:
+ *   it waited on a lookup in a stopped child, or in the queue behind one, until its bound;
+ * - **failed otherwise**: allowed only as D27's refusal (`P-463`), for a name in flight in the
+ *   stopped child at the quiet, asked while the route read `down`: the probe's own `getaddrinfo`
+ *   may not ask it, and the only process that may was not answering.
+ *
+ * Nothing else is allowed, and words other than those two kinds never are. Each check is placed by
+ * its own ask at the resolver and its own name, so the allowance is as large as the run made it,
+ * and no constant sets it.
+ */
+export function hangAllowance(hang: HangFacts): HangVerdict {
+  const down = hang.downAtMs;
+  const downUntil = hang.downUntilMs ?? Number.POSITIVE_INFINITY;
+  const names = (of: readonly string[] | undefined): Set<string> =>
+    new Set((of ?? []).map((name) => name.toLowerCase()));
+  const keptOff = names(hang.keptOff.answering);
+  const heldBack = names(hang.heldBack.answering);
+  const givenUpAllowed: NotAnswered[] = [];
+  const refusedAllowed: NotAnswered[] = [];
+  const outside: { check: NotAnswered; why: string }[] = [];
+  for (const check of hang.notAnswered) {
+    const host = check.host.toLowerCase();
+    const asked = check.askedAtMs;
+    let why: string | undefined;
+    if (check.ended === 'failed') {
+      why = 'in words neither the given-up words nor D27’s refusal';
+    } else if (asked === undefined) {
+      why = 'asked at no time the resolver was handed';
+    } else if (down === undefined) {
+      why = 'with no route off up handed to the resolver';
+    } else if (check.ended === 'givenUp') {
+      if (asked >= down) why = 'asked once the route had left up';
+      else if (!keptOff.has(host) && !heldBack.has(host)) {
+        why = 'for a name neither in flight in the stopped child nor held back behind it';
+      } else if (check.waitMs === undefined) {
+        why = 'its wait not read from its ask';
+      } else if (asked + check.waitMs <= 0) {
+        why = 'its wait over by the SIGSTOP';
+      }
+    } else if (!keptOff.has(host)) {
+      why = 'for a name not in flight in the stopped child at the quiet';
+    } else if (asked < down) {
+      why = 'asked before the route left up';
+    } else if (asked >= downUntil) {
+      why = 'asked once the route no longer read down';
+    }
+    if (why !== undefined) outside.push({ check, why });
+    else if (check.ended === 'givenUp') givenUpAllowed.push(check);
+    else refusedAllowed.push(check);
+  }
+  return { givenUpAllowed, refusedAllowed, outside };
 }
 
 /** What an arm's baseline run measured, for the arm held against it (`P-465`). */
@@ -432,6 +547,71 @@ function untroubled(facts: WorldFacts, said: (violation: string) => void): void 
   }
 }
 
+const atS = (ms: number | undefined): string =>
+  ms === undefined ? 'unread' : `${(ms / 1_000).toFixed(1)} s`;
+/** A few of `checks`, by name and ask, for a reader to find in the run. */
+const someOf = (checks: readonly NotAnswered[]): string =>
+  checks
+    .slice(0, 3)
+    .map(({ host, askedAtMs }) => `${host} at ${atS(askedAtMs)}`)
+    .join(', ') + (checks.length > 3 ? `, and ${String(checks.length - 3)} more` : '');
+const ENDED_WORDS: Readonly<Record<NotAnsweredEnd, string>> = {
+  givenUp: 'given up',
+  refused: 'refused by D27',
+  failed: 'failed otherwise',
+};
+
+/**
+ * P2's answering checks (`P-472`): every one answered but those its allowance takes
+ * (`hangAllowance`); the facts accounting for every check counted; and no name in flight in the
+ * stopped child at the quiet asked on the probe's own lanes since, which is what the allowance pays
+ * for: without it, a build that let such a name go to the probe's lanes would pass, its checks
+ * answered there (`P-463`'s own mutant).
+ */
+function hangAllowed(facts: WorldFacts, said: (violation: string) => void): void {
+  const hang = facts.hang;
+  if (hang === undefined) {
+    said('the hang’s allowance was not measured, so every answering check is held to answering');
+    allAnswered(facts, said, ['answering']);
+    return;
+  }
+  if (hang.downAtMs === undefined) {
+    said('the route leaving up was not handed to the resolver, so no answering check is allowed');
+  }
+  // Read for every check counted, or the allowance would pass checks it never saw.
+  const read = (ended: readonly NotAnsweredEnd[]): number =>
+    hang.notAnswered.filter((check) => ended.includes(check.ended)).length;
+  const givenUp = count(facts.givenUp, 'answering');
+  const otherwise = count(facts.failedOtherwise, 'answering');
+  if (read(['givenUp']) !== givenUp) {
+    said(
+      `the hang’s facts read ${String(read(['givenUp']))} answering checks given up, where ${String(givenUp)} were counted`,
+    );
+  }
+  if (read(['refused', 'failed']) !== otherwise) {
+    said(
+      `the hang’s facts read ${String(read(['refused', 'failed']))} answering checks failed otherwise, where ${String(otherwise)} were counted`,
+    );
+  }
+  const byWhy = new Map<string, NotAnswered[]>();
+  for (const { check, why } of hangAllowance(hang).outside) {
+    const key = `${ENDED_WORDS[check.ended]} outside the hang’s allowance, ${why}`;
+    byWhy.set(key, [...(byWhy.get(key) ?? []), check]);
+  }
+  for (const [key, checks] of byWhy) {
+    said(`${String(checks.length)} answering checks ${key} (${someOf(checks)})`);
+  }
+  const onProbe = hang.keptOffOnProbe;
+  if (onProbe.length > 0) {
+    said(
+      `${String(onProbe.length)} getaddrinfo on the probe’s own lanes for names in flight in the stopped child, since the route left up (${onProbe
+        .slice(0, 3)
+        .map(({ host, atMs }) => `${host} at ${atS(atMs)}`)
+        .join(', ')}): D27 keeps them off (P-463)`,
+    );
+  }
+}
+
 /** P5 and P5b (§7.6): fork to `ready`, the main thread's block at each fork, the child's size. */
 function respawned(facts: WorldFacts, said: (violation: string) => void, gated: boolean): void {
   allAnswered(facts, said, ['answering']);
@@ -630,7 +810,8 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
     untroubled(facts, said);
   },
   P2(facts, said) {
-    allAnswered(facts, said, ['answering']);
+    // Not P1's every-check-answered: the stopped child leaves some nowhere to be (`P-472`).
+    hangAllowed(facts, said);
     silentOffProbeLanes(facts, said);
     lossesWere(facts, said, { hung: 1 });
     untroubled(facts, said);

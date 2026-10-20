@@ -293,14 +293,25 @@ Each of these is a yes, or the cut waits.
    Results are `TODO(quiet-window)`): this run is the first, and its rows fill that table in step 9.
    Read, beside the bounds, what the arms print and do not assert: P5's and P5b's
    `lookupHelperTrouble` (1 after four kills in two minutes, as D27 says), P3's checks failed
-   "otherwise", each arm's event-loop p50, p99 and max, and its routes. **P2 is the first full-size
-   run on `P-463`'s build** (`P-472`, open): the names in flight when its child is stopped are kept
-   off the probe's lanes, and its route reads `down` for about 17 s, so an answering name still
-   unvouched at the SIGSTOP has its checks refused, which P2's judge fails. Scaled down on
-   `integ/r7-1020` the walk vouched every answering name first and P2 held; at full size D19 sends
-   most first lookups to the helper unvouched. A P2 that fails with answering checks failed
-   otherwise is `P-472`'s case: it stops the cut as any failed arm does, and goes to `P-472` with
-   the arm's lines. A result on the other side
+   "otherwise", each arm's event-loop p50, p99 and max, and its routes. **P2's answering checks have
+   an allowance** (`P-472`). At full size D19 sends most first lookups to the helper unvouched, so
+   its stopped child leaves two kinds of answering check with nowhere to be answered, and S7's first
+   full-size run (on `28b97a7c`) failed on both. **8 given up**: asked in the 3.3 s between the
+   SIGSTOP and the third quiet tick, they waited out their 2,500 ms bound on the one answering
+   lookup sent to the stopped child or in the queue behind it, as every build since S7 would have.
+   **4 failed otherwise**: D27's refusal (`P-463`) of the one answering name in flight at the
+   quiet, asked while the route read `down`, for about 17 s. The judge allows those two kinds and
+   nothing else, from the run's own facts. A check given up is allowed only if it was asked before
+   the route left `up`, for a name in flight in the stopped child at the quiet or held back behind
+   it, and was still waiting at the SIGSTOP. A check failed otherwise is allowed only with D27's
+   words, for a name in flight at the quiet, asked while the route read `down`. No name in flight
+   at the quiet may reach the probe's own lanes after it. P2's row prints what the allowance used
+   ("the hang's allowance"): what the stopped child held and held back, how many checks of each
+   kind it allowed and when they were asked, and how many fell outside it and why. A P2 that fails
+   on a check outside the allowance, or on a kept-off name on the probe's lanes, stops the cut as
+   any failed arm does, and goes to `P-472` with the arm's lines. Scaled down, the walk vouches
+   every answering name before 10 s, so the allowance has nothing to take: only a full-size run
+   reaches it. A result on the other side
    of the design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
    loop's p99) stops the cut. That verdict also reads `spread10`'s event-loop p99 in each mode, with
    its lanes at risk, and `walkrate`'s against `addresses`', with its channels' busiest second

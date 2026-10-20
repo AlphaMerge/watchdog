@@ -35,6 +35,7 @@ import {
   STALE_MS,
   type Family,
 } from '../../src/resolver/name-resolver.js';
+import type { ResolveAck, ResolveReply } from '../../src/resolver/protocol.js';
 import type { SystemFiles } from '../../src/resolver/system-names.js';
 import type { MemoryCapReading } from '../../src/runner/memory-cap.js';
 import { CheckPool, defaultPoolSize } from '../../src/runner/pool.js';
@@ -66,6 +67,7 @@ import {
   busiestSecond,
   CHANNELS_A_SECOND,
   gapBound,
+  hangAllowance,
   heldBound,
   JUDGED_ARMS,
   judgeWorld,
@@ -77,7 +79,10 @@ import {
   type Baseline,
   type GateMode,
   type Group,
+  type HangFacts,
   type LossAt,
+  type NotAnswered,
+  type NotAnsweredEnd,
   type PeakWindow,
   type WorldFacts,
 } from '../support/name-gate-judge.js';
@@ -1141,6 +1146,11 @@ interface WorldArm {
   /** The pool's ceiling held to half its size by memory (P5b). */
   readonly memoryGate?: boolean;
   /**
+   * The helper's child stopped (P2): each answering check's ask is read as the resolver is handed
+   * it, with how it ended, for its allowance (`P-472`).
+   */
+  readonly hang?: boolean;
+  /**
    * The silent names spread over keys under zone b, `k<n>.zone-b.test`, by this device's key:
    * `forwarder`'s hundred keys of three, `spread10`'s twenty of ten, at full size.
    */
@@ -1185,7 +1195,8 @@ interface WorldEvents {
 /** What the events found, for the facts. */
 interface WorldRecord {
   silencedAt?: number;
-  stopped?: { downAt?: number; hungAt?: number; upAt?: number; at: number };
+  /** P2: the SIGSTOP, the child it stopped, and what its look saw after it. */
+  stopped?: { downAt?: number; hungAt?: number; upAt?: number; at: number; pid?: number };
   /**
    * P3: the stall, the name whose question began it, when it began and ended (this thread's
    * `performance.now()`), that name's lookups open on the probe's lanes as it began, and the
@@ -1296,12 +1307,17 @@ const WORLD_ARMS: readonly WorldArm[] = [
     group: oneInTenSilent,
     perClient: true,
     transient: true,
+    hang: true,
     runMs: () => 60_000,
     events: async ({ at, names, record, peaks }) => {
       await at(10_000);
       const helper = names.gate?.helper;
       if (helper === undefined) return;
-      const stopped: NonNullable<WorldRecord['stopped']> = { at: performance.now() };
+      const pid = helper.pid();
+      const stopped: NonNullable<WorldRecord['stopped']> = {
+        at: performance.now(),
+        ...(pid === undefined ? {} : { pid }),
+      };
       record.stopped = stopped;
       killChild(names, 'SIGSTOP');
       // Its losses: the lookups detached as it goes quiet, then the child replaced (D26). The
@@ -1541,6 +1557,8 @@ class ProbeSide {
   readonly #open = new Map<string, Set<LaneFlight>>();
   /** When each name was answered with addresses. */
   readonly answeredAt = new Map<string, number[]>();
+  /** When each name's lookups began here: P2's kept-off names must have none since the quiet. */
+  readonly startedAt = new Map<string, number[]>();
   crashes = 0;
   /** Told as a lookup's try is with the kernel, with its name's group and the name. */
   onSent: ((group: Group, host: string) => void) | undefined;
@@ -1589,6 +1607,9 @@ class ProbeSide {
     this.#running[group] = (this.#running[group] ?? 0) + 1;
     this.peak[group] = Math.max(this.peak[group] ?? 0, this.#running[group]);
     const flight: LaneFlight = { startedAt: performance.now() };
+    const starts = this.startedAt.get(host) ?? [];
+    starts.push(flight.startedAt);
+    this.startedAt.set(host, starts);
     const open = this.#open.get(host) ?? new Set<LaneFlight>();
     open.add(flight);
     this.#open.set(host, open);
@@ -1659,20 +1680,43 @@ function stallSetUp(
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
+/** One lookup a child was sent, as the tap read it: when, and when it ended there (`P-472`). */
+interface TapFlight {
+  readonly host: string;
+  /** The child's index, in fork order. */
+  readonly child: number;
+  readonly sentAt: number;
+  /** Its answer read, or its child gone: undefined while it is in flight. */
+  endedAt?: number;
+}
+
+/** A child as the tap forked it. */
+interface TapChild {
+  readonly forkedAt: number;
+  readonly pid: number | undefined;
+  readyAt?: number;
+  /** When its last answer was read, to any lookup: what a stopped child last said (`P-472`). */
+  lastAnswerAt?: number;
+}
+
 /**
  * The real helper's child, forked as the helper forks it, with what it is asked and what it says
- * read off the channel on the way: its lookups in flight by group, its answers, and each child's
- * fork and `ready` (P5b). Nothing the helper sends or reads is changed.
+ * read off the channel on the way: its lookups in flight by group, its answers, each lookup sent
+ * and when it ended, and each child's fork, `ready` (P5b) and last answer (P2). Nothing the helper
+ * sends or reads is changed. The tap reads each message before the helper does, since its listener
+ * is the first on the child.
  */
 class HelperTap {
   readonly peak: Partial<Record<Group, number>> = {};
   /** The lookups each child was asked, by group, in fork order. */
   readonly byChild: Partial<Record<Group, number>>[] = [];
   readonly answeredAt = new Map<string, number[]>();
-  readonly children: { readonly forkedAt: number; readyAt?: number }[] = [];
+  readonly children: TapChild[] = [];
+  /** Every lookup sent to a child, in the order sent. */
+  readonly sent: TapFlight[] = [];
   stuck = 0;
   readonly #groupOf: (host: string) => Group;
-  readonly #flights = new Map<number, { readonly host: string; readonly child: number }>();
+  readonly #flights = new Map<number, TapFlight>();
   readonly #running: Partial<Record<Group, number>> = {};
 
   constructor(groupOf: (host: string) => Group) {
@@ -1683,6 +1727,7 @@ class HelperTap {
     const flight = this.#flights.get(id);
     if (flight === undefined) return;
     this.#flights.delete(id);
+    flight.endedAt = performance.now();
     const group = this.#groupOf(flight.host);
     this.#running[group] = (this.#running[group] ?? 1) - 1;
   }
@@ -1690,9 +1735,7 @@ class HelperTap {
   readonly fork: ForkHelper = (module, args, options) => {
     const child = fork(module, [...args], options);
     const index = this.children.length;
-    const record: { readonly forkedAt: number; readyAt?: number } = {
-      forkedAt: performance.now(),
-    };
+    const record: TapChild = { forkedAt: performance.now(), pid: child.pid };
     this.children.push(record);
     const asked: Partial<Record<Group, number>> = {};
     this.byChild.push(asked);
@@ -1701,6 +1744,7 @@ class HelperTap {
       if (raw['t'] === 'ready') record.readyAt ??= performance.now();
       if (raw['t'] === 'stuck') this.stuck += 1;
       if (raw['t'] !== 'answer' || typeof raw['id'] !== 'number') return;
+      record.lastAnswerAt = performance.now();
       const flight = this.#flights.get(raw['id']);
       if (flight !== undefined && raw['ok'] === true) {
         const times = this.answeredAt.get(flight.host) ?? [];
@@ -1721,7 +1765,9 @@ class HelperTap {
       send: (message, callback) => {
         const group = this.#groupOf(message.host);
         asked[group] = (asked[group] ?? 0) + 1;
-        this.#flights.set(message.id, { host: message.host, child: index });
+        const flight: TapFlight = { host: message.host, child: index, sentAt: performance.now() };
+        this.sent.push(flight);
+        this.#flights.set(message.id, flight);
         this.#running[group] = (this.#running[group] ?? 0) + 1;
         this.peak[group] = Math.max(this.peak[group] ?? 0, this.#running[group]);
         return child.send(message, callback);
@@ -2044,6 +2090,198 @@ function routeDownAfter(
   });
 }
 
+/**
+ * An answering name's ask as the pool handed it to the resolver (P2, `P-472`), on the main thread,
+ * where the resolver reads the helper's route: and how the resolver replied, in that call (`now`:
+ * an answer it had, or a refusal) or later, or not at all.
+ */
+interface ResolverAsk {
+  readonly host: string;
+  readonly at: number;
+  readonly waitMs: number | undefined;
+  reply?: {
+    readonly at: number;
+    readonly now: boolean;
+    readonly ok: boolean;
+    readonly message: string | undefined;
+  };
+}
+
+/** An answering check that did not answer, as the pool's result said (P2, `P-472`). */
+interface CheckEnd {
+  readonly host: string;
+  readonly ended: NotAnsweredEnd;
+  /** When its result was read, on the main thread, and how long it ran in its worker. */
+  readonly endedAt: number;
+  readonly durationMs: number;
+}
+
+/** What P2 saw of its stopped child, on the main thread's clock, for `hangFacts`. */
+interface HangSeen {
+  readonly stoppedAt: number;
+  /** The stopped child's index in the tap's fork order: undefined if the tap had none of its pid. */
+  readonly child: number | undefined;
+  /** The stopped child's last answer, to any lookup. */
+  readonly lastAnswerAt: number | undefined;
+  /** The route's changes, as the resolver was handed them. */
+  readonly changes: readonly { readonly at: number; readonly route: RouteState }[];
+  readonly sent: readonly TapFlight[];
+  readonly routed: readonly Pick<Routed, 'at' | 'host' | 'pool'>[];
+  /** When each name was answered, on either lane set. */
+  readonly answeredAt: (host: string) => readonly number[];
+  /** When each name's lookups began on the probe's lanes. */
+  readonly probeStarts: ReadonlyMap<string, readonly number[]>;
+  readonly asks: readonly ResolverAsk[];
+  readonly checks: readonly CheckEnd[];
+  readonly groupOf: (host: string) => Group;
+}
+
+/**
+ * Whether an ask can be a check's that ended so: a refusal's reply was D27's words; a check given
+ * up, or failed in other words, was not served an answer in the call, nor refused.
+ */
+function askFits(ended: NotAnsweredEnd, ask: ResolverAsk): boolean {
+  const reply = ask.reply;
+  const refused = reply !== undefined && !reply.ok && AVOIDED.test(reply.message ?? '');
+  if (ended === 'refused') return refused;
+  return !refused && !(reply?.now === true && reply.ok);
+}
+
+/**
+ * P2's facts for its allowance (`P-472`), from what the arm saw, in ms from the SIGSTOP:
+ * - **the route's window**, from the changes the resolver was handed: `down` from the first after
+ *   the SIGSTOP, to the next that is not `down`;
+ * - **kept off**: the names of the stopped child's lookups sent before the route left `up` and not
+ *   ended by then, which are its table at the quiet (the tap reads each answer before the helper);
+ * - **held back**: the names routed to the helper before then whose lookup had been neither sent to a
+ *   child nor answered by the stopped child's last answer, so queued behind its lanes;
+ * - **each answering check not answered**, put to its own ask at the resolver: of its name, one that
+ *   fits how it ended, not taken by another, handed before its result was read, and the nearest to
+ *   when it began (its result's time less its run). Asks of one name close enough to be mistaken
+ *   for each other are a scan's sensors sharing one lookup, and so one fate;
+ * - **the kept-off names' lookups begun on the probe's own lanes** since the route left `up`.
+ */
+function hangFacts(seen: HangSeen): HangFacts {
+  const since = (at: number): number => at - seen.stoppedAt;
+  const down = seen.changes.find(({ at, route }) => at >= seen.stoppedAt && route === 'down')?.at;
+  const downUntil =
+    down === undefined
+      ? undefined
+      : seen.changes.find(({ at, route }) => at > down && route !== 'down')?.at;
+  const namesByGroup = (hosts: Iterable<string>): Partial<Record<Group, string[]>> => {
+    const grouped: Partial<Record<Group, string[]>> = {};
+    for (const host of [...new Set(hosts)].sort()) {
+      const group = seen.groupOf(host);
+      (grouped[group] ??= []).push(host);
+    }
+    return grouped;
+  };
+  const keptOff =
+    down === undefined || seen.child === undefined
+      ? []
+      : seen.sent
+          .filter(
+            ({ child, sentAt, endedAt }) =>
+              child === seen.child && sentAt < down && (endedAt === undefined || endedAt > down),
+          )
+          .map(({ host }) => host.toLowerCase());
+  const lastSaid = seen.lastAnswerAt ?? seen.stoppedAt;
+  const heldBack =
+    down === undefined
+      ? []
+      : seen.routed
+          .filter(({ at, host, pool }) => {
+            if (pool !== 'helper' || at >= down) return false;
+            if (at >= lastSaid) return true;
+            const name = host.toLowerCase();
+            const inside = (t: number): boolean => t >= at && t <= lastSaid;
+            return (
+              !seen.sent.some(
+                (flight) => flight.host.toLowerCase() === name && inside(flight.sentAt),
+              ) && !seen.answeredAt(name).some(inside)
+            );
+          })
+          .map(({ host }) => host.toLowerCase());
+  const asksOf = new Map<string, ResolverAsk[]>();
+  for (const ask of seen.asks) {
+    const name = ask.host.toLowerCase();
+    const list = asksOf.get(name);
+    if (list === undefined) asksOf.set(name, [ask]);
+    else list.push(ask);
+  }
+  const taken = new Set<ResolverAsk>();
+  const notAnswered = [...seen.checks]
+    .sort((a, b) => a.endedAt - b.endedAt)
+    .map((check): NotAnswered => {
+      const name = check.host.toLowerCase();
+      const began = check.endedAt - check.durationMs;
+      let its: ResolverAsk | undefined;
+      for (const ask of asksOf.get(name) ?? []) {
+        if (taken.has(ask) || ask.at > check.endedAt || !askFits(check.ended, ask)) continue;
+        if (its === undefined || Math.abs(ask.at - began) < Math.abs(its.at - began)) its = ask;
+      }
+      if (its !== undefined) taken.add(its);
+      return {
+        host: name,
+        ended: check.ended,
+        askedAtMs: its === undefined ? undefined : since(its.at),
+        waitMs: its?.waitMs,
+      };
+    });
+  const keptOffNames = new Set(keptOff);
+  const keptOffOnProbe =
+    down === undefined
+      ? []
+      : [...seen.probeStarts]
+          .filter(([host]) => keptOffNames.has(host.toLowerCase()))
+          .flatMap(([host, starts]) =>
+            starts.filter((at) => at >= down).map((at) => ({ host, atMs: since(at) })),
+          )
+          .sort((a, b) => a.atMs - b.atMs);
+  return {
+    downAtMs: down === undefined ? undefined : since(down),
+    downUntilMs: downUntil === undefined ? undefined : since(downUntil),
+    keptOff: namesByGroup(keptOff),
+    heldBack: namesByGroup(heldBack),
+    notAnswered,
+    keptOffOnProbe,
+  };
+}
+
+/**
+ * What P2's allowance used, for its row: the route's window, what the stopped child held and held
+ * back, how many answering checks it allowed of each kind and when they were asked, how many fell
+ * outside it and why, the kept-off names on the probe's lanes since, and `avoidedRefused`.
+ */
+function hangLine(hang: HangFacts, avoidedRefused: number): string {
+  const s = (at: number | undefined): string =>
+    at === undefined ? 'never' : `${(at / 1_000).toFixed(1)} s`;
+  const span = (checks: readonly NotAnswered[]): string => {
+    const times = checks.flatMap(({ askedAtMs }) => (askedAtMs === undefined ? [] : [askedAtMs]));
+    return times.length === 0 ? 'none' : `${s(Math.min(...times))}–${s(Math.max(...times))}`;
+  };
+  const counts = (of: HangFacts['keptOff']): Partial<Record<Group, number>> => {
+    const counted: Partial<Record<Group, number>> = {};
+    for (const group of ['answering', 'silent', 'cached', 'crash'] as const) {
+      const names = of[group];
+      if (names !== undefined) counted[group] = names.length;
+    }
+    return counted;
+  };
+  const verdict = hangAllowance(hang);
+  const givenUp = hang.notAnswered.filter(({ ended }) => ended === 'givenUp').length;
+  const otherwise = hang.notAnswered.length - givenUp;
+  const whys = [...new Set(verdict.outside.map(({ why }) => why))];
+  return (
+    `the hang's allowance (P-472), from the SIGSTOP: the route down ${s(hang.downAtMs)} to ${s(hang.downUntilMs)}; ` +
+    `in flight in the stopped child as it left up ${byGroup(counts(hang.keptOff))}; held back behind it ${byGroup(counts(hang.heldBack))}; ` +
+    `answering given up ${String(givenUp)}, ${String(verdict.givenUpAllowed.length)} allowed (asked ${span(verdict.givenUpAllowed)}, before the route left up, for those names); ` +
+    `failed otherwise ${String(otherwise)}, ${String(verdict.refusedAllowed.length)} allowed as D27's refusals of names in flight at the quiet (asked ${span(verdict.refusedAllowed)}, while it read down); ` +
+    `outside it ${String(verdict.outside.length)}${whys.length === 0 ? '' : ` (${whys.join('; ')})`}; ` +
+    `kept-off names on the probe's lanes since ${String(hang.keptOffOnProbe.length)}; answering checks refused as avoided names ${String(avoidedRefused)}`
+  );
+}
+
 interface Routed {
   readonly at: number;
   readonly host: string;
@@ -2201,6 +2439,9 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
   let avoidedRefused = 0;
   /** The helper's route as each change of it was handed to the resolver, and when (gate mode). */
   const routeChanges: { readonly at: number; readonly route: RouteState }[] = [];
+  /** P2: each answering name's ask at the resolver, and each answering check not answered. */
+  const resolverAsks: ResolverAsk[] = [];
+  const checkEnds: CheckEnd[] = [];
   const asks = new Map<number, number[]>();
   const jitter: number[] = [];
   const run: number[] = [];
@@ -2289,6 +2530,42 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       routeChanges.push({ at: performance.now(), route: change.route });
       handOn(change);
     };
+    if (arm.hang === true) {
+      // Each answering name's ask as the pool hands it over, where the resolver reads the route,
+      // and its reply: the change above is handed a microtask after the route moves, in the turn
+      // it moves in, so no ask comes between them. The check's own result says when it ended, but
+      // reads its start only as late as the main thread is busy.
+      const handle = resolver.handle.bind(resolver);
+      resolver.handle = (request, post) => {
+        const { host, waitMs } = (isRecord(request) ? request : {}) as {
+          host?: unknown;
+          waitMs?: unknown;
+        };
+        if (typeof host !== 'string' || groupOf(host) !== 'answering') {
+          handle(request, post);
+          return;
+        }
+        const ask: ResolverAsk = {
+          host: host.toLowerCase(),
+          at: performance.now(),
+          waitMs: typeof waitMs === 'number' ? waitMs : undefined,
+        };
+        resolverAsks.push(ask);
+        let inCall = true;
+        handle(request, (message: ResolveAck | ResolveReply) => {
+          if (message.type === 'resolved' && ask.reply === undefined) {
+            ask.reply = {
+              at: performance.now(),
+              now: inCall,
+              ok: message.ok,
+              message: message.ok ? undefined : message.message,
+            };
+          }
+          post(message);
+        });
+        inCall = false;
+      };
+    }
     await within(START_BOUND_MS, 'the names’ start', built.start());
     const policy = built.gate?.policy;
     if (policy !== undefined) {
@@ -2339,6 +2616,19 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
         count(tallies[group], result.outcome, result.message);
         if (group === 'answering' && result.outcome !== 'ok' && AVOIDED.test(result.message)) {
           avoidedRefused += 1;
+        }
+        if (arm.hang === true && group === 'answering' && result.outcome !== 'ok') {
+          // Ended as `count` tallies it: the given-up words first, then D27's among the rest.
+          checkEnds.push({
+            host: worldHost(arm, device),
+            ended: GIVEN_UP.test(result.message)
+              ? 'givenUp'
+              : AVOIDED.test(result.message)
+                ? 'refused'
+                : 'failed',
+            endedAt: performance.now(),
+            durationMs: result.durationMs,
+          });
         }
         const times = asks.get(device) ?? [];
         times.push(performance.now() - result.durationMs);
@@ -2574,6 +2864,27 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
           }
         : undefined;
     const stopped = record.stopped;
+    const stoppedChild =
+      stopped?.pid === undefined
+        ? undefined
+        : tap.children.findIndex(({ pid }) => pid === stopped.pid);
+    const hang: HangFacts | undefined =
+      arm.hang === true && stopped !== undefined
+        ? hangFacts({
+            stoppedAt: stopped.at,
+            child: stoppedChild === undefined || stoppedChild < 0 ? undefined : stoppedChild,
+            lastAnswerAt:
+              stoppedChild === undefined ? undefined : tap.children[stoppedChild]?.lastAnswerAt,
+            changes: routeChanges,
+            sent: tap.sent,
+            routed: log.routed,
+            answeredAt: answers,
+            probeStarts: lanes.startedAt,
+            asks: resolverAsks,
+            checks: checkEnds,
+            groupOf,
+          })
+        : undefined;
     const stall = record.stall;
     const facts: WorldFacts = {
       arm: arm.name,
@@ -2622,6 +2933,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
               upAfterMs: stopped.upAt === undefined ? undefined : stopped.upAt - stopped.at,
             },
           }),
+      ...(hang === undefined ? {} : { hang }),
       ...(stall === undefined
         ? {}
         : {
@@ -2730,6 +3042,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
         : [
             `from the SIGSTOP: route down ${facts.stopped?.downAfterMs === undefined ? 'never' : ms(facts.stopped.downAfterMs)}, hung ${facts.stopped?.hungAfterMs === undefined ? 'never' : ms(facts.stopped.hungAfterMs)}, up ${facts.stopped?.upAfterMs === undefined ? 'never' : ms(facts.stopped.upAfterMs)}`,
           ]),
+      ...(hang === undefined ? [] : [hangLine(hang, avoidedRefused)]),
       ...(facts.stall === undefined
         ? []
         : [
@@ -3239,6 +3552,58 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     avoidedRefused: 0,
   };
 
+  /**
+   * A clean P2's hang (`P-472`), shaped as S7's first full-size run had it, in ms from the SIGSTOP:
+   * the route down from 3.3 s to the `hung` loss at 20.3 s; one answering name and three silent in
+   * flight in the stopped child at the quiet, and fourteen answering names held back behind it; eight
+   * checks given up, asked in the first 0.8 s on that name or behind it; and four of that name's
+   * refused by D27 while the route read down.
+   */
+  const KEPT = 'dev-1.zone-a.test';
+  const HELD = Array.from({ length: 14 }, (_, i) => `dev-${String(10 * i + 3)}.zone-a.test`);
+  const HELD_ONE = 'dev-3.zone-a.test';
+  const SILENT_KEPT = ['dev-0.zone-b.test', 'dev-10.zone-b.test', 'dev-20.zone-b.test'];
+  const gave = (host: string, askedAtMs: number | undefined, waitMs = 2_500): NotAnswered => ({
+    host,
+    ended: 'givenUp',
+    askedAtMs,
+    waitMs,
+  });
+  const refused = (host: string, askedAtMs: number | undefined): NotAnswered => ({
+    host,
+    ended: 'refused',
+    askedAtMs,
+    waitMs: 2_500,
+  });
+  const cleanHang: HangFacts = {
+    downAtMs: 3_300,
+    downUntilMs: 20_300,
+    keptOff: { answering: [KEPT], silent: SILENT_KEPT },
+    heldBack: { answering: HELD },
+    notAnswered: [
+      ...[KEPT, ...HELD.slice(0, 7)].map((host, i) => gave(host, 10 + 100 * i)),
+      ...[4_100, 8_000, 12_500, 18_900].map((at) => refused(KEPT, at)),
+    ],
+    keptOffOnProbe: [],
+  };
+  /** A clean P2's facts with its hang's checks, and the checks counted to match. */
+  const withHang = (
+    notAnswered: readonly NotAnswered[],
+    patch: Partial<HangFacts> = {},
+  ): Partial<WorldFacts> => ({
+    givenUp: {
+      answering: notAnswered.filter(({ ended }) => ended === 'givenUp').length,
+      silent: 40,
+      cached: 0,
+    },
+    failedOtherwise: {
+      answering: notAnswered.filter(({ ended }) => ended !== 'givenUp').length,
+      silent: 9,
+      cached: 0,
+    },
+    hang: { ...cleanHang, notAnswered, ...patch },
+  });
+
   const cleanStall: NonNullable<WorldFacts['stall']> = {
     ms: 15_000,
     replySent: true,
@@ -3357,6 +3722,8 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
           },
         }
       : {}),
+    // P2's stopped child left 12 answering checks nowhere to be answered, all in its allowance.
+    ...(arm === 'P2' ? withHang(cleanHang.notAnswered) : {}),
     // System gave 40 answering checks up behind its twenty silent domains; the gate 90 more, the
     // 3% of 3,000 two runs of one rule may differ by.
     ...(arm === 'spread10' && mode === 'gate'
@@ -3565,11 +3932,12 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       says: /1 checks refused/u,
     },
     {
+      // Counted, and not in its hang's facts: `P-472`'s allowance takes no check it did not read.
       arm: 'P2',
       mode: 'gate',
       breaks: 'answering checks failed at the helper’s loss',
       patch: { failedOtherwise: { answering: 3, silent: 9 } },
-      says: /3 answering checks failed otherwise/u,
+      says: /the hang’s facts read 4 answering checks failed otherwise, where 3 were counted/u,
     },
     {
       arm: 'partial',
@@ -3938,6 +4306,129 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       breaks: 'the hung loss late',
       patch: { stopped: { downAfterMs: 3_000, hungAfterMs: 25_000, upAfterMs: 25_500 } },
       says: /hung loss came 25000 ms after the SIGSTOP, past 22000/u,
+    },
+    // `P-472`: P2's allowance, each part failing on the facts that break it, at its edges.
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'an answering check given up, asked as the route left up',
+      patch: withHang([...cleanHang.notAnswered, gave(KEPT, 3_300)]),
+      says: /^1 answering checks given up outside the hang’s allowance, asked once the route had left up \(dev-1\.zone-a\.test at 3\.3 s\)$/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'an answering check given up for a name neither kept off nor held back',
+      patch: withHang([...cleanHang.notAnswered, gave('dev-2.zone-a.test', 500)]),
+      says: /^1 answering checks given up outside the hang’s allowance, for a name neither in flight in the stopped child nor held back behind it \(dev-2\.zone-a\.test at 0\.5 s\)$/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'an answering check given up whose wait was over at the SIGSTOP',
+      patch: withHang([...cleanHang.notAnswered, gave(HELD_ONE, -2_500)]),
+      says: /^1 answering checks given up outside the hang’s allowance, its wait over by the SIGSTOP/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'an answering check given up with no wait read from its ask',
+      patch: withHang([...cleanHang.notAnswered, { ...gave(KEPT, 100), waitMs: undefined }]),
+      says: /^1 answering checks given up outside the hang’s allowance, its wait not read from its ask/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'an answering check given up at no ask the resolver was handed',
+      patch: withHang([...cleanHang.notAnswered, gave(KEPT, undefined)]),
+      says: /^1 answering checks given up outside the hang’s allowance, asked at no time the resolver was handed \(dev-1\.zone-a\.test at unread\)$/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a refusal asked just before the route left up',
+      patch: withHang([...cleanHang.notAnswered, refused(KEPT, 3_299)]),
+      says: /^1 answering checks refused by D27 outside the hang’s allowance, asked before the route left up/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a refusal asked as the route left down at the hung loss',
+      patch: withHang([...cleanHang.notAnswered, refused(KEPT, 20_300)]),
+      says: /^1 answering checks refused by D27 outside the hang’s allowance, asked once the route no longer read down/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a refusal of a name held back, not in flight at the quiet',
+      patch: withHang([...cleanHang.notAnswered, refused(HELD_ONE, 5_000)]),
+      says: /^1 answering checks refused by D27 outside the hang’s allowance, for a name not in flight in the stopped child at the quiet/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a refusal at no ask the resolver was handed',
+      patch: withHang([...cleanHang.notAnswered, refused(KEPT, undefined)]),
+      says: /^1 answering checks refused by D27 outside the hang’s allowance, asked at no time the resolver was handed/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      // Its name kept off and its ask while down, so only its words put it outside.
+      breaks:
+        'an answering check failed in other words (a detached lookup settled at the hung loss)',
+      patch: withHang([
+        ...cleanHang.notAnswered,
+        { host: KEPT, ended: 'failed', askedAtMs: 5_000, waitMs: 2_500 },
+      ]),
+      says: /^1 answering checks failed otherwise outside the hang’s allowance, in words neither the given-up words nor D27’s refusal/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'an answering check given up that its hang’s facts did not read',
+      patch: {
+        ...withHang(cleanHang.notAnswered),
+        givenUp: { answering: 9, silent: 40, cached: 0 },
+      },
+      says: /^the hang’s facts read 8 answering checks given up, where 9 were counted$/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a kept-off name asked on the probe’s own lanes since the quiet',
+      patch: withHang(cleanHang.notAnswered, { keptOffOnProbe: [{ host: KEPT, atMs: 4_100 }] }),
+      says: /^1 getaddrinfo on the probe’s own lanes for names in flight in the stopped child, since the route left up \(dev-1\.zone-a\.test at 4\.1 s\): D27 keeps them off \(P-463\)$/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'its hang not measured',
+      patch: {},
+      omit: ['hang'],
+      says: /^the hang’s allowance was not measured/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'its hang not measured, so the checks it would allow fail',
+      patch: {},
+      omit: ['hang'],
+      says: /^8 answering checks given up$/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'the route leaving up not handed to the resolver',
+      patch: withHang(cleanHang.notAnswered, { downAtMs: undefined }),
+      says: /^the route leaving up was not handed to the resolver/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'the route leaving up not handed to the resolver, so its checks fall outside',
+      patch: withHang(cleanHang.notAnswered, { downAtMs: undefined }),
+      says: /^8 answering checks given up outside the hang’s allowance, with no route off up handed to the resolver/u,
     },
     {
       arm: 'P3',
@@ -4415,6 +4906,253 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     // the third. After the third, down from before it, and again to the end.
     assert.deepEqual(routeDownAfter([0, 30_000, 60_000], changes, 61_000), [0, 1_120, 995]);
     assert.deepEqual(routeDownAfter([0], [], 1_000), [0]);
+  });
+
+  const p2 = (patch: Partial<WorldFacts>): string[] =>
+    judgeWorld({ ...clean('P2', 'gate'), ...patch });
+
+  it('P2’s allowance holds on its edges, and its row says what it used (P-472)', () => {
+    // Given up: asked a millisecond before the route left up, and its wait a millisecond past the
+    // SIGSTOP. Refused: asked as the route left up, and a millisecond before it left down.
+    assert.deepEqual(
+      p2(
+        withHang([
+          ...cleanHang.notAnswered,
+          gave(KEPT, 3_299),
+          gave(HELD_ONE, -2_499),
+          refused(KEPT, 3_300),
+          refused(KEPT, 20_299),
+        ]),
+      ),
+      [],
+    );
+    // A route that never left down: a refusal at any time after it left up is inside it, and the
+    // missing `hung` loss is the run's failure, by its own bound.
+    const never = p2({
+      ...withHang([...cleanHang.notAnswered, refused(KEPT, 50_000)], { downUntilMs: undefined }),
+      stopped: { downAfterMs: 3_300, hungAfterMs: undefined, upAfterMs: undefined },
+    });
+    assert.ok(!never.some((said) => /allowance/u.test(said)), JSON.stringify(never));
+    assert.ok(
+      never.some((said) => /hung loss came never/u.test(said)),
+      JSON.stringify(never),
+    );
+    const line = hangLine(cleanHang, 4);
+    assert.match(line, /the route down 3\.3 s to 20\.3 s;/u);
+    assert.match(
+      line,
+      /in flight in the stopped child as it left up answering 1, silent 3; held back behind it answering 14;/u,
+    );
+    assert.match(
+      line,
+      /answering given up 8, 8 allowed \(asked 0\.0 s–0\.7 s, before the route left up, for those names\);/u,
+    );
+    assert.match(
+      line,
+      /failed otherwise 4, 4 allowed as D27's refusals of names in flight at the quiet \(asked 4\.1 s–18\.9 s, while it read down\);/u,
+    );
+    assert.match(
+      line,
+      /outside it 0; kept-off names on the probe's lanes since 0; answering checks refused as avoided names 4$/u,
+    );
+    const outside = { ...cleanHang, notAnswered: [...cleanHang.notAnswered, gave(KEPT, 3_300)] };
+    assert.match(
+      hangLine(outside, 4),
+      /given up 9, 8 allowed .*; outside it 1 \(asked once the route had left up\);/u,
+    );
+  });
+
+  it('P2’s allowance on the root-cause report’s three mutants, as the judge sees each run (P-472)', () => {
+    const givenUp = cleanHang.notAnswered.filter(({ ended }) => ended === 'givenUp');
+    const refusals = cleanHang.notAnswered.filter(({ ended }) => ended === 'refused');
+    const one = (said: string[], pattern: RegExp): void => {
+      assert.equal(said.length, 1, JSON.stringify(said));
+      assert.match(said[0] ?? '', pattern);
+    };
+    // M1, no keep-off at the quiet (`P-463`'s own mutant): the name in flight then is walked, heard
+    // and asked on the probe's lanes while the route reads down, and its four checks are answered
+    // there. The eight given up are all in the allowance: only the new assertion fails the run.
+    one(
+      p2(
+        withHang(givenUp, {
+          keptOffOnProbe: [4_100, 8_000, 12_500, 18_900].map((atMs) => ({ host: KEPT, atMs })),
+        }),
+      ),
+      /^4 getaddrinfo on the probe’s own lanes for names in flight in the stopped child, since the route left up \(dev-1\.zone-a\.test at 4\.1 s, dev-1\.zone-a\.test at 8\.0 s, dev-1\.zone-a\.test at 12\.5 s\)/u,
+    );
+    // M2, the keep-off widened to the helper's queued lookups at the quiet: those names are refused
+    // as they fall back, their checks asked before the route left up, and again while it is down.
+    one(
+      p2(
+        withHang([
+          gave(KEPT, 10),
+          ...HELD.slice(0, 7).map((host, i) => refused(host, 110 + 100 * i)),
+          refused(HELD_ONE, 6_000),
+          ...refusals,
+        ]),
+      ),
+      /^8 answering checks refused by D27 outside the hang’s allowance, for a name not in flight in the stopped child at the quiet \(dev-3\.zone-a\.test at 0\.1 s, dev-13\.zone-a\.test at 0\.2 s, dev-23\.zone-a\.test at 0\.3 s, and 5 more\)$/u,
+    );
+    // M2, the refusal kept on once the route reads `rejoining` or `up`.
+    one(
+      p2(withHang([...cleanHang.notAnswered, refused(KEPT, 20_350), refused(KEPT, 41_000)])),
+      /^2 answering checks refused by D27 outside the hang’s allowance, asked once the route no longer read down/u,
+    );
+    // M3, no fall-back at `down`: the queued lookups wait for the next child, and every check of
+    // those names asked meanwhile joins one and gives up.
+    one(
+      p2(
+        withHang([
+          ...cleanHang.notAnswered,
+          ...HELD.map((host, i) => gave(host, 4_000 + 1_000 * i)),
+        ]),
+      ),
+      /^14 answering checks given up outside the hang’s allowance, asked once the route had left up/u,
+    );
+  });
+
+  it('P2’s hang is read from what the arm saw: the route’s window, the stopped child’s lookups at the quiet, those held behind it, each check at its own ask, and the kept-off names on the probe’s lanes since (P-472)', () => {
+    const A = 'dev-1.zone-a.test';
+    const S = 'dev-0.zone-b.test';
+    const named = (n: number): string => `dev-${String(n)}.zone-a.test`;
+    const flight = (host: string, child: number, sentAt: number, endedAt?: number): TapFlight => ({
+      host,
+      child,
+      sentAt,
+      ...(endedAt === undefined ? {} : { endedAt }),
+    });
+    const ask = (
+      host: string,
+      at: number,
+      reply?: NonNullable<ResolverAsk['reply']>,
+    ): ResolverAsk => ({ host, at, waitMs: 2_500, ...(reply === undefined ? {} : { reply }) });
+    const avoided = (at: number): NonNullable<ResolverAsk['reply']> => ({
+      at,
+      now: true,
+      ok: false,
+      message:
+        'the probe’s resolver does not ask its own getaddrinfo for dev-1.zone-a.test: the lookup helper failed while asking for it lately, and is not answering',
+    });
+    const end = (
+      host: string,
+      ended: NotAnsweredEnd,
+      endedAt: number,
+      durationMs: number,
+    ): CheckEnd => ({ host, ended, endedAt, durationMs });
+    const seen: HangSeen = {
+      stoppedAt: 10_000,
+      child: 0,
+      lastAnswerAt: 10_002,
+      changes: [
+        // Down before the SIGSTOP, as a first child slow to start reads: not its quiet.
+        { at: 200, route: 'down' },
+        { at: 500, route: 'up' },
+        { at: 13_300, route: 'down' },
+        // A change of state the route stays down through.
+        { at: 14_000, route: 'down' },
+        { at: 30_300, route: 'rejoining' },
+        { at: 30_400, route: 'up' },
+      ],
+      sent: [
+        // Silent, from the cold start to the hung loss: kept off.
+        flight(S, 0, 1_000, 30_300),
+        // Answered before the SIGSTOP; ended as the route left up; the next child's.
+        flight(named(5), 0, 9_000, 9_001),
+        flight(named(6), 0, 12_000, 13_300),
+        flight(named(8), 1, 31_000, 31_002),
+        // Sent as the child stopped, and just before the quiet: kept off.
+        flight(A, 0, 10_001, 30_300),
+        flight(named(7), 0, 13_299.9, 30_300),
+      ],
+      routed: [
+        // To the helper, and answered on the probe's lanes since (a late hear): not held back.
+        { at: 8_000, host: named(11), pool: 'helper' },
+        // Sent at once: not held back.
+        { at: 9_000, host: named(5), pool: 'helper' },
+        // Still queued at the child's last answer, and routed after it: held back.
+        { at: 9_999, host: named(12), pool: 'helper' },
+        { at: 10_500, host: named(13), pool: 'helper' },
+        // The probe's lanes'; a silent name's, held back by its group; routed as the route left up.
+        { at: 11_000, host: named(14), pool: 'probe' },
+        { at: 12_000, host: S, pool: 'helper' },
+        { at: 13_300, host: named(15), pool: 'helper' },
+      ],
+      answeredAt: (host) => (host === named(11) ? [8_100] : []),
+      probeStarts: new Map([
+        [A, [5_000, 13_300, 20_000]],
+        // Fallen back at the quiet: held back, not kept off.
+        [named(13), [13_301]],
+      ]),
+      asks: [
+        // A kept answer, in the call: no check that failed is its.
+        ask(A, 9_500, { at: 9_500, now: true, ok: true, message: undefined }),
+        ask(A, 10_050),
+        ask(A, 13_299),
+        ask(A, 13_301, avoided(13_301)),
+        ask(A, 15_000, avoided(15_000)),
+        ask(A, 15_990, avoided(15_990)),
+        // Answered once fallen back, after its first check had given up.
+        ask(named(13), 10_480, { at: 13_310, now: false, ok: true, message: undefined }),
+        ask(named(13), 10_700),
+        // Asked after its check had ended.
+        ask(named(9), 17_500),
+      ],
+      checks: [
+        // Began 10,100: the ask at 10,050, not the kept answer.
+        end(A, 'givenUp', 12_600, 2_500),
+        // Began 10,500 and 10,520, both nearer 10,480: the second takes 10,700.
+        end(named(13), 'givenUp', 13_000, 2_500),
+        end(named(13), 'givenUp', 13_020, 2_500),
+        // Began 13,299.5, nearer the given-up check's ask: its own refusal's, at 13,301.
+        end(A, 'refused', 13_302.5, 3),
+        end(A, 'refused', 15_010, 5),
+        // Began 13,300: the ask at 13,299, just before the quiet.
+        end(A, 'givenUp', 15_800, 2_500),
+        end(A, 'refused', 16_000, 2),
+        // Its name's one ask came after it ended: none is its own.
+        end(named(9), 'givenUp', 17_000, 2_500),
+      ],
+      groupOf: (host) => (host.includes('zone-b') ? 'silent' : 'answering'),
+    };
+    const at = (host: string, ended: NotAnsweredEnd, askedAtMs: number): NotAnswered => ({
+      host,
+      ended,
+      askedAtMs,
+      waitMs: 2_500,
+    });
+    assert.deepEqual(hangFacts(seen), {
+      downAtMs: 3_300,
+      downUntilMs: 20_300,
+      keptOff: { answering: [A, named(7)], silent: [S] },
+      heldBack: { answering: [named(12), named(13)], silent: [S] },
+      notAnswered: [
+        at(A, 'givenUp', 50),
+        at(named(13), 'givenUp', 480),
+        at(named(13), 'givenUp', 700),
+        at(A, 'refused', 3_301),
+        at(A, 'refused', 5_000),
+        at(A, 'givenUp', 3_299),
+        at(A, 'refused', 5_990),
+        { host: named(9), ended: 'givenUp', askedAtMs: undefined, waitMs: undefined },
+      ],
+      keptOffOnProbe: [
+        { host: A, atMs: 3_300 },
+        { host: A, atMs: 10_000 },
+      ],
+    });
+    // No route off up after the SIGSTOP: nothing is kept off or held back, and no check has a window.
+    const stuckUp = hangFacts({ ...seen, changes: seen.changes.slice(0, 2) });
+    assert.deepEqual(
+      { ...stuckUp, notAnswered: stuckUp.notAnswered.length },
+      {
+        downAtMs: undefined,
+        downUntilMs: undefined,
+        keptOff: {},
+        heldBack: {},
+        notAnswered: 8,
+        keptOffOnProbe: [],
+      },
+    );
   });
 
   for (const one of cases) {
