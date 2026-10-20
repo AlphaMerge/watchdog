@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { ResolvedAddress } from '@ms/sensors';
 import { createLogger } from '@ms/shared';
+import { HELPER_LOSSES_TO_REST } from '../src/resolver/lookup-helper.js';
 import { buildNameResolution, olderCoreWarning } from '../src/resolver/name-resolution.js';
 import { GATE_SUMMARY_MS, GATE_TICK_MS } from '../src/resolver/name-resolver.js';
 import type { SystemFiles } from '../src/resolver/system-names.js';
@@ -21,6 +22,10 @@ import { pollWithin, within } from './support/within.js';
  * - **What the summaries' `changes` list** in each, as chains of states, which step 4's criterion
  *   names as a pass (the start, and each loss's moves) or a finding (a quiet spell with no loss).
  *   The first summary lists the helper's own start, which the criterion once left out.
+ * - **What they list of a rest** (fix round 2), which the guide's `helper` field once left out,
+ *   saying every loss moves to `backoff`: the fifth loss in ten minutes, `up` → `resting`, and
+ *   the rest's end; a `skew` loss at the child's start, `starting` → `resting`, with nothing
+ *   after; and a loss after a file glibc reads once changed, `up` → `resting`, nothing after.
  * - **Step 4's commands, run as written** on the lines: the collection keeps every summary and
  *   every warning of the gate's components, the older core's warning among them, and each
  *   reading command prints one match a line that is that hour's value, not a running total.
@@ -412,6 +417,181 @@ describe('the field test’s reading of the gate’s hourly summary (P-467)', ()
       await within(WAIT, 'the stop', names.stop());
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  it('lists a loss that rests the helper as a move to resting, as the guide says: a rest for a time ends resting → starting → up, one until restart has no move after it', async () => {
+    /** Short enough to wait out, long enough to see that nothing follows a rest until restart. */
+    const restMs = 200;
+    /** A gate probe as the first case builds it, its helper's rests shortened to `restMs`. */
+    const probe = (name: string, env: Record<string, string> = {}) => {
+      const { logger, raw } = productionLog();
+      const summaries = (): Line[] =>
+        raw.map((line) => JSON.parse(line) as Line).filter((line) => line['msg'] === SUMMARY);
+      const base = mkdtempSync(join(dir, `${name}-`));
+      const files = systemFiles(base);
+      const clock = { now: 1_000_000 };
+      const names = buildNameResolution({
+        mode: 'gate',
+        logger,
+        lanes: 6,
+        spoolDir: base,
+        helper: {
+          childModule: CHILD,
+          env: { ...process.env, ...env },
+          limits: { beatMs: 25, tickMs: 100, restFirstMs: restMs },
+        },
+        policy: { files, platform: 'linux', env: {}, checkBuilt: false },
+        resolver: {
+          now: () => clock.now,
+          lookup: () => Promise.resolve(PROBE_LANES),
+          watch: {
+            files: [
+              files.hosts,
+              files.resolvConf,
+              files.nsswitchConf,
+              files.gaiConf,
+              files.ldSoPreload,
+            ],
+            everyMs: 60_000,
+          },
+        },
+      });
+      const gate = names.gate;
+      assert.ok(gate !== undefined);
+      /** The first hour's changes, from its summary, once the clock is an hour on. */
+      const firstHour = async (): Promise<{ changes: Change[]; lost: unknown[] }> => {
+        // Past any rest's end, so that a move after it would be in the hour.
+        await new Promise((resolve) => setTimeout(resolve, restMs * 3));
+        clock.now += GATE_SUMMARY_MS;
+        await pollWithin(WAIT, `${name}: the summary`, () => summaries().length > 0, 20);
+        const line = summaries()[0];
+        assert.ok(line !== undefined);
+        const changes = (at(line, ['helper', 'changes']) as Change[]).map(({ from, to, loss }) => ({
+          from,
+          to,
+          ...(loss === undefined ? {} : { loss }),
+        }));
+        const lost = (at(line, ['helper', 'lost']) as Line[]).map((loss) => loss['reason']);
+        return { changes, lost };
+      };
+      /** The child killed from outside: an `exit` loss charged to no name. */
+      const kill = async (count: number): Promise<void> => {
+        await pollWithin(
+          WAIT,
+          `${name}: up before kill ${String(count)}`,
+          () => gate.helper.state === 'up' && gate.helper.pid() !== undefined,
+          10,
+        );
+        const pid = gate.helper.pid();
+        assert.ok(pid !== undefined);
+        process.kill(pid, 'SIGKILL');
+        await pollWithin(
+          WAIT,
+          () => `${name}: loss ${String(count)}: ${JSON.stringify(gate.helper.stats())}`,
+          () => gate.helper.stats().losses === count,
+          10,
+        );
+      };
+      const stop = async (): Promise<void> => {
+        await within(WAIT, `${name}: the stop`, names.stop());
+        rmSync(base, { recursive: true, force: true });
+      };
+      return { names, gate, raw, files, firstHour, kill, stop };
+    };
+    const backoff = (loss: string): Change[] => [
+      { from: 'up', to: 'backoff', loss },
+      { from: 'backoff', to: 'starting' },
+      { from: 'starting', to: 'up' },
+    ];
+
+    // A rest for a time: the fifth loss in ten minutes, and the rest's end.
+    const timed = probe('timed');
+    let timedHour: { changes: Change[]; lost: unknown[] };
+    try {
+      await within(WAIT, 'timed: the start', timed.names.start());
+      for (let count = 1; count <= HELPER_LOSSES_TO_REST; count += 1) await timed.kill(count);
+      await pollWithin(WAIT, 'timed: up after the rest', () => timed.gate.helper.state === 'up');
+      timedHour = await timed.firstHour();
+    } finally {
+      await timed.stop();
+    }
+    assert.equal(HELPER_LOSSES_TO_REST, 5);
+    assert.deepEqual(timedHour.changes, [
+      { from: 'idle', to: 'starting' },
+      { from: 'starting', to: 'up' },
+      ...backoff('exit'),
+      ...backoff('exit'),
+      ...backoff('exit'),
+      ...backoff('exit'),
+      { from: 'up', to: 'resting', loss: 'exit' },
+      { from: 'resting', to: 'starting' },
+      { from: 'starting', to: 'up' },
+    ]);
+    assert.deepEqual(timedHour.lost, ['exit', 'exit', 'exit', 'exit', 'exit']);
+
+    // A `skew` loss: the child reports another Node, at its start, and the rest has no end.
+    const skew = probe('skew', { SCRIPT_READY_NODE: 'v0.0.1' });
+    let skewHour: { changes: Change[]; lost: unknown[] };
+    try {
+      await within(WAIT, 'skew: the start', skew.names.start());
+      assert.equal(skew.gate.helper.state, 'resting');
+      assert.equal(skew.gate.helper.stats().restMs, undefined, 'until restart');
+      skewHour = await skew.firstHour();
+      assert.equal(skew.gate.helper.state, 'resting');
+    } finally {
+      await skew.stop();
+    }
+    assert.deepEqual(skewHour.changes, [
+      { from: 'idle', to: 'starting' },
+      { from: 'starting', to: 'resting', loss: 'skew' },
+    ]);
+    assert.deepEqual(skewHour.lost, ['skew']);
+
+    // A file glibc reads once changed under the running probe: its next loss, from `up`, rests
+    // until restart.
+    const moved = probe('moved');
+    let movedHour: { changes: Change[]; lost: unknown[] };
+    try {
+      await within(WAIT, 'moved: the start', moved.names.start());
+      writeFileSync(moved.files.ldSoPreload, '/nonexistent/libms-test.so\n');
+      await within(WAIT, 'moved: the look', moved.names.resolver.checkFiles());
+      assert.ok(
+        moved.raw.some((line) =>
+          line.includes(`${moved.files.ldSoPreload} changed: restart ms-probe to apply it`),
+        ),
+        'the change was found',
+      );
+      await moved.kill(1);
+      assert.equal(moved.gate.helper.state, 'resting');
+      movedHour = await moved.firstHour();
+      assert.equal(moved.gate.helper.state, 'resting');
+    } finally {
+      await moved.stop();
+    }
+    assert.deepEqual(movedHour.changes, [
+      { from: 'idle', to: 'starting' },
+      { from: 'starting', to: 'up' },
+      { from: 'up', to: 'resting', loss: 'exit' },
+    ]);
+
+    // The guide's `helper` field says each of them, beside a loss that does not rest it.
+    const guide = flat('administration.md');
+    const from = guide.indexOf('- `helper`: its `state` now');
+    const to = guide.indexOf('```bash', from);
+    assert.ok(from >= 0 && to > from, 'the guide has no `helper` field in the summary');
+    const field = guide.slice(from, to);
+    const says = (words: string, what: string): void => {
+      assert.ok(field.includes(words), `the guide does not say ${what}: ${words}`);
+    };
+    says(chainOf(backoff('exit').slice(1)), 'a loss’s way back');
+    says('A loss that rests it, as above, is a move to `resting` with its `loss`', 'a rest');
+    says('at the fifth loss in ten minutes', 'which loss rests it for a time');
+    says(`ends ${chainOf(timedHour.changes.slice(-2))}`, 'how a rest for a time ends');
+    says('a rest until ms-probe restarts has no move after it', 'that a rest until restart stays');
+    says('A `skew` loss', 'a skew loss');
+    says(chainOf(skewHour.changes.slice(1)), 'a skew loss’s move');
+    says('any loss after a file glibc reads once changed', 'a loss after a read-once file moved');
+    says(chainOf(movedHour.changes.slice(2)), 'that loss’s move');
   });
 
   it('under "system" logs no hourly summary, as the drill says, and under "gate" the first an hour after the start', async () => {

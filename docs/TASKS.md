@@ -15049,6 +15049,60 @@ because each is a decision rather than a defect:
         has no row for the trouble latch's warning, `the lookup helper is in trouble: …`, which
         step 4 reads each Warning by. Not added here: no case of the new test raises it (two
         losses in ten minutes, not three), so a row would be untested.
+      - **Review, fix round 2** (2026-10-20, on `5e2665b5`): item 7, Low, documentation only.
+        Fixed in a new commit on `feat/p432-fields`:
+        - **The guide's `helper` field says what a loss that rests the helper lists**
+          (administration guide). Round 1's sentence had every loss move to `backoff` and back to
+          `up`, but a loss that rests it moves to `resting` with its `loss` instead
+          (`#nextAfterLoss` returns `rest`, `#rest` sets `resting`). The field now says: a loss
+          that does not rest it is a move to `backoff`, then `backoff` → `starting` → `up`, from
+          `up`, `unresponsive` or (a `start` loss) `starting`; one that rests it is a move to
+          `resting` with its `loss`, from the same states; a rest for a time, at the fifth loss
+          in ten minutes or a loss within ten minutes of a rest's end, ends `resting` →
+          `starting` → `up`; a rest until ms-probe restarts has no move after it; a `skew` loss,
+          taken as the child starts, `starting` → `resting`, always rests until the restart, and
+          so does any loss after a file glibc reads once changed under the running probe (`up` →
+          `resting` for one from `up`). The runbook is unchanged: step 4 already names a
+          `resting` a finding, and gives a loss's way back only as the pass.
+        - **Two of the finding's facts corrected, not carried in.** The count is the fifth loss
+          in ten minutes, not the third (`HELPER_LOSSES_TO_REST` is 5, as the guide's rule above
+          and `U10` say). A `skew` loss is taken at the child's ready (`#onReady`), so it moves
+          from `starting`, never from `up`: the `up` → `resting` the finding gives is a loss
+          after a read-once file moved, listed with that loss's own reason (`exit` for a kill).
+        - **Tests**: `gate-summary-reading.test.ts` 3 of 3, one new case. Three gate probes
+          built as `main.ts` builds them, with the real helper on the scripted child and rests
+          shortened to 200 ms: five kills from outside (SIGKILL, `exit` losses charged to no
+          name), four `up` → `backoff` → `starting` → `up` and the fifth `up` → `resting` with
+          `exit`, then the rest's end `resting` → `starting` → `up`; a child reporting another
+          Node, `idle` → `starting` → `resting` with `skew`, and nothing after it 600 ms on; and
+          `ld.so.preload` written under the running probe, found by the watch (`… changed:
+          restart ms-probe to apply it`), then a kill, `up` → `resting` with `exit`, and nothing
+          after. Each first summary's `changes` and `lost` are pinned, and the guide's `helper`
+          field is held to each chain, to a rest being a move to `resting` with its `loss`, to
+          *the fifth*, and to a rest until restart having no move after it.
+        - **Mutants: 12, all killed.** Each restored with `shutil.copy` and `os.utime` and checked
+          with `filecmp`; each code mutant's marker was in `dist` while it ran, and after the last
+          rebuild none is left and `dist` is newer than the source.
+          - Documents (7): round 1's sentence back; *third* for *fifth*; a rest's end without
+            `starting`; a `skew` loss to `backoff`; the read-once loss taken out; a rest until
+            restart that "ends the same way"; a rest as a move to `backoff`.
+          - Code (5, `lookup-helper.ts`): a moved read-once file not resting the helper; a
+            `skew` loss resting for a time; the sixth loss resting, not the fifth; a rest that
+            never starts a child again; a timed rest's change without its `loss`.
+        - **Runs**, on the final build, beside other sessions' runs: `probe` 25 of 25 in
+          `gate-summary-reading`, `name-resolution` and `latch`; `core` `build-hygiene` 39 of 39.
+          Prettier and eslint clean on the changed `.ts` file.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (review fix round 2):
+        - **Each case is named by its chain, not by the suggested wording.** "Then back to `up`,
+          or to `resting` when it rests" reads as a rest coming after the `backoff`, and says
+          nothing of a rest until restart, which never comes back. Chains are what the summary
+          prints and what the test can hold the guide to, as round 1 decided for the runbook.
+        - **The test drives the real helper into each rest**, instead of checking words alone, so
+          a change to the helper's rests fails it rather than leaving the guide wrong. The
+          losses are kills from outside, not crashes: a crash with one name alone in flight can
+          be charged to that name and is then not counted toward a rest (D27), and a SIGKILL is
+          never charged (`P-453`).
+        - **Quiet-machine runs: none.** Nothing here is measured.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

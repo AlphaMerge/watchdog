@@ -1420,8 +1420,15 @@ line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`,
   and `lost` children (`at`, `reason`, `pid`, `why`, `signal`, `exitCode`), the first 20 of each,
   with `changesNotListed` and `lostNotListed` counting the rest. `msInState` is the time in each
   state since the start. The first summary after a start lists the helper's own start, `idle` →
-  `starting` → `up`; a loss is a move to `backoff` with its `loss`, then `backoff` → `starting`
-  → `up`, and a child that stopped answering first moves `up` → `unresponsive` before it.
+  `starting` → `up`. A loss that does not rest the helper is a move to `backoff` with its
+  `loss`, then `backoff` → `starting` → `up`: from `up`, from `unresponsive` for a child that
+  stopped answering first (`up` → `unresponsive` before it), or from `starting` for a `start`
+  loss. A loss that rests it, as above, is a move to `resting` with its `loss` instead, from the
+  same states. A rest for a time, at the fifth loss in ten minutes or a loss within ten minutes
+  of a rest's end, ends `resting` → `starting` → `up`; a rest until ms-probe restarts has no
+  move after it. A `skew` loss, taken as the child starts, always rests until the restart,
+  `starting` → `resting`, and so does any loss after a file glibc reads once changed under the
+  running probe, `up` → `resting` for a loss from `up`.
 
 ```bash
 sudo journalctl -u ms-probe --no-pager -o cat | grep -F 'in gate mode, this hour'
