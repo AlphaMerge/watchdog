@@ -59,11 +59,16 @@ describe('the theme script', () => {
   });
 
   describe('sets', () => {
-    const run = (stored: string | null, prefersDark: boolean): string | undefined => {
+    /** `prefersDark` is what the system answers; `'unanswered'` is a `matchMedia` that throws. */
+    const run = (
+      stored: string | null,
+      prefersDark: boolean | 'unanswered',
+    ): string | undefined => {
       if (stored !== null) localStorage.setItem('ms-theme', stored);
-      window.matchMedia = ((query: string) => ({
-        matches: query === '(prefers-color-scheme: dark)' && prefersDark,
-      })) as unknown as typeof window.matchMedia;
+      window.matchMedia = ((query: string) => {
+        if (prefersDark === 'unanswered') throw new Error('no media queries');
+        return { matches: query === '(prefers-color-scheme: dark)' && prefersDark };
+      }) as unknown as typeof window.matchMedia;
       const source = readFileSync(resolve(ROOT, 'public', themeSource ?? '(none)'), 'utf8');
       // The file under test, run as the page runs it: a classic script, at the top level.
       // eslint-disable-next-line @typescript-eslint/no-implied-eval -- that is the point
@@ -86,11 +91,23 @@ describe('the theme script', () => {
       expect(run(null, false)).toBe('light');
     });
 
-    it('light where storage cannot be read', () => {
+    // Storage switched off or refused by a policy is no stored choice, and the system's is
+    // followed, as `useTheme` follows its changes. It opened light whatever the system asked,
+    // and then turned dark at the system's first change (`U-23` review).
+    it('what the operating system asks for where storage cannot be read', () => {
       vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
         throw new Error('storage disabled');
       });
-      expect(run(null, true)).toBe('light');
+      expect(run(null, true)).toBe('dark');
+      delete document.documentElement.dataset['theme'];
+      expect(run(null, false)).toBe('light');
+    });
+
+    it('light where neither storage nor the operating system can be asked', () => {
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('storage disabled');
+      });
+      expect(run(null, 'unanswered')).toBe('light');
     });
   });
 });

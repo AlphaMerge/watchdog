@@ -7,12 +7,22 @@
 // reader had chosen. Only the Vite dev server, which sends no policy, ever ran it. A classic
 // script in the head still holds the first paint until it has run, as the inline one did.
 //
+// **Storage that cannot be read is no stored choice**, and the system's is followed, as
+// `useTheme` follows it when the system changes. Light whatever the system asked was the old
+// rule, so a reader with storage switched off opened light and turned dark at the first change.
+// Light is left for a browser that cannot be asked about the system either.
+//
 // **Its name carries a hash of what is in it**, because ms-core tells a browser to keep every file
 // beside index.html for a year. Change a byte and the name changes with it; `theme-boot.test.ts`
 // says what the new name is, and fails until it is the one on disk and in index.html.
 (function () {
+  let stored = null;
   try {
-    const stored = localStorage.getItem('ms-theme');
+    stored = localStorage.getItem('ms-theme');
+  } catch {
+    // Switched off, or refused by a policy: `localStorage` is null, or reading it throws.
+  }
+  try {
     const dark =
       stored === 'dark' ||
       (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
