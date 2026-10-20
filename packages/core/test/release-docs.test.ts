@@ -140,6 +140,38 @@ function danglingLinks(doc: string, markdown: string, shipped: readonly string[]
   });
 }
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+
+/**
+ * Every route `docs/api-reference.md` lists, with a pattern that matches it whatever stands for a
+ * parameter. `build-hygiene.test.ts` holds that page to the routes the core registers.
+ */
+function referenceRoutes(): { readonly key: string; readonly pattern: RegExp }[] {
+  const page = readFileSync(join(docsDir, 'api-reference.md'), 'utf8');
+  return [...page.matchAll(/^### `([A-Z]+) (\/\S*)`$/gmu)].map(([, method = '', path = '']) => {
+    // `{id}` is one segment, whatever fills it; the rest is literal.
+    const segments = path.split(/\{[^}/]+\}/u).map(escapeRegExp);
+    return {
+      key: `${method} ${path}`,
+      pattern: new RegExp(`^${method} ${segments.join('[^/]+')}$`, 'u'),
+    };
+  });
+}
+
+/** A route a document names in code: `GET /objects/:id`, `POST /api/v1/probes/<gid>/approve`. */
+const ROUTE_SPAN = /`(GET|POST|PUT|PATCH|DELETE) (\/[^`\s]*)`/gu;
+
+/**
+ * What a named route can mean: the path as written and, when it is not under `/api/`, under
+ * `/api/v1`, as prose shortens it. The query goes, and a parameter however spelled is one segment.
+ */
+function routeReadings(method: string, path: string): string[] {
+  const bare = (path.split('?')[0] ?? '').replace(/:[A-Za-z]+|<[A-Za-z]+>|\{[A-Za-z]+\}/gu, '1');
+  return [bare, ...(bare.startsWith('/api/') ? [] : [`/api/v1${bare}`])].map(
+    (one) => `${method} ${one}`,
+  );
+}
+
 function filesUnder(dir: string, keep: (name: string) => boolean): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
@@ -283,6 +315,52 @@ describe('the documents a release ships (`H-51`)', () => {
     assert.deepEqual(broken, [], 'links in a shipped document to a file the release does not have');
   });
 
+  /**
+   * The release's index told operators the OpenAPI document was at `/openapi.json`, copied from
+   * the repository's map; the core serves it at `GET /api/v1/openapi.json` only, which the API
+   * reference beside it said (`H-51` review). So a route a shipped document names is looked up in
+   * the reference, and the document's file name is never written without its route.
+   */
+  it('name only routes the core registers, and the OpenAPI document at its own', () => {
+    const { ship } = releaseDocs();
+    const routes = referenceRoutes();
+    // Presence, so that a page whose headings were not read cannot pass.
+    assert.ok(routes.length > 100, `${String(routes.length)} routes read from the API reference`);
+    assert.ok(routes.some(({ key }) => key === 'GET /api/v1/openapi.json'));
+
+    // The shipped documents, and the repository's map the release's index was written from.
+    const named: string[] = [];
+    const unknown: string[] = [];
+    const misnamed: string[] = [];
+    for (const doc of [...ship, 'README.md']) {
+      const text = readFileSync(join(docsDir, doc), 'utf8');
+      for (const [span, method = '', path = ''] of text.matchAll(ROUTE_SPAN)) {
+        named.push(`${doc}: ${span}`);
+        const readings = routeReadings(method, path);
+        if (!routes.some(({ pattern }) => readings.some((one) => pattern.test(one)))) {
+          unknown.push(`${doc}: ${span}`);
+        }
+      }
+      for (const [mention, before = ''] of text.matchAll(/(\S*)openapi\.json/gu)) {
+        if (!before.endsWith('/api/v1/')) misnamed.push(`${doc}: ${mention}`);
+      }
+    }
+    // A route in full, one shortened as prose shortens it, and the one this was written for.
+    for (const expected of [
+      'troubleshooting.md: `GET /api/v1/build`',
+      'troubleshooting.md: `GET /objects/:id/settings`',
+      'index.md: `GET /api/v1/openapi.json`',
+    ]) {
+      assert.ok(named.includes(expected), `${expected} was not found`);
+    }
+    assert.deepEqual(unknown, [], 'routes a document names that the core does not register');
+    assert.deepEqual(
+      misnamed,
+      [],
+      'the OpenAPI document named other than at GET /api/v1/openapi.json, the route that serves it',
+    );
+  });
+
   it('reach the .deb, the .rpm and the MSI through the staged tree, not the repository', () => {
     // `package.sh` stages the list, and each package copies what it staged. The MSI copied the
     // repository's whole docs/ until `H-51`, past the list.
@@ -367,6 +445,21 @@ describe('the documents a release ships (`H-51`)', () => {
         'findings/plot.png',
       ],
     );
+    // A named route, however its parameter is spelled, read as the reference spells it.
+    assert.deepEqual(routeReadings('GET', '/objects/:id/settings?inherited=true'), [
+      'GET /objects/1/settings',
+      'GET /api/v1/objects/1/settings',
+    ]);
+    assert.deepEqual(routeReadings('POST', '/api/v1/probes/<gid>/approve'), [
+      'POST /api/v1/probes/1/approve',
+    ]);
+    assert.deepEqual(
+      [
+        ...'`GET /metrics`, `DELETE /a/{id}`, `GET`, `GET objects`, GET /b'.matchAll(ROUTE_SPAN),
+      ].map(([, method, path]) => `${String(method)} ${String(path)}`),
+      ['GET /metrics', 'DELETE /a/{id}'],
+    );
+
     // Resolved against the document's own directory, as a reader's viewer resolves it.
     assert.deepEqual(
       danglingLinks('guide/planted.md', '[up](../installation.md) [here](installation.md)', [

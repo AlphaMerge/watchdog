@@ -77,9 +77,10 @@ view; [web-ui.md](web-ui.md) says what each covers.
 | ------------------------------------- | --------------------------------------------------------------------- |
 | [api-reference.md](api-reference.md) | Every route. **Generated from the OpenAPI document — do not edit.**  |
 
-A running core serves the same document at `/openapi.json`, which is what the reference is
-rendered from — so it is the schema the server actually validates against, not a description of
-one.
+A running core serves its own document at `GET /api/v1/openapi.json`, to any session or API token:
+the schema that core actually validates against, not a description of one. The reference is
+rendered from the full build's document and marks the routes the v1 build does not register, so a
+1.0 core's own document is the reference less the marked routes.
 
 ## Operating it
 

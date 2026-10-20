@@ -31,8 +31,10 @@ arrived with. The services' units name this directory as their documentation.
 | [adding-a-sensor-type.md](adding-a-sensor-type.md)     | The `SensorType` contract, the rules the catalogue enforces, and a worked example   |
 | [ADR-001-architecture.md](ADR-001-architecture.md)     | The architecture and its decisions, the TimescaleDB licence among them             |
 
-A running core serves the document the API reference is rendered from at `/openapi.json`, so a
-client can be generated from the schema the server validates against.
+A running core serves its own OpenAPI document at `GET /api/v1/openapi.json`, to any session or
+API token, so a client can be generated from the schema that core validates against. It lists the
+routes that core registers. The API reference is rendered from the full build, and marks each
+route a 1.0 core does not have.
 
 ## What these cite and a release does not carry
 
