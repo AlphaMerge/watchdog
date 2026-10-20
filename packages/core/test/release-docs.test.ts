@@ -273,6 +273,20 @@ describe('the documents a release ships (`H-51`)', () => {
       [],
       'a findings file ships',
     );
+    // Every design record but ADR-001, whose Decision 4 migration 004's checksummed refusal names.
+    // Read from the directory, so a new record is held here without a line of its own. Nothing
+    // else would hold them: a record with no relative links passes the link test shipped or kept.
+    const records = entries.filter((name) => /^ADR-\d{3}-[\w-]+\.md$/u.test(name));
+    assert.ok(records.length >= 6, `${String(records.length)} design records found in docs/`);
+    assert.deepEqual(
+      records.filter((name) => name !== 'ADR-001-architecture.md' && !keep.includes(name)),
+      [],
+      'design records the release ships, beside ADR-001',
+    );
+    assert.ok(
+      ship.includes('ADR-001-architecture.md'),
+      'ADR-001, which migration 004 names, is kept',
+    );
     assert.ok(ship.includes('index.md'), 'the release has no index of its own');
   });
 
