@@ -16419,6 +16419,19 @@ because each is a decision rather than a defect:
       recognised without reading the clock, with a test that pauses between the reads (an injected
       `realNow` stepping 3 ms, as `P-470`'s diagnosis did) and a mutant.
 
+- [ ] **P-476 — the dev PostgreSQL speaks no TLS, so `P-406`'s certificate case never runs against `pg`** ·
+      XS · P-406, H-53 · Filed 2026-10-20 by the coordinator, at rc.3's cut. `db-drivers.test`'s
+      "says a certificate it will not accept is the handshake, from the real driver" skipped
+      PostgreSQL on every run ("the dev PostgreSQL offers no TLS"), and a suite with one skip ends
+      `clean, but 1 suite(s) never ran`, which the cut's step 0.4 does not take as a pass. A skip that
+      happens on every run by design is the noise `P-49` warns of: it teaches a reader that a skip
+      means nothing. **Decided 2026-10-20 by Claude, under the user's delegation:** the case is
+      defined only for the engines whose dev server presents a certificate (MySQL and SQL Server),
+      not skipped for PostgreSQL, so a full stack runs with `skipped 0`, and a skip means a
+      dependency was down. **Done when** the dev PostgreSQL presents a self-signed certificate
+      (`ssl = on`, a certificate from `scripts/dev-certs.sh`, clients that ask for none still
+      served) and the case runs for all three engines, `pg`'s refusal read as the handshake.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the

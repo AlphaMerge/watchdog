@@ -264,31 +264,31 @@ for (const engine of ENGINES) {
       );
     });
 
-    it('says a certificate it will not accept is the handshake, from the real driver (P-406)', async (t) => {
-      if (!engine.available) {
-        t.skip(`${engine.name} is not running`);
-        return;
-      }
-      // The dev PostgreSQL speaks no TLS at all, so there is no certificate to refuse.
-      if (engine.name === 'PostgreSQL') {
-        t.skip('the dev PostgreSQL offers no TLS');
-        return;
-      }
-      // Both dev servers present a self-signed certificate. `mysql2` codes its failure
-      // `HANDSHAKE_SSL_ERROR` over Node's own code, which is what this proves is still read.
-      const refused = await rejectionOf(() =>
-        runDbCheck(
-          engine.driver,
-          context(engine, { query: engine.one, encrypt: 'require', verifyTls: true }),
-        ),
-      );
-      assert.match(String(refused), /self-signed/);
-      assert.deepEqual(
-        failedIn(refused),
-        { phase: 'handshake', target: engine.options.host },
-        String(refused),
-      );
-    });
+    // The dev PostgreSQL speaks no TLS at all, so there is no certificate to refuse: the case is
+    // defined only where a dev server presents one, rather than skipped on every run, which a
+    // cut's suite reads as a suite that never ran (`P-476` gives the dev PostgreSQL one).
+    if (engine.name !== 'PostgreSQL') {
+      it('says a certificate it will not accept is the handshake, from the real driver (P-406)', async (t) => {
+        if (!engine.available) {
+          t.skip(`${engine.name} is not running`);
+          return;
+        }
+        // Both dev servers present a self-signed certificate. `mysql2` codes its failure
+        // `HANDSHAKE_SSL_ERROR` over Node's own code, which is what this proves is still read.
+        const refused = await rejectionOf(() =>
+          runDbCheck(
+            engine.driver,
+            context(engine, { query: engine.one, encrypt: 'require', verifyTls: true }),
+          ),
+        );
+        assert.match(String(refused), /self-signed/);
+        assert.deepEqual(
+          failedIn(refused),
+          { phase: 'handshake', target: engine.options.host },
+          String(refused),
+        );
+      });
+    }
   });
 }
 
