@@ -1331,49 +1331,46 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   lanes, resting included, where it would crash the probe. It is asked again after an hour, at a
   moment the helper has nothing else in flight, then after twice as long at each crash it alone
   was in flight for, to a day. An answer, or a restart of the probe, clears it.
-- **Only a crash is held against a name** (`P-453`): the child ending by a signal a crash
-  raises, SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP or SIGSYS. A child killed from
-  outside (SIGKILL, SIGTERM or SIGINT: an operator, the kernel's OOM killer, a cgroup kill), or
-  one that exits with a code, makes no name poison, and the name it was asking is asked again in
-  the next child. A suspect is sent alone there, while the helper isolates. A poison name's re-ask
-  starts first, at a moment nothing else is in flight, as its hourly re-ask does, and what is
-  queued for the helper, or asked after it, starts beside it. A crash while anything else is in
-  flight beside it is charged to no one, and every name in flight is kept off the probe's lanes.
-  A crash while it is alone in flight, as it is from its start when nothing was queued for the
-  next child, is charged to it as at its hourly re-ask, and its next re-ask is twice as far off.
-  When the kill is the second loss in ten minutes, the helper isolates, and the re-ask is sent
-  alone as a suspect.
-  When the child's channel closes before its exit is read, the helper kills it and waits up to a
-  second for the exit to say which it was. Every name in flight when the child ends, a crash or
-  not, or when it runs out of memory, is kept off the probe's lanes until ten minutes after the
-  helper is next up, a rest included: any of them may be what ended it. So is every name in
-  flight when the child goes quiet, and so every name a child killed for being quiet was asking
-  (`P-463`): `getaddrinfo` runs on the child's own threads, so only a lookup that reaches its
-  whole process (an NSS module holding a lock its main thread needs, or a lookup that grows it
-  until it swaps) can quiet it, and the same lookup could quiet the probe. At most 8 lookups are
-  in flight at a quiet, as many as the helper runs at once, but the names kept off add up. Each
-  stays off until ten minutes after the helper is next up, and a quiet the child comes back from
-  is not a loss, so however often a starved host's child goes quiet and comes back the helper
-  never rests, and each quiet in those ten minutes adds its names. While the helper is not
-  answering, the check of each name kept off fails at once (`RESOLVER_FAULT`), unless an answer
-  is kept for it (30 s, and five minutes' grace past that), which the check uses; once it
-  answers they are asked there. The `not answering` warning, said at most once a minute, gives
-  `keptOff`, the lookups in flight at that quiet, and `keptOffNow`, every name kept off then,
-  with the quiets since the last warning (`alsoNotAnswering`) and what they detached and kept
-  off (`alsoDetached`, `alsoKeptOff`); those still unsaid as the probe stops are said then. The
-  hourly summary, `the probe’s resolver in gate mode, this hour`, is said again as the probe
-  stops, for the part of the hour since the last (`stopping: true`). It has the checks failed
-  at once since the last (`checksFaulted`) and the lookups refused (`routed.faulted`: one
-  however many checks waited for it, so a refresh nobody waited for is one, and two checks on
-  one lookup are one). Since the probe started, it has the quiets (`helper.quiets`), the most
-  names kept off at once (`helper.keptOffPeak`) and the time not answering
-  (`helper.msInState.unresponsive`). The probe's
-  `the lookup helper was lost` line says who sent a SIGKILL the child ended by (`killedBy`,
-  `P-469`): `probe` for its own, for the `why` it gives; `itself` for the child ending itself
-  after the `fatal` it gives; `outside` for anyone else, the kernel's OOM killer and a cgroup
-  kill among them. On Windows a crash ends
-  with an exit code, so no end is held against a name there yet (`P-464`); the names are still
-  kept off the probe's lanes, and losses rest the helper as above.
+- **Only a crash is held against a name** (`P-453`): the child ending by a signal a crash raises,
+  SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP or SIGSYS. A child killed from outside (SIGKILL,
+  SIGTERM or SIGINT: an operator, the kernel's OOM killer, a cgroup kill), or one that exits with a
+  code, makes no name poison, and the name it was asking is asked again in the next child. A suspect
+  is sent alone there, while the helper isolates. A poison name's re-ask starts first, at a moment
+  nothing else is in flight, as its hourly re-ask does, and what is queued for the helper, or asked
+  after it, starts beside it. A crash while anything else is in flight beside it is charged to no
+  one, and every name in flight is kept off the probe's lanes. A crash while it is alone in flight,
+  as it is from its start when nothing was queued for the next child, is charged to it as at its
+  hourly re-ask, and its next re-ask is twice as far off. When the kill is the second loss in ten
+  minutes, the helper isolates, and the re-ask is sent alone as a suspect. When the child's channel
+  closes before its exit is read, the helper kills it and waits up to a second for the exit to say
+  which it was. Every name in flight when the child ends, a crash or not, or when it runs out of
+  memory, is kept off the probe's lanes until ten minutes after the helper is next up, a rest
+  included: any of them may be what ended it. So is every name in flight when the child goes quiet,
+  and so every name a child killed for being quiet was asking (`P-463`): `getaddrinfo` runs on the
+  child's own threads, so only a lookup that reaches its whole process (an NSS module holding a lock
+  its main thread needs, or a lookup that grows it until it swaps) can quiet it, and the same lookup
+  could quiet the probe. At most 8 lookups are in flight at a quiet, as many as the helper runs at
+  once, but the names kept off add up. Each stays off until ten minutes after the helper is next up,
+  and a quiet the child comes back from is not a loss, so however often a starved host's child goes
+  quiet and comes back the helper never rests, and each quiet in those ten minutes adds its names.
+  While the helper is not answering, the check of each name kept off fails at once
+  (`RESOLVER_FAULT`), unless an answer is kept for it (30 s, and five minutes' grace past that),
+  which the check uses; once it answers they are asked there. The `not answering` warning, said at
+  most once a minute, gives `keptOff`, the lookups in flight at that quiet, and `keptOffNow`, every
+  name kept off then, with the quiets since the last warning (`alsoNotAnswering`) and what they
+  detached and kept off (`alsoDetached`, `alsoKeptOff`); those still unsaid as the probe stops are
+  said then. The hourly summary, `the probe’s resolver in gate mode, this hour`, is said again as
+  the probe stops, for the part of the hour since the last (`stopping: true`). It has the checks
+  failed at once since the last (`checksFaulted`) and the lookups refused (`routed.faulted`: one
+  however many checks waited for it, so a refresh nobody waited for is one, and two checks on one
+  lookup are one). Since the probe started, it has the quiets (`helper.quiets`), the most names kept
+  off at once (`helper.keptOffPeak`) and the time not answering (`helper.msInState.unresponsive`).
+  The probe's `the lookup helper was lost` line says who sent a SIGKILL the child ended by
+  (`killedBy`, `P-469`): `probe` for its own, for the `why` it gives; `itself` for the child ending
+  itself after the `fatal` it gives; `outside` for anyone else, the kernel's OOM killer and a cgroup
+  kill among them. On Windows a crash ends with an exit code, so no end is held against a name there
+  yet (`P-464`); the names are still kept off the probe's lanes, and losses rest the helper as
+  above.
 - **Stopping.** The helper serves the check pool until the pool has drained, then stops with the
   probe. A probe killed outright takes it with it: the child exits within a second of its channel
   to the probe closing.
@@ -1406,10 +1403,10 @@ protocol 38. **Before downgrading a probe to a build without the setting, take
 `probe.nameResolver` out of its `probe.json`**: an older probe refuses a key it does not know,
 and does not start.
 
-**What the probe's log says of it** (`P-467`). The helper's state, losses and memory, the
-check's state, and what was routed where have no channel (the user's decision of 2026-10-18 put
-six on Probe Health, not fourteen): the probe logs each as it happens, and once an hour in one
-line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`, `dns-check` or
+**What the probe's log says of it** (`P-467`). The helper's state, losses, quiets and memory, the
+check's state, and what was routed where have no channel (the user's decision of 2026-10-18 put six
+on Probe Health, not fourteen): the probe logs each as it happens, and once an hour in one line.
+Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`, `dns-check` or
 `system-names`), `level` and `msg`:
 
 | What happened | Level | `msg`, or how it starts |
@@ -1417,8 +1414,9 @@ line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`,
 | The probe started in gate mode | info | `probe.nameResolver is gate: the name policy …`, with `check` (`on` or `off`) and, when off, `off`'s `code` and `why` |
 | A core older than protocol 38 | warn, once a connection | `this core is older than protocol 38: the lookup helper’s health does not reach it` |
 | The helper is up | info | `the lookup helper is ready`, with its `pid` |
-| It stopped answering, and again | warn, at most once a minute, with the count since / info | `the lookup helper is not answering: …` / `the lookup helper is answering again` |
-| It was lost | warn | `the lookup helper was lost`, with `reason` (`start`, `skew`, `exit`, `hung` or `memory`), `why` (for `memory`, its resident set), and `signal` or `exitCode` |
+| It stopped answering, and again | warn, at most once a minute / info | `the lookup helper is not answering: …`, with `keptOff` and `keptOffNow`, and the quiets since the last line (`alsoNotAnswering`, `alsoDetached`, `alsoKeptOff`) / `the lookup helper is answering again` |
+| Quiets not yet said, as it stops | warn | `the lookup helper is stopping: the times it was not answering since it last said so`, with `alsoNotAnswering`, `alsoDetached` and `alsoKeptOff` |
+| It was lost | warn | `the lookup helper was lost`, with `reason` (`start`, `skew`, `exit`, `hung` or `memory`), `why` (for `memory`, its resident set), `signal` or `exitCode`, and for a SIGKILL, once its exit is read, who sent it (`killedBy`: `probe`, `itself` or `outside`, `P-469`) |
 | A name crashed it | error, once a name | `asking getaddrinfo for <name> made the lookup helper fail: …` |
 | It rests, and is started again | error / info | `the lookup helper is resting: …` (or `… resting until ms-probe restarts: …`) / `the lookup helper’s rest is over: …` |
 | A file glibc reads once changed | warn, once | `<file> changed: restart ms-probe to apply it` |
@@ -1427,34 +1425,41 @@ line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`,
 | A miss, and a zone skipped | warn | `the DNS check missed a name …` / `the DNS check missed three names of one zone …` |
 | The check stands down | error, then warn for a repeat within a day | `the DNS check missed names in three zones in ten minutes: …` |
 | Walks deferred | warn at the start of each episode | `the DNS check is deferring walks to the lookup helper: …`, with `why` and the count so far |
-| The hour | info | `the probe’s resolver in gate mode, this hour` |
+| The hour, and the stop | info, every hour and as the probe stops | `the probe’s resolver in gate mode, this hour`, with `"stopping":true` at the stop |
 
-**The hourly summary** says, for the hour since the last (the first an hour after the start):
+**The hourly summary** says, for the hour since the last (the first an hour after the start), and
+once more as the probe stops, with `stopping: true`, for the part of the hour since the last
+(`P-463`):
 
 - `hour`: the lookups heard (`lookupsHeard`, on the probe's own lanes), asked in the helper
   (`lookupsToHelper`), the check's `misses`, the walks deferred (`walksDeferred`), and
   `passedStuck` and `helperStuck`. The same names at the top level are running totals since the
   probe started, and `walksDeferred` there gives each reason (`budget`, `rate`, `stall`,
-  `scoutWait`) with their `total`. `routed` is the hour's routes by kind.
+  `scoutWait`) with their `total`. `routed` is the hour's routes by kind, each counting lookups
+  (`faulted`: one for each lookup the gate refused, however many checks waited for it), and
+  `checksFaulted` the checks the gate failed at once (`RESOLVER_FAULT`) since the last summary,
+  each once.
 - `check`: its `state` (0 the helper resting, 1 on, 2 off for the system's name settings or
   platform, or while they are slow to read, 3 not proven, 4 stood down), `said` in words, and
   while it is off, `off` with the `code` and `why` of the rule that turned it off; with its
   totals (`misses`, `standDowns`) and the zones it keeps (`keys`, `silentKeys`, `mixedKeys`).
 - `helper`: its `state` now; `rss`, its resident memory in bytes at the child's last beat (`null`
   with no child), and `rssPeak`; its `losses` since the probe started, by reason, with their
-  `total`; and the hour's `changes` of state (`at`, `from`, `to`, and the `loss` that moved it)
-  and `lost` children (`at`, `reason`, `pid`, `why`, `signal`, `exitCode`), the first 20 of each,
-  with `changesNotListed` and `lostNotListed` counting the rest. `msInState` is the time in each
-  state since the start. The first summary after a start lists the helper's own start, `idle` →
-  `starting` → `up`. A loss that does not rest the helper is a move to `backoff` with its
-  `loss`, then `backoff` → `starting` → `up`: from `up`, from `unresponsive` for a child that
-  stopped answering first (`up` → `unresponsive` before it), or from `starting` for a `start`
-  loss. A loss that rests it, as above, is a move to `resting` with its `loss` instead, from the
-  same states. A rest for a time, at the fifth loss in ten minutes or a loss within ten minutes
-  of a rest's end, ends `resting` → `starting` → `up`; a rest until ms-probe restarts has no
-  move after it. A `skew` loss, taken as the child starts, always rests until the restart,
-  `starting` → `resting`, and so does any loss after a file glibc reads once changed under the
-  running probe, `up` → `resting` for a loss from `up`.
+  `total`; and the hour's `changes` of state (`at`, `from`, `to`, and the `loss` that moved it) and
+  `lost` children (`at`, `reason`, `pid`, `why`, `signal`, `exitCode`), the first 20 of each, with
+  `changesNotListed` and `lostNotListed` counting the rest; a `lost` entry has no `killedBy`, which
+  the loss's own line gives. `msInState` is the time in each state since the start, and `quiets` and
+  `keptOffPeak` the quiets and the most names kept off the probe's lanes at once since then
+  (`P-463`). The first summary after a start lists the helper's own start, `idle` → `starting` →
+  `up`. A loss that does not rest the helper is a move to `backoff` with its `loss`, then `backoff`
+  → `starting` → `up`: from `up`, from `unresponsive` for a child that stopped answering first (`up`
+  → `unresponsive` before it), or from `starting` for a `start` loss. A loss that rests it, as
+  above, is a move to `resting` with its `loss` instead, from the same states. A rest for a time, at
+  the fifth loss in ten minutes or a loss within ten minutes of a rest's end, ends `resting` →
+  `starting` → `up`; a rest until ms-probe restarts has no move after it. A `skew` loss, taken as
+  the child starts, always rests until the restart, `starting` → `resting`, and so does any loss
+  after a file glibc reads once changed under the running probe, `up` → `resting` for a loss from
+  `up`.
 
 ```bash
 sudo journalctl -u ms-probe --no-pager -o cat | grep -F 'in gate mode, this hour'

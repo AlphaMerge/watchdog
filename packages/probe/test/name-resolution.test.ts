@@ -429,4 +429,31 @@ describe('the field-test runbook’s ends that said nothing (P-463 fix round 3)'
       .map(({ at }) => at);
     assert.deepEqual(unsaid, [1, 2], 'the two starts killed, the one with no summary included');
   });
+
+  /**
+   * The two counts the rule leaves out, named so the write-up says them (`P-463` round 3's review,
+   * items 9 and 10, fixed at the `integ/r7-1020` integration). The start running at the end reading
+   * is excepted from the ends, so its time from its last summary to the end reading, up to an hour
+   * on every probe, was in no sum and named nowhere. And a not-answering line's `alsoNotAnswering`
+   * counts the quiets held back since the line before, up to a minute, so the first line after a
+   * summary can count quiets that summary's `quiets` already holds.
+   */
+  it('names the running start’s time since its last summary, and the quiets a first line can count twice', async () => {
+    const flat = (await section()).replace(/\s+/g, ' ');
+    assert.match(
+      flat,
+      /Its time from its last summary before the end reading to the end reading, up to an hour on every probe, is in no sum either: the write-up names it as uncounted/,
+      'the running start’s tail is in no sum and not named',
+    );
+    assert.match(
+      flat,
+      /on the first line after a start's last summary it can include quiets of the minute before that summary, which that summary's `quiets` holds already/,
+      'a first line’s alsoNotAnswering can count quiets the summary holds',
+    );
+    assert.match(
+      flat,
+      /quiets held back after the last line are on no line/,
+      'quiets held back after the last line are on none',
+    );
+  });
 });

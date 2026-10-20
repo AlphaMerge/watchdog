@@ -41958,6 +41958,61 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
             made a gate of the cut.** The coordinator put `P-453`, `P-460`, `P-461` and S6's gaps
             in before the cut, and `P-465` was filed after that list.
         - **Quiet-machine runs: none.** Nothing here is measured.
+      - **Brought onto `P-467`, `P-463` and `P-469`, `P-465` and `P-471`, and `P-462`**
+        (2026-10-20, integration `integ/r7-1020`, one docs commit), the four documents and the
+        findings made to agree with what landed:
+        - **The release notes.** The rest of the gate's health is in the log: a SIGKILL's sender
+          (`killedBy`), the quiets and the names they keep off, the checks failed at once, the
+          summary said again at the stop. Probe Health says the mode, the hourly summary what was
+          routed where. The differential's paragraph is run 9's: 3,008 lookups (2,170 heard, 70
+          silent, 768 local), resolved at 9 and 9, eleven off boxes, the sequence rows, `%scope`
+          and the skew boxes. *Verified* names `P-462` and `P-465`'s arms.
+        - **The runbook.** A `SIGKILL` read by its `killedBy`, `journalctl -k` only for
+          `outside` (both tracks' text in one bullet); the stop's summary in the hours' file and
+          in the drill, which no longer waits an hour for one; three more reading commands
+          (`checksFaulted`, `quiets`, `keptOffPeak`); and the two runbook items `P-463`'s round 3
+          review left open (below).
+        - **The administration guide.** The log table's not-answering, stopping and lost rows
+          with `keptOff`, `keptOffNow`, the `also…` counts and `killedBy`; the summary at the
+          stop, `checksFaulted`, `quiets` and `keptOffPeak`; a `lost` entry has no `killedBy`.
+        - **The cut checklist.** Step 0.1 counts eight tickets, `P-469` with them. Step 0.2 holds
+          the fixture to run 9 (3,008, 42 and 49 sequence recordings) and its policy build.
+          Step 0.6 gives run 9's times and lines: 263 rows, 6 answer rows and 2 sequence rows an
+          image (254 rows on Rocky 8), resolved at 9 and 9 (bound 21), eleven `off` lines and
+          four `skew` lines with what each says. Step 0.7 says P2 is the first full-size run on
+          `P-463`'s build, and a P2 failed by answering checks refused is `P-472`'s case.
+        - **The findings.** S8's timing note reads run 9 (164 ms), S7's names no removed field,
+          and the skew box's message says "its state" where it named `nameCheckState`. S7's
+          records every arm run once scaled down on `integ/r7-1020` (830 s, 1,153 s and 69 s, all
+          held, not a measurement): P2 held with no answering check refused, but its walk vouched
+          every answering name before the SIGSTOP, so `P-472` stays open for the full-size run.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **`killedBy` is not added to the hourly summary's `lost` entries here.** It is a
+            behaviour neither track built, which would need its own test and mutant; the loss's
+            own line carries it, step 4 keeps every such line in `gate-events.jsonl`, and the
+            guide says where to read it. The fields track named it a one-line follow-up.
+          - **The fake helper's loss names no SIGKILL sender** (`killedBy` undefined), as a loss
+            whose exit is not read yet: `P-469` made the field required, and the fields track's
+            `FakeHelper.lose` builds a `HelperLoss` of its own (integration commit, not docs).
+          - **`P-463`'s round 3 items 9 and 10 are fixed in the runbook here**, since they are
+            runbook-only and in the paragraph this commit rewrites. The start running at the end
+            reading leaves its time since its last summary uncounted, and the write-up names it
+            as for an end that said nothing. The first not-answering line after a start's last
+            summary can count up to a minute of quiets that summary holds, and quiets held back
+            after the last line are on none: the write-up says both of its count. A test in
+            `name-resolution.test.ts` reads both rules from step 4; two mutants of the runbook,
+            each dropping one, fail it.
+          - **The drill reads the stop's summary.** The probe says one as it stops (`P-463` fix
+            round 2), so the next run's restart says the one that covers the drill and the
+            restore, and the hour's wait the fields track wrote is not needed.
+          - **The tests that name the eight removed fields stay**: `metrics.test.ts`,
+            `probe-health.test.ts`, `probe-health-report.test.ts`, `capabilities.test.ts` and
+            `config-problems.test.ts` each assert a field is gone, and fail if one comes back.
+            Elsewhere the tree names them only in this file's history and decisions.
+          - **Step 0.2 says the recordings' policy build is the integrated one.** The sha256 of
+            `system-names.js` built on `integ/r7-1020` begins `ae2c892f`, the build run 9
+            recorded: no other track changed the file.
+        - **Quiet-machine runs: none.** Nothing here is measured.
 
 ## Release 1.1 — Windows
 

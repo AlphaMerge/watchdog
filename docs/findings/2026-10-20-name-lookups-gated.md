@@ -447,7 +447,7 @@ Each arm's assertions were read against that code:
   the facts take the gate's counters from its own log, the helper's channel, `riskSeen()`, the
   helper's `stats()` and the trouble latch. The resolver's `gateHealth()` is read only for
   `passedStuck` and `helperStuck`, behind two of the six fields Probe Health keeps. The arm's start
-  waits on the policy's word and the check's log, not on `nameCheckState`.
+  waits on the policy's word and the check's log, not on Probe Health.
 
 ### `P-465` and `P-471`'s fix round 1 (2026-10-20)
 
@@ -490,9 +490,10 @@ delegation (also in `docs/TASKS.md`, under `P-465` and `P-471`):
 - **`MS_DNS_ARMS` names only arms there are.** It skipped a name no arm had, so a build without
   `P-465`'s arms ran none of them and ended `fail 0`. The file now stops on such a name
   (`unknownArms`). The rc.3 cut checklist's step 0.1 now counts `P-462`, `P-463` and `P-465` with
-  the tickets put in before the cut (6, not 3): all three were decided in after the step was
-  written, and only `P-465` was flagged. Step 0.7 stops the cut where the run has no row for
-  `spread10` in either mode, `addresses` or `walkrate`, or either line held against a baseline.
+  the tickets put in before the cut (6, not 3; 8 once `P-467` and `P-469` were integrated beside
+  them on `integ/r7-1020`): all three were decided in after the step was written, and only `P-465`
+  was flagged. Step 0.7 stops the cut where the run has no row for `spread10` in either mode,
+  `addresses` or `walkrate`, or either line held against a baseline.
 - **The `RESOLVER_FAULT` list and `P-471`'s reading of P1, P5 and P5b** are corrected above. The
   list lacked the silent route's refusal while the route is `down` (P2's silent zone), the stop's
   refusals and the resolver's own faults. Answering names can be avoided after a kill, and are kept
@@ -706,6 +707,33 @@ is a measurement:
 - **Mutants: 16, all killed**, 15 in the built judge and test file through the third block, each
   by its own case or test, and the count above through the arm (`docs/TASKS.md`, under `P-465`'s
   fix round 1, lists each).
+
+**On `integ/r7-1020`** (2026-10-20), where `P-465` and `P-471` were integrated with `P-467`,
+`P-463`, `P-469` and `P-462`, every arm ran once more at this scale, in three runs as above (the
+helper's arms with the three new ones; the rest of the world's arms with P3; `partial` with the
+check off), beside `ms-server` and other sessions' runs at a load of 3.09 per CPU, so not a
+measurement: 830 s, 1,153 s and 69 s, and every arm held (138, 142 and 130 passed, 0 failed).
+`P-463` keeps the names in flight at a quiet off the probe's lanes, and P2 is the arm that reaches
+it:
+
+- **P2**: 450 of 450 answering checks answered; the silent zone's 28 given up and 22 failed
+  otherwise while the child was stopped, as on `1b6bd68a`; the route `down` 3.8 s after the
+  SIGSTOP, `hung` at 20.9 s, the next child up at 21.0 s. No answering check was refused. At this
+  scale the walk vouched the answering names before the SIGSTOP (3 routed `unvouched` to the
+  helper), so `P-472`'s case, an answering name still unvouched at the SIGSTOP, was not reached,
+  and `P-472` stays open for the full-size run.
+- **P1, P5, P5b and P6** as on `1b6bd68a`: P1 967 of 967, two `exit` losses, the latch 0; P5 and
+  P5b every check (1,258 and 1,252), four `exit` losses each, the route `down` 0 ms after each
+  kill and no answering check refused, the latch 1; P6 490 of 490, three `exit` losses, one
+  name poisoned, checked 9 times once its zone answered and asked on the probe's lanes 0 times.
+- **`spread10`**: `system` answered 150 of 298 answering checks, and the gate 156 of 300 against
+  a floor of 143; at risk at a pick at most 4, all admitted. **`addresses`**: 499 of 499, the
+  canary the walk's one question. **`walkrate`**: 455 of 455 answering, p99 5.3 ms against
+  `addresses`' 5.2 ms + 10 ms, busiest second 20.
+- **The rest of the world's arms and P3** held as before: every answering check answered in every
+  arm and mode but `system`'s in `forwarder` (27 of 200); P3's stall held 15,001 ms, its lookup
+  answered 60 ms after it. `partial` with the check off routed 100 lookups `unvouched (off)` to
+  the helper and answered its 450 answering and 30 cached checks.
 
 ## The quiet-window command
 

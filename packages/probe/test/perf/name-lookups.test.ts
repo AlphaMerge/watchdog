@@ -2293,7 +2293,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     const policy = built.gate?.policy;
     if (policy !== undefined) {
       // On and proven by its canary, or off for the environment as the arm or `MS_DNS_CHECK` says:
-      // the policy's word and the check's own log, not Probe Health's `nameCheckState`.
+      // the policy's word and the check's own log, since Probe Health carries no check state.
       await pollWithin(
         START_BOUND_MS,
         () =>

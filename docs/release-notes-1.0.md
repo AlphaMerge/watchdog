@@ -337,9 +337,11 @@ From rc.2 or anything older:
     probe older than rc.3 shows all six as gaps. A probe set to `"gate"` under a core below 38
     warns once a connection that the lookup helper's health does not reach the core.
   - **The rest is in the probe's log** (`P-467`): the helper's changes of state, its losses with
-    their reason and signal, and its resident memory; the name check's state and why; and what
-    was asked where, the check's misses and the walks it deferred. Each is logged as it happens,
-    and once an hour in one line, `the probe’s resolver in gate mode, this hour`
+    their reason and signal (and for a SIGKILL who sent it, `killedBy`, `P-469`), its quiets and
+    the names they kept off the probe's lanes (`P-463`), and its resident memory; the name
+    check's state and why; and what was asked where, the check's misses, the walks it deferred
+    and the checks the gate failed at once. Each is logged as it happens, and once an hour in one
+    line, `the probe’s resolver in gate mode, this hour`, said again as the probe stops
     ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)
     lists them).
 - **A probe left on rc.2 keeps working, and its newer channels gap.** Core and probe negotiate down
@@ -511,35 +513,34 @@ ms-probe`: the setting is read only at start
 
   A helper that fails is replaced. Meanwhile a name its servers did not answer waits for it, its
   checks failing at once, and any other waits at most 2 s before it is asked on the probe's own
-  lanes. Probe Health's `lookupHelperTrouble` goes Warning, once, when the helper has
-  not been up for 30 s, has failed three times in ten minutes, ran out of memory, or rests, and
-  clears after ten minutes up with no failure. After five failures in ten minutes the probe
-  resolves as with `"system"` for ten minutes, doubling to an hour if it happens again
-  (`nameResolverMode` 3). A name that crashes `getaddrinfo` in the helper is found, its checks
-  fail at once, and it is never asked on the probe's own lanes. **Only a crash is held against a
-  name** (`P-453`): a helper killed from outside (the kernel's OOM killer, a cgroup kill, an
-  operator) or past its memory bound, or one that exits with a code, makes no name poison, and
-  every name it was asking is kept off the probe's own lanes until ten minutes after the helper
-  is next up, since any of them may be what ended it; so is every name a helper was asking when
-  it stopped answering (`P-463`). While the helper is not answering, the check of such a name
-  fails at once unless an answer is kept for it, and a helper that keeps going quiet and coming
-  back never rests, so the names it keeps off add up; the hourly summary, said again as the
-  probe stops, counts the checks failed at once (`checksFaulted`). Its loss line says whether a
-  SIGKILL was the probe's own, the helper's, or one from outside such as the OOM killer
-  (`killedBy`, `P-469`). `"system"` is the
-  resolver rc.3
-  has without the gate: `P-426`'s, with `P-438`'s kept answers. Probe Health says which mode
-  each probe ran and what the gate routed where (the upgrade item above). And in either mode it
-  now warns once for the probe when its resolver gives up 100 checks in five minutes for want of
-  an answer, naming the domains not answering (`P-441`, `lookupsGivenUpRecently`).
+  lanes. Probe Health's `lookupHelperTrouble` goes Warning, once, when the helper has not been up
+  for 30 s, has failed three times in ten minutes, ran out of memory, or rests, and clears after ten
+  minutes up with no failure. After five failures in ten minutes the probe resolves as with
+  `"system"` for ten minutes, doubling to an hour if it happens again (`nameResolverMode` 3). A name
+  that crashes `getaddrinfo` in the helper is found, its checks fail at once, and it is never asked
+  on the probe's own lanes. **Only a crash is held against a name** (`P-453`): a helper killed from
+  outside (the kernel's OOM killer, a cgroup kill, an operator) or past its memory bound, or one
+  that exits with a code, makes no name poison, and every name it was asking is kept off the probe's
+  own lanes until ten minutes after the helper is next up, since any of them may be what ended it;
+  so is every name a helper was asking when it stopped answering (`P-463`). While the helper is not
+  answering, the check of such a name fails at once unless an answer is kept for it, and a helper
+  that keeps going quiet and coming back never rests, so the names it keeps off add up; the hourly
+  summary, said again as the probe stops, counts the checks failed at once (`checksFaulted`). Its
+  loss line says whether a SIGKILL was the probe's own, the child's own after the fatal error it
+  names, or one from outside such as the OOM killer (`killedBy`, `P-469`). `"system"` is the
+  resolver rc.3 has without the gate: `P-426`'s, with `P-438`'s kept answers. Probe Health says
+  which mode each probe ran, and the probe's hourly summary what the gate routed where (the upgrade
+  item above). And in either mode it now warns once for the probe when its resolver gives up 100
+  checks in five minutes for want of an answer, naming the domains not answering (`P-441`,
+  `lookupsGivenUpRecently`).
 
   **Before rc.3 was cut**, the name policy the gate routes by was held to what glibc itself asks, in
   boxes of seven distributions' own images, from glibc 2.28 (Rocky 8) to 2.41 (Debian 13), with
-  `systemd-resolved` serving the stub on Ubuntu 24.04: 2,966 lookups, each glibc's questions server
+  `systemd-resolved` serving the stub on Ubuntu 24.04: 3,008 lookups, each glibc's questions server
   by server and try by try, every one as the policy said. The name check's own questions were held
   to glibc's beside them (`P-460`): for every lookup the check asked what glibc first asked, in
   order, and heard an answer when glibc returned within a second and not otherwise, but where
-  `rotate` let glibc start at a server that answered while another was silent (2,128 heard, 70
+  `rotate` let glibc start at a server that answered while another was silent (2,170 heard, 70
   silent, and 768 answered locally with nothing asked); gate mode answered as `"system"` does, and
   the helper as the probe's own lanes. Six rows of what servers answer were played too (a truncated
   answer with TCP refused, FORMERR, an AAAA SERVFAIL beside an answered A, and EDNS refused or
@@ -547,15 +548,22 @@ ms-probe`: the setting is read only at start
   the limit below says (`P-454`). With 150 names of a silent zone asked at once through a dnsmasq
   limited to 30 forwards, dnsmasq held at most 6 distinct questions for the probe at once without
   the gate, 8 with it and 10 with its helper killed, and its table was never full;
-  `systemd-resolved` held 10 and 9. In boxes with `nscd`, `libnss-resolve`, `libnss-mdns`,
-  `LD_PRELOAD` or `/etc/ld.so.preload`, the check was off by the rule this item names and asked
-  nothing (`P-461`) ([the differential](findings/2026-10-20-name-gate-differential.md), run 7). The
-  cut ran it again (*Verified*, below).
+  `systemd-resolved` held 9 and 9. In eleven boxes the check was off by the rule this item names and
+  asked nothing: `nscd`, `libnss-resolve` (as installed, as `files resolve dns`, and with its stub
+  refused), `libnss-mdns` (as installed, and before `files`), `libnss-sss` before `files`,
+  `LD_PRELOAD`, `/etc/ld.so.preload`, `LOCALDOMAIN` set empty, and a server written
+  `nameserver 10.1` (`P-461`, `P-462`). A key whose names part between heard and silent, and
+  `_gateway` on a host with no IPv6 route, were played as lookups through one check, each as the
+  policy said, and a hosts line with a `%scope` was skipped by glibc as the policy says. A file
+  glibc reads once (`gai.conf`, or `nsswitch.conf` below 2.33), edited under a running probe, rested
+  the helper until restart at its next loss, and `nsswitch.conf` at 2.36 did not (D28)
+  ([the differential](findings/2026-10-20-name-gate-differential.md), run 9). The cut ran it again
+  (*Verified*, below).
 
-  **Before `v1.0.0`**: add the gate's measurement to this item: `P-432` S7's arms at 5,000
-  sensors against a simulated dnsmasq, in both modes, run at the cut
-  ([their method](findings/2026-10-20-name-lookups-gated.md)). The field test runs
-  `"gate"` on every probe (`H-09`), and the default for 1.0 is decided again after it. Say here
+  **Before `v1.0.0`**: add the gate's measurement to this item: `P-432` S7's arms at 5,000 sensors
+  against a simulated dnsmasq, in both modes, `P-465`'s `spread10`, `addresses` and `walkrate` among
+  them, run at the cut ([their method](findings/2026-10-20-name-lookups-gated.md)). The field test
+  runs `"gate"` on every probe (`H-09`), and the default for 1.0 is decided again after it. Say here
   which it is, and why.
 - **Slipped to 1.0.1:**
   - `A-84`: when a probe's protocol flap ends, the core should push that probe its configuration
@@ -602,8 +610,8 @@ ms-probe`: the setting is read only at start
 tests of [runbook-field-test.md](runbook-field-test.md) on arm64, and on x86_64 all but the
 Ubuntu install, which this machine's emulator cannot boot (`H-29`); `P-432`'s differential
 against `getaddrinfo` in seven images, glibc's questions and the name check's (`P-460`), with
-the boxes that show the check off (`P-461`); the full suite; and the gate's full-size
-measurement (S7). Run by
+the boxes that show the check off (`P-461`) and §7.5's other rows (`P-462`); the full suite; and
+the gate's full-size measurement (S7, with `P-465`'s arms). Run by
 [the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md), with their results in the
 rc.3 record.
 rc.2, for comparison, is `0a43b7bf`, cut 2026-10-04

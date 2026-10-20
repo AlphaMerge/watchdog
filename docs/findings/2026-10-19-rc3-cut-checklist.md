@@ -9,8 +9,12 @@
   for them is resolved against that code. The rest were built the same day and integrated on
   `integ/r6-1020`, with this page brought onto them: the gate track's second round (`P-453` and
   S6's re-check gaps), S7's perf arms and its findings file, and `P-460` and `P-461` (S8's
-  second recording and its boxes, run 7). Their landing on `origin/main` is what step 0.1
-  checks by name, and the cut does not start without it. What only the cut can say (the commit,
+  second recording and its boxes, run 7). Then on `integ/r7-1020`: `P-467` (Probe Health's six
+  name fields, the rest in the probe's log), `P-463` and `P-469` (the lookup helper's quiets and
+  who sent a SIGKILL), `P-465` and `P-471` (S7's `spread10`, `addresses` and `walkrate`, and its
+  helper arms re-read), and `P-462` (§7.5's other rows in the differential, run 9, whose
+  recordings are committed). Their landing on `origin/main` is what step 0.1 checks by name, and
+  the cut does not start without it. What only the cut can say (the commit,
   the dates, the checksums, S7's full-size numbers) stays a `<…>` placeholder or a
   `TODO(quiet-window)`, filled in step 9.
 - **What it adds to rc.2's procedure**: the x86_64 build and its smokes as steps, not a ticket
@@ -62,17 +66,18 @@ Each of these is a yes, or the cut waits.
    from the probe's queues, or settled after `stop()`); and the three it put in after them (its
    decisions for rc.3, also under `P-432`): `P-462` (the differential replays §7.5's other rows),
    `P-463` (names in flight when the helper goes quiet kept off the probe's lanes) and `P-465`
-   (`spread10` and `walkrate`, which step 0.7 runs). And `P-467`: S6's eight Probe Health
-   fields out by the user's decision of 2026-10-18 (OPEN-5), so the cut speaks protocol 38 with
-   six name fields, and the field test reads the rest from the probe's hourly summary. `P-454`
-   stays open: it is a known limit in the release notes.
+   (`spread10` and `walkrate`, which step 0.7 runs), with `P-469` for its decision that a
+   SIGKILL the probe sent is told apart from one from outside. And `P-467`: S6's eight Probe
+   Health fields out by the user's decision of 2026-10-18 (OPEN-5), so the cut speaks protocol 38
+   with six name fields, and the field test reads the rest from the probe's hourly summary.
+   `P-454` stays open: it is a known limit in the release notes.
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem
    git fetch -q origin
    git log --oneline origin/main | grep -E 'P-432 S[0-9]'    # S1 to S8, each at least once
    git cat-file -e origin/main:docs/findings/2026-10-20-name-lookups-gated.md && echo "S7's findings"
-   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461|P-462|P-463|P-465|P-467) '    # 7
+   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461|P-462|P-463|P-465|P-467|P-469) '    # 8
    git show origin/main:packages/shared/src/protocol/messages.ts | grep -c 'PROTOCOL_VERSION = 38;'    # 1
    ```
 
@@ -89,11 +94,11 @@ Each of these is a yes, or the cut waits.
    `getaddrinfo`, `systemd-resolved` included). `P-432` S8 ran it in boxes of each distribution's
    own image rather than the smoke images, since the glibc and the NSS modules are the
    distribution's either way (S8's outcome, decided 2026-10-20): Rocky 8 and 9, Debian 11, 12 and
-   13, Ubuntu 22.04 and 24.04. The fixture is S8's run 7 (`P-460`'s fix round 2), schema 3: glibc's
-   wire for every image, each question's OPT record with it, 2,966 recordings and 42 for the six
-   answer rows, one in each image, and Ubuntu 24.04's run went through `systemd-resolved`. It holds
-   no walk recording: the walk is judged in the run against glibc's, never committed (`P-460`'s
-   decision):
+   13, Ubuntu 22.04 and 24.04. The fixture is S8's run 9 (`P-462`'s fix round 1), schema 3: glibc's
+   wire for every image, each question's OPT record with it, 3,008 recordings, 42 for the six
+   answer rows, one in each image, and 49 for the two sequence rows' seven lookups, in each image,
+   and Ubuntu 24.04's run went through `systemd-resolved`. It holds no walk recording: the walk is
+   judged in the run against glibc's, never committed (`P-460`'s decision):
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
@@ -104,17 +109,19 @@ Each of these is a yes, or the cut waits.
    print(sorted(images), "recordings:", len(r["recordings"]))
    assert sorted(images) == ["debian11", "debian12", "debian13", "rocky8", "rocky9", "ubuntu2204", "ubuntu2404"], images
    assert images["ubuntu2404"]["resolved"] is True
-   assert r["schema"] == 3 and len(r["recordings"]) == 2966 and len(r["answerRecordings"]) == 42
+   assert r["schema"] == 3 and len(r["recordings"]) == 3008 and len(r["answerRecordings"]) == 42
+   assert len(r["sequenceRecordings"]) == 49
    print("policy build", sorted({i["policyDigest"][:8] for i in images.values()}))
    '
    ```
 
    Step 0.6 runs it again, on the commit to be cut. The recordings name the policy build they were
-   made on (`e19f270b…`, S6's `system-names.js`). The gate track's fix round changed that file in a
-   build run 7 did not have (a load past its bound is judged at the look after the one it was read
-   from, not that one), so step 0.6 replays a newer build than the recordings name. That is
-   expected: its verdict holds each run to the build it loaded, never to the recordings' digest,
-   and it does not rewrite them. Write both digests in the record.
+   made on (`ae2c892f…`, `system-names.js` with `P-462`'s `skewedFiles`), which is the build of
+   that file on `integ/r7-1020`, where the four tracks of 2026-10-20 were integrated: none of the
+   others changed it. A change to that file landed after it makes step 0.6 replay a newer build
+   than the recordings name. That is expected: its verdict holds each run to the build it loaded,
+   never to the recordings' digest, and it does not rewrite them. Write both digests in the
+   record.
 
 3. **No `TODO(rc3-cut)` marker is left in the documents** that ship in `/opt/ms/docs`. Each is
    resolved against the landed code in a docs commit on `main`, before step 0.4, so that the
@@ -169,14 +176,16 @@ Each of these is a yes, or the cut waits.
 6. **The name gate's differential passes on the commit to be cut, in all seven images**
    (`scripts/smoke/name-gate-differential.sh`), in step 0.4's worktree. It judges which questions
    glibc and the check send, and of time only whether glibc returned within 1 s, which load cannot
-   move a plan across (S8's findings: glibc took at most 137 ms on a plan whose walk was heard, and
-   at least 1,009 ms where it waited out a try), so it needs step 0.5's count under 2, not a quiet
+   move a plan across (S8's findings: glibc took at most 164 ms on a plan whose walk was heard in run
+   9, 232 ms in run 8 on a loaded VM, and at least 1,009 ms where it waited out a try), so it needs
+   step 0.5's count under 2, not a quiet
    machine. Every image, with no `MS_DIFF_IMAGES` or `MS_DIFF_ONLY` (a narrowed run never
    verifies), on the digests the recordings were made on (no `MS_DIFF_REFRESH`), and without
    `MS_DIFF_WRITE`: the cut checks the committed recordings, it does not rewrite them. The boxes
    load the worktree's build, and the script refuses one older than its sources, so build first.
-   With `P-460`'s walk and `P-461`'s boxes the whole run takes about 45 minutes (S8's run 7: 04:11
-   to 04:56 UTC; run 4 about 50), each image's replay 337–384 s in run 7 and 303–494 s in run 4.
+   With `P-462`'s rows and boxes the whole run takes about an hour (S8's run 9: 09:56 to 10:52
+   UTC, with the host's load at 14; run 8 took 73 minutes on a VM loaded harder, and run 7, before
+   `P-462`, 45), each image's replay 350–726 s in run 9.
    Each image's replay is bounded at 3,600 s inside its box, and the host's alarm is above the
    whole run.
 
@@ -193,8 +202,8 @@ Each of these is a yes, or the cut waits.
    ```
 
    It must end `==> NAME GATE DIFFERENTIAL PASSED (runs in /tmp/rc3-diff)`, with a
-   `260 rows and 6 answer rows in … s` line for each of the seven images (251 rows on Rocky 8)
-   and `systemd-resolved: active` for `ubuntu2404`. Any `FAILED` line, or `MS_DIFF_REFRESH` named
+   `263 rows, 6 answer rows and 2 sequence rows in … s` line for each of the seven images (254
+   rows on Rocky 8) and `systemd-resolved: active` for `ubuntu2404`. Any `FAILED` line, or `MS_DIFF_REFRESH` named
    because a recorded digest could no longer be pulled, stops the cut: a moved image is a new
    recording, made on `main` and reviewed, not at the cut, and the cut starts again from step 0.3
    on the commit that lands it. `git status --porcelain` in the worktree prints nothing afterwards.
@@ -207,19 +216,28 @@ Each of these is a yes, or the cut waits.
       names, types and servers in order up to where each stops, and heard if and only if glibc
       returned within 1 s (under `rotate`, silent wherever a server is, whatever glibc's time). It
       also holds gate mode's answers to `system` mode's and the helper's to the lanes', plays the
-      six answer rows, and runs the budget boxes and the five boxes with the check off. The walk
+      six answer rows and the two sequence rows (`P-462`), and runs the budget boxes, the eleven
+      boxes with the check off and the four skew boxes. The walk
       prints no line of its own: it is judged in the verdict, not recorded, so a walk, OPT,
       regression or answer row that disagrees is a `DISAGREES` line and fails the run. Read these
-      in `run.out` before the `PASSED` line, each as S8's run 7 had it:
-      - `<image>: <rows> rows, <plans> plans recorded` for each of the seven, 2,966 plans in all;
-      - `answer rows: 42 plans recorded`;
+      in `run.out` before the `PASSED` line, each as S8's run 9 had it:
+      - `<image>: <rows> rows, <plans> plans recorded` for each of the seven, 3,008 plans in all;
+      - `answer rows: 42 plans recorded` and `sequence rows: 49 lookups recorded`;
       - five `budget …` lines: `dnsmasq system`, `gate` and `gate-kill`, and `resolved system`
-        and `gate`, each `table full 0 times` at dnsmasq. Run 7 held 6, 8 and 10 distinct
-        questions at once at dnsmasq (bounds 18 and 34, `system` + 12 and + 28) and 10 and 9 at
-        resolved (bound 22); the verdict holds the bounds, and the record copies the numbers;
-      - five `off …` lines, `nscd`, `resolve` (Ubuntu 24.04), `mdns4_minimal`, `ld-preload` and
-        `ld-so-preload`, each `route unvouched:off, 0 questions asked` and off by its rule
-        (`nscd`, `nsswitch` or `env`).
+        and `gate`, each `table full 0 times` at dnsmasq. Run 9 held 6, 8 and 10 distinct
+        questions at once at dnsmasq (bounds 18 and 34, `system` + 12 and + 28) and 9 and 9 at
+        resolved (bound 21, `system` + 12); the verdict holds the bounds, and the record copies
+        the numbers;
+      - eleven `off …` lines, each `route unvouched:off, 0 questions asked` and off by its rule:
+        `nscd` (`nscd`); `resolve`, `files-resolve-dns` and `stub-refused` (Ubuntu 24.04),
+        `mdns4_minimal`, `mdns4-first` and `sss-first` (`nsswitch`); `ld-preload`,
+        `ld-so-preload` and `localdomain-empty` (`env`); and `nameserver-aton` (`resolv`);
+      - four `skew …` lines, each `the check off by skew`: `gai` and `gai-not-first` with the
+        restart said for `["/etc/gai.conf"]` and `nsswitch-frozen` for `["/etc/nsswitch.conf"]`,
+        both after the edit and by the end, and after the SIGKILL the helper resting with no
+        child, mode 3, trouble 1 and 0 lookups to the helper; and `nsswitch-reloaded` with the
+        restart said for `[]`, and after the SIGKILL the helper up in a new child, mode 2 and
+        trouble 0.
 
       A run with fewer of any of these has not tested the check, whatever its last line says,
       and the cut waits. Name in the record the recordings verified (step 0.2's) and the build
@@ -275,7 +293,14 @@ Each of these is a yes, or the cut waits.
    Results are `TODO(quiet-window)`): this run is the first, and its rows fill that table in step 9.
    Read, beside the bounds, what the arms print and do not assert: P5's and P5b's
    `lookupHelperTrouble` (1 after four kills in two minutes, as D27 says), P3's checks failed
-   "otherwise", each arm's event-loop p50, p99 and max, and its routes. A result on the other side
+   "otherwise", each arm's event-loop p50, p99 and max, and its routes. **P2 is the first full-size
+   run on `P-463`'s build** (`P-472`, open): the names in flight when its child is stopped are kept
+   off the probe's lanes, and its route reads `down` for about 17 s, so an answering name still
+   unvouched at the SIGSTOP has its checks refused, which P2's judge fails. Scaled down on
+   `integ/r7-1020` the walk vouched every answering name first and P2 held; at full size D19 sends
+   most first lookups to the helper unvouched. A P2 that fails with answering checks failed
+   otherwise is `P-472`'s case: it stops the cut as any failed arm does, and goes to `P-472` with
+   the arm's lines. A result on the other side
    of the design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
    loop's p99) stops the cut. That verdict also reads `spread10`'s event-loop p99 in each mode, with
    its lanes at risk, and `walkrate`'s against `addresses`', with its channels' busiest second

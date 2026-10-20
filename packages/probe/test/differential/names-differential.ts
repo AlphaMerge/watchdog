@@ -2040,7 +2040,7 @@ export function skewProblems(run: SkewRun): string[] {
   else {
     if (before.check !== 'on' || before.checkState !== 1) {
       said(
-        `the check was not on and proven before the edit (${before.check}, nameCheckState ${String(before.checkState)})`,
+        `the check was not on and proven before the edit (${before.check}, its state ${String(before.checkState)})`,
       );
     }
     if (before.helper !== 'up') said(`the helper was ${before.helper} before the edit, not up`);

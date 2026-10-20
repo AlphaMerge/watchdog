@@ -3313,7 +3313,7 @@ describe('P-462: the skew boxes, a file edited under a running probe and its hel
           before: { check: 'on', checkState: 3, helper: 'up', answered: 'answer:1' },
         }),
       ),
-      ['skew box gai: the check was not on and proven before the edit (on, nameCheckState 3)'],
+      ['skew box gai: the check was not on and proven before the edit (on, its state 3)'],
     );
     assert.deepEqual(
       skewProblems(

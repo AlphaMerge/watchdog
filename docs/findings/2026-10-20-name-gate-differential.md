@@ -534,6 +534,7 @@ upstream.
   named `10.1` (10.0.0.1 to glibc): the check is off for each, so each is a box that claims no
   wire, only the check off by its rule and nothing asked (`P-461`, `P-462`).
 - Timings: no run here is a quiet one, and none needs to be. The 1 s line is far from where load
-  could move a plan across it: glibc took at most 137 ms on a plan whose walk was heard (232 ms in
-  run 8, on a loaded VM), and load only slows it; where the walk was silent and glibc slow, glibc took at least 1,009 ms, waiting
+  could move a plan across it: glibc took at most 164 ms on a plan whose walk was heard in run 9,
+  whose recordings are committed (232 ms in run 8, on a loaded VM, and 137 ms in run 4), and load
+  only slows it; where the walk was silent and glibc slow, glibc took at least 1,009 ms, waiting
   out a 1 s try, which load cannot shorten.

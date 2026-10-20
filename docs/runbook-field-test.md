@@ -450,20 +450,21 @@ The numbers that decide the criterion:
   reading; the other two are states, read as their numbers.
 
   **The rest is in the probe's log, not on Probe Health** (the user's decision of 2026-10-18,
-  `P-467`): the helper's changes of state, its losses and its resident memory, the check's state
-  and why, and the lookups heard, asked in the helper, missed and deferred. The probe logs each
-  as it happens, and once an hour one summary line, `the probe’s resolver in gate mode, this
-  hour`, whose fields the
+  `P-467`): the helper's changes of state, its losses and its resident memory, its quiets and the
+  names they kept off the probe's lanes (`P-463`), the check's state and why, and the lookups heard,
+  asked in the helper, missed and deferred, and the checks failed at once. The probe logs each as it
+  happens, and once an hour one summary line, `the probe’s resolver in gate mode, this hour`, said
+  once more as the probe stops (`"stopping":true`), whose fields the
   [administration guide](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)
-  lists. Read both on each probe's host, from the start reading's time written as `journalctl`
-  takes it (`2026-10-04 13:44:34 UTC`), and keep the files with the write-up:
+  lists. Read both on each probe's host, from the start reading's time written as `journalctl` takes
+  it (`2026-10-04 13:44:34 UTC`), and keep the files with the write-up:
 
   ```bash
   SINCE='<start-reading-time, as 2026-10-04 13:44:34 UTC>'
   # One line an hour: the criteria below read its hour, check and helper fields.
   sudo journalctl -u ms-probe --since "$SINCE" --no-pager -o cat \
     | grep -F 'in gate mode, this hour' > gate-hours.jsonl
-  wc -l gate-hours.jsonl                     # one an hour since the probe started, no gap
+  wc -l gate-hours.jsonl                     # one an hour since each start, and one at each stop
   # Every warning and error of the resolver, the helper, the check and the name settings.
   sudo journalctl -u ms-probe --since "$SINCE" --no-pager -o cat \
     | grep -E '"component":"(lookup-helper|dns-check|system-names|name-resolver)"' \
@@ -486,6 +487,9 @@ The numbers that decide the criterion:
   grep -o '"losses":{[^}]*}' gate-hours.jsonl         # its losses since the start, and total
   grep -o '"changes":\[[^]]*]' gate-hours.jsonl       # this hour's changes of its state
   grep -vF '"lost":[]' gate-hours.jsonl               # the hours that list a loss, whole
+  grep -o '"checksFaulted":[0-9]*' gate-hours.jsonl   # checks failed at once since the one before
+  grep -o '"quiets":[0-9]*' gate-hours.jsonl          # the helper's quiets since that start
+  grep -o '"keptOffPeak":[0-9]*' gate-hours.jsonl     # the most names it kept off at once since
   ```
 
   - `lookupHelperTrouble` is `0` throughout: every hour's `max` is `0`. Each Warning, and any
@@ -556,15 +560,22 @@ The numbers that decide the criterion:
       boot only where the journal is kept on disk (`/var/log/journal`): `journalctl --list-boots`
       lists the boots it holds, and a boot of the week missing from it is a time the write-up
       leaves uncounted.
-    - A start whose summaries do not end with a `stopping` one, none at all included, ended
-      without stopping (killed, crashed, or the host lost power): what it counted since its last
-      summary, or since its start line if it said none, was never said, up to an hour. The
-      write-up names each such end by its start line's time, with the time it leaves uncounted,
-      the `the lookup helper is not answering` lines in that time (each a quiet no summary holds,
-      and its `alsoNotAnswering` more), and the sensors whose checks failed at once in it, found
-      by their messages as below. The start running at the end reading is not an end: its counts
-      are its summaries before the end reading, and the `stopping` one the drill's stop says is
-      not the week's.
+    - A start whose summaries do not end with a `stopping` one, none at all included, ended without
+      stopping (killed, crashed, or the host lost power): what it counted since its last summary, or
+      since its start line if it said none, was never said, up to an hour. The write-up names each
+      such end by its start line's time, with the time it leaves uncounted, the
+      `the lookup helper is not answering` lines in that time (each a quiet no summary holds, and
+      its `alsoNotAnswering` more), and the sensors whose checks failed at once in it, found by
+      their messages as below. A line's `alsoNotAnswering` counts the quiets held back since the
+      line before it, up to a minute's: on the first line after a start's last summary it can
+      include quiets of the minute before that summary, which that summary's `quiets` holds already,
+      and the quiets held back after the last line are on no line. The write-up says both of the
+      count it names. The start running at the end reading is not an end: its counts are its
+      summaries before the end reading, and the `stopping` one the drill's stop says is not the
+      week's. Its time from its last summary before the end reading to the end reading, up to an
+      hour on every probe, is in no sum either: the write-up names it as uncounted, with the
+      `the lookup helper is not answering` lines and the sensors whose checks failed at once in it,
+      as for an end that said nothing.
     - Each summary with `checksFaulted` above `0` is a finding, with the sensors whose checks
       failed at once, whose messages say the probe `does not ask its own getaddrinfo` for the
       name.
@@ -655,9 +666,9 @@ and runs on the same installation once with `"gate"` and once with `"system"`:
 
    The hourly summary is not part of the pass. Under `"system"` there is none. Under `"gate"`
    the first, `the probe’s resolver in gate mode, this hour`, is logged an hour after step 2's
-   restart, and the restart at step 4 would stop the probe before it is: to keep it, restore
-   both zones, wait until an hour has passed since step 2, and run the same command again
-   before step 4's restart. That summary covers the restore too.
+   restart, and the probe says one more as it stops, with `"stopping":true`, for the time since
+   the last (`P-463`): the next stop, at the other run's step 2, says the one for the time since,
+   the drill and the restore in it. Run the same command again after that stop, and keep both.
 4. Restore both zones, set the other mode in that probe's `probe.json`, and repeat from 1: step
    2's restart applies it.
 
