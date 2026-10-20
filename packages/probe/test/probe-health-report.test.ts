@@ -254,12 +254,22 @@ describe('the probe’s own health report', () => {
     }).report();
     assert.equal(report.nameResolverMode, 1);
     assert.deepEqual(report.lookupsNotAnswering, ['zone-b.test', '']);
+    // Every gate field but the mode, S6's eight included: the documents say the thirteen gap
+    // under `system` (`H-50`).
     for (const field of [
       'lookupHelperTrouble',
       'nameCheckOnSeconds',
       'namePassedStuck',
       'nameHelperStuck',
       'nameQuestionsOpen',
+      'lookupHelperState',
+      'lookupHelperLosses',
+      'lookupHelperMemory',
+      'nameCheckState',
+      'nameLookupsHeard',
+      'nameLookupsToHelper',
+      'nameCheckMisses',
+      'nameWalksDeferred',
     ]) {
       assert.equal(field in report, false, `${field} sent in system mode`);
     }

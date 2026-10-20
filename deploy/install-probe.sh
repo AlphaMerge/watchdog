@@ -6,7 +6,7 @@
 #     sudo ./install-probe.sh --enrolment web-dc2.enrol
 #     sudo ./install-probe.sh --enrolment web-dc2.enrol --name web-dc2 --no-start
 #
-# The bundle comes from the core host:  sudo /opt/ms/bin/ms-enrol web-dc2 --out web-dc2.enrol
+# The bundle comes from the core host:  sudo /opt/ms/bin/ms-enrol web-dc2 --host "$(hostname -f)" --out web-dc2.enrol
 #
 # **This is a separate installer from `install.sh`, not a flag on it.** `install.sh --probe-only`
 # already existed, and it installs from the full release tarball — so putting a probe on a remote

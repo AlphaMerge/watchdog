@@ -3,8 +3,8 @@
 #
 # Run on the *core* host, which is where the probe-channel CA lives:
 #
-#     sudo /opt/ms/bin/ms-enrol web-dc2 --out web-dc2.enrol
-#     sudo /opt/ms/bin/ms-enrol web-dc2 | ssh web-dc2 'umask 077; cat > web-dc2.enrol'
+#     sudo /opt/ms/bin/ms-enrol web-dc2 --host "$(hostname -f)" --out web-dc2.enrol
+#     sudo /opt/ms/bin/ms-enrol web-dc2 --host "$(hostname -f)" | ssh web-dc2 'umask 077; cat > web-dc2.enrol'
 #
 # Carry the file to the probe host and hand it to that host's installer:
 #

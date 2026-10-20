@@ -345,7 +345,13 @@ From rc.2 or anything older:
   For a probe at 28, Probe Health channels that arrived after it gap, `lookupsInFlight` among them
   ([Probe Health](administration.md#probe-health--msprobehealth)), and on Debian and Ubuntu its
   ICMP sensors are Down (above). It refuses `probe.nameResolver` in its `probe.json` and stays
-  stopped (exit 78), so set the key only on a probe already upgraded. Bring the probes level.
+  stopped (exit 78), so set the key only on a probe already upgraded. **Until it is upgraded,
+  its Probe Health reads Warning**: `protocol` reads `1`, *older than the core*, and the message
+  names both protocols and what the probe cannot do until it is upgraded. A Warning state trigger
+  on that sensor, as step 3 of [the field-test runbook](runbook-field-test.md) puts on every
+  Probe Health sensor, fires for it, and the Warning clears when the probe reconnects at 39.
+  rc.1 and rc.2 both spoke 28, so this upgrade is the first in the 1.0 line to show it. Bring
+  the probes level.
 
 ### From a build older than rc.2
 
@@ -408,12 +414,17 @@ the **new** build first, then install the old release
 ([going back, after a tarball upgrade](installation.md#going-back-after-a-tarball-upgrade), which
 also says what taking back 064 and 073 does).
 
-**A probe whose `probe.json` sets `probe.nameResolver`** (`P-432`), to either value: remove the
-key before installing a build older than rc.3 on its host, which refuses a key it does not know
-and leaves the probe stopped (exit 78)
+**A probe that sets either of the two keys rc.3 adds**: `probe.nameResolver` (`P-432`), to
+either value, and `probe.allowScriptsAsRoot` (`P-276`). A build older than rc.3 refuses a probe
+setting it does not know, with `probe: unknown setting "allowScriptsAsRoot"`, and the probe
+stays stopped (exit 78). Before installing one on a probe's host, remove both keys from the
+`probe` section of `/etc/ms/probe.json`, whatever their value, and from the environment of any
+drop-in (`systemctl cat ms-probe` shows it): `MS_PROBE__NAME_RESOLVER` and
+`MS_PROBE__ALLOW_SCRIPTS_AS_ROOT`, then `systemctl daemon-reload`. Without `allowScriptsAsRoot`,
+rc.2 runs a root probe's scripts as root, as it did before. To go back to the resolver without
+reinstalling anything, set `"system"` and restart the probe, after `systemctl reset-failed
+ms-probe`: the setting is read only at start
 ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)).
-To go back to the resolver without reinstalling anything, set `"system"` and restart the probe,
-after `systemctl reset-failed ms-probe`: the setting is read only at start.
 
 ## Known limits, and what comes next
 
@@ -463,12 +474,12 @@ after `systemctl reset-failed ms-probe`: the setting is read only at start.
   of the check's bound, if that is less). Every other name it asks in a helper process it starts,
   `ms-probe: lookups`, with six lanes under the probe resolver's own rules and two more for Check
   now: a zone that stops answering holds at most 4 of the six, and one is kept for zones that
-  answer. A name the hosts file gives stays on the probe's own lanes, and Check now goes to the
-  helper without asking first. **Every answer is still the operating system's**: what the probe
-  asks decides only where `getaddrinfo` runs. A zone that stops answering raises nothing of its
-  own, and the probe's own thread pool is not the silent zone's while the helper is up, so a cold
-  start in the middle of one zone's outage answers the other zones from its first scan, with or
-  without the answer file.
+  answer. A name the hosts file gives stays on the probe's own lanes while the check is on
+  (below), and Check now goes to the helper without asking first. **Every answer is still the
+  operating system's**: what the probe asks decides only where `getaddrinfo` runs. A zone that
+  stops answering raises nothing of its own, and the probe's own thread pool is not the silent
+  zone's while the helper is up, so a cold start in the middle of one zone's outage answers the
+  other zones from its first scan, with or without the answer file.
 
   The probe follows the system's lookup order only where it can be sure of it, and checks that
   at start: Linux with glibc 2.28 to 2.42; a `resolv.conf` of `nameserver`, `search` or
@@ -477,20 +488,23 @@ after `systemctl reset-failed ms-probe`: the setting is read only at start.
   dns`; no `nscd`; and nothing preloaded or set in the environment that changes how a name is
   looked up (`LOCALDOMAIN`, `RES_OPTIONS`, `HOSTALIASES`, `LD_PRELOAD`, `LD_AUDIT`,
   `LD_LIBRARY_PATH`, `/etc/ld.so.preload`). Anywhere else the check is off: the probe's start
-  line names the first thing that did not fit, and every name the hosts file does not give is
-  asked in the helper. On Ubuntu 24.04, `systemd-resolved`'s stub `resolv.conf` is one the check
-  takes, and a `resolve` or `mdns4_minimal` on the `hosts:` line turns it off. **After start,
-  only the hosts file is followed**, and `nscd` starting or stopping. Any change to
-  `resolv.conf`, `nsswitch.conf`, `gai.conf` or `/etc/ld.so.preload`, to the hostname's domain
-  while `resolv.conf` has no search list, or to the NSS modules the `hosts:` line names, turns
-  the check off until `ms-probe` restarts, and the log says so, naming what moved (`P-432` S4).
-  Every name is then asked in the helper. On Ubuntu that includes `systemd-resolved` rewriting
-  its stub `resolv.conf` when a DHCP lease or netplan changes the search domains.
+  line names the first thing that did not fit, and every name is asked in the helper, the hosts
+  file's included, since the probe then vouches for nothing of how glibc reads that file either.
+  On Ubuntu 24.04, `systemd-resolved`'s stub `resolv.conf` is one the check takes, and a
+  `resolve` or `mdns4_minimal` on the `hosts:` line turns it off. **After start, only the hosts
+  file is followed**, and `nscd` starting or stopping. Any change to `resolv.conf`,
+  `nsswitch.conf`, `gai.conf` or `/etc/ld.so.preload`, to the hostname's domain while
+  `resolv.conf` has no search list, or to the NSS modules the `hosts:` line names, turns the
+  check off until `ms-probe` restarts, and the log says so, naming what moved (`P-432` S4).
+  Every name is then asked in the helper, the hosts file's included. On Ubuntu that includes
+  `systemd-resolved` rewriting its stub `resolv.conf` when a DHCP lease or netplan changes the
+  search domains.
 
   A name the check found silent that the helper then answered within a second is a miss: one
   skips the check for that name for an hour, three of one zone in ten minutes skip the zone for an
   hour, and three zones skipped in ten minutes stand the check down for an hour, doubling to
-  eight within a day. What is skipped, or asked while the check stands down, goes to the helper.
+  eight within a day. What is skipped, or asked while the check stands down, goes to the helper,
+  but for a name the hosts file gives.
 
   A helper that fails is replaced. Meanwhile a name its servers did not answer waits for it, its
   checks failing at once, and any other waits at most 2 s before it is asked on the probe's own

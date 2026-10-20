@@ -1276,27 +1276,32 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   zone to the helper for five minutes. Each server is asked at most 10 questions a second, 20 at
   once, and the check holds at most 8 questions open for zones it has heard and 4 for the rest;
   a name past either goes to the helper. Check now goes to the helper without a walk.
-- **When the check is off, every name not the hosts file's is asked in the helper.** It is off
-  while the system's name settings say it cannot vouch for what glibc would do (`nscd`, an NSS
-  module it does not model, `LD_PRELOAD`, `RES_OPTIONS`, and the like: the probe's log says
-  which, at start, or when the settings move under a running probe, which turns it off until the
-  probe restarts); while they are slow to read; and until a server has answered it (it asks
-  `localhost.` of the first server every minute until one does). **A slow read turns it off for
-  now, not until restart**: a read of the settings that has not ended in 10 s (30 s for the one at
-  start) is let go, logged, and `nameCheckState` reads 2. At the next look, every 5 s, a read that
-  has ended since turns the check back on; one still not ended is taken as hung, and the check is
-  off until the probe restarts. At start the next look is not the probe's first, which the
-  settings were read from and which comes as the 30 s are up, but the one after it, at least 5 s
-  later; a read that ends before then turns the check on as it ends. A change to
-  `resolv.conf`, `nsswitch.conf` or the hosts file starts it again from nothing.
+- **When the check is off, every name not the hosts file's is asked in the helper, and while
+  the system's name settings turn it off, the hosts file's too.** The settings turn it off when
+  they say it cannot vouch for what glibc would do (`nscd`, an NSS module it does not model,
+  `LD_PRELOAD`, `RES_OPTIONS`, and the like: the probe's log says which, at start, or when the
+  settings move under a running probe, which turns it off until the probe restarts), and while
+  they are slow to read. It then vouches for nothing, not even how glibc reads the hosts file, so
+  every name is asked in the helper, the hosts file's included (`nameCheckState` 2). **A slow
+  read turns it off for now, not until restart**: a read of the settings that has not ended in
+  10 s (30 s for the one at start) is let go, logged, and `nameCheckState` reads 2. At the next
+  look, every 5 s, a read that has ended since turns the check back on; one still not ended is
+  taken as hung, and the check is off until the probe restarts. At start the next look is not
+  the probe's first, which the settings were read from and which comes as the 30 s are up, but
+  the one after it, at least 5 s later; a read that ends before then turns the check on as it
+  ends. It is also off until a server has answered it (it asks `localhost.` of the first server
+  every minute until one does), and while it stands down (below); a name the hosts file gives
+  stays on the probe's own lanes then. A change to `resolv.conf`, `nsswitch.conf` or the hosts
+  file starts it again from nothing.
 - **A name the check misses is skipped, then its zone, then the check stands down.** A miss is
   a name the helper answered within a second whose walk the check had found silent, its
   question still unanswered 3 s after it was sent. **One miss** skips that name's walk for an
   hour; **three missed names of one zone in ten minutes** skip the zone for an hour; **three
   zones skipped in ten minutes** stand the check down for an hour, doubling to eight within a
-  day, so a stand-down takes nine misses at least. A skipped name or zone, and every name while
-  the check stands down, is asked in the helper, unwalked. A rising `nameCheckMisses` with no
-  stand-down is these skips; the probe's log names each name and zone skipped.
+  day, so a stand-down takes nine misses at least. A skipped name or zone, and every name but the
+  hosts file's while the check stands down, is asked in the helper, unwalked. A rising
+  `nameCheckMisses` with no stand-down is these skips; the probe's log names each name and zone
+  skipped.
 - **The helper's lanes keep a silent zone to its share.** At most 6 of its lookups run at once:
   4 for names with nothing kept, 4 for refreshes, 5 for the two together, and 1 for held
   names' retries, with `P-438`'s rule for a domain not known to answer (3 of the first 4) and 2

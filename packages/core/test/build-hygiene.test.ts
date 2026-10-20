@@ -14,7 +14,15 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { coreHealth, CREDENTIAL_KINDS, probeHealth } from '@ms/sensors';
-import { healthForPeer, PROTOCOL_VERSION, versionFor, type ProbeHealthReport } from '@ms/shared';
+import {
+  describeSkew,
+  healthForPeer,
+  loadConfig,
+  probeConfigSchema,
+  PROTOCOL_VERSION,
+  versionFor,
+  type ProbeHealthReport,
+} from '@ms/shared';
 import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
 import { notificationMethods } from '../src/notifications/methods.js';
 import { coreCatalogue } from '../src/profile.js';
@@ -979,6 +987,54 @@ describe('the probe health protocol', () => {
  * This is `S-11`'s rule applied to a second document: when a document depends on a list, assert
  * the list rather than trusting the person who wrote it down.
  */
+/**
+ * The Probe Health channels the gate adds (`P-432`): what `healthForPeer` strips from a core below
+ * the protocol `nameResolver` needs and keeps at this build's, so a channel a later slice adds is
+ * counted with no list here to write again.
+ */
+function gateChannelKeys(): string[] {
+  const keys = probeHealth.channels({}).map((channel) => channel.key);
+  const full = Object.fromEntries(keys.map((key) => [key, 1])) as unknown as ProbeHealthReport;
+  const older = new Set(Object.keys(healthForPeer(full, versionFor('nameResolver') - 1)));
+  const newest = new Set(Object.keys(healthForPeer(full, PROTOCOL_VERSION)));
+  const gate = keys.filter((key) => newest.has(key) && !older.has(key));
+  // A strip that matched nothing would make every assertion on it vacuous.
+  assert.ok(gate.length >= 6, `found ${String(gate.length)} gate channels: ${gate.join(', ')}`);
+  return gate;
+}
+
+/** How the documents write a count of channels. */
+const NUMBER_WORDS: readonly string[] = [
+  'none',
+  'one',
+  'two',
+  'three',
+  'four',
+  'five',
+  'six',
+  'seven',
+  'eight',
+  'nine',
+  'ten',
+  'eleven',
+  'twelve',
+  'thirteen',
+  'fourteen',
+  'fifteen',
+  'sixteen',
+  'seventeen',
+  'eighteen',
+  'nineteen',
+  'twenty',
+];
+
+/**
+ * The one channel of the gate's that a probe running `"system"` sends: `nameResolverMode`, `1`.
+ * `packages/probe/test/probe-health-report.test.ts` holds the report to it, every other gate
+ * field absent in system mode.
+ */
+const SENT_IN_BOTH_MODES = 'nameResolverMode';
+
 describe('the field-test runbook', () => {
   const SENSORS = new Map([
     ['Core Health', coreHealth],
@@ -1071,14 +1127,7 @@ describe('the field-test runbook', () => {
     const section = runbook.slice(start, end).replace(/\s+/g, ' ');
 
     const channels = new Map(probeHealth.channels({}).map((channel) => [channel.key, channel]));
-    const full = Object.fromEntries(
-      [...channels.keys()].map((key) => [key, 1]),
-    ) as unknown as ProbeHealthReport;
-    const older = new Set(Object.keys(healthForPeer(full, versionFor('nameResolver') - 1)));
-    const newest = new Set(Object.keys(healthForPeer(full, PROTOCOL_VERSION)));
-    const gate = [...channels.keys()].filter((key) => newest.has(key) && !older.has(key));
-    // A strip that matched nothing would make every assertion below vacuous.
-    assert.ok(gate.length >= 6, `found ${String(gate.length)} gate channels: ${gate.join(', ')}`);
+    const gate = gateChannelKeys();
 
     const named = (text: string): string[] =>
       [...text.matchAll(/`([a-zA-Z]+)`/g)].map((match) => match[1] ?? '').sort();
@@ -1103,17 +1152,43 @@ describe('the field-test runbook', () => {
       'the readings step 4 names',
     );
     const states = /the other (\w+) are states/.exec(section);
-    const numbers = new Map([
-      ['two', 2],
-      ['three', 3],
-      ['four', 4],
-      ['five', 5],
-      ['six', 6],
-    ]);
     assert.equal(
-      numbers.get(states?.[1] ?? ''),
+      NUMBER_WORDS.indexOf(states?.[1] ?? ''),
       declared((key) => !counter(key) && lookup(key)).length,
       'the states step 4 counts',
+    );
+  });
+
+  /**
+   * Step 4 and the release notes count the gate's channels a probe running `"system"` leaves as
+   * gaps alike, and as the probe sends them (`H-50`): all but `nameResolverMode`, which reads `1`.
+   * The runbook said all fourteen gap, so a tester looking for a probe left on the default by its
+   * gaps found `nameResolverMode` reading, against its own step 1 and the notes.
+   */
+  it('counts the gate’s channels a probe on "system" leaves as gaps, as the release notes do', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const flat = (text: string): string => text.replace(/\s+/g, ' ');
+    const runbook = flat(await readFile(join(repoRoot, 'docs', 'runbook-field-test.md'), 'utf8'));
+    const notes = flat(await readFile(join(repoRoot, 'docs', 'release-notes-1.0.md'), 'utf8'));
+    const gate = gateChannelKeys();
+    assert.ok(gate.includes(SENT_IN_BOTH_MODES), `${SENT_IN_BOTH_MODES} is a gate channel`);
+    const gapping = NUMBER_WORDS[gate.length - 1] ?? '';
+    assert.notEqual(gapping, '', `a word for ${String(gate.length - 1)}`);
+
+    const start = runbook.indexOf("- **The gate's channels, on every probe**");
+    const end = runbook.indexOf('- **`lookupsGivenUp`', start);
+    assert.ok(start >= 0 && end > start, 'step 4 has no list of the gate’s channels');
+    const section = runbook.slice(start, end);
+    assert.ok(
+      section.includes(
+        `on a probe running \`"system"\` the ${gapping} beside \`${SENT_IN_BOTH_MODES}\` gap, ` +
+          `and \`${SENT_IN_BOTH_MODES}\` reads \`1\``,
+      ),
+      `step 4 does not say the ${gapping} gap under "system" and ${SENT_IN_BOTH_MODES} reads 1`,
+    );
+    assert.ok(
+      notes.includes(`Under \`"system"\` the ${gapping} gap`),
+      `the release notes do not say the ${gapping} gap under "system"`,
     );
   });
 });
@@ -1143,7 +1218,212 @@ describe('the 1.0 release notes', () => {
       .sort();
     assert.equal(migrations[2], files.at(-1), 'the last migration the notes say rc.3 applies');
   });
+
+  /**
+   * *Going back* names every probe setting this build has and `v1.0.0-rc.2` does not, in the file
+   * and as the drop-in variable, because rc.2 refuses a key it does not know and the probe stays
+   * stopped (`H-50`). The paragraph named `probe.nameResolver` and not `probe.allowScriptsAsRoot`,
+   * which *Before you upgrade* tells a root probe with scripts to set: that probe, taken back to
+   * rc.2 by the notes, failed with `unknown setting` and stayed down.
+   *
+   * rc.2's settings are a list read from that tag, since a tag does not move; a key spelt wrong in
+   * it would be one this build lacks, which the first assertion refuses. rc.2's refusal is played
+   * here by this build's loader on its schema with the new keys taken out, which is rc.2's: the
+   * diff of the two schemas is those keys and nothing else.
+   */
+  it('say, for going back, to remove every probe setting rc.2 does not know', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const notes = (await readFile(join(repoRoot, 'docs', 'release-notes-1.0.md'), 'utf8')).replace(
+      /\s+/g,
+      ' ',
+    );
+    const start = notes.indexOf('### Going back');
+    const end = notes.indexOf(' ## ', start);
+    assert.ok(start >= 0 && end > start, 'the release notes have no Going back section');
+    const going = notes.slice(start, end);
+
+    const now = settingsOf(probeConfigSchema as unknown as SchemaNode);
+    const rc2 = Object.entries(RC2_PROBE_SETTINGS).flatMap(([section, keys]) =>
+      keys.split(' ').map((key) => `${section}.${key}`),
+    );
+    assert.deepEqual(
+      rc2.filter((path) => !now.includes(path)),
+      [],
+      'a setting rc.2 has that this build does not',
+    );
+    const added = now.filter((path) => !rc2.includes(path));
+    assert.ok(added.length > 0, 'this build adds no probe setting, so nothing below is tested');
+
+    const quoted: string[] = [];
+    for (const path of added) {
+      const env = envNameOf(path);
+      assert.ok(going.includes(`\`${path}\``), `Going back does not name \`${path}\``);
+      assert.ok(going.includes(`\`${env}\``), `Going back does not name \`${env}\` for a drop-in`);
+
+      // This build reads the variable as that setting; rc.2's schema refuses it by name.
+      const value = String(defaultOf(probeConfigSchema as unknown as SchemaNode, path));
+      const read = loadConfig({ schema: probeConfigSchema, env: { [env]: value }, argv: [] });
+      assert.deepEqual(read.sources.envOverrides, [env], `${env} is read as ${path}`);
+      const parent = path.slice(0, path.lastIndexOf('.'));
+      const refusal = `${parent}: unknown setting "${path.slice(parent.length + 1)}"`;
+      assert.throws(
+        () =>
+          loadConfig({
+            schema: withoutSettings(probeConfigSchema, added),
+            env: { [env]: value },
+            argv: [],
+          }),
+        (error: unknown) => error instanceof Error && error.message.includes(refusal),
+        `rc.2 refuses ${env} with ${refusal}`,
+      );
+      if (going.includes(refusal)) quoted.push(refusal);
+    }
+    assert.ok(quoted.length > 0, 'Going back quotes no refusal rc.2 writes');
+    assert.match(going, /exit 78/, 'Going back does not say the probe stays stopped');
+  });
+
+  /**
+   * An rc.2 probe under this core reads Warning on Probe Health, which the notes now say (`H-50`):
+   * the core reads protocol 28 as outdated, and the protocol lookup maps that to Warning, *older
+   * than the core*. rc.1 and rc.2 both spoke 28, so this upgrade is the first in the 1.0 line to
+   * show it, and every Warning trigger the runbook puts on Probe Health fires for a lagging probe.
+   * The item said only that its newer channels gap.
+   */
+  it('say a probe left on rc.2 reads Warning on Probe Health until it is upgraded', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const notes = (await readFile(join(repoRoot, 'docs', 'release-notes-1.0.md'), 'utf8')).replace(
+      /\s+/g,
+      ' ',
+    );
+    const protocol = /the protocol between core and probe moves from (\d+) to (\d+)/.exec(notes);
+    assert.ok(protocol, 'the upgrade section names no protocol');
+    const rc2 = Number(protocol[1]);
+    assert.equal(describeSkew(rc2).kind, 'outdated', `this core reads protocol ${String(rc2)}`);
+
+    const lookup = BUILT_IN_LOOKUPS.find((definition) => definition.id === 'ms.probe.protocol');
+    assert.ok(lookup?.type === 'singleInt', 'the protocol lookup');
+    const older = lookup.entries.find((entry) => entry.text === 'older than the core');
+    assert.ok(older, 'the protocol lookup has no entry for a probe older than the core');
+    assert.equal(older.state, 'warning');
+
+    const start = notes.indexOf('- **A probe left on rc.2');
+    const end = notes.indexOf(' ### ', start);
+    assert.ok(start >= 0 && end > start, 'the release notes have no item for a probe left on rc.2');
+    const item = notes.slice(start, end);
+    assert.match(item, /\*\*Until it is upgraded, its Probe Health reads Warning\*\*/);
+    assert.ok(
+      item.includes(`\`protocol\` reads \`${String(older.value)}\`, *${older.text}*`),
+      'the item does not give the protocol channel’s reading',
+    );
+    assert.ok(
+      item.includes(`reconnects at ${String(PROTOCOL_VERSION)}`),
+      'the item does not say when the Warning clears',
+    );
+  });
 });
+
+/**
+ * Where a name the hosts file gives runs while the name check is off for the host's settings
+ * (`H-50`): in the helper, like every other name. `classifyName` answers `off` for every name
+ * then, before it reads the hosts file (`packages/probe/src/resolver/system-names.ts`, whose
+ * header says nothing is `local` while the check is off), and `DnsCheck.route` sends `off` to
+ * the helper while it is up; `system-names.test.ts` holds a hosts-file name to `off` in every
+ * shape the check is off for. The release notes, the runbook and the administration guide said
+ * the hosts file's names stayed on the probe's own lanes, so a field test on a host with `nscd`
+ * misread where its names ran.
+ */
+describe('the name check’s documents', () => {
+  it('send the hosts file’s names to the helper while the host’s settings turn the check off', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    for (const file of ['release-notes-1.0.md', 'runbook-field-test.md', 'administration.md']) {
+      const text = (await readFile(join(repoRoot, 'docs', file), 'utf8')).replace(/\s+/g, ' ');
+      const kept =
+        /every name (?:the hosts file does not give|not the hosts file's) is asked in the (?:lookup )?helper[.:]/.exec(
+          text,
+        );
+      assert.equal(
+        kept,
+        null,
+        `${file} keeps the hosts file's names off the helper: ${kept?.[0] ?? ''}`,
+      );
+      assert.match(
+        text,
+        /every name is asked in the (?:lookup )?helper, the hosts file's included/,
+        `${file} does not say the hosts file's names go to the helper while the check is off`,
+      );
+    }
+  });
+});
+
+/**
+ * Every setting a `v1.0.0-rc.2` probe knows, as `section.key` by section, read from that tag's
+ * `packages/shared/src/config/schema.ts` on 2026-10-20 (`H-50`). Each of its sections is closed
+ * (`additionalProperties: false`), so a key not listed here stops an rc.2 probe with exit 78.
+ */
+const RC2_PROBE_SETTINGS: Readonly<Record<string, string>> = {
+  service: 'name dataDir logLevel logPretty shutdownTimeoutMs',
+  probe: [
+    'gid displayName spoolDir spoolMaxBytes spoolSegmentMaxBytes spoolBatchMaxRows',
+    'spoolCatchUpMaxRows workerPoolSize workerPoolMinSize workerPoolIdleShrinkMs',
+    'checkQueueMaxLength checkAbortGraceMs processRunnerMaxConcurrent processRunnerQueueMaxLength',
+    'processMemoryLimitMb processUid processGid scriptDir powerShellPath targetPolicy',
+  ].join(' '),
+  trapListener: 'enabled port address transport communities bufferSize',
+  syslogListener: 'enabled port address udp tcp ipVersion senders bufferSize',
+  flowListener: 'enabled port address ipVersion exporters bufferSize',
+  core: 'host port accessKey reconnectMinDelayMs reconnectMaxDelayMs heartbeatIntervalMs',
+  'core.tls': 'certFile keyFile caFile',
+};
+
+/** The part of a configuration schema these tests walk. */
+interface SchemaNode {
+  readonly properties?: Readonly<Record<string, SchemaNode>>;
+  readonly required?: readonly string[];
+  readonly default?: unknown;
+}
+
+/** Every leaf setting of a schema, as its dotted path. */
+function settingsOf(node: SchemaNode, prefix = ''): string[] {
+  return Object.entries(node.properties ?? {}).flatMap(([key, child]) => {
+    const path = prefix === '' ? key : `${prefix}.${key}`;
+    return child.properties === undefined ? [path] : settingsOf(child, path);
+  });
+}
+
+/** A setting's default, by its dotted path. */
+function defaultOf(node: SchemaNode, path: string): unknown {
+  let at: SchemaNode | undefined = node;
+  for (const key of path.split('.')) at = at?.properties?.[key];
+  return at?.default;
+}
+
+/** `probe.allowScriptsAsRoot` → `MS_PROBE__ALLOW_SCRIPTS_AS_ROOT`, as the loader reads it. */
+function envNameOf(path: string): string {
+  const segments = path.split('.').map((key) => key.replace(/[A-Z]/g, (c) => `_${c}`));
+  return `MS_${segments.join('__').toUpperCase()}`;
+}
+
+/** A schema like `schema` with the settings at `paths` taken out, as an older build had it. */
+function withoutSettings(
+  schema: typeof probeConfigSchema,
+  paths: readonly string[],
+): typeof probeConfigSchema {
+  const copy = structuredClone(schema);
+  for (const path of paths) {
+    const keys = path.split('.');
+    const leaf = keys.pop() ?? '';
+    let at = copy as unknown as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    for (const key of keys) at = at.properties[key] as typeof at;
+    at.properties = Object.fromEntries(
+      Object.entries(at.properties).filter(([name]) => name !== leaf),
+    );
+    if (at.required !== undefined) at.required = at.required.filter((name) => name !== leaf);
+  }
+  return copy;
+}
 
 /**
  * The administration guide's Probe Health table names channels that exist, and every listener
@@ -1712,6 +1992,90 @@ describe('scripts/test-all.sh', () => {
       assert.equal(refused.status, 2, `${bound}: ${refused.out}`);
       assert.deepEqual(refused.calls, [], bound);
     }
+  });
+});
+
+/**
+ * The documented `ms-enrol` command works on a default core (`H-50`).
+ *
+ * A default core binds every address (`probeEndpoint.host` is `0.0.0.0`), which `ms-enrol` drops,
+ * since a probe cannot dial it, and then stops with "pass --host". `installation.md` → *Remote
+ * probes*, which the field-test runbook sends every remote probe to, ran it without `--host`, so
+ * it failed on every default core; and the obvious `--host <address>` fails later, at the probe's
+ * TLS check, because the core's certificate lists only the names `setup.sh` issued it for. So
+ * every command a document gives passes `--host`, and *Remote probes* names what it may be.
+ */
+describe('enrolling a remote probe', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+
+  it('passes --host wherever a document or a script’s usage runs ms-enrol', async () => {
+    const example = JSON.parse(
+      await readFile(join(repoRoot, 'deploy', 'examples', 'core.json'), 'utf8'),
+    ) as { probeEndpoint?: { host?: string } };
+    const enrol = await readFile(join(repoRoot, 'deploy', 'enrol-probe.sh'), 'utf8');
+    assert.ok(
+      enrol.includes('ep.host === "0.0.0.0" || ep.host === "::" ? ""'),
+      'ms-enrol no longer drops a wildcard host, so this test’s premise has moved',
+    );
+    assert.ok(
+      ['0.0.0.0', '::'].includes(example.probeEndpoint?.host ?? ''),
+      'the example core binds an address a probe can dial, so this test’s premise has moved',
+    );
+
+    const docs = (await readdir(join(repoRoot, 'docs')))
+      .filter((name) => name.endsWith('.md') && name !== 'TASKS.md')
+      .map((name) => join('docs', name));
+    const scripts = (await readdir(join(repoRoot, 'deploy')))
+      .filter((name) => name.endsWith('.sh'))
+      .map((name) => join('deploy', name));
+    const commands: string[] = [];
+    const without: string[] = [];
+    for (const file of [...docs, ...scripts]) {
+      const lines = (await readFile(join(repoRoot, file), 'utf8')).split('\n');
+      for (const [index, line] of lines.entries()) {
+        if (!/\/opt\/ms\/bin\/ms-enrol\s+[A-Za-z0-9._-]+/.test(line)) continue;
+        commands.push(`${file}:${String(index + 1)}`);
+        if (!line.includes('--host ')) without.push(`${file}:${String(index + 1)}: ${line.trim()}`);
+      }
+    }
+    assert.ok(
+      commands.some((at) => at.startsWith(join('docs', 'installation.md'))),
+      'no command',
+    );
+    assert.deepEqual(without, [], 'an ms-enrol command a default core refuses');
+  });
+
+  it('names, in Remote probes, every name the core’s certificate is issued for', async () => {
+    const setup = await readFile(join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
+    assert.match(
+      setup,
+      /hostname_fqdn="\$\(hostname -f /,
+      'setup.sh names the core by hostname -f',
+    );
+    const san = /^subjectAltName=(.+)$/m.exec(setup);
+    assert.ok(san, 'setup.sh issues the core’s certificate with no subjectAltName');
+    const names = (san[1] ?? '').split(',').map((entry) => {
+      const value = entry.replace(/^(?:DNS|IP):/, '');
+      return value === '${hostname_fqdn}' ? 'hostname -f' : value;
+    });
+    assert.ok(names.includes('hostname -f'), `the names setup.sh issues: ${names.join(', ')}`);
+
+    const guide = (await readFile(join(repoRoot, 'docs', 'installation.md'), 'utf8')).replace(
+      /\s+/g,
+      ' ',
+    );
+    const start = guide.indexOf('## Remote probes');
+    const end = guide.indexOf('### The certificate a probe is bound to', start);
+    assert.ok(start >= 0 && end > start, 'installation.md has no Remote probes section');
+    const section = guide.slice(start, end);
+    for (const name of names) {
+      assert.ok(section.includes(`\`${name}\``), `Remote probes does not name \`${name}\``);
+    }
+    assert.ok(
+      section.includes('-ext subjectAltName'),
+      'Remote probes does not show how to read them',
+    );
+    assert.match(section, /IP address fails/, 'Remote probes does not say an address fails');
   });
 });
 

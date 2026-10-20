@@ -55,9 +55,10 @@ simulator does not, and a week of unattended running.
 
 - **An Ubuntu host** for the core.
 - **A host for a remote probe: optional, and recommended.** Debian or RHEL, x86_64, whose
-  `resolv.conf` names the site's DNS servers, and which can reach the core on TCP 23560 (step 1,
-  *Every probe resolves names with the gate*). Without one, nothing in the week shows what the
-  gate's questions cost the site's resolver, and the write-up says so.
+  `resolv.conf` names the site's DNS servers, which resolves the core host's name (its
+  `hostname -f`, by DNS or the probe host's hosts file) to the core, and which can reach the core
+  on TCP 23560 by it (step 1, *Every probe resolves names with the gate*). Without one, nothing
+  in the week shows what the gate's questions cost the site's resolver, and the write-up says so.
 - **100 devices you did not choose for being easy.** A field test against a hundred identical
   Linux VMs proves the scheduler and nothing about the sensor catalogue. Aim for a spread: some
   switches, some Windows servers, some appliances with slow SNMP agents, at least one device
@@ -133,13 +134,18 @@ A probe left on `"system"` tests nothing of it, and step 4 records that it did n
 - **Both ends run this build.** A remote probe is the same candidate's probe-only tarball,
   `ms-probe-<version>-linux-x86_64.tar.gz`, checked against the record the same way, and installed
   as [installation.md → Remote probes](installation.md#remote-probes) says: `ms-enrol` on the
-  core's host issues the probe its bundle, `sudo ./install-probe.sh --enrolment <bundle>` from
-  inside the unpacked tarball installs and enrols it, and it is approved onto a probe object of
-  its own on the core. That is the path `scripts/smoke-enrol.sh` runs. The `ms-probe` package is
-  not used for a remote probe here: it has no way to take an enrolment bundle, and its setup
-  issues a probe-channel certificate authority of its own, which the core does not trust. Give
-  the new probe its Probe Health sensor (above). An older probe refuses the key and stays stopped
-  (exit 78), and under an older core the gate's health never reaches Probe Health.
+  core's host issues the probe its bundle, with `--host "$(hostname -f)"`, since a default core
+  binds every address and `ms-enrol` cannot read one to dial. The probe dials that name and checks
+  the core's certificate against it, which lists `localhost`, `127.0.0.1` and the core host's
+  `hostname -f` at install, so an IP address fails (`connection to core failed`, and the probe
+  never appears as pending), and the probe's host must resolve the name to the core.
+  `sudo ./install-probe.sh --enrolment <bundle>` from inside the unpacked tarball installs and
+  enrols it, and it is approved onto a probe object of its own on the core. That is the path
+  `scripts/smoke-enrol.sh` runs. The `ms-probe` package is not used for a remote probe here: it
+  has no way to take an enrolment bundle, and its setup issues a probe-channel certificate
+  authority of its own, which the core does not trust. Give the new probe its Probe Health sensor
+  (above). An older probe refuses the key and stays stopped (exit 78), and under an older core
+  the gate's health never reaches Probe Health.
 - **A second probe pointed straight at the site's resolver, if you can.** Ubuntu's own probe asks
   `systemd-resolved`'s stub at `127.0.0.53`, which stands between the gate and the site's DNS
   servers, so it cannot show what the gate's questions cost them. A probe on Debian or RHEL whose
@@ -178,13 +184,14 @@ A probe in gate mode logs one line at start, *probe.nameResolver is gate: the na
 probe routes its lookups by*, with what it read of the host's name settings: its DNS servers,
 search list, `resolv.conf` options, `hosts:` line and glibc. **`"check":"on"` in that line is the
 pass**: the name check takes this host's settings. `"check":"off"` names in its `off` field the
-first rule the host failed (`code`, and `why` in words), and every name the hosts file does not
-give is asked in the lookup helper: still the gate, and the write-up says which rule, since
-nothing the week records then tests the check. No such line means the probe runs `"system"`,
-which logs nothing of the mode, or has not restarted. Probe Health's `nameResolverMode` says the
-same from the core (step 4), and `nameCheckState` reads `1` once a DNS server has answered the
-check (`3` until then). Run this block once against a packaged probe before the week, as the
-dress rehearsal did for the rest of step 1.
+first rule the host failed (`code`, and `why` in words), and every name is asked in the lookup
+helper, the hosts file's included, so step 4's share of lookups in the helper counts them too:
+still the gate, and the write-up says which rule, since nothing the week records then tests the
+check. No such line means the probe runs `"system"`, which logs nothing of the mode, or has not
+restarted. Probe Health's `nameResolverMode` says the same from the core (step 4), and
+`nameCheckState` reads `1` once a DNS server has answered the check (`3` until then). Run this
+block once against a packaged probe before the week, as the dress rehearsal did for the rest of
+step 1.
 
 ## 2. Restart everything, once, before you start counting
 
@@ -424,11 +431,12 @@ The numbers that decide the criterion:
   the workers it no longer reaches going quiet (`P-256`). Still high an `idleMs` after the checks
   stopped is a finding.
 - **The gate's channels, on every probe** (`P-432`), written down here before the week so that
-  nobody judges them after it: six at protocol 38 and eight at 39, gaps on a probe running
-  `"system"`. Only the trouble latch moves Probe Health's state (its lookup reads `1` as Warning,
-  so step 3's Warning trigger on that probe's sensor delivers it); read the others. **The core
-  stores a counter as a rate**, the difference between two readings over the time between them,
-  per second, so `/values` and the history give no running total to subtract: each criterion
+  nobody judges them after it: six at protocol 38 and eight at 39; on a probe running
+  `"system"` the thirteen beside `nameResolverMode` gap, and `nameResolverMode` reads `1`. Only
+  the trouble latch moves Probe Health's state (its lookup reads `1` as Warning, so step 3's
+  Warning trigger on that probe's sensor delivers it); read the others. **The core stores a
+  counter as a rate**, the difference between two readings over the time between them, per
+  second, so `/values` and the history give no running total to subtract: each criterion
   below is on the hourly history since the start reading (the `curl` loop above,
   `resolutionSeconds=3600`), in the form the core stores, and an hour with no value is a gap the
   write-up explains. The counters are `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck`,

@@ -361,8 +361,17 @@ one at the transport layer would not be possible at all. Issue a bundle instead.
 On the **core** host:
 
 ```bash
-sudo /opt/ms/bin/ms-enrol web-dc2 --out web-dc2.enrol
+sudo /opt/ms/bin/ms-enrol web-dc2 --host "$(hostname -f)" --out web-dc2.enrol
+sudo openssl x509 -noout -ext subjectAltName -in /etc/ms/tls/core.crt    # what --host may be
 ```
+
+**`--host` is the name the probe will dial the core by, and a default core needs it.** The core
+binds every address (`probeEndpoint.host` is `0.0.0.0`), which a probe cannot dial, so without
+`--host` `ms-enrol` stops with *pass --host*. It must be a name the core's certificate lists:
+the install issued it for `localhost`, `127.0.0.1` and the core host's `hostname -f` at the time,
+which the `openssl` line prints. The probe checks the certificate against the name it dials, so
+the core's IP address fails, and the probe logs `connection to core failed` and never appears
+as pending. The probe's host must resolve that name to the core, by DNS or its hosts file.
 
 Carry that file to the probe host — it holds a private key and the enrolment key, so it is
 written 0600, and it is meant to be carried once and deleted. Then, from inside a probe-only
@@ -728,6 +737,12 @@ earlier release is the one you keep. `ms-uninstall` leaves it, and names it.
 
 A package has no `previous`: install the earlier package version with `apt` or `dnf`, after the
 same `migrate down`.
+
+**The earlier release refuses a setting it does not know.** Every section of `core.json` and
+`probe.json` is closed, so a key the newer release added, in the file or as an `MS_…` variable
+in a drop-in, stops that service under the earlier one with `unknown setting` and exit 78. Take
+out what the newer release added before starting the earlier one: its release notes' *Going
+back* names each key.
 
 **Taking back migration 064 can rename maps, reports and libraries.** Since 064 a name is unique
 only among what one account can read, so two groups may each have a "Core Network". The releases
