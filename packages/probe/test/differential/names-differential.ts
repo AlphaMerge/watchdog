@@ -62,6 +62,15 @@ import type { DnsBehaviour, DnsServerPolicy } from '@ms/simulators';
  * FORMERR, A answered with AAAA SERVFAIL, and EDNS-intolerant servers, each with what
  * `getaddrinfo` returns. **The budget boxes** (`budgetProblems`) and **the boxes with the check
  * off** (`offProblems`, `P-461`) are judged here too.
+ *
+ * **§7.5's other rows** (`P-462`). Those the check is on for are **sequence rows**
+ * (`SEQUENCE_ROWS`): several lookups in one world, in turn through one check, so that a key's
+ * state carries from one to the next (a partial key, some of a zone's names in the server's cache
+ * and others not), and a world S4's rows cannot write (an IPv4 default gateway and no IPv6 one, for
+ * `_gateway`). A name the check does not vouch for is held to being sent to the helper unasked.
+ * Those it is off for are boxes like `P-461`'s, the policy loaded in situ (`OFF_CASES`), and the
+ * mid-run edits are **skew boxes** (`skewProblems`, D28): the check off by `skew` once the file
+ * moves, and after a helper SIGKILL the rest until restart where this glibc reads the file once.
  */
 
 /** systemd-resolved's stub: the one server glibc asks that no simulator can be. */
@@ -215,7 +224,10 @@ export interface ImageRun {
   /** The sha256 of the rows file the run replayed, and of the policy's build it loaded. */
   readonly rowsDigest: string;
   readonly policyDigest: string;
-  /** The sha256 of the answer rows it played and their world (`answerRowsDigest`). */
+  /**
+   * The sha256 of the answer rows and the sequence rows it played, and their world
+   * (`answerRowsDigest`).
+   */
   readonly answerRowsDigest: string;
   /** The sha256 of every build the boxes load (`names-build.ts`), as the run began. */
   readonly buildDigest: string;
@@ -229,6 +241,8 @@ export interface ImageRun {
   readonly rows: readonly RowRun[];
   /** The answer rows (`ANSWER_ROWS`), each with its one plan. */
   readonly answers?: readonly RowRun[];
+  /** The sequence rows (`SEQUENCE_ROWS`, `P-462`), each lookup with its one plan. */
+  readonly sequences?: readonly SequenceRun[];
 }
 
 /** A wire glibc sent for a row's plan in an image (`system-names-recordings.json`, schema 3). */
@@ -266,6 +280,11 @@ export interface RecordingsFile {
   readonly recordings: readonly Recording[];
   /** glibc's wire for each answer row (`ANSWER_ROWS`) in each image, plan `ANSWER_PLAN`. */
   readonly answerRecordings: readonly Recording[];
+  /**
+   * glibc's wire for each lookup of each sequence row (`SEQUENCE_ROWS`) in each image, by its
+   * `sequenceLookupId`, plan `ANSWER_PLAN`.
+   */
+  readonly sequenceRecordings: readonly Recording[];
 }
 
 /** The row's expectation in an image: null where the check is off there, so it is not replayed. */
@@ -347,6 +366,9 @@ export function judgePlan(e: Expectation, run: PlanRun): PlanVerdict {
 
 /** glibc "returned within 1 s" (§7.5): the probe's bound for a lookup that is stuck (`STUCK_MS`). */
 export const WITHIN_MS = 1_000;
+
+/** The check's route for a name it cannot vouch for: to the helper, with nothing asked. */
+export const UNVOUCHED_ROUTE = 'unvouched:cannotVouch';
 
 /**
  * A walk that differs from glibc by design, asserted exactly as it is, so the run says if either
@@ -485,6 +507,17 @@ export function walkProblems(
   const walk = run.walk;
   if (walk === undefined) return [`${run.plan}: the walk was not recorded`];
   const at = `${run.plan}, the walk`;
+  if (e.class === 'cannotVouch') {
+    // A source the walk does not model (§7.5's fidelity assertion 3): sent to the helper unasked.
+    const out: string[] = [];
+    if (walk.route !== UNVOUCHED_ROUTE) {
+      out.push(`${at}: routed ${walk.route}, and the row is cannotVouch`);
+    }
+    if (walk.wire.length > 0) {
+      out.push(`${at}: asked ${JSON.stringify(walk.wire)} for a name the check does not vouch for`);
+    }
+    return out;
+  }
   if (e.class !== 'walk') {
     const out: string[] = [];
     if (walk.route !== 'local') out.push(`${at}: routed ${walk.route}, and the row is ${e.class}`);
@@ -577,7 +610,8 @@ export function optProblems(run: PlanRun, expected: GlibcOpt): string[] {
 /**
  * §7.5's regression assertions, labelled as such, comparing `getaddrinfo` with `getaddrinfo`: gate
  * mode answers as `system` mode, the helper's child as the probe's lanes, and gate mode ran the
- * name where its walk said: a heard or local name on the probe's lanes, a silent one in the helper.
+ * name where its walk said: a heard or local name on the probe's lanes, a silent one, or one the
+ * check does not vouch for (`P-462`), in the helper.
  */
 export function modesProblems(run: PlanRun): string[] {
   const modes = run.modes;
@@ -595,7 +629,11 @@ export function modesProblems(run: PlanRun): string[] {
   }
   const route = run.walk?.route;
   const where =
-    route === 'silent' ? 'helper' : route === 'heard' || route === 'local' ? 'lanes' : undefined;
+    route === 'silent' || route === UNVOUCHED_ROUTE
+      ? 'helper'
+      : route === 'heard' || route === 'local'
+        ? 'lanes'
+        : undefined;
   if (where !== undefined && modes.gateRan !== where) {
     out.push(
       `${run.plan}, regression: gate mode ran it ${modes.gateRan === 'helper' ? 'in the helper' : 'on the probe’s lanes'}, and its walk was ${route ?? ''}`,
@@ -832,10 +870,311 @@ export function answerProblems(row: AnswerRow, played: RowRun): string[] {
   return out;
 }
 
+// --- the sequence rows (`P-462`) -------------------------------------------------------------------
+
+/**
+ * One lookup of a sequence row, in its turn, with what the row claims of it in every image: the
+ * policy's reading, the walk's route in the row's one check after the lookups before it, glibc's
+ * wire and what `getaddrinfo` returns, and whether it returns within `WITHIN_MS`.
+ */
+export interface SequenceLookup {
+  readonly name: string;
+  readonly family: 0 | 4 | 6;
+  readonly reading:
+    | { readonly class: 'walk'; readonly candidates: readonly string[] }
+    | { readonly class: 'cannotVouch'; readonly reason: string };
+  readonly walk: 'heard' | 'silent' | typeof UNVOUCHED_ROUTE;
+  readonly fast: boolean;
+  readonly wire: readonly Wire[];
+  readonly outcome: string;
+}
+
+export interface SequenceServer {
+  readonly address: string;
+  /** What it answers every name not in its cache with. */
+  readonly behaviour: DnsBehaviour;
+  /**
+   * Names its recursion cache holds, A and AAAA (`SEQUENCE_CACHED`), answered from it whatever
+   * `behaviour` says: names cached at a forwarder whose upstream for their zone is silent.
+   */
+  readonly cached?: readonly string[];
+}
+
+/**
+ * A row of several lookups in one world, played in turn through one check (`P-462`): what §7.5
+ * lists beyond S4's rows and the answer rows that the check is on for. S4's rows ask one name of
+ * a world whose servers answer every name alike, and a check new for each plan; a key's state
+ * (§1.5) carries from one lookup to the next, and a server's cache answers some names of a zone
+ * and not others. The world is `ANSWER_WORLD`'s, with the row's own resolv.conf and nsswitch.conf.
+ */
+export interface SequenceRow {
+  readonly id: string;
+  readonly title: string;
+  readonly resolvConf: string;
+  readonly nsswitch: string;
+  /**
+   * A default route through this IPv4 gateway, on a link of its own with no IPv6, and no IPv6
+   * default route: nss-myhostname's `_gateway` (`SEQUENCE_GATEWAY_LINK`).
+   */
+  readonly gateway?: string;
+  readonly servers: readonly SequenceServer[];
+  readonly lookups: readonly SequenceLookup[];
+  readonly glibcOpt: GlibcOpt;
+}
+
+/** One sequence row played in an image: each lookup as an answer row's run, in the row's order. */
+export interface SequenceRun {
+  readonly id: string;
+  /** `<row id>#<n>` from 1, each with its one plan, `ANSWER_PLAN`. */
+  readonly lookups: readonly RowRun[];
+  /** What kept the row from being played as its world says, or its world from being seen so. */
+  readonly setup?: readonly string[];
+}
+
+/** The addresses a sequence row's cache holds for each of its cached names. */
+export const SEQUENCE_CACHED: readonly string[] = [ANSWER_A, ANSWER_AAAA];
+/** The link a sequence row's gateway is on, and its address there (`/24`, `.1`). */
+export const SEQUENCE_GATEWAY_LINK = 'ms-gw';
+export const SEQUENCE_GATEWAY = '198.19.0.254';
+
+const ZONE = 'zone.example.test';
+const inZone = (label: string): string => `${label}.${ZONE}`;
+/** One server, each try 1 s and one try: a name its server leaves silent fails in about 1 s. */
+const ONE_QUICK = `nameserver ${S1}\noptions timeout:1 attempts:1\n`;
+const walked = (name: string): SequenceLookup['reading'] => ({
+  class: 'walk',
+  candidates: [name],
+});
+const askedBoth = (name: string): Wire[] => [
+  [S1, name, 'A', 1],
+  [S1, name, 'AAAA', 1],
+];
+const GATEWAY_NAME = '_gateway';
+const SYSTEMD_NAME: SequenceLookup['reading'] = { class: 'cannotVouch', reason: 'systemd-name' };
+
+export const SEQUENCE_ROWS: readonly SequenceRow[] = [
+  {
+    id: 'sequence-partial-key',
+    title:
+      'a partial key: one zone, two of its names in the server’s cache and two not, its upstream silent, asked in turn through one check',
+    resolvConf: ONE_QUICK,
+    nsswitch: 'hosts: files dns\n',
+    servers: [
+      {
+        address: S1,
+        behaviour: { reply: { kind: 'silent' } },
+        cached: [inZone('cached-1'), inZone('cached-2')],
+      },
+    ],
+    lookups: [
+      // The key is new: a scout, answered from the cache.
+      {
+        name: inZone('cached-1'),
+        family: 0,
+        reading: walked(inZone('cached-1')),
+        walk: 'heard',
+        fast: true,
+        wire: askedBoth(inZone('cached-1')),
+        outcome: 'answer:2',
+      },
+      // The key heard: the name's own step goes, and is not heard.
+      {
+        name: inZone('uncached-1'),
+        family: 0,
+        reading: walked(inZone('uncached-1')),
+        walk: 'silent',
+        fast: false,
+        wire: askedBoth(inZone('uncached-1')),
+        outcome: 'EAI_AGAIN',
+      },
+      // The key mixed: each name its own walk, heard for a cached one and silent for another.
+      {
+        name: inZone('cached-2'),
+        family: 0,
+        reading: walked(inZone('cached-2')),
+        walk: 'heard',
+        fast: true,
+        wire: askedBoth(inZone('cached-2')),
+        outcome: 'answer:2',
+      },
+      {
+        name: inZone('uncached-2'),
+        family: 0,
+        reading: walked(inZone('uncached-2')),
+        walk: 'silent',
+        fast: false,
+        wire: askedBoth(inZone('uncached-2')),
+        outcome: 'EAI_AGAIN',
+      },
+    ],
+    glibcOpt: 'none',
+  },
+  {
+    id: 'sequence-gateway-v4-only',
+    title:
+      '_gateway on a host with an IPv4 default gateway and no IPv6 one, under files myhostname dns: nss-myhostname answers families 4 and 0, and DNS is asked for family 6',
+    resolvConf: `nameserver ${S1}\n`,
+    nsswitch: 'hosts: files myhostname dns\n',
+    gateway: SEQUENCE_GATEWAY,
+    servers: [{ address: S1, behaviour: ANSWERING }],
+    lookups: [
+      {
+        name: GATEWAY_NAME,
+        family: 4,
+        reading: SYSTEMD_NAME,
+        walk: UNVOUCHED_ROUTE,
+        fast: true,
+        wire: [],
+        outcome: 'answer:1',
+      },
+      {
+        name: GATEWAY_NAME,
+        family: 0,
+        reading: SYSTEMD_NAME,
+        walk: UNVOUCHED_ROUTE,
+        fast: true,
+        wire: [],
+        outcome: 'answer:1',
+      },
+      {
+        name: GATEWAY_NAME,
+        family: 6,
+        reading: SYSTEMD_NAME,
+        walk: UNVOUCHED_ROUTE,
+        fast: true,
+        wire: [[S1, GATEWAY_NAME, 'AAAA', 1]],
+        outcome: 'answer:1',
+      },
+    ],
+    glibcOpt: 'none',
+  },
+];
+
+/** The id a sequence row's lookup is played and recorded under: `<row id>#<n>`, from 1. */
+export const sequenceLookupId = (row: Pick<SequenceRow, 'id'>, k: number): string =>
+  `${row.id}#${String(k + 1)}`;
+
+/** The policy's reading of a sequence row's lookup in the image, as its own row would state it. */
+export function sequenceExpectation(row: SequenceRow, lookup: SequenceLookup): Classification {
+  const family = lookup.family;
+  return {
+    ...lookup.reading,
+    ...(lookup.reading.class === 'walk'
+      ? { types: family === 4 ? ['A'] : family === 6 ? ['AAAA'] : ['A', 'AAAA'] }
+      : {}),
+    servers: row.servers.map((server) => server.address),
+    rotate: false,
+    timeout: optionIn(row.resolvConf, 'timeout', 5),
+    attempts: optionIn(row.resolvConf, 'attempts', 2),
+  };
+}
+
+/** A sequence row's run in an image against what it claims, lookup by lookup, as problems. */
+export function sequenceProblems(row: SequenceRow, played: SequenceRun): string[] {
+  const out: string[] = [...(played.setup ?? [])];
+  if (played.lookups.length !== row.lookups.length) {
+    out.push(
+      `played ${String(played.lookups.length)} lookups, and the row has ${String(row.lookups.length)}`,
+    );
+  }
+  for (const [k, lookup] of row.lookups.entries()) {
+    const at = `lookup ${String(k + 1)} (${lookup.name}, family ${String(lookup.family)})`;
+    const ran = played.lookups[k];
+    if (ran === undefined) {
+      out.push(`${at}: not played`);
+      continue;
+    }
+    if (ran.id !== sequenceLookupId(row, k)) out.push(`${at}: played ${ran.id} in its turn`);
+    const said = (why: string): void => {
+      out.push(`${at}: ${why}`);
+    };
+    for (const why of ran.setup ?? []) said(why);
+    const e = sequenceExpectation(row, lookup);
+    const misread = classificationProblem(e, ran.inImage);
+    if (misread !== undefined) said(misread);
+    const edns0 = row.glibcOpt !== 'none';
+    if (ran.edns0 !== edns0) {
+      said(
+        `the policy in the image reads edns0 as ${String(ran.edns0)}, the row says ${String(edns0)}`,
+      );
+    }
+    const plan = ran.plans.find((each) => each.plan === ANSWER_PLAN);
+    if (plan === undefined) {
+      said(`plan ${ANSWER_PLAN} not played`);
+      continue;
+    }
+    if (!isDeepStrictEqual(plan.wire, lookup.wire)) {
+      said(
+        `the row expects ${JSON.stringify(lookup.wire)}, glibc sent ${JSON.stringify(plan.wire)}`,
+      );
+    }
+    if (plan.outcome !== lookup.outcome) {
+      said(`getaddrinfo returned ${plan.outcome}, and the row says ${lookup.outcome}`);
+    }
+    if (plan.ms < WITHIN_MS !== lookup.fast) {
+      said(
+        `glibc returned in ${String(Math.round(plan.ms))} ms (${plan.outcome}), and the row says it returns ${lookup.fast ? 'within' : 'after'} ${String(WITHIN_MS)} ms`,
+      );
+    }
+    if (plan.walk !== undefined && plan.walk.route !== lookup.walk) {
+      said(`the walk was ${plan.walk.route}, and the row says ${lookup.walk}`);
+    }
+    for (const why of [
+      ...walkProblems(e, plan),
+      ...optProblems(plan, row.glibcOpt),
+      ...modesProblems(plan),
+    ]) {
+      said(why);
+    }
+  }
+  return out;
+}
+
+/**
+ * What a sequence row is played in, the one place the replay reads its world from: the answer
+ * rows' world's hosts file and gai.conf with the row's own resolv.conf and nsswitch.conf, the
+ * world's hostname, and its environment.
+ */
+export function sequenceRowWorld(
+  row: SequenceRow,
+  world: AnswerWorld = ANSWER_WORLD,
+): {
+  readonly files: Readonly<Record<string, string>>;
+  readonly hostname: string;
+  readonly env: Readonly<Record<string, string>>;
+} {
+  return {
+    files: {
+      '/etc/hosts': world.hosts,
+      '/etc/resolv.conf': row.resolvConf,
+      '/etc/nsswitch.conf': row.nsswitch,
+      '/etc/gai.conf': world.gai,
+    },
+    hostname: world.hostname,
+    env: world.env,
+  };
+}
+
+/**
+ * Why the box's default routes are not a sequence row's world, or undefined: `ip -4 route show
+ * default` must name its gateway, and `ip -6 route show default` nothing.
+ */
+export function gatewayProblem(gateway: string, v4: string, v6: string): string | undefined {
+  if (!new RegExp(`(^|\\n)default via ${gateway.replaceAll('.', '\\.')} `, 'u').test(v4)) {
+    return `the box has no IPv4 default route via ${gateway}: ${JSON.stringify(v4.trim())}`;
+  }
+  if (v6.trim() !== '') {
+    return `the box has an IPv6 default route, and the row is of a host with none: ${JSON.stringify(v6.trim())}`;
+  }
+  return undefined;
+}
+
 export interface Verified {
   readonly recordings: Recording[];
   /** glibc's wire for each answer row in each image. */
   readonly answerRecordings: Recording[];
+  /** glibc's wire for each lookup of each sequence row in each image. */
+  readonly sequenceRecordings: Recording[];
   readonly problems: string[];
   /** Plans recorded and rows replayed, by image. */
   readonly counts: Record<string, { rows: number; plans: number }>;
@@ -858,17 +1197,18 @@ export function digestOf(bytes: Uint8Array): string {
 }
 
 /**
- * The sha256 of the answer rows and their world, as JSON: they live here rather than in the rows
- * file, and a run names the ones it played as it names the rows file, so recordings of a row since
- * changed (its resolv.conf, a server's behaviour, what it claims) or played in another world (the
- * hosts file, nsswitch.conf, gai.conf, the hostname or the environment) cannot verify, or stand
- * committed, for it.
+ * The sha256 of the answer rows, the sequence rows and their world, as JSON: they live here rather
+ * than in the rows file, and a run names the ones it played as it names the rows file, so
+ * recordings of a row since changed (its resolv.conf, a server's behaviour, a lookup, what it
+ * claims) or played in another world (the hosts file, nsswitch.conf, gai.conf, the hostname or the
+ * environment) cannot verify, or stand committed, for it.
  */
 export function answerRowsDigest(
   rows: readonly AnswerRow[] = ANSWER_ROWS,
   world: AnswerWorld = ANSWER_WORLD,
+  sequences: readonly SequenceRow[] = SEQUENCE_ROWS,
 ): string {
-  return digestOf(Buffer.from(JSON.stringify({ world, rows })));
+  return digestOf(Buffer.from(JSON.stringify({ world, rows, sequences })));
 }
 
 /**
@@ -904,18 +1244,20 @@ export function answerRowWorld(
  * load than `current`, or one that saw its build change while it ran; a row played that the rows
  * do not replay in that image; and an image the rows say goes through systemd-resolved where the
  * run did not see it serve the stub. Each plan whose glibc wire verified is held to its walk, its
- * OPT records and its regression lookups too (`P-460`), and every answer row must be played in
- * every image and hold.
+ * OPT records and its regression lookups too (`P-460`), and every answer row and every sequence
+ * row (`P-462`) must be played in every image and hold.
  */
 export function verify(
   rows: RowsFile,
   runs: readonly ImageRun[],
   current: Current,
   answerRows: readonly AnswerRow[] = ANSWER_ROWS,
+  sequenceRows: readonly SequenceRow[] = SEQUENCE_ROWS,
 ): Verified {
   const problems: string[] = [];
   const recordings: Recording[] = [];
   const answerRecordings: Recording[] = [];
+  const sequenceRecordings: Recording[] = [];
   const counts: Record<string, { rows: number; plans: number }> = {};
   for (const run of runs) {
     if (!Object.hasOwn(rows.images, run.image)) {
@@ -1027,8 +1369,33 @@ export function verify(
         answerRecordings.push(recordingOf(row.id, image, ran, undefined));
       }
     }
+    const sequences = run.sequences ?? [];
+    for (const played of sequences) {
+      if (!sequenceRows.some((row) => row.id === played.id)) {
+        problems.push(`${image}, sequence row ${played.id}: played, and is no sequence row`);
+      }
+    }
+    for (const row of sequenceRows) {
+      const at = `${image}, sequence row ${row.id} (${row.title})`;
+      const found = sequences.filter((each) => each.id === row.id);
+      const played = found[0];
+      if (played === undefined) {
+        problems.push(`${at}: not replayed`);
+        continue;
+      }
+      if (found.length > 1) problems.push(`${at}: played ${String(found.length)} times`);
+      const wrong = sequenceProblems(row, played);
+      for (const why of wrong) problems.push(`${at}: ${why}`);
+      if (wrong.length > 0) continue;
+      for (const [k, lookup] of played.lookups.entries()) {
+        const ran = lookup.plans.find((plan) => plan.plan === ANSWER_PLAN);
+        if (ran !== undefined) {
+          sequenceRecordings.push(recordingOf(sequenceLookupId(row, k), image, ran, undefined));
+        }
+      }
+    }
   }
-  return { recordings, answerRecordings, problems, counts };
+  return { recordings, answerRecordings, sequenceRecordings, problems, counts };
 }
 
 /** Why a run, an image's or a box's, is not of the build the verdict judges by, or nothing. */
@@ -1086,12 +1453,13 @@ export function recordingsFile(runs: readonly ImageRun[], verified: Verified): R
     images,
     recordings: verified.recordings,
     answerRecordings: verified.answerRecordings,
+    sequenceRecordings: verified.sequenceRecordings,
   };
 }
 
 /**
- * A run file as it held it: an image's run, a budget box's or a box with the check off, or why it
- * is none (an empty file is a replay that stopped).
+ * A run file as it held it: an image's run, a budget box's, a box with the check off or a skew
+ * box's, or why it is none (an empty file is a replay that stopped).
  */
 export function parseRun(
   path: string,
@@ -1100,6 +1468,7 @@ export function parseRun(
   | { readonly run: ImageRun }
   | { readonly budget: BudgetRun }
   | { readonly off: OffRun }
+  | { readonly skew: SkewRun }
   | { readonly problem: string } {
   let parsed: unknown;
   try {
@@ -1121,6 +1490,13 @@ export function parseRun(
       return { problem: `${path}: not an off box's run (no case or check)` };
     }
     return { off: off as OffRun };
+  }
+  if (kind === 'skew') {
+    const skew = parsed as Partial<SkewRun>;
+    if (typeof skew.case !== 'string' || typeof skew.image !== 'string') {
+      return { problem: `${path}: not a skew box's run (no case or image)` };
+    }
+    return { skew: skew as SkewRun };
   }
   const run = parsed as Partial<ImageRun> | null;
   if (run === null || typeof run.image !== 'string' || !Array.isArray(run.rows)) {
@@ -1235,9 +1611,19 @@ export function budgetProblems(run: BudgetRun): string[] {
   return out;
 }
 
-// --- the boxes with the check off (`P-461`) -------------------------------------------------------
+// --- the boxes with the check off (`P-461`, `P-462`) ---------------------------------------------
 
-export type OffCase = 'nscd' | 'resolve' | 'mdns4_minimal' | 'ld-preload' | 'ld-so-preload';
+export type OffCase =
+  | 'nscd'
+  | 'resolve'
+  | 'mdns4_minimal'
+  | 'ld-preload'
+  | 'ld-so-preload'
+  | 'sss-first'
+  | 'mdns4-first'
+  | 'files-resolve-dns'
+  | 'stub-refused'
+  | 'localdomain-empty';
 
 /** A box in which the check must be off, in situ: the policy loaded against the box as it is. */
 export interface OffRun {
@@ -1251,6 +1637,16 @@ export interface OffRun {
   readonly nscdSocket: boolean;
   readonly ldPreload: string | undefined;
   readonly ldSoPreload: string | undefined;
+  /** `LOCALDOMAIN` in the process's environment, when it is set, empty or not (`P-462`). */
+  readonly localDomain?: string;
+  /** /etc/resolv.conf as the process read it. */
+  readonly resolvConf?: string;
+  /** Whether a socket is bound to systemd-resolved's stub, 127.0.0.53:53, UDP or TCP. */
+  readonly stubListening?: boolean;
+  /** `systemctl is-active systemd-resolved`, where systemctl runs. */
+  readonly resolved?: string;
+  /** Every NSS module in the box's library directories, by name: `libnss_<name>.so.2`. */
+  readonly nssModules?: readonly string[];
   /** A name the check was asked to route in the box, once it was started: `unvouched:off`. */
   readonly route: string | undefined;
   /**
@@ -1279,6 +1675,50 @@ const hostsLineHas =
     run.hostsLine !== undefined && pattern.test(run.hostsLine)
       ? undefined
       : `the box’s hosts: line is ${JSON.stringify(run.hostsLine)}, with no ${what}`;
+
+/** The module the hosts: line names is installed, as an operator who wrote the line has it. */
+const installed =
+  (module: string) =>
+  (run: OffRun): string | undefined =>
+    (run.nssModules ?? []).includes(module)
+      ? undefined
+      : `libnss_${module}.so.2 is not installed in the box (${JSON.stringify(run.nssModules ?? [])})`;
+
+/** Every check of a case, the first that fails said. */
+const allOf =
+  (...checks: readonly ((run: OffRun) => string | undefined)[]) =>
+  (run: OffRun): string | undefined => {
+    for (const check of checks) {
+      const why = check(run);
+      if (why !== undefined) return why;
+    }
+    return undefined;
+  };
+
+/**
+ * Whether a socket is bound to `address`:`port` (IPv4) in /proc/net/udp or /proc/net/tcp's text:
+ * `local_address` is the address as a little-endian hex word and the port in hex, `0100007F:0035`
+ * for 127.0.0.1:53. Over TCP only a listener counts (`st` 0A).
+ */
+export function boundIn(
+  procText: string,
+  address: string,
+  port: number,
+  transport: 'udp' | 'tcp',
+): boolean {
+  const octets = address.split('.').map(Number);
+  const word = [...octets]
+    .reverse()
+    .map((octet) => octet.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
+  const local = `${word}:${port.toString(16).padStart(4, '0').toUpperCase()}`;
+  return procText.split('\n').some((line) => {
+    const fields = line.trim().split(/\s+/u);
+    if (fields[1]?.toUpperCase() !== local) return false;
+    return transport === 'udp' || fields[3]?.toUpperCase() === '0A';
+  });
+}
 
 /** Each box with the check off, by the rule it must be off by. */
 export const OFF_CASES: Readonly<Record<OffCase, OffCaseClaim>> = {
@@ -1317,6 +1757,62 @@ export const OFF_CASES: Readonly<Record<OffCase, OffCaseClaim>> = {
         ? undefined
         : '/etc/ld.so.preload is empty or absent in the box',
   },
+  // §7.5's other rows the check is off for (`P-462`). Each hosts: line below has no action
+  // group, so the rule is seen naming the source it does not take.
+  'sss-first': {
+    image: 'debian12',
+    code: 'nsswitch',
+    why: /names "sss"/u,
+    inSitu: allOf(hostsLineHas(/^sss files dns$/u, 'sss before files'), installed('sss')),
+  },
+  'mdns4-first': {
+    image: 'debian12',
+    code: 'nsswitch',
+    why: /names "mdns4_minimal"/u,
+    inSitu: allOf(
+      hostsLineHas(/^mdns4_minimal files dns$/u, 'mdns4_minimal before files'),
+      installed('mdns4_minimal'),
+    ),
+  },
+  'files-resolve-dns': {
+    image: 'ubuntu2404',
+    code: 'nsswitch',
+    why: /names "resolve"/u,
+    inSitu: allOf(hostsLineHas(/^files resolve dns$/u, 'files resolve dns'), installed('resolve')),
+  },
+  // systemd-resolved running with `DNSStubListener=no`, resolv.conf a file of its own naming the
+  // stub (resolved's stub file as written while the stub listened), and the hosts: line
+  // libnss-resolve wrote: glibc goes to resolved over varlink, and the stub refuses.
+  'stub-refused': {
+    image: 'ubuntu2404',
+    code: 'nsswitch',
+    why: /hosts: line/u,
+    inSitu: allOf(
+      (run) =>
+        run.resolved === 'active'
+          ? undefined
+          : `systemd-resolved is ${String(run.resolved)}, not active`,
+      (run) =>
+        run.stubListening === false
+          ? undefined
+          : `the stub is ${run.stubListening === true ? 'listening' : 'not looked at'} on ${STUB}:53`,
+      (run) =>
+        isDeepStrictEqual(nameserversOf(run.resolvConf ?? ''), [STUB])
+          ? undefined
+          : `resolv.conf names ${JSON.stringify(nameserversOf(run.resolvConf ?? ''))}, not the stub alone`,
+      hostsLineHas(/(^|\s)resolve(\s|$)/u, 'resolve'),
+      installed('resolve'),
+    ),
+  },
+  'localdomain-empty': {
+    image: 'debian12',
+    code: 'env',
+    why: /LOCALDOMAIN is set/u,
+    inSitu: (run) =>
+      run.localDomain === ''
+        ? undefined
+        : `LOCALDOMAIN is ${run.localDomain === undefined ? 'unset' : JSON.stringify(run.localDomain)} in the box, not set and empty`,
+  },
 };
 
 /**
@@ -1351,14 +1847,212 @@ export function offProblems(run: OffRun): string[] {
   return out;
 }
 
+// --- the boxes with a file edited mid-run (`P-462`, D28) -----------------------------------------
+
+export type SkewCase = 'gai' | 'nsswitch-frozen' | 'nsswitch-reloaded';
+
+/** What a skew box's case edits, and what D28 says of it at the image's glibc. */
+interface SkewClaim {
+  readonly image: string;
+  readonly file: string;
+  /** The file's text after the edit: a shape the check takes, so that only the move turns it off. */
+  readonly edit: string;
+  /**
+   * Whether this glibc reads the file once per process (D28): gai.conf with no `reload yes`, and
+   * nsswitch.conf below 2.33. A read-once file edited marks the helper skewed, and its next loss
+   * rests it until ms-probe restarts; any other file's edit turns the check off and nothing more.
+   */
+  readonly readOnce: boolean;
+}
+
+/** The text a skew box writes before ms-probe starts: one the check is on for. */
+export const SKEW_WORLD: Readonly<Record<string, string>> = {
+  '/etc/hosts': ANSWER_WORLD.hosts,
+  '/etc/resolv.conf': `nameserver ${S1}\n`,
+  '/etc/nsswitch.conf': 'hosts: files dns\n',
+  '/etc/gai.conf': '',
+};
+
+export const SKEW_CASES: Readonly<Record<SkewCase, SkewClaim>> = {
+  gai: {
+    image: 'debian12',
+    file: '/etc/gai.conf',
+    edit: 'precedence ::ffff:0:0/96 100\n',
+    readOnce: true,
+  },
+  'nsswitch-frozen': {
+    image: 'debian11',
+    file: '/etc/nsswitch.conf',
+    edit: 'hosts: files myhostname dns\n',
+    readOnce: true,
+  },
+  'nsswitch-reloaded': {
+    image: 'debian12',
+    file: '/etc/nsswitch.conf',
+    edit: 'hosts: files myhostname dns\n',
+    readOnce: false,
+  },
+};
+
 /**
- * Every budget box and box with the check off, each run once, of the build the verdict judges by,
- * and holding.
+ * A skew box (`names-skew.ts`): ms-probe's name resolution in gate mode, as ms-probe builds it, in
+ * a box with the check on; then the case's file edited mid-run; then the lookup helper's child
+ * SIGKILLed from outside. Each phase as the box read it.
+ */
+export interface SkewRun {
+  readonly kind: 'skew';
+  readonly case: SkewCase;
+  readonly image: string;
+  readonly glibc: string | null | undefined;
+  /** Before the edit: the policy, the check's state (1 on and proven), the helper, a lookup. */
+  readonly before?: {
+    readonly check: 'on' | 'off';
+    readonly checkState: number | undefined;
+    readonly helper: string;
+    readonly answered: string;
+  };
+  /** Once the watch had looked after the edit. */
+  readonly edited?: {
+    readonly check: 'on' | 'off';
+    readonly off?: { readonly code: string; readonly why: string };
+    readonly readOnce: readonly string[];
+    readonly skewed: boolean;
+    /** The files the helper said to restart ms-probe for ("<file> changed: restart …"). */
+    readonly restartSaid: readonly string[];
+  };
+  /** After the child was SIGKILLed and the helper had settled, and held there a while. */
+  readonly killed?: {
+    readonly helper: string;
+    readonly route: string;
+    /** The rest's length when on a timer; absent for a rest until restart, or no rest. */
+    readonly restMs?: number;
+    /** Whether a child other than the one killed was up. */
+    readonly respawned: boolean;
+    /** Probe Health's `nameResolverMode`: 2 gate, 3 gate with the helper resting. */
+    readonly mode: number;
+    /** The helper's trouble latch, `lookupHelperTrouble`. */
+    readonly trouble: number;
+    /** How often the helper said it rests until ms-probe restarts. */
+    readonly restingSaid: number;
+    /** A name asked then, and how many lookups it sent to the helper. */
+    readonly answered: string;
+    readonly toHelper: number;
+  };
+  readonly setup?: readonly string[];
+  readonly buildDigest: string;
+  readonly rebuilt?: string;
+}
+
+/**
+ * A skew box against D28 and the allowlist's rule 6: the check on and proven, the helper up and a
+ * name answered before the edit; after it, the check off by `skew` naming the file, and the helper
+ * marked skewed, saying to restart ms-probe, if and only if this glibc reads the file once. After
+ * the SIGKILL, a skewed helper rests until restart: resting with no timer and no new child, gate
+ * mode reported resting (3), the trouble latch set, and names asked as with `system`, none sent to
+ * the helper. A helper not skewed is up again in a new child, with the latch clear, and the check
+ * being off, its names go to the helper.
+ */
+export function skewProblems(run: SkewRun): string[] {
+  const claim = SKEW_CASES[run.case];
+  const at = `skew box ${run.case}`;
+  const out: string[] = (run.setup ?? []).map((why) => `${at}: ${why}`);
+  const said = (why: string): void => {
+    out.push(`${at}: ${why}`);
+  };
+  if (run.image !== claim.image) said(`ran in ${run.image}, not ${claim.image}`);
+  const before = run.before;
+  if (before === undefined) said('the check before the edit was not recorded');
+  else {
+    if (before.check !== 'on' || before.checkState !== 1) {
+      said(
+        `the check was not on and proven before the edit (${before.check}, nameCheckState ${String(before.checkState)})`,
+      );
+    }
+    if (before.helper !== 'up') said(`the helper was ${before.helper} before the edit, not up`);
+    if (!before.answered.startsWith('answer:')) {
+      said(`a name was not answered before the edit: ${before.answered}`);
+    }
+  }
+  const edited = run.edited;
+  if (edited === undefined) said('the check after the edit was not recorded');
+  else {
+    if (
+      edited.check !== 'off' ||
+      edited.off?.code !== 'skew' ||
+      !edited.off.why.includes(claim.file)
+    ) {
+      const was =
+        edited.check === 'on' || edited.off === undefined
+          ? edited.check
+          : `off by ${edited.off.code} (${edited.off.why})`;
+      said(`after ${claim.file} was edited the check was ${was}, not off by skew naming it`);
+    }
+    const once = edited.readOnce.includes(claim.file);
+    if (once !== claim.readOnce) {
+      said(
+        `the policy reads ${claim.file} as ${once ? '' : 'not '}read once at this glibc, and D28 says ${claim.readOnce ? 'it is' : 'it is not'}`,
+      );
+    }
+    if (edited.skewed !== claim.readOnce) {
+      said(`the policy said a new helper would ${edited.skewed ? '' : 'not '}read otherwise`);
+    }
+    const restart = claim.readOnce ? [claim.file] : [];
+    if (!isDeepStrictEqual(edited.restartSaid, restart)) {
+      said(
+        `the helper said to restart ms-probe for ${JSON.stringify(edited.restartSaid)}, and D28 says ${JSON.stringify(restart)}`,
+      );
+    }
+  }
+  const killed = run.killed;
+  if (killed === undefined) {
+    said('the helper after its SIGKILL was not recorded');
+    return out;
+  }
+  if (!killed.answered.startsWith('answer:')) {
+    said(`a name was not answered after the SIGKILL: ${killed.answered}`);
+  }
+  if (claim.readOnce) {
+    if (
+      killed.helper !== 'resting' ||
+      killed.route !== 'resting' ||
+      killed.restMs !== undefined ||
+      killed.respawned
+    ) {
+      said(
+        `the helper was ${killed.helper} (route ${killed.route}${killed.restMs === undefined ? '' : `, for ${String(killed.restMs)} ms`}${killed.respawned ? ', a new child up' : ''}), not resting until ms-probe restarts`,
+      );
+    }
+    if (killed.mode !== 3) said(`Probe Health said nameResolverMode ${String(killed.mode)}, not 3`);
+    if (killed.trouble !== 1) said(`the trouble latch was ${String(killed.trouble)}, not set`);
+    if (killed.restingSaid < 1) said('the helper never said it rests until ms-probe restarts');
+    if (killed.toHelper !== 0) {
+      said(`${String(killed.toHelper)} lookups went to a resting helper, not asked as with system`);
+    }
+  } else {
+    if (killed.helper !== 'up' || !killed.respawned) {
+      said(
+        `the helper was ${killed.helper}${killed.respawned ? '' : ' with no new child'}, not up again in a new child`,
+      );
+    }
+    if (killed.mode !== 2) said(`Probe Health said nameResolverMode ${String(killed.mode)}, not 2`);
+    if (killed.trouble !== 0) said(`the trouble latch was set after one loss`);
+    if (killed.restingSaid !== 0) said('the helper said it rests until ms-probe restarts');
+    if (killed.toHelper < 1) {
+      said('no lookup went to the helper with the check off and the helper up');
+    }
+  }
+  return out;
+}
+
+/**
+ * Every budget box, box with the check off and skew box, each run once, of the build the verdict
+ * judges by, and holding.
  */
 export function verifyBoxes(
   budget: readonly BudgetRun[],
   off: readonly OffRun[],
   current: Pick<Current, 'buildDigest'>,
+  skew: readonly SkewRun[] = [],
 ): string[] {
   const out: string[] = [];
   for (const forwarder of Object.keys(BUDGET_BOXES) as Forwarder[]) {
@@ -1385,6 +2079,18 @@ export function verifyBoxes(
   }
   for (const run of off) {
     if (!Object.hasOwn(OFF_CASES, run.case)) out.push(`off box ${run.case}: no such box`);
+  }
+  for (const name of Object.keys(SKEW_CASES) as SkewCase[]) {
+    const found = skew.filter((run) => run.case === name);
+    if (found.length === 0) out.push(`skew box ${name}: not run`);
+    if (found.length > 1) out.push(`skew box ${name}: run ${String(found.length)} times`);
+    for (const run of found) {
+      out.push(...buildProblems(`skew box ${name}`, run, current));
+      out.push(...skewProblems(run));
+    }
+  }
+  for (const run of skew) {
+    if (!Object.hasOwn(SKEW_CASES, run.case)) out.push(`skew box ${run.case}: no such box`);
   }
   return out;
 }

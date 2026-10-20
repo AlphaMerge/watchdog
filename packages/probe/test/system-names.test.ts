@@ -1739,6 +1739,9 @@ describe('numeric names and the hosts file', () => {
     assert.equal(has('localhost'), '46');
     assert.equal(has('printer-alias'), '4', 'names in lower case (strcasecmp)');
     assert.equal(has('router'), '-', 'a %scope is no address to inet_pton');
+    // Nor one naming an interface the box has (`P-462`): inet_pton reads no scope at all.
+    assert.equal(hostsTable(SCOPED_HOSTS).has('routerlo'), false);
+    assert.equal(hostsTable(SCOPED_HOSTS).has('localhost'), true);
     assert.equal(has('router6'), '6');
     assert.equal(has('ip6-localhost'), '46', '::1 is 127.0.0.1 for AF_INET');
     assert.equal(has('ip6-loopback'), '46');
@@ -3041,6 +3044,14 @@ interface S8Source {
   readonly family: Family;
 }
 
+/**
+ * A `%scope` hosts line naming an interface every box has (`P-462`): HOSTS' `fe80::1%eth0` names
+ * one no box has, so glibc skipping it could be its interface lookup failing. glibc's `files`
+ * reads the address with `inet_pton`, which takes no `%scope` whatever the interface
+ * (nss/nss_files/files-hosts.c `LINE_PARSER`), so this line is skipped too, and the name walked.
+ */
+const SCOPED_HOSTS = '127.0.0.1 localhost\nfe80::3%lo routerlo\n';
+
 const S8_SOURCES: readonly S8Source[] = [
   ...CLASS_WORLDS.filter((world) => world.exported).flatMap((world) =>
     NAMES.flatMap(([name]) =>
@@ -3065,6 +3076,12 @@ const S8_SOURCES: readonly S8Source[] = [
     fixture: resolvFixture(row),
     name: 'sw1',
     family: 0,
+  })),
+  ...FAMILIES.map((family) => ({
+    title: `a %scope hosts line naming an interface the box has (lo) is skipped: routerlo, family ${String(family)}`,
+    fixture: { nsswitch: FD, resolv: CORP, hosts: SCOPED_HOSTS },
+    name: 'routerlo',
+    family,
   })),
 ];
 

@@ -40,16 +40,17 @@ ms_names_diff_stale() {
   return "${stale}"
 }
 
-# `ms_names_diff_counts <image> <replay log>`: how many of S4's rows and of the answer rows the
-# replay played in the image, by its line for each (`<image> <row id> <title>: …`), where an S4
-# row's id is 16 hex digits and an answer row's begins `answer-`. Anything else the replay said on
-# stderr is no row.
+# `ms_names_diff_counts <image> <replay log>`: how many of S4's rows, of the answer rows and of
+# the sequence rows the replay played in the image, by its line for each (`<image> <row id>
+# <title>: …`), where an S4 row's id is 16 hex digits, an answer row's begins `answer-` and a
+# sequence row's `sequence-`. Anything else the replay said on stderr is no row.
 ms_names_diff_counts() {
   local image="$1" log="$2"
   awk -v image="${image}" '
     $1 == image && length($2) == 16 && $2 ~ /^[0-9a-f]+$/ { rows += 1 }
     $1 == image && $2 ~ /^answer-/ { answers += 1 }
-    END { printf "%d rows and %d answer rows\n", rows, answers }
+    $1 == image && $2 ~ /^sequence-/ { sequences += 1 }
+    END { printf "%d rows, %d answer rows and %d sequence rows\n", rows, answers, sequences }
   ' "${log}"
 }
 

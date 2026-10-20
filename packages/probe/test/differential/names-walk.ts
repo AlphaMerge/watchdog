@@ -15,6 +15,10 @@ import type { ModesReply, ModesRequest } from './names-modes.js';
  *    and the stub's capture on.
  * 4. `walk`: the check routes the name alone, and the wire is what the servers saw since 3.
  * 5. `answers`, then `release`.
+ *
+ * A sequence row (`walkSequence`, `P-462`) takes the same steps with each of its lookups in turn
+ * through the one check proven in 2: each walk with the log cleared before it, so its wire is its
+ * own, then each lookup's regression in the same order, then `release`.
  */
 
 /** What every server answers while the checks are proven: NXDOMAIN, as one no plan has set. */
@@ -86,4 +90,45 @@ export async function walkAndModes(
     modes: answered.modes,
     setup,
   };
+}
+
+/** A sequence row's lookups played after glibc's, as `walkAndModes` plays one plan's. */
+export interface RecordedSequence {
+  readonly walks: readonly WalkRun[];
+  readonly modes: readonly ModesRun[];
+  readonly setup: string[];
+}
+
+/**
+ * Recording (B) of a sequence row's lookups, and their regression lookups (`P-462`): every server
+ * of `servers` neutral, the checks proven, then the row's answers set, and each lookup walked in
+ * turn by the one check, the log cleared before each so that each wire is that walk's alone; then
+ * each lookup's regression in the same order.
+ */
+export async function walkSequence(
+  modes: ModesChannel,
+  sim: WalkSimulator,
+  servers: readonly string[],
+  setPlan: () => Promise<void>,
+  lookups: readonly { readonly host: string; readonly family: 0 | 4 | 6 }[],
+): Promise<RecordedSequence> {
+  const setup: string[] = [];
+  for (const server of servers) await sim.set({ fallback: true }, NEUTRAL, server);
+  const prepared = await modes.request({ op: 'prepare' }, 'prepared');
+  if (!prepared.walkProven) setup.push('the walk’s check was not proven by its canary');
+  if (!prepared.gateProven) setup.push('gate mode’s check was not proven by its canary');
+  await setPlan();
+  const walks: WalkRun[] = [];
+  for (const lookup of lookups) {
+    await sim.clearLog();
+    const walked = await modes.request({ op: 'walk', ...lookup }, 'walked');
+    const asked = askedOf(await sim.log());
+    walks.push({ route: walked.route, wire: wireOf(asked), opt: optOf(asked), ms: walked.ms });
+  }
+  const answered: ModesRun[] = [];
+  for (const lookup of lookups) {
+    answered.push((await modes.request({ op: 'answers', ...lookup }, 'answered')).modes);
+  }
+  await modes.request({ op: 'release' }, 'released');
+  return { walks, modes: answered, setup };
 }

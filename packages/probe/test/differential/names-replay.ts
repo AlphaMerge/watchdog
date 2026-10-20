@@ -20,16 +20,22 @@ import {
   ANSWER_ROWS,
   ANSWER_WORLD,
   NAMESERVER,
+  SEQUENCE_CACHED,
+  SEQUENCE_GATEWAY_LINK,
+  SEQUENCE_ROWS,
   STUB,
   answerRowWorld,
   answerRowsDigest,
   digestOf,
   expectationIn,
+  gatewayProblem,
   listenerOf,
   nameserversOf,
   optOf,
   pcapQuestions,
   resolvedObserved,
+  sequenceLookupId,
+  sequenceRowWorld,
   unplayable,
   wireOf,
   type AnswerRow,
@@ -44,9 +50,17 @@ import {
   type Row,
   type RowRun,
   type RowsFile,
+  type SequenceRow,
+  type SequenceRun,
 } from './names-differential.js';
 import type { ModesReply, ModesRequest } from './names-modes.js';
-import { askedOf, walkAndModes, type ModesChannel, type StubSteps } from './names-walk.js';
+import {
+  askedOf,
+  walkAndModes,
+  walkSequence,
+  type ModesChannel,
+  type StubSteps,
+} from './names-walk.js';
 
 /**
  * The differential's replay in one image (`P-432` S8, D30): run as root in a box from
@@ -79,7 +93,11 @@ import { askedOf, walkAndModes, type ModesChannel, type StubSteps } from './name
  *    `system` and in `gate` mode, in the helper's child, and on the probe's own lanes.
  *
  * Then each answer row (`ANSWER_ROWS`), with a simulator of its own whose servers' TCP may be
- * closed, played the same way.
+ * closed, played the same way. Then each sequence row (`SEQUENCE_ROWS`, `P-462`): its world, and
+ * where it says, an IPv4 default gateway on a link of its own with no IPv6, seen in the box's
+ * routes; glibc's wire for each lookup in turn, each in a process of its own; then every lookup
+ * walked in turn by one check, and each one's regression (`walkSequence`). The gateway's link is
+ * removed after the row.
  *
  * **systemd-resolved** (`--via-resolved`, Ubuntu 24.04): the box boots systemd with resolved
  * running, and a row whose server is its stub, 127.0.0.53, is played through it. resolved's
@@ -643,6 +661,139 @@ async function playAnswerRow(
   }
 }
 
+/**
+ * A sequence row's gateway (`P-462`): a dummy link of its own with no IPv6, its address `.1` of
+ * the gateway's /24, and an IPv4 default route through the gateway at metric 10, beside any the
+ * box has (Ubuntu 24.04's resolved box routes by `ms0`, with no gateway). What could not be set up
+ * is returned, and so is a box whose default routes are then not the row's world.
+ */
+async function addGateway(gateway: string): Promise<string[]> {
+  const link = SEQUENCE_GATEWAY_LINK;
+  const address = `${gateway.split('.').slice(0, 3).join('.')}.1/24`;
+  try {
+    await run('ip', ['link', 'add', link, 'type', 'dummy']);
+    try {
+      writeFileSync(`/proc/sys/net/ipv6/conf/${link}/disable_ipv6`, '1');
+    } catch {
+      // A box with no IPv6 at all: the link has none either way.
+    }
+    await run('ip', ['addr', 'add', address, 'dev', link]);
+    await run('ip', ['link', 'set', link, 'up']);
+    await run('ip', ['route', 'add', 'default', 'via', gateway, 'dev', link, 'metric', '10']);
+    const v4 = (await run('ip', ['-4', 'route', 'show', 'default'])).stdout;
+    const v6 = (await run('ip', ['-6', 'route', 'show', 'default'])).stdout;
+    const unlike = gatewayProblem(gateway, v4, v6);
+    return unlike === undefined ? [] : [unlike];
+  } catch (error: unknown) {
+    return [`could not set the gateway ${gateway} up: ${String(error)}`];
+  }
+}
+
+async function removeGateway(): Promise<void> {
+  try {
+    await run('ip', ['link', 'del', SEQUENCE_GATEWAY_LINK]);
+  } catch {
+    // Never added: the setup said so.
+  }
+}
+
+/**
+ * A sequence row (`SEQUENCE_ROWS`, `P-462`): in the world the run's digest names, with a simulator
+ * of its own whose servers may cache some names, glibc's wire for each lookup in turn, then the
+ * walks and the regressions of every lookup in turn through one check.
+ */
+async function playSequenceRow(
+  row: SequenceRow,
+  world: AnswerWorld,
+  ipv6: boolean,
+): Promise<{ run: SequenceRun; glibc: string | undefined }> {
+  const played = sequenceRowWorld(row, world);
+  const setup = writeFiles(played.files, played.hostname);
+  const env = envOf(played.env);
+  if (row.gateway !== undefined) setup.push(...(await addGateway(row.gateway)));
+  try {
+    const reads: Read[] = [];
+    for (const lookup of row.lookups) reads.push(await inImageOf(env, lookup.name, lookup.family));
+    const specs: DnsServerSpec[] = [];
+    for (const server of row.servers) {
+      await onLoopback(server.address, false);
+      specs.push({
+        ...NAMESERVER,
+        name: server.address,
+        address: server.address,
+        port: 53,
+        ipv6: false,
+        ...(server.cached === undefined ? {} : { cache: true }),
+      });
+    }
+    let spare = 1;
+    strays(specs, ipv6, () => `127.0.1.${String(spare++)}`);
+    const sim = await DnsSimulator.start({ servers: specs, ipv6: false });
+    const setPlan = async (): Promise<void> => {
+      for (const server of row.servers) {
+        await sim.set({ fallback: true }, server.behaviour, server.address);
+        if (server.cached !== undefined) {
+          await sim.prime(
+            server.cached.map((name) => ({ name, addresses: SEQUENCE_CACHED, ttl: 300 })),
+            server.address,
+          );
+        }
+      }
+    };
+    const first = row.lookups[0];
+    const modes = Modes.start(first?.name ?? '', first?.family ?? 0, env);
+    try {
+      await setPlan();
+      // (A) glibc's wire, each lookup in turn in a process of its own.
+      const glibc: { asked: Asked[]; looked: Lookup }[] = [];
+      for (const lookup of row.lookups) {
+        await sim.clearLog();
+        const looked = await lookUp(lookup.name, lookup.family, env);
+        await sleep(SETTLE_MS);
+        glibc.push({ asked: askedOf(await sim.log()), looked });
+      }
+      // (B) every lookup walked in turn by one check, then each one's regression.
+      const recorded = await walkSequence(
+        modes,
+        sim,
+        specs.map((spec) => spec.name),
+        setPlan,
+        row.lookups.map((lookup) => ({ host: lookup.name, family: lookup.family })),
+      );
+      setup.push(...recorded.setup);
+      const lookups: RowRun[] = row.lookups.map((_, k): RowRun => {
+        const read = reads[k];
+        const asked = glibc[k]?.asked ?? [];
+        return {
+          id: sequenceLookupId(row, k),
+          inImage: read?.inImage ?? { class: 'off', off: 'not read' },
+          ...(read?.edns0 === undefined ? {} : { edns0: read.edns0 }),
+          plans: [
+            {
+              plan: ANSWER_PLAN,
+              wire: wireOf(asked),
+              opt: optOf(asked),
+              outcome: glibc[k]?.looked.outcome ?? 'not looked up',
+              ms: glibc[k]?.looked.ms ?? 0,
+              ...(recorded.walks[k] === undefined ? {} : { walk: recorded.walks[k] }),
+              ...(recorded.modes[k] === undefined ? {} : { modes: recorded.modes[k] }),
+            },
+          ],
+        };
+      });
+      return {
+        run: { id: row.id, lookups, ...(setup.length > 0 ? { setup } : {}) },
+        glibc: reads[0]?.glibc,
+      };
+    } finally {
+      await modes.stop();
+      await sim.stop();
+    }
+  } finally {
+    if (row.gateway !== undefined) await removeGateway();
+  }
+}
+
 const planLine = (p: PlanRun): string =>
   `${p.plan} ${String(p.wire.length)}q, walk ${p.walk?.route ?? '?'} ${String(p.walk?.wire.length ?? 0)}q`;
 
@@ -684,6 +835,19 @@ async function main(): Promise<void> {
         `(${String(Math.round(performance.now() - started))} ms)`,
     );
   }
+  const sequences: SequenceRun[] = [];
+  for (const row of SEQUENCE_ROWS) {
+    if (a.only !== undefined && !a.only.includes(row.id)) continue;
+    build.look(`before sequence row ${row.id}`);
+    const started = performance.now();
+    const played = await playSequenceRow(row, world, ipv6);
+    glibc ??= played.glibc;
+    sequences.push(played.run);
+    say(
+      `${a.image} ${row.id} ${row.title}: ${played.run.lookups.flatMap((lookup) => lookup.plans.map(planLine)).join(', ')} ` +
+        `(${String(Math.round(performance.now() - started))} ms)`,
+    );
+  }
   build.look('at the end');
   const image: ImageRun = {
     image: a.image,
@@ -698,6 +862,7 @@ async function main(): Promise<void> {
     resolved: a.viaResolved && resolvedObserved(runs),
     rows: runs,
     answers,
+    sequences,
   };
   process.stdout.write(`${JSON.stringify(image)}\n`);
 }

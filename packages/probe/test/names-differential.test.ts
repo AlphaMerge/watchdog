@@ -19,18 +19,26 @@ import {
   BUDGET_NAMES,
   NAMESERVER,
   OFF_CASES,
+  SEQUENCE_GATEWAY,
+  SEQUENCE_GATEWAY_LINK,
+  SEQUENCE_ROWS,
+  SKEW_CASES,
+  SKEW_WORLD,
   STUB,
+  UNVOUCHED_ROUTE,
   WITHIN_MS,
   answerExpectation,
   answerProblems,
   answerRowWorld,
   answerRowsDigest,
+  boundIn,
   budgetProblems,
   canonicalAddress,
   classificationProblem,
   digestOf,
   expectationIn,
   firstAsks,
+  gatewayProblem,
   judgePlan,
   listenerOf,
   modesProblems,
@@ -42,6 +50,11 @@ import {
   pcapQuestions,
   recordingsFile,
   resolvedObserved,
+  sequenceExpectation,
+  sequenceLookupId,
+  sequenceProblems,
+  sequenceRowWorld,
+  skewProblems,
   unplayable,
   verify as verifyAt,
   verifyBoxes as verifyBoxesAt,
@@ -65,6 +78,10 @@ import {
   type Row,
   type RowRun,
   type RowsFile,
+  type SequenceRow,
+  type SequenceRun,
+  type SkewCase,
+  type SkewRun,
   type WalkRun,
   type Wire,
 } from './differential/names-differential.js';
@@ -72,6 +89,7 @@ import type { ModesReply, ModesRequest } from './differential/names-modes.js';
 import {
   NEUTRAL,
   walkAndModes,
+  walkSequence,
   type ModesChannel,
   type WalkSimulator,
 } from './differential/names-walk.js';
@@ -174,6 +192,7 @@ function classified(e: Expectation): InImage {
   return {
     class: e.class,
     ...(e.via === undefined ? {} : { via: e.via }),
+    ...(e.reason === undefined ? {} : { reason: e.reason }),
     ...(e.candidates === undefined ? {} : { candidates: e.candidates }),
     ...(e.types === undefined ? {} : { types: e.types }),
     servers: e.servers,
@@ -240,7 +259,7 @@ function faithfulWalk(e: Expectation, plan: Plan, wire: readonly Wire[]): WalkRu
 const modesFor = (route: string): ModesRun => ({
   system: ANSWERED,
   gate: ANSWERED,
-  gateRan: route === 'silent' ? 'helper' : 'lanes',
+  gateRan: route === 'silent' || route === UNVOUCHED_ROUTE ? 'helper' : 'lanes',
   helper: ANSWERED,
   lanes: ANSWERED,
 });
@@ -272,6 +291,40 @@ function faithfulAnswer(row: AnswerRow): RowRun {
         modes: modesFor(row.walk),
       },
     ],
+  };
+}
+
+/** A sequence row played by a glibc and a check that did what it claims, lookup by lookup. */
+function faithfulSequence(row: SequenceRow): SequenceRun {
+  return {
+    id: row.id,
+    lookups: row.lookups.map((lookup, k): RowRun => {
+      const walked =
+        lookup.walk === UNVOUCHED_ROUTE
+          ? []
+          : firstWire(lookup.wire).slice(0, lookup.walk === 'heard' ? undefined : 1);
+      return {
+        id: sequenceLookupId(row, k),
+        inImage: classified({ ...sequenceExpectation(row, lookup), plans: [] }),
+        edns0: row.glibcOpt !== 'none',
+        plans: [
+          {
+            plan: ANSWER_PLAN,
+            wire: lookup.wire,
+            opt: optFor(row.glibcOpt, lookup.wire),
+            outcome: lookup.outcome,
+            ms: lookup.fast ? 3 : 1_005,
+            walk: {
+              route: lookup.walk,
+              wire: walked,
+              opt: walked.map(() => false),
+              ms: lookup.walk === 'silent' ? 251 : 2,
+            },
+            modes: modesFor(lookup.walk),
+          },
+        ],
+      };
+    }),
   };
 }
 
@@ -314,6 +367,7 @@ function faithful(rows: RowsFile, image: string, glibc = rows.images[image]): Im
     resolved: rows.resolved.includes(image),
     rows: out,
     answers: ANSWER_ROWS.map(faithfulAnswer),
+    sequences: SEQUENCE_ROWS.map(faithfulSequence),
   };
 }
 
@@ -891,6 +945,11 @@ describe('the differential: the verdict over the files the runs left', () => {
           writeFileSync(path, JSON.stringify(offRun(name, built)));
           return path;
         }),
+        ...(Object.keys(SKEW_CASES) as SkewCase[]).map((name) => {
+          const path = join(dir, `skew-${name}.json`);
+          writeFileSync(path, JSON.stringify(skewRun(name, built)));
+          return path;
+        }),
       ];
       const verdict = (...runs: string[]): ReturnType<typeof spawnSync> =>
         spawnSync(process.execPath, [VERIFY, rowsPath, ...runs, ...boxes], {
@@ -924,6 +983,11 @@ describe('the differential: the verdict over the files the runs left', () => {
         String(passed.stderr),
         /^off nscd in debian12: check off by nscd .*, route unvouched:off, 0 questions asked$/mu,
       );
+      assert.match(
+        String(passed.stderr),
+        /^skew gai in debian12 \(glibc 2\.36\): after the edit the check off by skew, restart said for \["\/etc\/gai\.conf"\]; after the SIGKILL the helper resting, mode 3, trouble 1, 0 lookups to the helper$/mu,
+      );
+      assert.match(String(passed.stderr), /^sequence rows: \d+ lookups recorded$/mu);
       const recorded = file.images['debian12'];
       assert.ok(recorded !== undefined);
       assert.equal(recorded.rowsDigest, current.rowsDigest);
@@ -1923,6 +1987,12 @@ function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
         'ld-preload':
           'LD_PRELOAD is set in ms-probe’s environment: what ld.so loads with it may answer for glibc',
         'ld-so-preload': '/etc/ld.so.preload is not empty: ld.so loads what it names',
+        'sss-first': 'nsswitch.conf’s hosts: line names "sss"',
+        'mdns4-first': 'nsswitch.conf’s hosts: line names "mdns4_minimal"',
+        'files-resolve-dns': 'nsswitch.conf’s hosts: line names "resolve"',
+        'stub-refused': 'nsswitch.conf’s hosts: line has an action group',
+        'localdomain-empty':
+          'LOCALDOMAIN is set in ms-probe’s environment, and glibc’s resolver reads it',
       }[name],
     },
     hostsLine: {
@@ -1931,11 +2001,29 @@ function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
       mdns4_minimal: 'files mdns4_minimal [NOTFOUND=return] dns',
       'ld-preload': 'files dns',
       'ld-so-preload': 'files dns',
+      'sss-first': 'sss files dns',
+      'mdns4-first': 'mdns4_minimal files dns',
+      'files-resolve-dns': 'files resolve dns',
+      'stub-refused': 'files resolve [!UNAVAIL=return] dns myhostname',
+      'localdomain-empty': 'files dns',
     }[name],
     nscdSocket: name === 'nscd',
     ldPreload: name === 'ld-preload' ? '/usr/lib/aarch64-linux-gnu/libresolv.so.2' : undefined,
     ldSoPreload:
       name === 'ld-so-preload' ? '/usr/lib/aarch64-linux-gnu/libresolv.so.2\n' : undefined,
+    ...(name === 'localdomain-empty' ? { localDomain: '' } : {}),
+    resolvConf:
+      name === 'stub-refused'
+        ? 'nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n'
+        : 'nameserver 10.0.0.53\n',
+    stubListening: false,
+    ...(name === 'stub-refused' ? { resolved: 'active' } : {}),
+    nssModules: {
+      'sss-first': ['dns', 'files', 'sss'],
+      'mdns4-first': ['dns', 'files', 'mdns', 'mdns4', 'mdns4_minimal', 'myhostname'],
+      'files-resolve-dns': ['myhostname', 'resolve'],
+      'stub-refused': ['myhostname', 'resolve', 'systemd'],
+    }[name as string] ?? ['myhostname'],
     route: 'unvouched:off',
     asked: [],
     buildDigest: CURRENT.buildDigest,
@@ -2002,8 +2090,9 @@ describe('P-461: the boxes with the check off in situ', () => {
   it('every box is run once, and none other', () => {
     const budget = [budgetRun('dnsmasq'), budgetRun('resolved')];
     const off = (Object.keys(OFF_CASES) as OffCase[]).map((name) => offRun(name));
+    const skew = (Object.keys(SKEW_CASES) as SkewCase[]).map((name) => skewRun(name));
     const verifyBoxes = (b: readonly BudgetRun[], o: readonly OffRun[]): string[] =>
-      verifyBoxesAt(b, o, CURRENT);
+      verifyBoxesAt(b, o, CURRENT, skew);
     assert.deepEqual(verifyBoxes(budget, off), []);
     assert.deepEqual(verifyBoxes(budget.slice(1), off.slice(1)), [
       'budget box dnsmasq: not run',
@@ -2026,8 +2115,13 @@ describe('P-461: the boxes with the check off in situ', () => {
     );
     // Each box of the build the verdict judges by, and unchanged while it ran.
     assert.deepEqual(
-      verifyBoxesAt(budget, off, { buildDigest: 'b1' }).length,
-      budget.length + off.length,
+      verifyBoxesAt(budget, off, { buildDigest: 'b1' }, skew).length,
+      budget.length + off.length + skew.length,
+    );
+    // The skew boxes are among the boxes every run must have.
+    assert.deepEqual(
+      verifyBoxesAt(budget, off, CURRENT),
+      (Object.keys(SKEW_CASES) as SkewCase[]).map((name) => `skew box ${name}: not run`),
     );
     assert.deepEqual(
       verifyBoxes([{ ...budgetRun('dnsmasq'), buildDigest: 'b9' }, budgetRun('resolved')], off),
@@ -2172,6 +2266,24 @@ describe('P-460: the committed recordings are of the committed rows', () => {
       }
     }
     assert.equal(recorded.answerRecordings.length, images.length * ANSWER_ROWS.length);
+    // And each lookup of each sequence row (`P-462`), in its turn, as the row claims it.
+    for (const image of images) {
+      for (const row of SEQUENCE_ROWS) {
+        for (const [k, lookup] of row.lookups.entries()) {
+          const id = sequenceLookupId(row, k);
+          const found = recorded.sequenceRecordings.filter((r) => r.id === id && r.image === image);
+          assert.equal(found.length, 1, `${id} in ${image}`);
+          const one = found[0];
+          assert.ok(one !== undefined, `${id} in ${image}`);
+          assert.deepEqual(one.wire, lookup.wire, `${id} in ${image}`);
+          assert.equal(one.outcome, lookup.outcome, `${id} in ${image}`);
+        }
+      }
+    }
+    assert.equal(
+      recorded.sequenceRecordings.length,
+      images.length * SEQUENCE_ROWS.reduce((sum, row) => sum + row.lookups.length, 0),
+    );
   });
 });
 
@@ -2393,7 +2505,7 @@ describe('P-460: the build the boxes load', () => {
 });
 
 describe('the differential’s script: what each image played', () => {
-  it('counts S4’s rows and the answer rows by their own lines, and nothing else the replay said', () => {
+  it('counts S4’s rows, the answer rows and the sequence rows by their own lines, and nothing else the replay said', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ms-names-counts-'));
     try {
       const log = join(dir, 'debian12.log');
@@ -2403,6 +2515,9 @@ describe('the differential’s script: what each image played', () => {
           'debian12 aaaaaaaaaaaaaaaa a walked name: nxdomain 4q, walk heard 4q, answer 2q, walk heard 2q (40 ms)',
           'debian12 0123456789abcdef rotate: last-answers-after-silent 4q, walk silent 3q (5050 ms)',
           'debian12 answer-formerr FORMERR from server 1, server 2 answering: plan 2q, walk heard 2q (30 ms)',
+          'debian12 sequence-partial-key a partial key: plan 2q, walk heard 2q, plan 2q, walk silent 2q (3000 ms)',
+          'debian12 sequence-gateway-v4-only _gateway: plan 0q, walk unvouched:cannotVouch 0q (900 ms)',
+          'rocky8 sequence-partial-key a partial key: plan 2q (3000 ms)',
           '(node:12) Warning: something the replay did not say of a row',
           'rocky8 aaaaaaaaaaaaaaaa a walked name: nxdomain 4q (40 ms)',
           'debian12 aaaaaaaaaaaaaaa a short id (1 ms)',
@@ -2411,10 +2526,740 @@ describe('the differential’s script: what each image played', () => {
       );
       assert.deepEqual(bash('ms_names_diff_counts debian12 "$1"', log), {
         status: 0,
-        stdout: '2 rows and 1 answer rows\n',
+        stdout: '2 rows, 1 answer rows and 2 sequence rows\n',
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// --- P-462: §7.5's other rows ---------------------------------------------------------------------
+
+describe('P-462: the sequence rows, several lookups through one check', () => {
+  const partial = SEQUENCE_ROWS.find((row) => row.id === 'sequence-partial-key');
+  const gateway = SEQUENCE_ROWS.find((row) => row.id === 'sequence-gateway-v4-only');
+  assert.ok(partial !== undefined && gateway !== undefined);
+
+  /** A faithful run with lookup `k`'s run changed. */
+  function withLookup(row: SequenceRow, k: number, change: (run: RowRun) => RowRun): SequenceRun {
+    const run = faithfulSequence(row);
+    return { ...run, lookups: run.lookups.map((each, j) => (j === k ? change(each) : each)) };
+  }
+  const withPlan = (run: RowRun, change: Partial<PlanRun>): RowRun => ({
+    ...run,
+    plans: run.plans.map((plan) => ({ ...plan, ...change })),
+  });
+  const planOf = (run: RowRun): PlanRun => {
+    const plan = run.plans[0];
+    assert.ok(plan !== undefined);
+    return plan;
+  };
+
+  it('each says how glibc and the walk end for every lookup, in turn, in every image', () => {
+    assert.equal(new Set(SEQUENCE_ROWS.map((row) => row.id)).size, SEQUENCE_ROWS.length);
+    for (const row of SEQUENCE_ROWS) {
+      assert.match(row.id, /^sequence-/u);
+      for (const lookup of row.lookups) {
+        // Heard if and only if glibc is quick, and a name not vouched for asked of no one.
+        if (lookup.walk === 'heard') assert.equal(lookup.fast, true, lookup.name);
+        if (lookup.walk === 'silent') assert.equal(lookup.fast, false, lookup.name);
+        assert.equal(lookup.walk === UNVOUCHED_ROUTE, lookup.reading.class === 'cannotVouch');
+      }
+    }
+    // The partial key: one zone, its cached names heard and the others silent, in turn.
+    const cached = partial.servers.flatMap((server) => server.cached ?? []);
+    assert.deepEqual(
+      partial.lookups.map((lookup) => [lookup.walk, cached.includes(lookup.name)]),
+      [
+        ['heard', true],
+        ['silent', false],
+        ['heard', true],
+        ['silent', false],
+      ],
+    );
+    assert.equal(
+      new Set(partial.lookups.map((lookup) => lookup.name.split('.').slice(1).join('.'))).size,
+      1,
+    );
+    // _gateway: local for families 4 and 0, asked of DNS for family 6, on a host with an IPv4
+    // gateway and no IPv6 one, under the one line that asks nss-myhostname before DNS.
+    assert.equal(gateway.gateway, SEQUENCE_GATEWAY);
+    assert.equal(gateway.nsswitch, 'hosts: files myhostname dns\n');
+    assert.deepEqual(
+      gateway.lookups.map((lookup) => [lookup.family, lookup.wire.length, lookup.outcome]),
+      [
+        [4, 0, 'answer:1'],
+        [0, 0, 'answer:1'],
+        [6, 1, 'answer:1'],
+      ],
+    );
+    assert.equal(sequenceLookupId(partial, 0), 'sequence-partial-key#1');
+  });
+
+  it('holds when glibc and the walk did what the row says', () => {
+    for (const row of SEQUENCE_ROWS)
+      assert.deepEqual(sequenceProblems(row, faithfulSequence(row)), [], row.id);
+  });
+
+  it('names each way a lookup can disagree, at its turn', () => {
+    const at = 'lookup 2 (uncached-1.zone.example.test, family 0)';
+    const two = (change: (run: RowRun) => RowRun): string[] =>
+      sequenceProblems(partial, withLookup(partial, 1, change));
+    assert.deepEqual(
+      two((run) =>
+        withPlan(run, {
+          wire: [...planOf(run).wire, ['10.0.0.53', 'x', 'A', 1]],
+          opt: [false, false, false],
+        }),
+      ),
+      [
+        `${at}: the row expects [["10.0.0.53","uncached-1.zone.example.test","A",1],["10.0.0.53","uncached-1.zone.example.test","AAAA",1]], glibc sent [["10.0.0.53","uncached-1.zone.example.test","A",1],["10.0.0.53","uncached-1.zone.example.test","AAAA",1],["10.0.0.53","x","A",1]]`,
+      ],
+    );
+    assert.deepEqual(
+      two((run) => withPlan(run, { outcome: 'answer:2' })),
+      [`${at}: getaddrinfo returned answer:2, and the row says EAI_AGAIN`],
+    );
+    // glibc quick where the row says it waits out its try: the walk's silence disagrees too.
+    assert.deepEqual(
+      two((run) => withPlan(run, { ms: 4 })),
+      [
+        `${at}: glibc returned in 4 ms (EAI_AGAIN), and the row says it returns after 1000 ms`,
+        `${at}: plan, the walk: silent, and glibc returned in 4 ms (EAI_AGAIN)`,
+      ],
+    );
+    const heard = (run: RowRun): RowRun =>
+      withPlan(run, { walk: { ...(planOf(run).walk as WalkRun), route: 'heard' } });
+    assert.deepEqual(two(heard).slice(0, 1), [
+      `${at}: the walk was heard, and the row says silent`,
+    ]);
+    assert.deepEqual(
+      two((run) => ({
+        ...run,
+        inImage: { ...run.inImage, candidates: ['uncached-1.zone.example.test', 'x'] } as InImage,
+      })),
+      [
+        `${at}: the policy in the image reads candidates as ["uncached-1.zone.example.test","x"], the row says ["uncached-1.zone.example.test"]`,
+      ],
+    );
+    assert.deepEqual(
+      two((run) => ({ ...run, edns0: true })),
+      [`${at}: the policy in the image reads edns0 as true, the row says false`],
+    );
+    assert.deepEqual(
+      two((run) => ({ ...run, setup: ['could not set /etc/hosts up'] })),
+      [`${at}: could not set /etc/hosts up`],
+    );
+    assert.deepEqual(
+      two((run) => ({ ...run, plans: [] })),
+      [`${at}: plan plan not played`],
+    );
+    assert.deepEqual(
+      two((run) => withPlan(run, { modes: { ...modesFor('silent'), gate: 'error:ENOTFOUND' } })),
+      [`${at}: plan, regression: gate mode answered error:ENOTFOUND, system mode ${ANSWERED}`],
+    );
+    // glibc's OPT records as the row's options say, and the check's none (P-454).
+    assert.deepEqual(
+      two((run) => withPlan(run, { opt: [true, false] })),
+      [
+        `${at}: plan: glibc’s questions carried OPT records [true,false], and without options edns0 none of glibc’s questions carries an OPT record`,
+      ],
+    );
+    assert.deepEqual(
+      two((run) => {
+        const walk = planOf(run).walk as WalkRun;
+        return withPlan(run, { walk: { ...walk, opt: walk.wire.map(() => true) } });
+      }),
+      [
+        `${at}: plan: the check’s questions carry an OPT record now, where c-ares 1.34.6 sent none: P-454’s known limit has moved`,
+      ],
+    );
+    // In its turn: a lookup missing, or the lookups played in another order.
+    const run = faithfulSequence(partial);
+    assert.deepEqual(sequenceProblems(partial, { ...run, lookups: run.lookups.slice(0, 3) }), [
+      'played 3 lookups, and the row has 4',
+      'lookup 4 (uncached-2.zone.example.test, family 0): not played',
+    ]);
+    const [first, second, ...rest] = run.lookups;
+    assert.ok(first !== undefined && second !== undefined);
+    assert.equal(
+      sequenceProblems(partial, { ...run, lookups: [second, first, ...rest] }).filter((why) =>
+        why.includes('in its turn'),
+      ).length,
+      2,
+    );
+    assert.deepEqual(sequenceProblems(partial, { ...run, setup: ['the gateway is not up'] }), [
+      'the gateway is not up',
+    ]);
+  });
+
+  it('a name the check does not vouch for is sent to the helper, with nothing asked', () => {
+    const at = 'lookup 3 (_gateway, family 6)';
+    const six = (change: (run: RowRun) => RowRun): string[] =>
+      sequenceProblems(gateway, withLookup(gateway, 2, change));
+    const walk = (run: RowRun, change: Partial<WalkRun>): RowRun =>
+      withPlan(run, { walk: { ...(planOf(run).walk as WalkRun), ...change } });
+    assert.deepEqual(
+      six((run) => walk(run, { route: 'local' })),
+      [
+        `${at}: the walk was local, and the row says ${UNVOUCHED_ROUTE}`,
+        `${at}: plan, the walk: routed local, and the row is cannotVouch`,
+        `${at}: plan, regression: gate mode ran it in the helper, and its walk was local`,
+      ],
+    );
+    assert.deepEqual(
+      six((run) => walk(run, { wire: [['10.0.0.53', '_gateway', 'AAAA', 1]], opt: [false] })),
+      [
+        `${at}: plan, the walk: asked [["10.0.0.53","_gateway","AAAA",1]] for a name the check does not vouch for`,
+      ],
+    );
+    assert.deepEqual(
+      six((run) => withPlan(run, { modes: { ...modesFor(UNVOUCHED_ROUTE), gateRan: 'lanes' } })),
+      [
+        `${at}: plan, regression: gate mode ran it on the probe’s lanes, and its walk was ${UNVOUCHED_ROUTE}`,
+      ],
+    );
+    // The policy in the image vouching for it is a misread, not a walk to judge.
+    assert.deepEqual(
+      six((run) => ({
+        ...run,
+        inImage: classified({
+          class: 'walk',
+          candidates: ['_gateway'],
+          types: ['AAAA'],
+          servers: ['10.0.0.53'],
+          rotate: false,
+          timeout: 5,
+          attempts: 2,
+          plans: [],
+        }),
+      })).slice(0, 1),
+      [`${at}: the policy in the image reads class as "walk", the row says "cannotVouch"`],
+    );
+    // glibc answering family 6 without DNS, as it does family 4, is the row's world gone.
+    assert.deepEqual(
+      six((run) => withPlan(run, { wire: [], opt: [] })),
+      [`${at}: the row expects [["10.0.0.53","_gateway","AAAA",1]], glibc sent []`],
+    );
+  });
+
+  it('every image plays every sequence row once, and only those, and each lookup is recorded', () => {
+    const debian = faithful(RESOLV_ROWS, 'debian12');
+    const ubuntu = faithful(RESOLV_ROWS, 'ubuntu2404');
+    const lookups = SEQUENCE_ROWS.reduce((sum, row) => sum + row.lookups.length, 0);
+    const verified = verify(RESOLV_ROWS, [debian, ubuntu]);
+    assert.deepEqual(verified.problems, []);
+    assert.equal(verified.sequenceRecordings.length, 2 * lookups);
+    assert.deepEqual(
+      verified.sequenceRecordings
+        .filter((recording) => recording.image === 'debian12')
+        .map((recording) => recording.id),
+      SEQUENCE_ROWS.flatMap((row) => row.lookups.map((_, k) => sequenceLookupId(row, k))),
+    );
+    assert.equal(recordingsFile([debian, ubuntu], verified).sequenceRecordings.length, 2 * lookups);
+    const [one] = SEQUENCE_ROWS;
+    assert.ok(one !== undefined);
+    const played = debian.sequences ?? [];
+    const problems = (sequences: readonly SequenceRun[]): string[] =>
+      verify(RESOLV_ROWS, [{ ...debian, sequences }, ubuntu]).problems;
+    assert.deepEqual(problems(played.slice(1)), [
+      `debian12, sequence row ${one.id} (${one.title}): not replayed`,
+    ]);
+    assert.deepEqual(problems([...played, faithfulSequence(one)]), [
+      `debian12, sequence row ${one.id} (${one.title}): played 2 times`,
+    ]);
+    assert.deepEqual(problems([...played, { ...faithfulSequence(one), id: 'sequence-none' }]), [
+      'debian12, sequence row sequence-none: played, and is no sequence row',
+    ]);
+    // A row that disagrees records none of its lookups.
+    const wrong = verify(RESOLV_ROWS, [
+      {
+        ...debian,
+        sequences: [withLookup(one, 1, (run) => ({ ...run, edns0: true })), ...played.slice(1)],
+      },
+      ubuntu,
+    ]);
+    assert.equal(wrong.problems.length, 1);
+    assert.equal(
+      wrong.sequenceRecordings.filter((recording) => recording.image === 'debian12').length,
+      lookups - one.lookups.length,
+    );
+  });
+
+  it('is played in the answer rows’ world, with its own resolv.conf and nsswitch.conf', () => {
+    const played = sequenceRowWorld(gateway);
+    assert.deepEqual(played.files, {
+      '/etc/hosts': ANSWER_WORLD.hosts,
+      '/etc/resolv.conf': gateway.resolvConf,
+      '/etc/nsswitch.conf': gateway.nsswitch,
+      '/etc/gai.conf': ANSWER_WORLD.gai,
+    });
+    assert.equal(played.hostname, ANSWER_WORLD.hostname);
+    assert.deepEqual(played.env, ANSWER_WORLD.env);
+    const other: AnswerWorld = { ...ANSWER_WORLD, hosts: '127.0.0.1 localhost\n', hostname: 'p2' };
+    assert.equal(sequenceRowWorld(gateway, other).files['/etc/hosts'], other.hosts);
+    assert.equal(sequenceRowWorld(gateway, other).hostname, 'p2');
+  });
+
+  it('the digest the runs name moves when a sequence row does', () => {
+    const base = answerRowsDigest();
+    const [one, ...rest] = SEQUENCE_ROWS;
+    assert.ok(one !== undefined);
+    const moved = (row: SequenceRow): string =>
+      answerRowsDigest(ANSWER_ROWS, ANSWER_WORLD, [row, ...rest]);
+    assert.equal(moved(one), base);
+    assert.notEqual(moved({ ...one, resolvConf: `${one.resolvConf}options ndots:2\n` }), base);
+    assert.notEqual(moved({ ...one, lookups: one.lookups.slice(1) }), base);
+    assert.notEqual(answerRowsDigest(ANSWER_ROWS, ANSWER_WORLD, rest), base);
+  });
+
+  it('the gateway’s box routes by its IPv4 gateway and has no IPv6 default route', () => {
+    const v4 = `default dev ms0 scope link\ndefault via ${SEQUENCE_GATEWAY} dev ${SEQUENCE_GATEWAY_LINK} metric 10\n`;
+    assert.equal(gatewayProblem(SEQUENCE_GATEWAY, v4, ''), undefined);
+    assert.equal(gatewayProblem(SEQUENCE_GATEWAY, v4, '\n'), undefined);
+    assert.equal(
+      gatewayProblem(SEQUENCE_GATEWAY, 'default dev ms0 scope link\n', ''),
+      `the box has no IPv4 default route via ${SEQUENCE_GATEWAY}: "default dev ms0 scope link"`,
+    );
+    // Not a prefix of another address.
+    assert.match(
+      gatewayProblem(SEQUENCE_GATEWAY, `default via ${SEQUENCE_GATEWAY}9 dev x\n`, '') ?? '',
+      /no IPv4 default route/u,
+    );
+    assert.equal(
+      gatewayProblem(SEQUENCE_GATEWAY, v4, 'default via fe80::1 dev ms-gw metric 1024\n'),
+      'the box has an IPv6 default route, and the row is of a host with none: "default via fe80::1 dev ms-gw metric 1024"',
+    );
+  });
+});
+
+describe('P-462: the walk’s steps for a sequence row, the lookups in turn through one check', () => {
+  it('proves the checks before the row’s answers, walks each lookup with the log cleared, then each regression', async () => {
+    const steps: string[] = [];
+    const sim: WalkSimulator = {
+      set(_target, behaviour, server) {
+        steps.push(`set ${String(server)} ${behaviour === NEUTRAL ? 'neutral' : 'other'}`);
+        return Promise.resolve();
+      },
+      clearLog() {
+        steps.push('clearLog');
+        return Promise.resolve();
+      },
+      log() {
+        steps.push('log');
+        return Promise.resolve([]);
+      },
+    };
+    const modes: ModesChannel = {
+      request<K extends ModesReply['op']>(
+        message: ModesRequest,
+        op: K,
+      ): Promise<Extract<ModesReply, { op: K }>> {
+        const named =
+          message.op === 'walk' || message.op === 'answers'
+            ? ` ${String(message.host)}/${String(message.family)}`
+            : '';
+        steps.push(`request ${message.op}${named}`);
+        const said: Record<ModesRequest['op'], ModesReply> = {
+          prepare: { op: 'prepared', walkProven: true, gateProven: true },
+          walk: { op: 'walked', route: 'heard', ms: 2 },
+          answers: { op: 'answered', modes: modesFor('heard') },
+          release: { op: 'released' },
+          exit: { op: 'released' },
+        };
+        const reply = said[message.op];
+        assert.equal(reply.op, op);
+        return Promise.resolve(reply as Extract<ModesReply, { op: K }>);
+      },
+    };
+    const recorded = await walkSequence(
+      modes,
+      sim,
+      ['10.0.0.53'],
+      () => {
+        steps.push('setPlan');
+        return Promise.resolve();
+      },
+      [
+        { host: 'a.zone.test', family: 0 },
+        { host: 'b.zone.test', family: 6 },
+      ],
+    );
+    assert.deepEqual(steps, [
+      'set 10.0.0.53 neutral',
+      'request prepare',
+      'setPlan',
+      'clearLog',
+      'request walk a.zone.test/0',
+      'log',
+      'clearLog',
+      'request walk b.zone.test/6',
+      'log',
+      'request answers a.zone.test/0',
+      'request answers b.zone.test/6',
+      'request release',
+    ]);
+    assert.equal(recorded.walks.length, 2);
+    assert.equal(recorded.modes.length, 2);
+    assert.deepEqual(recorded.setup, []);
+  });
+});
+
+describe('P-462: the boxes with the check off, §7.5’s other shapes', () => {
+  it('fails each box not as its case says', () => {
+    assert.deepEqual(offProblems(offRun('sss-first', { hostsLine: 'files sss dns' })), [
+      'off box sss-first: the box’s hosts: line is "files sss dns", with no sss before files',
+    ]);
+    assert.deepEqual(offProblems(offRun('sss-first', { nssModules: ['dns', 'files'] })), [
+      'off box sss-first: libnss_sss.so.2 is not installed in the box (["dns","files"])',
+    ]);
+    assert.deepEqual(
+      offProblems(
+        offRun('mdns4-first', { hostsLine: 'mdns4_minimal [NOTFOUND=return] files dns' }),
+      ),
+      [
+        'off box mdns4-first: the box’s hosts: line is "mdns4_minimal [NOTFOUND=return] files dns", with no mdns4_minimal before files',
+      ],
+    );
+    assert.deepEqual(offProblems(offRun('files-resolve-dns', { nssModules: [] })), [
+      'off box files-resolve-dns: libnss_resolve.so.2 is not installed in the box ([])',
+    ]);
+    assert.deepEqual(
+      offProblems(
+        offRun('files-resolve-dns', { hostsLine: 'files resolve [!UNAVAIL=return] dns' }),
+      ),
+      [
+        'off box files-resolve-dns: the box’s hosts: line is "files resolve [!UNAVAIL=return] dns", with no files resolve dns',
+      ],
+    );
+    assert.deepEqual(offProblems(offRun('stub-refused', { resolved: 'inactive' })), [
+      'off box stub-refused: systemd-resolved is inactive, not active',
+    ]);
+    assert.deepEqual(offProblems(offRun('stub-refused', { stubListening: true })), [
+      'off box stub-refused: the stub is listening on 127.0.0.53:53',
+    ]);
+    const { stubListening: _unlooked, ...unlooked } = offRun('stub-refused');
+    assert.deepEqual(offProblems(unlooked as OffRun), [
+      'off box stub-refused: the stub is not looked at on 127.0.0.53:53',
+    ]);
+    assert.deepEqual(
+      offProblems(offRun('stub-refused', { resolvConf: 'nameserver 10.0.0.53\n' })),
+      ['off box stub-refused: resolv.conf names ["10.0.0.53"], not the stub alone'],
+    );
+    assert.deepEqual(offProblems(offRun('stub-refused', { hostsLine: 'files dns' })), [
+      'off box stub-refused: the box’s hosts: line is "files dns", with no resolve',
+    ]);
+    const { localDomain: _unset, ...unset } = offRun('localdomain-empty');
+    assert.deepEqual(offProblems(unset as OffRun), [
+      'off box localdomain-empty: LOCALDOMAIN is unset in the box, not set and empty',
+    ]);
+    assert.deepEqual(offProblems(offRun('localdomain-empty', { localDomain: 'corp.example' })), [
+      'off box localdomain-empty: LOCALDOMAIN is "corp.example" in the box, not set and empty',
+    ]);
+  });
+
+  it('fails a box off by another rule than its case’s, the source named', () => {
+    // The action group would turn it off too, but the box is there to show the source named.
+    assert.deepEqual(
+      offProblems(
+        offRun('sss-first', {
+          off: { code: 'nsswitch', why: 'nsswitch.conf’s hosts: line has an action group' },
+        }),
+      ),
+      [
+        'off box sss-first: the policy has the check off by nsswitch (nsswitch.conf’s hosts: line has an action group), not by nsswitch',
+      ],
+    );
+    assert.equal(
+      offProblems(
+        offRun('files-resolve-dns', {
+          off: { code: 'module', why: 'glibc cannot load libnss_resolve.so.2' },
+        }),
+      ).length,
+      1,
+    );
+    assert.equal(
+      offProblems(
+        offRun('localdomain-empty', {
+          off: { code: 'env', why: 'RES_OPTIONS is set in ms-probe’s environment' },
+        }),
+      ).length,
+      1,
+    );
+    assert.deepEqual(offProblems(offRun('stub-refused', { check: 'on' })), [
+      'off box stub-refused: the policy loaded in the box has the check on',
+    ]);
+  });
+
+  it('reads a socket bound to the stub off /proc/net, UDP bound or TCP listening', () => {
+    const header =
+      '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
+    const udp = `${header}  12: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0\n`;
+    assert.equal(boundIn(udp, '127.0.0.53', 53, 'udp'), true);
+    assert.equal(boundIn(udp, '127.0.0.54', 53, 'udp'), false);
+    assert.equal(boundIn(udp, '127.0.0.53', 5353, 'udp'), false);
+    assert.equal(boundIn(header, '127.0.0.53', 53, 'udp'), false);
+    const listening = `${header}   3: 3500007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 1\n`;
+    const connected = `${header}   3: 3500007F:0035 0100007F:D431 01 00000000:00000000 00:00000000 00000000   991        0 1\n`;
+    assert.equal(boundIn(listening, '127.0.0.53', 53, 'tcp'), true);
+    assert.equal(boundIn(connected, '127.0.0.53', 53, 'tcp'), false);
+    assert.equal(boundIn(' 1: 0100007F:0035 00000000:0000 07\n', '127.0.0.1', 53, 'udp'), true);
+  });
+});
+
+/** A skew box as its case says. */
+function skewRun(name: SkewCase, change: Partial<SkewRun> = {}): SkewRun {
+  const claim = SKEW_CASES[name];
+  const once = claim.readOnce;
+  return {
+    kind: 'skew',
+    case: name,
+    image: claim.image,
+    glibc: claim.image === 'debian11' ? '2.31' : '2.36',
+    before: { check: 'on', checkState: 1, helper: 'up', answered: 'answer:192.0.2.53' },
+    edited: {
+      check: 'off',
+      off: {
+        code: 'skew',
+        why: `${claim.file} changed since ms-probe started, from sha256 a to sha256 b: the check is off until ms-probe restarts`,
+      },
+      readOnce: once ? [claim.file, '/etc/ld.so.preload'] : ['/etc/gai.conf', '/etc/ld.so.preload'],
+      skewed: once,
+      restartSaid: once ? [claim.file] : [],
+    },
+    killed: once
+      ? {
+          helper: 'resting',
+          route: 'resting',
+          respawned: false,
+          mode: 3,
+          trouble: 1,
+          restingSaid: 1,
+          answered: 'answer:192.0.2.53',
+          toHelper: 0,
+        }
+      : {
+          helper: 'up',
+          route: 'up',
+          respawned: true,
+          mode: 2,
+          trouble: 0,
+          restingSaid: 0,
+          answered: 'answer:192.0.2.53',
+          toHelper: 1,
+        },
+    buildDigest: CURRENT.buildDigest,
+    ...change,
+  };
+}
+
+describe('P-462: the skew boxes, a file edited under a running probe and its helper SIGKILLed (D28)', () => {
+  const edited = (name: SkewCase, change: Partial<NonNullable<SkewRun['edited']>>): SkewRun => {
+    const run = skewRun(name);
+    return { ...run, edited: { ...(run.edited as NonNullable<SkewRun['edited']>), ...change } };
+  };
+  const killed = (name: SkewCase, change: Partial<NonNullable<SkewRun['killed']>>): SkewRun => {
+    const run = skewRun(name);
+    return { ...run, killed: { ...(run.killed as NonNullable<SkewRun['killed']>), ...change } };
+  };
+
+  it('holds each box that did what D28 says at its glibc', () => {
+    for (const name of Object.keys(SKEW_CASES) as SkewCase[])
+      assert.deepEqual(skewProblems(skewRun(name)), [], name);
+    // Every case's world is one the check is on for, and its edit a shape it takes.
+    assert.deepEqual(Object.keys(SKEW_WORLD).sort(), [
+      '/etc/gai.conf',
+      '/etc/hosts',
+      '/etc/nsswitch.conf',
+      '/etc/resolv.conf',
+    ]);
+    for (const claim of Object.values(SKEW_CASES)) {
+      assert.notEqual(SKEW_WORLD[claim.file], claim.edit);
+    }
+    assert.deepEqual(
+      Object.entries(SKEW_CASES).map(([name, claim]) => [name, claim.image, claim.readOnce]),
+      [
+        ['gai', 'debian12', true],
+        ['nsswitch-frozen', 'debian11', true],
+        ['nsswitch-reloaded', 'debian12', false],
+      ],
+    );
+  });
+
+  it('fails a check not on before the edit, or not off by skew after it', () => {
+    assert.deepEqual(
+      skewProblems(
+        skewRun('gai', {
+          before: { check: 'on', checkState: 3, helper: 'up', answered: 'answer:1' },
+        }),
+      ),
+      ['skew box gai: the check was not on and proven before the edit (on, nameCheckState 3)'],
+    );
+    assert.deepEqual(
+      skewProblems(
+        skewRun('gai', {
+          before: { check: 'on', checkState: 1, helper: 'starting', answered: 'error:EAI_AGAIN' },
+        }),
+      ),
+      [
+        'skew box gai: the helper was starting before the edit, not up',
+        'skew box gai: a name was not answered before the edit: error:EAI_AGAIN',
+      ],
+    );
+    const { before: _before, ...unrecorded } = skewRun('gai');
+    assert.deepEqual(skewProblems(unrecorded as SkewRun), [
+      'skew box gai: the check before the edit was not recorded',
+    ]);
+    assert.deepEqual(skewProblems(edited('gai', { check: 'on' })), [
+      'skew box gai: after /etc/gai.conf was edited the check was on, not off by skew naming it',
+    ]);
+    assert.equal(
+      skewProblems(edited('gai', { off: { code: 'slow', why: 'a look did not end' } })).length,
+      1,
+    );
+    assert.equal(
+      skewProblems(
+        edited('gai', {
+          off: { code: 'skew', why: '/etc/resolv.conf changed since ms-probe started' },
+        }),
+      ).length,
+      1,
+    );
+    // Off by another rule, though its words name the file, is not the skew D28 owes.
+    assert.deepEqual(
+      skewProblems(
+        edited('gai', {
+          off: { code: 'unreadable', why: '/etc/gai.conf could not be read: EACCES' },
+        }),
+      ),
+      [
+        'skew box gai: after /etc/gai.conf was edited the check was off by unreadable (/etc/gai.conf could not be read: EACCES), not off by skew naming it',
+      ],
+    );
+  });
+
+  it('fails a file read once where D28 says it is not, or the other way, and what the helper said of it', () => {
+    assert.deepEqual(
+      skewProblems(
+        edited('nsswitch-frozen', { readOnce: ['/etc/gai.conf', '/etc/ld.so.preload'] }),
+      ),
+      [
+        'skew box nsswitch-frozen: the policy reads /etc/nsswitch.conf as not read once at this glibc, and D28 says it is',
+      ],
+    );
+    assert.deepEqual(
+      skewProblems(edited('nsswitch-reloaded', { readOnce: ['/etc/nsswitch.conf'] })),
+      [
+        'skew box nsswitch-reloaded: the policy reads /etc/nsswitch.conf as read once at this glibc, and D28 says it is not',
+      ],
+    );
+    assert.deepEqual(skewProblems(edited('gai', { skewed: false })), [
+      'skew box gai: the policy said a new helper would not read otherwise',
+    ]);
+    assert.deepEqual(skewProblems(edited('gai', { restartSaid: [] })), [
+      'skew box gai: the helper said to restart ms-probe for [], and D28 says ["/etc/gai.conf"]',
+    ]);
+    // A file glibc reads again: no restart is owed for it, and none for another file.
+    assert.deepEqual(
+      skewProblems(edited('nsswitch-reloaded', { restartSaid: ['/etc/gai.conf'] })),
+      [
+        'skew box nsswitch-reloaded: the helper said to restart ms-probe for ["/etc/gai.conf"], and D28 says []',
+      ],
+    );
+  });
+
+  it('a skewed helper rests until restart after its SIGKILL, and one not skewed is up again', () => {
+    assert.deepEqual(
+      skewProblems(killed('gai', { helper: 'up', route: 'up', respawned: true })).slice(0, 1),
+      [
+        'skew box gai: the helper was up (route up, a new child up), not resting until ms-probe restarts',
+      ],
+    );
+    // A new child up is no rest until restart, whatever the state says.
+    assert.deepEqual(skewProblems(killed('gai', { respawned: true })), [
+      'skew box gai: the helper was resting (route resting, a new child up), not resting until ms-probe restarts',
+    ]);
+    assert.deepEqual(skewProblems(killed('nsswitch-frozen', { restMs: 600_000 })), [
+      'skew box nsswitch-frozen: the helper was resting (route resting, for 600000 ms), not resting until ms-probe restarts',
+    ]);
+    assert.deepEqual(skewProblems(killed('gai', { mode: 2 })), [
+      'skew box gai: Probe Health said nameResolverMode 2, not 3',
+    ]);
+    assert.deepEqual(skewProblems(killed('gai', { trouble: 0 })), [
+      'skew box gai: the trouble latch was 0, not set',
+    ]);
+    assert.deepEqual(skewProblems(killed('gai', { restingSaid: 0 })), [
+      'skew box gai: the helper never said it rests until ms-probe restarts',
+    ]);
+    assert.deepEqual(skewProblems(killed('gai', { toHelper: 1 })), [
+      'skew box gai: 1 lookups went to a resting helper, not asked as with system',
+    ]);
+    assert.deepEqual(skewProblems(killed('gai', { answered: 'error:EAI_AGAIN' })), [
+      'skew box gai: a name was not answered after the SIGKILL: error:EAI_AGAIN',
+    ]);
+    // Not skewed: the loss is an ordinary one.
+    assert.deepEqual(
+      skewProblems(
+        killed('nsswitch-reloaded', {
+          helper: 'resting',
+          route: 'resting',
+          respawned: false,
+          mode: 3,
+          trouble: 1,
+          restingSaid: 1,
+          toHelper: 0,
+        }),
+      ),
+      [
+        'skew box nsswitch-reloaded: the helper was resting with no new child, not up again in a new child',
+        'skew box nsswitch-reloaded: Probe Health said nameResolverMode 3, not 2',
+        'skew box nsswitch-reloaded: the trouble latch was set after one loss',
+        'skew box nsswitch-reloaded: the helper said it rests until ms-probe restarts',
+        'skew box nsswitch-reloaded: no lookup went to the helper with the check off and the helper up',
+      ],
+    );
+    const { killed: _killed, ...unkilled } = skewRun('gai');
+    assert.deepEqual(skewProblems(unkilled as SkewRun), [
+      'skew box gai: the helper after its SIGKILL was not recorded',
+    ]);
+    assert.deepEqual(skewProblems(skewRun('gai', { image: 'debian11', setup: ['nscd ran'] })), [
+      'skew box gai: nscd ran',
+      'skew box gai: ran in debian11, not debian12',
+    ]);
+  });
+
+  it('every skew box is run once, and none other, of the build the verdict judges by', () => {
+    const budget = [budgetRun('dnsmasq'), budgetRun('resolved')];
+    const off = (Object.keys(OFF_CASES) as OffCase[]).map((name) => offRun(name));
+    const skew = (Object.keys(SKEW_CASES) as SkewCase[]).map((name) => skewRun(name));
+    const boxes = (s: readonly SkewRun[]): string[] => verifyBoxesAt(budget, off, CURRENT, s);
+    assert.deepEqual(boxes(skew), []);
+    assert.deepEqual(boxes(skew.slice(1)), ['skew box gai: not run']);
+    assert.deepEqual(boxes([...skew, skewRun('gai')]), ['skew box gai: run 2 times']);
+    assert.deepEqual(boxes([...skew, { ...skewRun('gai'), case: 'hosts' as SkewCase }]).slice(-1), [
+      'skew box hosts: no such box',
+    ]);
+    assert.deepEqual(boxes([skewRun('gai', { buildDigest: 'b9' }), ...skew.slice(1)]), [
+      'skew box gai: ran the build b9, the build is b0',
+    ]);
+    assert.deepEqual(boxes([skewRun('gai', { rebuilt: 'at the end' }), ...skew.slice(1)]), [
+      'skew box gai: its build changed while it ran (at the end)',
+    ]);
+    // Each run of the build is still held to its case.
+    const resting = skewRun('gai');
+    assert.deepEqual(
+      boxes([
+        { ...resting, killed: { ...(resting.killed as NonNullable<SkewRun['killed']>), mode: 2 } },
+        ...skew.slice(1),
+      ]),
+      ['skew box gai: Probe Health said nameResolverMode 2, not 3'],
+    );
+    // Read back from its file, as names-verify reads every box.
+    const parsed = parseRun('/out/skew-gai.json', JSON.stringify(skewRun('gai')));
+    assert.ok('skew' in parsed);
+    assert.deepEqual(parseRun('/out/skew-x.json', JSON.stringify({ kind: 'skew' })), {
+      problem: "/out/skew-x.json: not a skew box's run (no case or image)",
+    });
   });
 });

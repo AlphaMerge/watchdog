@@ -1,14 +1,30 @@
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { pino } from 'pino';
 import { DnsCheck, type DnsAsker } from '../../src/resolver/dns-check.js';
 import { ForwardBudget } from '../../src/resolver/forward-budget.js';
 import { GlibcNamePolicy, SYSTEM_FILES } from '../../src/resolver/system-names.js';
 import { pollWithin } from '../support/within.js';
 import { BuildWatch } from './names-build.js';
-import { OFF_CASES, type OffCase, type OffRun } from './names-differential.js';
+import {
+  OFF_CASES,
+  STUB,
+  boundIn,
+  nameserversOf,
+  type OffCase,
+  type OffRun,
+} from './names-differential.js';
 
 /**
  * A box with the name check off (`P-461`): the policy loaded in situ, against the box as the
@@ -24,6 +40,19 @@ import { OFF_CASES, type OffCase, type OffRun } from './names-differential.js';
  * - `ld-preload`: `LD_PRELOAD` set to libresolv, which ld.so loads harmlessly.
  * - `ld-so-preload`: /etc/ld.so.preload naming libresolv.
  *
+ * And §7.5's other rows the check is off for (`P-462`), each hosts: line written as an operator
+ * would, with no action group, so that the rule is seen naming the source:
+ * - `sss-first`: `hosts: sss files dns`, with libnss-sss installed.
+ * - `mdns4-first`: `hosts: mdns4_minimal files dns`, with libnss-mdns installed.
+ * - `files-resolve-dns`: `hosts: files resolve dns`, with libnss-resolve installed.
+ * - `stub-refused`: in a box the script boots, resolv.conf a file of its own holding resolved's
+ *   stub file as resolved wrote it with the stub listening (`nameserver 127.0.0.53`), then
+ *   systemd-resolved restarted with `DNSStubListener=no`, and the hosts: line libnss-resolve wrote:
+ *   the stub refuses, and glibc asks resolved over varlink. Not the stub file itself: with the stub
+ *   off, systemd 255 makes it a link to its uplink file, which names the uplink servers and no stub
+ *   (the first narrowed run of `P-462` read 192.168.65.7 there).
+ * - `localdomain-empty`: `LOCALDOMAIN` set and empty, which glibc reads as no search list.
+ *
  * Prints the case's `OffRun` as JSON, with the build it loaded (`names-build.ts`).
  */
 
@@ -37,6 +66,24 @@ const PRELOADED = [
   '/lib64/libresolv.so.2',
 ];
 const PATH = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+const run = promisify(execFile);
+/** Where a distribution keeps its NSS modules, for every architecture the boxes build for. */
+const LIBRARY_DIRS = [
+  '/lib/aarch64-linux-gnu',
+  '/usr/lib/aarch64-linux-gnu',
+  '/lib/x86_64-linux-gnu',
+  '/usr/lib/x86_64-linux-gnu',
+  '/usr/lib64',
+  '/lib64',
+];
+/** The hosts: line each case writes, beside the rest of nsswitch.conf as the box has it. */
+const HOSTS_LINES: Partial<Record<OffCase, string>> = {
+  'sss-first': 'sss files dns',
+  'mdns4-first': 'mdns4_minimal files dns',
+  'files-resolve-dns': 'files resolve dns',
+};
+const STUB_OFF = '/etc/systemd/resolved.conf.d/ms-stub-off.conf';
+const STUB_FILE = '/run/systemd/resolve/stub-resolv.conf';
 
 function hostsLine(): string | undefined {
   try {
@@ -55,6 +102,52 @@ function readOr(path: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Every `libnss_<name>.so.2` in the library directories, by name. */
+function nssModules(): string[] {
+  const found = new Set<string>();
+  for (const dir of LIBRARY_DIRS) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const match = /^libnss_(.+)\.so\.2$/u.exec(entry);
+      if (match?.[1] !== undefined) found.add(match[1]);
+    }
+  }
+  return [...found].sort();
+}
+
+/** Whether anything is bound to the stub's address, port 53, over UDP or listening over TCP. */
+function stubListening(): boolean {
+  return (
+    boundIn(readOr('/proc/net/udp') ?? '', STUB, 53, 'udp') ||
+    boundIn(readOr('/proc/net/tcp') ?? '', STUB, 53, 'tcp')
+  );
+}
+
+/** `systemctl is-active systemd-resolved`, or undefined where systemctl does not run. */
+async function resolvedState(): Promise<string | undefined> {
+  try {
+    const { stdout } = await run('systemctl', ['is-active', 'systemd-resolved'], {
+      timeout: 10_000,
+    });
+    return stdout.trim();
+  } catch (error: unknown) {
+    const said = (error as { stdout?: unknown }).stdout;
+    return typeof said === 'string' && said.trim() !== '' ? said.trim() : undefined;
+  }
+}
+
+/** nsswitch.conf with its hosts: line replaced, or added, as an operator edits it. */
+function withHostsLine(text: string, line: string): string {
+  const lines = text.split('\n').filter((each) => !/^[ \t]*hosts:/u.test(each));
+  const body = lines.join('\n').replace(/\n*$/u, '');
+  return `${body === '' ? '' : `${body}\n`}hosts: ${line}\n`;
 }
 
 /**
@@ -100,6 +193,8 @@ async function inSitu(which: OffCase, image: string): Promise<Omit<OffRun, 'buil
   );
   check.stop();
   const said = route.route === 'unvouched' ? `unvouched:${route.why}` : route.route;
+  const resolved = await resolvedState();
+  const resolvConf = readOr(SYSTEM_FILES.resolvConf);
   return {
     kind: 'off',
     case: which,
@@ -112,6 +207,13 @@ async function inSitu(which: OffCase, image: string): Promise<Omit<OffRun, 'buil
     nscdSocket: existsSync(SYSTEM_FILES.nscdSocket),
     ldPreload: process.env['LD_PRELOAD'],
     ldSoPreload: readOr(SYSTEM_FILES.ldSoPreload),
+    ...(process.env['LOCALDOMAIN'] === undefined
+      ? {}
+      : { localDomain: process.env['LOCALDOMAIN'] }),
+    ...(resolvConf === undefined ? {} : { resolvConf }),
+    stubListening: stubListening(),
+    ...(resolved === undefined ? {} : { resolved }),
+    nssModules: nssModules(),
     route: said,
     asked,
   };
@@ -178,8 +280,66 @@ async function setUp(which: OffCase): Promise<{ env: Record<string, string>; set
     case 'resolve':
     case 'mdns4_minimal':
       break;
+    case 'sss-first':
+    case 'mdns4-first':
+    case 'files-resolve-dns': {
+      const line = HOSTS_LINES[which] ?? '';
+      try {
+        const text = readOr(SYSTEM_FILES.nsswitchConf) ?? '';
+        writeFileSync(SYSTEM_FILES.nsswitchConf, withHostsLine(text, line));
+      } catch (error: unknown) {
+        setup.push(`could not write the hosts: line ${line}: ${String(error)}`);
+      }
+      break;
+    }
+    case 'stub-refused':
+      setup.push(...(await stubOff()));
+      break;
+    case 'localdomain-empty':
+      env['LOCALDOMAIN'] = '';
+      break;
   }
   return { env, setup };
+}
+
+/**
+ * systemd-resolved restarted with its stub off, and resolv.conf its stub file as the symlink an
+ * Ubuntu host has gives it: what could not be done is returned.
+ */
+async function stubOff(): Promise<string[]> {
+  try {
+    // The stub file as resolved writes it with the stub listening, kept as resolv.conf: what an
+    // operator's resolv.conf copied from it holds.
+    await pollWithin(
+      20_000,
+      'systemd-resolved to be active',
+      async () => (await resolvedState()) === 'active',
+      500,
+    );
+    await pollWithin(10_000, 'resolved’s stub file', () => existsSync(STUB_FILE));
+    const stub = readFileSync(STUB_FILE, 'utf8');
+    if (!isDeepStrictEqual(nameserversOf(stub), [STUB])) {
+      return [`resolved’s stub file names ${JSON.stringify(nameserversOf(stub))}, not ${STUB}`];
+    }
+    // A file of its own: Ubuntu links resolv.conf to the stub file, and a write through the link
+    // would be resolved's to overwrite.
+    if (lstatSync(SYSTEM_FILES.resolvConf, { throwIfNoEntry: false })?.isSymbolicLink() === true) {
+      unlinkSync(SYSTEM_FILES.resolvConf);
+    }
+    writeFileSync(SYSTEM_FILES.resolvConf, stub);
+    mkdirSync('/etc/systemd/resolved.conf.d', { recursive: true });
+    writeFileSync(STUB_OFF, '[Resolve]\nDNSStubListener=no\n');
+    await run('systemctl', ['restart', 'systemd-resolved'], { timeout: 30_000 });
+    await pollWithin(
+      20_000,
+      'systemd-resolved to be active again',
+      async () => (await resolvedState()) === 'active',
+      500,
+    );
+    return [];
+  } catch (error: unknown) {
+    return [`could not turn resolved’s stub off: ${String(error)}`];
+  }
 }
 
 const argv = process.argv.slice(2);

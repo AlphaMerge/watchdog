@@ -14773,7 +14773,7 @@ because each is a decision rather than a defect:
         write: `readNsswitch` says so before it would name the source it does not take
         (`resolve`, `mdns4_minimal`), and either reason is the rule's.
       - **Tests and mutants**: in `P-460`'s.
-- [ ] **P-462 — the differential replays none of §7.5's other rows** · S · P-432 · Filed
+- [x] **P-462 — the differential replays none of §7.5's other rows** · S · P-432 · Filed
       2026-10-20 by `P-460`. §7.5 lists rows beyond those `P-460` asked for and S4's export
       holds, and the differential plays none of them: `sss` or `mdns4_minimal` before `files`;
       `files resolve dns`; the stub refused under `resolve` (`DNSStubListener=no`); a `%scope`
@@ -14783,6 +14783,172 @@ because each is a decision rather than a defect:
       needs a box like `P-461`'s; the others need a row of their own, as the answer rows are.
       Not decided: whether any of them goes in before the rc.3 cut. **Done when** each is a box
       or a row of the differential, or a reason it is not is recorded here.
+
+      **P-462 outcome.** Every row is now a box or a row of the differential, and the run fails
+      unless each holds. The shapes the check is off for are boxes like `P-461`'s. The shapes it is
+      on for are rows with plans: two sequence rows of the answer rows' kind, and three of S4's
+      rows. Run 8 (`docs/findings/2026-10-20-name-gate-differential.md`, run 8) is the whole run
+      on this build, in all seven images, and its recordings are the committed ones.
+      - **Five off boxes** (`OFF_CASES`, `names-off.ts`). Each loads the policy in situ and must
+        report the check off with the rule named, route a name `unvouched:off`, and ask nothing
+        from the check's start to its stop:
+        - `sss-first` (Debian 12, `libnss-sss`): `hosts: sss files dns`, off by `nsswitch`,
+          naming "sss".
+        - `mdns4-first` (Debian 12, `libnss-mdns`): `hosts: mdns4_minimal files dns`, off by
+          `nsswitch`, naming "mdns4_minimal".
+        - `files-resolve-dns` (Ubuntu 24.04, `libnss-resolve`): off by `nsswitch`, naming
+          "resolve".
+        - `stub-refused` (Ubuntu 24.04, booted). systemd-resolved is active with
+          `DNSStubListener=no`, nothing is bound to 127.0.0.53:53 over UDP or TCP
+          (`/proc/net`), resolv.conf names the stub alone, and the hosts: line is the one
+          `libnss-resolve` wrote. Off by `nsswitch`, by its action group.
+        - `localdomain-empty` (Debian 12): `LOCALDOMAIN` set and empty, off by `env`.
+      - **Two sequence rows** (`SEQUENCE_ROWS`). Each plays several lookups in one world: glibc
+        is asked for each in turn, each in its own process, and then one check walks them all in
+        turn, with each lookup's regression. Each lookup claims its policy reading, glibc's wire,
+        outcome and speed, and the walk's route.
+        - `sequence-partial-key`: one zone and one server, its upstream silent, with two of the
+          zone's names in its cache. The S5 simulator has a cache of its own for this, primed
+          per server. In turn: a cached name, heard as the key's scout; an uncached one, silent
+          once the key is heard; the second cached name, heard on its own walk once the key is
+          mixed; and the second uncached name, silent.
+        - `sequence-gateway-v4-only`: `_gateway` under `hosts: files myhostname dns`, on a
+          dummy link with an IPv4 default route through 198.19.0.254 and no IPv6. The check
+          cannot vouch (`systemd-name`): it routes `unvouched:cannotVouch` to the helper and
+          asks nothing. nss-myhostname answers families 4 and 0 with no question. For family 6,
+          `_gateway` AAAA is asked once: with no IPv6 gateway, myhostname says NOTFOUND and
+          `dns` is asked.
+      - **Three of S4's rows**: `routerlo` (`fe80::3%lo`) for families 0, 4 and 6. The export
+        already held `router` (`fe80::1%eth0`), but no box has an `eth0`, so glibc skipping that
+        line could have been an interface it could not find. Every box has `lo`.
+      - **Three skew boxes** (`SKEW_CASES`, `names-skew.ts`). Each runs ms-probe's name
+        resolution in gate mode, built as `main.ts` builds it, in a world the check is on for.
+        It edits a file mid-run and waits for the watch's look to end, then SIGKILLs the
+        helper's child from outside:
+        - `gai`: gai.conf at glibc 2.36, read once with no `reload yes`.
+        - `nsswitch-frozen`: nsswitch.conf at 2.31, read once below 2.33.
+        - `nsswitch-reloaded`: nsswitch.conf at 2.36, the negative.
+
+        Each must have the check off by `skew` naming the file. A read-once file must mark the
+        helper skewed and log "restart ms-probe to apply it" for it. After the SIGKILL the
+        helper must rest until restart: no timed rest and no new child, mode 3, the trouble
+        latch set, the resting line logged, and no lookup to the helper. A reloaded file must do
+        none of that: the helper comes back up in a new child, mode 2, trouble 0, and takes
+        lookups.
+      - **Run 8**, the whole differential on this build, 07:45 to 08:58 UTC, not a quiet run
+        (the VM gate was below 2 at its start):
+        - It passed in all seven images with every box: 263 rows in each (254 on Rocky 8) and
+          3,008 plans (2,170 heard, 70 silent, 768 local).
+        - The 49 sequence lookups held as claimed. The partial key's cached names returned
+          `answer:2` in 8–45 ms, and its uncached ones `EAI_AGAIN` after 1,010–1,050 ms.
+        - The three `routerlo` rows were heard in every image, glibc skipping the line.
+        - The ten off boxes were off by their rules, with 0 questions asked. The three skew boxes
+          were as D28 says.
+        - The budget boxes held dnsmasq at 6, 8 and 10, and resolved at 10 and 11.
+        - Every run named one build (`15d1ca61…`), which none saw change.
+        - The recordings are rewritten from it: 3,008, 42 answer recordings and 49 sequence
+          recordings.
+
+        A first attempt was stopped 19 minutes in, before any verdict, when its 90-minute bound
+        looked short. Rocky 8 alone had taken 637 s on a loaded VM, and this run had 150 minutes.
+        Each image took 389–920 s.
+      - **What the narrowed runs found, before the whole run.** Three runs of the new rows and
+        boxes alone. Each finding was a box's own fault, and none was the policy's or ms-probe's:
+        - **`stub-refused`**: with `DNSStubListener=no`, systemd 255 makes its stub file a link
+          to its uplink file. The first box copied the stub file after the restart and read
+          `nameserver 192.168.65.7` in it, the Docker DNS that resolved had taken from the box.
+          So on Ubuntu, where resolv.conf links to the stub file, turning the stub off sends
+          glibc to the uplink servers, and nothing is refused. The refused stub needs a
+          resolv.conf of its own that names 127.0.0.53, such as one copied from the stub file
+          while it listened. The box now writes that copy, then turns the stub off.
+        - **`nsswitch-reloaded`**: the in-situ process exited 13 on an unsettled top-level
+          await. With the check off, its second name went to the helper. The helper keeps no
+          process alive (its child, channel and timers are unref'd), so the loop drained. In
+          ms-probe its other handles keep the loop alive. Here each of the box's lookups now has
+          a bound of its own (`within`), whose timer does.
+        - **`gai`**, once in two runs: no "restart ms-probe" line was read. The policy turns
+          the check off inside the watch's look and tells the helper after an await, and the
+          box looked in between. It now waits for the look's last line (`checkFiles`' "the name
+          policy after the change").
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **The partial key and `_gateway` are sequence rows of the differential, not rows of
+          S4's export.** Each needs what S4's `World` cannot state: a key's state carried from
+          one lookup to the next through one check, a server's cache, and a default route. Each
+          of S4's rows is one lookup. They are claims in `names-differential.ts`, as the answer
+          rows are, played in the answer rows' world. The answer rows' digest is now of
+          `{ world, rows, sequences }`, so the committed recordings name the sequence rows too.
+        - **`%scope` is three of S4's rows, not a box.** The check is on for it: glibc skips the
+          line and DNS is asked, which the policy claims a wire for. The rows use `lo` rather
+          than `eth0`, so that the skip cannot be an interface glibc failed to find.
+        - **`_gateway` is held to the helper, and glibc's wire is claimed exactly, family by
+          family.** The check cannot vouch for it, so the walk asks nothing. The row claims
+          what glibc then does: nss-myhostname answers families 4 and 0 from the route, and
+          family 6 falls through to DNS. That fall-through is why the check cannot vouch for
+          the name. The regression holds the helper's answer to the lanes'.
+        - **`stub-refused` is a booted box, and is off by the action group.** `readNsswitch`
+          names the action group that `libnss-resolve` writes before it would name `resolve`,
+          and either reason is the rule's, as `P-461` decided. The box also holds the world to
+          the row (resolved active, the stub bound to nothing, resolv.conf naming the stub
+          alone), so the run fails if the box is not the case it claims.
+        - **Both `sss` and `mdns4_minimal` are boxes.** §7.5 says "or". They are different
+          modules, one answering from a daemon and one from multicast, and each box cost one
+          image.
+        - **Three skew cases, nsswitch.conf at 2.36 the negative.** D28 owes a rest until
+          restart only for a file read once. A box that rested after every edit would pass a run
+          of the two read-once cases alone.
+        - **`LOCALDOMAIN=""` is an off box by `env`, not a row.** The policy turns the check off
+          for `LOCALDOMAIN` set at all, empty included, so the row claims no wire.
+      - **Tests**, each run after the last change: `names-differential.test.ts` 92, 17 of them
+        new. The sequence rows are held lookup by lookup, at their turn: the count, the order,
+        the reading, `edns0`, the wire, the outcome, the speed, the walk's route and steps, the
+        OPT records and the regression. A name the check cannot vouch for goes to the helper
+        with nothing asked. Each image must play each sequence row once, and a lookup is
+        recorded only when it holds. The digest moves with a sequence row, and the row is played
+        in the answer rows' world with its own files. The gateway's routes are judged. The walk's
+        steps for a sequence row go in order: the checks proven before the row's answers, each
+        lookup walked with the log cleared, then each regression. The off boxes: each new case
+        held to its world and its rule, and the stub's socket read off `/proc/net`, UDP bound or
+        TCP listening. The skew boxes: before, after the edit, and after the SIGKILL, for each of
+        the three cases. The verdict requires every skew box, of the build. `names-verify` and
+        the script's counts name the sequence rows and the skew boxes. `system-names.test.ts`
+        442: the export holds the three `routerlo` rows, and the hosts table skips the line and
+        keeps `localhost`. The committed-recordings tests hold run 8's recordings.
+      - **Mutants: 64 on the toolchain, all killed.** Each was restored with `shutil.copy` and
+        `os.utime` and checked with `filecmp`. No marker was left in `dist` after the last
+        rebuild, and `dist` is newer than its source. The mutants covered:
+        - the cannotVouch walk held to `local`, and its wire unchecked;
+        - a name the check cannot vouch for not run in the helper;
+        - each of the sequence row's checks dropped: the count, the turn, the setup, the
+          misread, `edns0`, the wire, the outcome, the speed, the route, and the walk, OPT and
+          regression problems;
+        - the verdict not requiring a sequence row, letting one through twice or unknown,
+          recording one that failed, or not saying why;
+        - the digest without the sequence rows, and the world's nsswitch.conf or hosts file in
+          place of the row's;
+        - the gateway's IPv6 route unchecked, and its address matched as a prefix;
+        - `boundIn`'s byte order, and any TCP state;
+        - each new off case's line, module, reason, resolved, stub, resolv.conf or
+          `LOCALDOMAIN` check;
+        - each skew check, before, after the edit and after the SIGKILL;
+        - the verdict not requiring a skew box, not checking its build, not holding it to its
+          case, or not parsing it;
+        - `walkSequence` with no reset, one log for every walk, or no name passed;
+        - the script not counting sequence rows;
+        - the policy reading a `%lo` address.
+
+        Four survived the first pass, and tests added for them kill them: the sequence row's OPT
+        records not held, a skew box off by another rule whose words name the file, a resting
+        helper with a new child up, and the verdict not holding a skew box to its case. Two
+        did not compile as first written and were rewritten.
+      - **Mutants in the boxes: six, all killed**, in two narrowed runs. Each failed the run with
+        its own `DISAGREES` lines:
+        - every lookup walked under the first one's name (`names-modes`);
+        - the stub left listening;
+        - the `nsswitch-frozen` edit not written, while the other two skew boxes passed in the
+          same run;
+        - no gateway;
+        - the cache not primed;
+        - `LOCALDOMAIN` not set.
 - [x] **P-463 — names in flight when the lookup helper goes quiet are not kept off the probe's
       lanes** · XS · P-432, P-453 · Filed 2026-10-20 by `P-453`. D27 keeps every name in flight
       at an `exit` or `memory` loss off the probe's own `getaddrinfo` until ten minutes after

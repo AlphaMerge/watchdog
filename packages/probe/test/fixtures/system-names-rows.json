@@ -38,7 +38,8 @@
     "td7c7a33ff153": "nameserver 10.0.0.1\nnameserver 10.0.0.2\noptions timeout:1 attempts:2\n",
     "tdafe76d075ff": "hosts: files dns myhostname\n",
     "te3b0c44298fc": "",
-    "te86b2c49a9fd": "nameserver 10.0.0.53\noptions \n"
+    "te86b2c49a9fd": "nameserver 10.0.0.53\noptions \n",
+    "tebc7c61130ba": "127.0.0.1 localhost\nfe80::3%lo routerlo\n"
   },
   "rows": [
     {
@@ -13927,6 +13928,178 @@
               ["10.0.0.53", "sw1.corp.example", "A", 1],
               ["10.0.0.53", "sw1.corp.example", "AAAA", 1]
             ]
+          }
+        ]
+      },
+      "byImage": {}
+    },
+    {
+      "id": "f32a2f460865c7ba",
+      "title": "a %scope hosts line naming an interface the box has (lo) is skipped: routerlo, family 0",
+      "world": {
+        "glibc": "2.39",
+        "hostname": "probe-1",
+        "env": {},
+        "files": {
+          "/etc/hosts": "tebc7c61130ba",
+          "/etc/resolv.conf": "t1a6c2c25cedd",
+          "/etc/nsswitch.conf": "t2ad90a00ddc4",
+          "/etc/gai.conf": "te3b0c44298fc"
+        },
+        "missingModules": [],
+        "addresses": ["10.0.0.53"],
+        "ipv6": false
+      },
+      "question": {
+        "name": "routerlo",
+        "family": 0
+      },
+      "expect": {
+        "class": "walk",
+        "candidates": ["routerlo.corp.example", "routerlo"],
+        "types": ["A", "AAAA"],
+        "servers": ["10.0.0.53"],
+        "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
+        "plans": [
+          {
+            "plan": "nxdomain",
+            "answers": {
+              "10.0.0.53": {
+                "A": "nxdomain",
+                "AAAA": "nxdomain"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "routerlo.corp.example", "A", 1],
+              ["10.0.0.53", "routerlo.corp.example", "AAAA", 1],
+              ["10.0.0.53", "routerlo", "A", 1],
+              ["10.0.0.53", "routerlo", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "answer",
+            "answers": {
+              "10.0.0.53": {
+                "A": "address",
+                "AAAA": "address"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "routerlo.corp.example", "A", 1],
+              ["10.0.0.53", "routerlo.corp.example", "AAAA", 1]
+            ]
+          }
+        ]
+      },
+      "byImage": {}
+    },
+    {
+      "id": "a59b0188f27a45c3",
+      "title": "a %scope hosts line naming an interface the box has (lo) is skipped: routerlo, family 4",
+      "world": {
+        "glibc": "2.39",
+        "hostname": "probe-1",
+        "env": {},
+        "files": {
+          "/etc/hosts": "tebc7c61130ba",
+          "/etc/resolv.conf": "t1a6c2c25cedd",
+          "/etc/nsswitch.conf": "t2ad90a00ddc4",
+          "/etc/gai.conf": "te3b0c44298fc"
+        },
+        "missingModules": [],
+        "addresses": ["10.0.0.53"],
+        "ipv6": false
+      },
+      "question": {
+        "name": "routerlo",
+        "family": 4
+      },
+      "expect": {
+        "class": "walk",
+        "candidates": ["routerlo.corp.example", "routerlo"],
+        "types": ["A"],
+        "servers": ["10.0.0.53"],
+        "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
+        "plans": [
+          {
+            "plan": "nxdomain",
+            "answers": {
+              "10.0.0.53": {
+                "A": "nxdomain"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "routerlo.corp.example", "A", 1],
+              ["10.0.0.53", "routerlo", "A", 1]
+            ]
+          },
+          {
+            "plan": "answer",
+            "answers": {
+              "10.0.0.53": {
+                "A": "address"
+              }
+            },
+            "wire": [["10.0.0.53", "routerlo.corp.example", "A", 1]]
+          }
+        ]
+      },
+      "byImage": {}
+    },
+    {
+      "id": "42f570d7286a14d6",
+      "title": "a %scope hosts line naming an interface the box has (lo) is skipped: routerlo, family 6",
+      "world": {
+        "glibc": "2.39",
+        "hostname": "probe-1",
+        "env": {},
+        "files": {
+          "/etc/hosts": "tebc7c61130ba",
+          "/etc/resolv.conf": "t1a6c2c25cedd",
+          "/etc/nsswitch.conf": "t2ad90a00ddc4",
+          "/etc/gai.conf": "te3b0c44298fc"
+        },
+        "missingModules": [],
+        "addresses": ["10.0.0.53"],
+        "ipv6": false
+      },
+      "question": {
+        "name": "routerlo",
+        "family": 6
+      },
+      "expect": {
+        "class": "walk",
+        "candidates": ["routerlo.corp.example", "routerlo"],
+        "types": ["AAAA"],
+        "servers": ["10.0.0.53"],
+        "rotate": false,
+        "timeout": 5,
+        "attempts": 2,
+        "plans": [
+          {
+            "plan": "nxdomain",
+            "answers": {
+              "10.0.0.53": {
+                "AAAA": "nxdomain"
+              }
+            },
+            "wire": [
+              ["10.0.0.53", "routerlo.corp.example", "AAAA", 1],
+              ["10.0.0.53", "routerlo", "AAAA", 1]
+            ]
+          },
+          {
+            "plan": "answer",
+            "answers": {
+              "10.0.0.53": {
+                "AAAA": "address"
+              }
+            },
+            "wire": [["10.0.0.53", "routerlo.corp.example", "AAAA", 1]]
           }
         ]
       },

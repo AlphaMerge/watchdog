@@ -36,13 +36,23 @@ import type { ModesRun } from './names-differential.js';
  *    helper's child, and on the probe's own lanes (`systemLookup`), and where gate mode ran it.
  * 4. `release`: everything of the plan stopped, the helper's child with it.
  *
+ * A sequence row (`P-462`) names the lookup in each `walk` and `answers`, several in turn after one
+ * `prepare`, so that the check's key states carry from one lookup to the next as they would in
+ * ms-probe. Without a name, each is of the row's own name and family.
+ *
  * Every wait has a bound of its own, shorter than the replay's on this process.
  */
 
+/** A lookup a step is of: the row's own name and family unless the request names one. */
+export interface ModesLookup {
+  readonly host?: string;
+  readonly family?: Family;
+}
+
 export type ModesRequest =
   | { readonly op: 'prepare' }
-  | { readonly op: 'walk' }
-  | { readonly op: 'answers' }
+  | ({ readonly op: 'walk' } & ModesLookup)
+  | ({ readonly op: 'answers' } & ModesLookup)
   | { readonly op: 'release' }
   | { readonly op: 'exit' };
 
@@ -114,9 +124,15 @@ interface Plan {
 }
 
 const [name = '', familyText = '0'] = process.argv.slice(2);
-const family = Number(familyText) as Family;
 /** As the resolver keys a name: trimmed, lower case, a trailing dot kept. */
-const host = name.trim().toLowerCase();
+const keyed = (text: string): string => text.trim().toLowerCase();
+/** The lookup a step is of. */
+function lookupOf(asked: ModesLookup): { readonly host: string; readonly family: Family } {
+  return {
+    host: keyed(asked.host ?? name),
+    family: asked.family ?? (Number(familyText) as Family),
+  };
+}
 let plan: Plan | undefined;
 
 async function prepare(): Promise<ModesReply> {
@@ -157,9 +173,10 @@ async function prepare(): Promise<ModesReply> {
   return { op: 'prepared', walkProven, gateProven };
 }
 
-async function walk(): Promise<ModesReply> {
+async function walk(asked: ModesLookup): Promise<ModesReply> {
   const current = plan;
   if (current === undefined) throw new Error('walk before prepare');
+  const { host, family } = lookupOf(asked);
   const started = performance.now();
   const route = await within(
     WALK_MS,
@@ -182,9 +199,10 @@ async function walk(): Promise<ModesReply> {
   return { op: 'walked', route: routeOf(route), ms };
 }
 
-async function answers(): Promise<ModesReply> {
+async function answers(asked: ModesLookup): Promise<ModesReply> {
   const current = plan;
   if (current === undefined) throw new Error('answers before prepare');
+  const { host, family } = lookupOf(asked);
   const gateParts = current.gate.gate;
   if (gateParts === undefined) throw new Error('gate mode built no gate');
   const before = current.gate.resolver.gateHealth();
@@ -234,9 +252,9 @@ process.on('message', (message: ModesRequest) => {
       case 'prepare':
         return prepare();
       case 'walk':
-        return walk();
+        return walk(message);
       case 'answers':
-        return answers();
+        return answers(message);
       case 'release':
         return release();
       case 'exit':

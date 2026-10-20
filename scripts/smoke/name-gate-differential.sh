@@ -35,14 +35,21 @@
 # Debian 12 with `dnsmasq-base`) in both modes and in gate mode after a helper SIGKILL, and
 # systemd-resolved (in Ubuntu 24.04's box, after its rows) in both modes, with no SIGKILL arm; and
 # the boxes with the check off in situ (`P-461`): nscd running, libnss-resolve's and
-# libnss-mdns's hosts: lines, LD_PRELOAD and /etc/ld.so.preload. Every one must hold for the run
-# to pass. Every image's run and every box's carries the build it loaded, and says if it changed
-# while it ran: the verdict takes only runs of the build as it is then.
+# libnss-mdns's hosts: lines, LD_PRELOAD and /etc/ld.so.preload. §7.5's other rows (`P-462`): the
+# sequence rows in every image after the answer rows (a partial key, several lookups through one
+# check; `_gateway` on a host with an IPv4 default gateway and no IPv6 one); more boxes with the
+# check off (`sss` and `mdns4_minimal` before `files`, `files resolve dns`, `LOCALDOMAIN=""`, and
+# systemd-resolved's stub refused under `resolve`, in a box booted with systemd); and the skew
+# boxes, a file edited under a running probe in gate mode and its helper then SIGKILLed (gai.conf
+# at Debian 12, nsswitch.conf at Debian 11, where glibc reads it once, and at Debian 12, where it
+# does not). Every one must hold for the run to pass. Every image's run and every box's carries
+# the build it loaded, and says if it changed while it ran: the verdict takes only runs of the
+# build as it is then.
 #
 #   MS_DIFF_IMAGES="debian12 ubuntu2404"   only these (default: all of them)
 #   MS_DIFF_ONLY=<id,id>                   only these rows (a partial run never verifies)
-#   MS_DIFF_BOXES="budget off"             the boxes beside the rows (default both; `none`: neither,
-#                                          and the run never verifies)
+#   MS_DIFF_BOXES="budget off skew"        the boxes beside the rows (default all three; `none`:
+#                                          none, and the run never verifies)
 #   MS_DIFF_OUT=<dir>                      keep each image's run there (default: a temp dir); an
 #                                          earlier run's files there are removed first, and the
 #                                          verdict takes only the runs this invocation made
@@ -71,16 +78,28 @@ ubuntu2404 ubuntu:24.04 1 0
 debian13 debian:trixie 0 0
 "
 
-# case image package: each box with the check off (`P-461`), built on the image's base with the
-# package installed as an operator would (`-` for none).
+# case image package boot: each box with the check off (`P-461`, `P-462`), built on the image's
+# base with the package installed as an operator would (`-` for none); `boot` 1 boots it with
+# systemd and systemd-resolved, as Ubuntu 24.04's replay box is.
 OFF_BOXES="
-nscd debian12 nscd
-mdns4_minimal debian12 libnss-mdns
-resolve ubuntu2404 libnss-resolve
-ld-preload debian12 -
-ld-so-preload debian12 -
+nscd debian12 nscd 0
+mdns4_minimal debian12 libnss-mdns 0
+resolve ubuntu2404 libnss-resolve 0
+ld-preload debian12 - 0
+ld-so-preload debian12 - 0
+sss-first debian12 libnss-sss 0
+mdns4-first debian12 libnss-mdns 0
+files-resolve-dns ubuntu2404 libnss-resolve 0
+stub-refused ubuntu2404 libnss-resolve 1
+localdomain-empty debian12 - 0
 "
-boxes=" ${MS_DIFF_BOXES:-budget off} "
+# case image: each skew box (`P-462`, D28), on the image's base with nothing added.
+SKEW_BOXES="
+gai debian12
+nsswitch-frozen debian11
+nsswitch-reloaded debian12
+"
+boxes=" ${MS_DIFF_BOXES:-budget off skew} "
 want_box() { case "${boxes}" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # `image_row <name>`: the image's base, resolved and apt-snapshot columns.
@@ -125,6 +144,25 @@ build_box() {
     -f "${repo_root}/scripts/smoke/Dockerfile.names" "${repo_root}/scripts/smoke" >/dev/null
 }
 
+# `boot_box <container> <tag> <docker run options…>`: the box started with systemd as its init,
+# privileged with no network, and waited on for systemd to be running; prints the state reached.
+boot_box() {
+  local container="$1" tag="$2" state=""
+  shift 2
+  # The labels are two separate arguments by design, so this expansion must split.
+  # shellcheck disable=SC2046
+  docker run -d --name "${container}" $(ms_smoke_labels) \
+    --privileged --cgroupns=host --network none \
+    -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+    -v "${repo_root}:/ms:ro" "$@" "${tag}" /sbin/init >/dev/null
+  for _ in $(seq 1 60); do
+    state="$(docker exec "${container}" timeout 10 systemctl is-system-running 2>/dev/null || true)"
+    [ "${state}" = "running" ] || [ "${state}" = "degraded" ] && break
+    sleep 1
+  done
+  printf '%s\n' "${state}"
+}
+
 # `keep_run <file>`: a box's stdout went to `<file>.partial`; it is kept whole, for the verdict.
 keep_run() {
   mv "${out}/$1.partial" "${out}/$1"
@@ -151,7 +189,7 @@ while read -r name _; do
   rm -f "${out}/${name}.json" "${out}/${name}.json.partial" "${out}/${name}.log"
 done <<<"${IMAGES}"
 rm -f "${out}/recordings.json" "${out}/verify.log" "${out:?}"/off-*.json* "${out:?}"/off-*.log \
-  "${out:?}"/budget-*.json* "${out:?}"/budget-*.log
+  "${out:?}"/budget-*.json* "${out:?}"/budget-*.log "${out:?}"/skew-*.json* "${out:?}"/skew-*.log
 wanted="${MS_DIFF_IMAGES:-$(echo "${IMAGES}" | awk 'NF { print $1 }' | tr '\n' ' ')}"
 only=()
 if [ -n "${MS_DIFF_ONLY:-}" ]; then only=(--only "${MS_DIFF_ONLY}"); fi
@@ -188,18 +226,7 @@ while read -r name base resolved snapshot; do
   replay=(timeout 3600 node "/ms/${dist}/names-replay.js" --rows "/ms/${rows}" --image "${name}"
     "${only[@]+"${only[@]}"}")
   if [ "${resolved}" = 1 ]; then
-    # The labels are two separate arguments by design, so this expansion must split.
-    # shellcheck disable=SC2046
-    docker run -d --name "${container}" $(ms_smoke_labels) \
-      --privileged --cgroupns=host --network none \
-      -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
-      -v "${repo_root}:/ms:ro" -e "MS_DIFF_BASE=${base}" -e "MS_DIFF_DIGEST=${digest}" \
-      "${image}" /sbin/init >/dev/null
-    for _ in $(seq 1 60); do
-      state="$(docker exec "${container}" timeout 10 systemctl is-system-running 2>/dev/null || true)"
-      [ "${state}" = "running" ] || [ "${state}" = "degraded" ] && break
-      sleep 1
-    done
+    state="$(boot_box "${container}" "${image}" -e "MS_DIFF_BASE=${base}" -e "MS_DIFF_DIGEST=${digest}")"
     # resolved's upstream is the simulator, at 127.0.0.2; every cache cold; nothing but unicast
     # DNS; and a single-label name sent upstream, so the stub answers it as the plan says.
     # resolved asks its global servers only while some link has a routable address, and with no
@@ -309,9 +336,9 @@ if want_box budget; then
   fi
 fi
 
-# The boxes with the check off in situ (`P-461`).
+# The boxes with the check off in situ (`P-461`, `P-462`).
 if want_box off; then
-  while read -r box image package; do
+  while read -r box image package boot; do
     [ -n "${box}" ] || continue
     [ "${package}" != - ] || package=""
     read -r base _ snapshot <<<"$(image_row "${image}")"
@@ -320,12 +347,51 @@ if want_box off; then
       continue
     fi
     tag="ms-names-diff:${image}-${box}"
-    echo "==> off box ${box}: building ${tag} from ${digest}${package:+ with ${package}}"
-    build_box "${tag}" "${digest}" 0 "${snapshot}" "${package}"
+    booted=""
+    [ "${boot}" != 1 ] || booted=", booted with systemd"
+    echo "==> off box ${box}: building ${tag} from ${digest}${package:+ with ${package}}${booted}"
+    build_box "${tag}" "${digest}" "${boot}" "${snapshot}" "${package}"
     verify_image="${tag}"
-    run_box "off-${box}" "${tag}" timeout 120 node "/ms/${dist}/names-off.js" --case "${box}" \
-      --image "${image}"
+    if [ "${boot}" != 1 ]; then
+      run_box "off-${box}" "${tag}" timeout 120 node "/ms/${dist}/names-off.js" --case "${box}" \
+        --image "${image}"
+      continue
+    fi
+    # Booted with systemd and systemd-resolved, as the case's own setup needs them.
+    container="$(ms_smoke_name "names-off-${box}")"
+    containers+=("${container}")
+    docker rm -f "${container}" >/dev/null 2>&1 || true
+    echo "    systemd: $(boot_box "${container}" "${tag}")"
+    if docker exec "${container}" timeout 180 node "/ms/${dist}/names-off.js" --case "${box}" \
+      --image "${image}" >"${out}/off-${box}.json.partial" 2>"${out}/off-${box}.log"; then
+      keep_run "off-${box}.json"
+      sed 's/^/    /' "${out}/off-${box}.log"
+    else
+      mv "${out}/off-${box}.json.partial" "${out}/off-${box}.json.failed"
+      echo "    FAILED: the off-${box} box stopped:" >&2
+      tail -5 "${out}/off-${box}.log" | sed 's/^/      /' >&2
+      failed=1
+    fi
+    docker rm -f "${container}" >/dev/null 2>&1 || true
   done <<<"${OFF_BOXES}"
+fi
+
+# The skew boxes (`P-462`, D28): a file edited under a running probe, then its helper SIGKILLed.
+if want_box skew; then
+  while read -r box image; do
+    [ -n "${box}" ] || continue
+    read -r base _ snapshot <<<"$(image_row "${image}")"
+    if ! digest="$(base_digest "${image}" "${base}")"; then
+      failed=1
+      continue
+    fi
+    tag="ms-names-diff:${image}-skew-${box}"
+    echo "==> skew box ${box}: building ${tag} from ${digest}"
+    build_box "${tag}" "${digest}" 0 "${snapshot}" ""
+    verify_image="${tag}"
+    run_box "skew-${box}" "${tag}" timeout 200 node "/ms/${dist}/names-skew.js" --case "${box}" \
+      --image "${image}"
+  done <<<"${SKEW_BOXES}"
 fi
 
 echo "==> verifying every image's run against the rows, and every box"
