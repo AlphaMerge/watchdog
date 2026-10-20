@@ -148,33 +148,29 @@ async function isSettled(promise: Promise<unknown>): Promise<boolean> {
   return done;
 }
 
+/** How many microtasks `settlesInItsTurn` waits, in turn. An answer at once has settled by 2. */
+const TURN_MICROTASKS = 100;
+
 /**
- * A 1 ms timer, armed as this is called. `before(promise)`, for a promise asked for once it is
- * armed, says whether that promise settled before the timer fired: "at once", on no timer
- * (`P-473`). Timers of one length fire in the order they were armed and a longer one falls due
- * later, so a failure delivered on any timer loses to this one, however loaded the host and
- * whichever phase of the loop the test is in. `isSettled` alone cannot say this from the check
- * phase: its `setImmediate` then runs in the loop's next iteration, after that iteration's timers.
+ * Whether a promise, asked for in this turn of the loop, settles in this turn's microtasks: "at
+ * once", with no timer, immediate or I/O callback before it (`P-473`). Call it in the turn of the
+ * ask. Node runs every microtask queued, and every one they queue, before any timer, immediate or
+ * I/O callback, so a failure delivered on any of those loses to this check, whatever the timer's
+ * length, whenever it was armed, however loaded the host and whichever phase the test asks from.
+ * Neither an immediate (`isSettled`) nor a 1 ms timer of the test's own says that. An immediate
+ * queued from the check phase runs after the next iteration's timers. And Node keeps one list of
+ * timers for each length, takes the lists in the order their first timer falls due, and runs every
+ * timer due in a list before it takes the next. So a failure beats the 1 ms timer when it is put
+ * on a timer armed before it, or on a longer one whose list was due first and the loop comes late.
  */
-function aTimer(): { readonly before: (promise: Promise<unknown>) => Promise<boolean> } {
-  let fired = false;
-  const timer = new Promise<void>((resolve) => {
-    setTimeout(() => {
-      fired = true;
-      resolve();
-    }, 1);
-  });
-  return {
-    before: async (promise) => {
-      let first: boolean | undefined;
-      const mark = (): void => {
-        first ??= !fired;
-      };
-      promise.then(mark, mark);
-      await within(1_000, 'the test’s 1 ms timer', timer);
-      return first === true;
-    },
+async function settlesInItsTurn(promise: Promise<unknown>): Promise<boolean> {
+  let done = false;
+  const mark = (): void => {
+    done = true;
   };
+  promise.then(mark, mark);
+  for (let turn = 0; turn < TURN_MICROTASKS; turn += 1) await Promise.resolve();
+  return done;
 }
 
 /** Waits past the bound for stuck, so every lookup running since before is stuck. */
@@ -449,12 +445,11 @@ describe('a name the resolver does not answer is held (P-426)', () => {
     const waiting = ask('slow.test', 4, { waitMs: 10_000 });
     await pastStuck();
     assert.equal(await isSettled(waiting), false, 'still waiting, past the bound for stuck');
-    // At once: settled before a 1 ms timer armed just before it, so on no timer (`P-473`; this was
-    // under 20 ms of wall clock, which a loaded host can exceed). `isSettled` here, in the check
+    // At once: settled in the microtasks of the turn it was asked in, so on no timer (`P-473`; this
+    // was under 20 ms of wall clock, which a loaded host can exceed). `isSettled` here, in the check
     // phase, let a failure on a 1 ms timer through whenever the loop paused over a millisecond.
-    const timer = aTimer();
     const held = ask('slow.test');
-    assert.equal(await timer.before(held), true, 'a new check fails at once');
+    assert.equal(await settlesInItsTurn(held), true, 'a new check fails at once');
     await assert.rejects(held, (error: Error) => {
       assert.equal(codeOf(error), RESOLVER_HELD);
       assert.match(error.message, /a lookup for slow\.test has run \d+ s without an answer/u);
@@ -582,10 +577,9 @@ describe('the resolver’s lanes (P-426)', () => {
     });
     await pastStuck();
     await within(1_000, 'the waiting check to fail once the lanes were stuck', failedEarly);
-    // Asked after: fails at once, before a 1 ms timer armed just before it (`P-473`).
-    const timer = aTimer();
+    // Asked after: fails at once, in the microtasks of the turn it was asked in (`P-473`).
     const late = ask('late.zone-a.test', 4, { waitMs: 60_000 });
-    assert.equal(await timer.before(late), true, 'a check behind stuck lanes fails at once');
+    assert.equal(await settlesInItsTurn(late), true, 'a check behind stuck lanes fails at once');
     await assert.rejects(late, (error) => codeOf(error) === RESOLVER_STUCK);
     assert.equal(callsFor('early.zone-a.test').length, 0, 'not run yet');
     // A lane comes back: the queued lookup runs, and its answer is kept for the next check.
@@ -2049,9 +2043,11 @@ describe('“Check now” (P-426)', () => {
     clock.now = 3_000;
     // The one first lane, busy with a lookup that is slow but not stuck.
     void ask('busy.test', 4, { waitMs: 60_000 }).catch(() => undefined);
-    // Inside its bound: posted before a timer for the bound's last millisecond has fired. Timers
-    // fire in the order they fall due, and the reply is posted in the turn of the one that sends
-    // it. A loaded host can make the reply take over 400 ms, but cannot reorder them (`P-473`).
+    // Inside its bound: posted before a timer for the bound's last millisecond has fired. Node takes
+    // its timer lists, one for each length, in the order their first timer falls due. The reply's
+    // 300 ms timer is due before this 399 ms one, the only one of its length, so its list comes
+    // first, and the reply is posted in that timer's turn. A loaded host can make the reply take
+    // over 400 ms, but cannot reorder the two (`P-473`).
     let boundPassed = false;
     let inBound: boolean | undefined;
     const bound = setTimeout(() => {

@@ -16247,20 +16247,25 @@ because each is a decision rather than a defect:
       its resting twin (`name-resolver-resting.test.ts`) must pass twenty runs in a row at a load
       near 20.
 
-      **P-473 outcome. "At once" is settled before a 1 ms timer of the test's own, and "before its
-      bound" is before a timer for the bound's last millisecond.** Built 2026-10-20 on
-      `fix/flakes-r1`, in `name-resolver.test.ts` only.
-      - **The two "at once" tests** arm a 1 ms timer just before the check is asked, and assert
-        that its promise settled before the timer fired (corrected in fix round 1, below: they
-        used `isSettled`, one `setImmediate`, and this said that settled them "before the loop's
-        next turn, so no timer was waited on, however late the loop gets there", which holds
-        only for a check asked in the timers phase). Under 20 ms said less: a failure put on a
-        1 ms timer passed it.
+      **P-473 outcome. "At once" is settled in the microtasks of the turn the check was asked in,
+      and "before its bound" is before a timer for the bound's last millisecond.** Built 2026-10-20
+      on `fix/flakes-r1`, in `name-resolver.test.ts` only.
+      - **The two "at once" tests** assert that the check's promise settled in the microtasks of
+        the turn it was asked in (`settlesInItsTurn`), so before any timer, immediate or I/O
+        callback. Corrected twice, below. In round 0 they used `isSettled`, one `setImmediate`,
+        and this said that settled them "before the loop's next turn, so no timer was waited on,
+        however late the loop gets there", which holds only for a check asked in the timers
+        phase. In fix round 1 they asserted the promise settled before a 1 ms timer armed just
+        before the ask, which a failure on a timer armed before it beats. Under 20 ms said less:
+        a failure put on a 1 ms timer passed it.
       - **"Before its bound"** sets a timer of 399 ms beside the 400 ms "Check now", and records
-        at the reply's posting whether it had fired. Node runs timers in the order they fall due,
-        and the reply is posted in the reactions of the early timer that sends it, before any
-        later timer runs. So a loaded host makes both late but cannot reorder them. The note's
-        "within 300 ms" already said which timer answered.
+        at the reply's posting whether it had fired. Node takes its timer lists, one for each
+        length, in the order their first timer falls due, and runs a timer's reactions before the
+        next timer. The early timer's 300 ms list is due before the 399 ms list, which holds only
+        the test's timer, and the reply is posted in the early timer's reactions. So a loaded host
+        makes both late but cannot reorder them. (Corrected in fix round 2: this said Node runs
+        timers in the order they fall due, which it does not across lengths.) The note's "within
+        300 ms" already said which timer answered.
       - **The lower bounds** ('took >= 200', '>= 150', '>= 100') are left. A loaded host only
         makes a timer later, so it cannot fail them.
       - **Not reproduced first.** On the base, the file passed 12 of 12 at loads of 19–20. The
@@ -16292,16 +16297,18 @@ because each is a decision rather than a defect:
           timer" was certain only through the second test.
         - **The fix: an order against a timer of the test's own** (`aTimer`), as "before its
           bound" already was. A 1 ms timer is armed just before the ask, and the test asserts
-          that the check settled before it fired. Timers of one length fire in the order they
-          were armed, and a longer one falls due later. So a failure on any timer loses to it,
-          from whichever phase the test asks in.
+          that the check settled before it fired. (Replaced in fix round 2, below. This said
+          that a failure on any timer loses to the 1 ms timer, from whichever phase the test
+          asks in. One on a timer armed before it, or on a longer timer whose list was due first,
+          beats it once the loop comes late.)
         - **Decided 2026-10-20 by Claude, under the user's delegation:**
           - The order check, not the review's other offer, a `setTimeout(0)` before the ask. Both
             hold on Node 24 (the review's script of that shape passed the mutant 0 in 300 at every
             pause). But the `setTimeout(0)` rests on how Node's timers phase reads the clock,
             which nothing in the test would say, and a later edit that moved the ask would undo
-            it unseen. The order rests on timers firing in order, which the test states, and
-            holds wherever the ask is.
+            it unseen. (Withdrawn in fix round 2: this said the order rests on timers firing in
+            order, which the test states, and holds wherever the ask is. It rests on how Node
+            orders its timer lists as well, which nothing in the test said either.)
           - The second test takes it too, though it was not affected, so the file has one
             meaning of "at once" and neither test depends on the phase it asks in.
         - **Mutants: 8 of 8 killed, and the r1 first test shown to let the loaded case
@@ -16312,6 +16319,62 @@ because each is a decision rather than a defect:
           the review's case made certain on a quiet host, and its second fails.
         - **Runs.** The file and its twin with `dns-check.test.ts`, 20 runs in a row at a load
           held near 20 (13.8–24.6, median 20.2): 20 of 20, 231 tests each.
+      - **Fix round 2** (the review of fix round 1, its item 3).
+        - **Round 1's order against a 1 ms timer was not certain for a failure on any timer.**
+          Node does not fire due timers strictly by due time. It keeps one list for each timer
+          length, takes the lists in the order their first timer falls due, and runs every due
+          timer in a list before it takes the next. So a failure on a timer armed before the
+          test's 1 ms timer, or on a longer timer whose list had a timer due first, settles first
+          once the loop reaches its timers late: the loaded case. The review's script, asking
+          from the check phase under Node 24.19.0 with the thread held after the ask, let a 5 ms
+          failure through 0 in 100 with no other 5 ms timer, 84 in 100 with one armed 4.5 ms
+          before the ask and 100 in 100 with one armed 5 ms before, a 10 ms failure 100 in 100
+          beside a 10 ms timer armed 9.5 ms before, and one on a 1 ms timer armed before the
+          test's 300 in 300. This round's script of the same shape (`order.mjs`, in the track's
+          scratch) gave 0, 99, 100 and 100 in 100 for the first four, and 100 in 100 for a 1 ms
+          interval armed before the ask. Round 1's recorded kills hold, as the review said: a
+          failure on a 0 or 1 ms timer joins the test's list behind its timer, and the test's
+          resolver arms no other 5 ms timer.
+        - **The fix: "at once" is settled in the microtasks of the turn the check was asked in**
+          (`settlesInItsTurn`, in place of `aTimer`). It waits through 100 microtasks of its own,
+          then says whether the check's promise has settled. Node runs every microtask queued,
+          and every one they queue, before its next timer, immediate or I/O callback. So a
+          failure delivered on any of those loses, whatever the timer's length, whenever it was
+          armed, however loaded the host and from whichever phase the test asks. A copy that
+          recorded it found the resolver's answer at once settled by the helper's second
+          microtask, in both tests and in both files.
+        - **"Before its bound"** keeps its order against a 399 ms timer. Its mechanism was sound,
+          but its comment, and the outcome above, said Node fires timers in the order they fall
+          due. Both now give the reason that holds: the early timer's 300 ms list is due before
+          the 399 ms list, which holds only the test's timer.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - The microtask turn, not the review's suggested narrowing of round 1's claim to
+            failures on 0 or 1 ms timers and on later timers whose length's list had nothing
+            earlier pending. The narrowed claim is true, but it rests on how Node orders its
+            timer lists, which round 1 held against a `setTimeout(0)`, and it leaves a failure on
+            a timer armed earlier able to pass. The microtask turn rests on the ordering Node
+            documents for every callback, and "settled before the loop's next turn" is the first
+            form the ticket's **Done when** names.
+          - 100 microtasks, not the 2 the answer takes. Exactly 2 would fail the test when a
+            change to the resolver adds a microtask to an answer that is still at once. 100 is
+            still no timer, and costs nothing.
+          - "Before its bound" keeps a timer. What it tells apart is which of two timers of the
+            resolver's sent the reply, and no count of microtasks says that.
+        - **Mutants: 19 of 19 killed, and round 1's tests shown to let the review's case
+          through.** Every at-once outcome delivered late, in eight ways: on a 1 ms timer with
+          the thread then held 3 ms, on 0 ms held 3 ms, on 1 ms, on 5 ms held 8 ms, on an
+          immediate, on an immediate held 3 ms, on the next tick of a 1 ms interval armed when
+          the module loads (a failure on a timer armed before the test's own), and on 5 ms held
+          6 ms beside a 5 ms interval armed when the module loads (the review's longer timer, in
+          a list of its length armed earlier). Each fails both tests, in the file and in its
+          resting twin.
+          Round 0's three are killed too: the held name's at-once branch removed, the stuck
+          lanes' branch removed, and the early timer moved to the bound. Round 1's tests under
+          the 1 ms interval: both pass in both files, the review's case made certain. Under an
+          immediate, round 1's second test passes as well: it asks in the timers phase, whose
+          immediates run before the next timers.
+        - **Runs.** The file and its twin, 20 runs in a row at a load held near 20 (20.8–23.5,
+          median 22.3): 20 of 20, 198 tests each.
 - [x] **P-474 — `process-runner`'s `P-278` test waits 30 s for a late read it counts only when it
       forced the lateness** · XS · P-278 · Filed 2026-10-20 by the flakes track. 'ends what a script
       left when its leader was reaped before its line was read' timed out at its 30 s `until` once
