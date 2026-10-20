@@ -43810,6 +43810,117 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       release's), the file name keeps the tag's spelling, and a test of the generated `.wxs`
       covers both.
 
+- [x] **H-51 — a release installs the repository's whole `docs/`** · S · H-05, H-20 · Found
+      2026-10-20 by the docs track. `package.sh` staged `cp -R docs`, so the tarball, the `.deb` and
+      the `.rpm` installed the backlog (`TASKS.md`, about 46,000 lines), `PLAN.md`,
+      `CAPABILITIES.MD`, `WORKFLOW.MD`, six ADRs, the field-test runbook and 103 findings files to
+      `/opt/ms/docs`, on every core and every remote probe host. `package-msi.sh` copied the
+      repository's `docs/` itself, past the stage. **Done when** the release ships an allowlist of
+      the operator's documents, each file in `docs/` decided with its reason; links in shipped
+      documents to files not shipped are rewritten; the index is right for the repository and for
+      the shipped copy; and a test holds the list: every document a unit, a script or a source
+      string points at is in it, and no internal document is.
+
+      **H-51 outcome.** `scripts/lib/release-docs.txt` decides every entry at the top of `docs/`,
+      `ship` or `keep`, with the reason above each line. `package.sh` stages the `ship` lines and
+      nothing else, and stops the build on a listed file that is not there, a line that is not one
+      path inside `docs/`, or a verdict other than the two. `package-msi.sh` copies the staged
+      `docs`, as the `.deb` and `.rpm` already did.
+      - **Shipped (13):** `index.md` (new: the release's index), `installation.md`,
+        `administration.md`, `runbook-backup-restore.md`, `release-notes-1.0.md`,
+        `troubleshooting.md`, `sizing.md`, `web-ui.md`, `sensor-reference.md`, `api-reference.md`,
+        `state-machine.md`, `adding-a-sensor-type.md`, `ADR-001-architecture.md`.
+      - **Kept:** `README.md` (the repository's map), `TASKS.md`, `PLAN.md`, `CAPABILITIES.MD`,
+        `WORKFLOW.MD`, `ADR-002` to `ADR-006`, `runbook-field-test.md`, `findings/`.
+      - **Links:** 32 links in seven shipped documents pointed at files a release does not have
+        (`release-notes-1.0.md` 16, `web-ui.md` 7, `sizing.md` 3, `installation.md` 2,
+        `administration.md` 2, `troubleshooting.md` 1, `state-machine.md` 1). Each is plain text
+        now, or points at a shipped document (the TimescaleDB licence at ADR-001's Decision 4, the
+        Partial and Unusual states at `state-machine.md` §1, what 1.0 lacks at the release notes,
+        the sensor types at `GET /api/v1/sensor-types` in the API reference).
+      - **Pointers:** five OpenAPI descriptions named `CAPABILITIES.MD` or `WORKFLOW.MD`, and
+        `flow.netflow`'s `channels` parameter `CAPABILITIES.MD`; each says what it meant instead,
+        and both references are regenerated. `ms-core.service` named `CLAUDE.md` and
+        `CAPABILITIES.MD` (its sizing line now names `docs/sizing.md`), `ms-probe.service` and
+        `ms-setup` `WORKFLOW.MD`, `ms-setup` `CAPABILITIES.MD`, and nine installed scripts' headers
+        `TASKS.md`; each is reworded.
+      - **The index:** `docs/README.md` stays the repository's map of everything and says what a
+        release ships, pointing at `index.md` and the list. `index.md` indexes the shipped
+        documents only, and says that a ticket, a `findings/` file or a design document a
+        paragraph cites stays in the source repository.
+      - **Tests:** `release-docs.test.ts` (new, 6): every entry decided once, `README.md`,
+        `TASKS.md`, `PLAN.md`, `CAPABILITIES.MD`, `WORKFLOW.MD`, the field-test runbook and
+        `findings/` kept, and an index shipped; every document named by a file under `deploy/`,
+        a packaging script's heredocs, or a string in any package's source (comments and SQL
+        comments aside, a migration's `RAISE` and `COMMENT ON` included) shipped, after checking
+        that the reader finds the seven documents it must; no link from a shipped document to an
+        unshipped file, code spans and fences aside; the three packagers copy the staged `docs`;
+        the readers, planted; and the list read as `package.sh` reads it.
+        `package-provenance.test.ts` (2): `package.sh`, run for a core and a probe host, stages
+        exactly the shipped list and neither kept file the test repository adds; and six bad
+        lines each stop the build with their message and no tarball.
+      - **Mutants**, 15, all killed, each restored by copy and compared byte for byte, and
+        `dist` rebuilt after the four in the test's own readers and searched for their marker:
+        `package.sh` staging all of `docs/` again, without the missing-file check, without the
+        path check, and skipping an unknown verdict; `package-msi.sh` copying the repository's
+        `docs/`; a `[TASKS.md]` link back in the release notes; `CAPABILITIES.MD` back in the
+        audit route's description and `WORKFLOW.MD` in `ms-probe.service`; `TASKS.md` shipped,
+        `installation.md` kept, `index.md` kept; and the readers with SQL comments read, code read
+        as links, JSX text unread and heredocs unread.
+      - **The tarball**, built once at `d1081326` (`ms-1.0.0-rc.2-linux-aarch64`, clean, `v1`):
+        its `docs/` holds the 13 shipped files and nothing else, 1.06 MB, where the same
+        directory at `21b55948` was 126 files and 8.5 MB. No `TASKS`, `PLAN`, `CAPABILITIES`,
+        `WORKFLOW`, `ADR-002`..`006`, field-test or findings path is in it.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **What ships is what an operator installing, running, upgrading, troubleshooting,
+          sizing or extending the product reads**, and what a shipped unit, script or message
+          sends them to. The field-test runbook qualifies a candidate before it is released, so it
+          is ours. The findings are the evidence behind the documents' numbers, which the
+          documents state; they are cited by name.
+        - **`ADR-001` ships, alone of the ADRs.** Migration 004's refusal of a TimescaleDB
+          without the Community licence names its Decision 4, and the migrator checksums that
+          text, so it cannot be reworded; the installation guide, the release notes and the units
+          cite its decisions on `ping`, protocol skew and the service wrapper. ADR-002 to ADR-006
+          record maps, uploads, geographical maps and reports, none of which the 1.0 build has.
+        - **`state-machine.md` and `adding-a-sensor-type.md` ship.** The first is what an
+          operator reads to know why a sensor is Down, Unknown or still Warning, and migration
+          040's column comment names it; the second is how the product is extended, and the
+          catalogue's refusal of a malformed type names it.
+        - **A separate index ships, under its own name, rather than one `README.md` for both.**
+          The repository's map links the backlog, the plan and every finding, which a release
+          does not have, and `CLAUDE.md` sends contributors to it. `index.md` needs no renaming at
+          staging, so every shipped file is the repository's file byte for byte.
+        - **A pointer at a kept document is reworded rather than shipping the document.** The
+          one exception is the checksummed migration text above. An installed script's header
+          keeps its ticket id and loses `TASKS.md`.
+        - **Every entry is decided, `keep` as well as `ship`.** A new document fails the test
+          until somebody decides it, and the decision and its reason are in one file. Findings
+          are kept as a directory, so a new one needs no line.
+        - **Plain-text citations of kept documents stay.** The test is on links, as the ticket
+          asks. A cited ticket or finding tells a reader where the evidence is; `index.md` says
+          that it is in the source repository.
+        - **The probe host's package ships the same documents.** Its units name
+          `administration.md` and its installer `installation.md`, and one list for every package
+          keeps them the same.
+        - **The rc.3 checklist's step 9.3 now names the rc.3 record in the release notes as plain
+          text**, as rc.2's is: the notes ship and `findings/` does not, so a link would fail the
+          suite on `main` after the cut.
+
+- [x] **H-52 — the shipped sensor reference lists `flow.netflow` as though 1.0 had it** · XS ·
+      H-51, H-12 · Found 2026-10-20 in `H-51`, deciding to ship `sensor-reference.md`. The v1
+      build withholds `flow.netflow` (`WITHHELD_FROM_V1`), and the release notes count 39 types,
+      but the reference marked only the Windows category as not in 1.0. **Done when** the
+      reference marks every type the v1 build leaves out, from the build's own list.
+
+      **H-52 outcome.** `scripts/docs/sensor-reference.mjs` marks Traffic *not in 1.0 — v2*, in
+      the index and under its heading, and checks every category against `WITHHELD_FROM_V1`: it
+      stops on a category withheld whole without a note, a note on a category the v1 build
+      carries, or a category that mixes the two, which would need marks type by type. The
+      reference is regenerated; `build-hygiene`'s generated-documentation check holds it.
+      Two mutants, both killed by *has docs/sensor-reference.md in step with the code*: the
+      Traffic note taken out (the generator stops), and the note and the check taken out (the
+      reference differs from the committed one).
+
 ---
 
 ## Phase 11 — Flow monitoring (`V2-01`)
