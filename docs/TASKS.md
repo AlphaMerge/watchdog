@@ -33136,7 +33136,12 @@ because each is a decision rather than a defect:
         sensors' `netflow5.test.ts` assert their refusals cite none. **Corrected by review round
         1:** a type's channels for `{}` alone, so a channel only a parameter turns on was never
         read, nor the placeholders, the built-in schedules or a default; and nothing held what a
-        check says, a log line or a refusal. All of it is held since, below. **Mutants (16), each
+        check says, a log line or a refusal. All of it is held since, below. **Corrected by review
+        round 2:** not all of it. The core's third test read what a logger call and an error were
+        given, and what the core writes as a sensor's message is neither — Core Health's and
+        Probe Health's, and the message a state is written with when a probe changes or a parent
+        is paused — so a ticket in any of them passed. It reads every string under `src` since,
+        below. **Mutants (16), each
         failing:** each of the eight citations put back in its place (`P-07`, `A-41b`, `V2-01`,
         `T-09`, `ADR-003`, `B-03`, the channel table's `P-05`, the stat's `P-08`), and a ticket
         written into a trigger kind's description, a setting's, a lookup's state text, a
@@ -33241,7 +33246,8 @@ because each is a decision rather than a defect:
         whose citations (126 in the reference) are `U-92`'s *Seen* note and a ticket of their
         own, and the SQL whose comments are where a query's ticket goes: read whole, it found 176
         strings that cite one, three of them the operator's, so it would need a list of
-        exceptions longer than what it held.
+        exceptions longer than what it held. **The core's half is replaced by review round 2**,
+        below: three rules, not a list, take out what is written for somebody else.
       - **Decided 2026-10-20 by Claude, under the user's delegation:** a test in each package,
         each with its own thirty-line reader, rather than one in the core reading three trees. A
         type's author runs the sensors' suite, and a package's tests hold its own source, as each
@@ -33266,6 +33272,76 @@ because each is a decision rather than a defect:
         files, 39 green; the web suite 96 files and 1,294 tests green; both references
         `--check` current and unchanged. **Mutants 17, 17 killed**, each restored byte for byte
         and the tree rebuilt before the suites above.
+
+      **Review round 2, 2026-10-20: one new defect, closed** (core, one commit and this note).
+      8. **What the core writes as a sensor's message was read by nothing** (new). Round 1 said a
+         check's words, a log line and a refusal were all held, and the core's third test read
+         the arguments of a logger call, of a `new …Error(…)` and of a `throw`. The message the
+         core writes for a sensor is none of those: a check result's `message` for Core Health
+         ("Core Health could not read its own numbers: …") and for Probe Health ("not connected
+         to the core"), the `message` a state is re-decided with when the probe carrying a sensor
+         changes or a sensor is created under a paused parent, a constant (`LOST_MESSAGE`), and
+         the sentence Probe Health's `describe()` assembles part by part. Each is the sensor's
+         message, its state-log entry and every notification carrying `%lastmessage`, and a
+         ticket in any of them passed every suite. The third test reads every string under `src`
+         now, as the other packages' tests do, except three kinds of text written for somebody
+         else: a SQL comment, `--` to the end of its line, in any string (a flag such as
+         `--config` stays); a migration's `up` and `down`, its SQL, which the migrator checksums
+         once it ships, so 004's licence hint, which sends the operator to
+         `docs/ADR-001-architecture.md`, cannot change, and whose `COMMENT ON` text is the
+         database's own documentation; and a `description` and a `summary` under `api/`, the
+         OpenAPI document the *Seen* note leaves to a ticket of its own. A template is read as
+         one text, so a comment that runs past a placeholder is still a comment, and the strings
+         inside a placeholder are read too. It reads 15,260 strings in 342 files and found two,
+         neither of them the operator's, which are reworded as the other packages reword theirs:
+         the unique-constraint registry's note that `seedBuiltIns` takes the next free name
+         "(P-393)", and the enrolment route's reason for writing no audit entry "(A-18)". Each
+         ticket moved to a comment beside it. **Not held:** a `RAISE` in a new migration's SQL,
+         which the operator reads in the journal when that migration fails. The test's docblock
+         says so.
+      - **Tests** (+1): `operator-text.test.ts` (core, 4). A new test takes a SQL comment out of
+        a string and leaves a flag and the query. The third test reads the whole tree, and
+        asserts both that it reaches a log line, a migration's log line and name, a refusal, Core
+        Health's and Probe Health's messages, a sentence `describe()` assembles, a state's
+        message as an argument and as a constant, a route's refusal outside its schema, a
+        description outside `api/`, a query outside its comments and a string inside a
+        placeholder, and that it leaves out a query's comment, 004's hint and an API
+        description. **Mutants (18), each failing:** a ticket in Probe Health's lost-probe
+        message (the review's scenario), in Core Health's, in the probe change's and the paused
+        parent's state messages, in `LOST_MESSAGE`, in a part of Probe Health's sentence and in
+        the stream's refusal; `P-393` and `A-18` put back; and the reader's own rules broken one
+        at a time: SQL comments kept, a flag taken for a comment, a migration's SQL read, the API
+        reference read, a description left out outside `api/` too, every property of a migration
+        left out, a template with a placeholder not read, a placeholder's strings not read, and a
+        `message` property left out, as before.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the core's test reads its
+        whole tree under three rules, rather than adding `message` properties to what it reads,
+        and this replaces round 1's decision for the core. A sensor's message is written as a
+        property, an argument, a constant, an entry in a table of them and a sentence a function
+        assembles from parts, so a list of the places a message is written misses the next shape,
+        as round 1's list missed these. Of the review's four, a `message` property rule reaches
+        two, and neither `describe()` nor `LOST_MESSAGE`. Round 1 feared a list of exceptions
+        longer than what it held. The 176 strings it counted break down into 23 SQL comments, 60
+        strings of migration SQL and 88 of the API reference, which the three rules take out; the
+        three log lines it fixed; and the two reworded here.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a SQL comment is found by
+        its shape — `--` followed by a space or the end of the line, in any string — rather than
+        by recognising SQL. Telling a query by its first word took operator text with it:
+        TimescaleDB's upgrade refusal ends "then run ALTER EXTENSION timescaledb UPDATE in this
+        database", and the error for deleting an object that is not empty carries a `retryWith`
+        that begins `DELETE /api/v1/objects/`. A column list such as `summaryColumns` begins with
+        no keyword at all. No string in the core's `src` outside SQL carries ` -- `.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a migration's `up` and
+        `down` are left out whole, `RAISE` included, rather than read outside their comments. A
+        shipped `up` cannot change (`db/migrations/types.ts`, `H-21`). Outside their comments, 42
+        strings of migration SQL cite a ticket: 41 in `COMMENT ON` text, which is the database's
+        documentation, and 004's hint, which nobody may reword. The gap left is a new migration's
+        `RAISE`, written knowing it cannot change once it ships.
+      - **The round together, 2026-10-20** (one commit and this note): the core's operator-text,
+        unique-constraint, audit-sweep, schedule-seed, TOTP and build-hygiene files, six of them,
+        79 tests green and none skipped; both references regenerated, unchanged, and `--check`
+        current. **Mutants 18, 18 killed**, each restored byte for byte, and the tree rebuilt
+        before the suites above.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
