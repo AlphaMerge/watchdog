@@ -540,7 +540,7 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
             type="button"
             onClick={cancel}
             disabled={cancelling}
-            className="border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
+            className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
           >
             {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>

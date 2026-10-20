@@ -101,7 +101,9 @@ export function RediscoveryPanel({
               setProblem(null);
               setEditing('new');
             }}
-            className="border border-border px-2 py-1 text-sm text-text hover:bg-surface"
+            // The control grey, as every button here is (`U-87`): they were edged in the hairline,
+            // 1.36:1 on the light surface where 1.4.11 asks 3:1 of a control's edge.
+            className="border border-control px-2 py-1 text-sm text-text hover:bg-surface"
           >
             New rule
           </button>
@@ -204,7 +206,7 @@ export function RediscoveryPanel({
                         'the rule could not be switched',
                       );
                     }}
-                    className="border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
+                    className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
                   >
                     {rule.enabled ? `Switch off ${rule.name}` : `Switch on ${rule.name}`}
                   </button>
@@ -215,7 +217,7 @@ export function RediscoveryPanel({
                       setProblem(null);
                       setEditing(rule);
                     }}
-                    className="border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
+                    className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
                   >
                     Edit <span className="sr-only">{rule.name}</span>
                   </button>
@@ -241,7 +243,7 @@ export function RediscoveryPanel({
                         onClick={() => {
                           setConfirming(null);
                         }}
-                        className="border border-border px-2 py-1 text-sm text-text hover:bg-surface"
+                        className="border border-control px-2 py-1 text-sm text-text hover:bg-surface"
                       >
                         Keep
                       </button>
@@ -253,7 +255,7 @@ export function RediscoveryPanel({
                       onClick={() => {
                         setConfirming(rule.id);
                       }}
-                      className="border border-border px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
+                      className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
                     >
                       Delete <span className="sr-only">{rule.name}</span>
                     </button>
@@ -652,7 +654,7 @@ function RuleForm({
         <button
           type="button"
           onClick={onCancel}
-          className="border border-border px-3 py-1 text-sm text-text hover:bg-surface"
+          className="border border-control px-3 py-1 text-sm text-text hover:bg-surface"
         >
           Cancel
         </button>

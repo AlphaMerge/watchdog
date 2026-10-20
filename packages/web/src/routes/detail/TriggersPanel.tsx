@@ -204,7 +204,9 @@ function OwnRow({
                       );
                     });
                 }}
-                className="border border-down-border bg-down-bg px-2 py-0.5 text-xs text-down-fg"
+                // Edged in the state's text colour, not its tint (`U-87`): `--ms-down-border` is
+                // 1.55:1 on the fill and 1.8:1 on the surface, and the fill barely leaves it.
+                className="border border-down-fg bg-down-bg px-2 py-0.5 text-xs text-down-fg"
               >
                 Yes, delete
               </button>
