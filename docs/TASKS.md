@@ -32773,11 +32773,138 @@ because each is a decision rather than a defect:
         "as drawn" holds this tab only. The credential kinds' `allowedTargets` and SSH `hostKeys`
         items have no `title` (`packages/sensors`), so entries read "Allowed targets 1", "Remove
         Allowed targets 1" and "Add allowed targets". Kind descriptions carry Markdown backticks
-        shown as typed (HTTP's token, Database's `SELECT`).
+        shown as typed (HTTP's token, Database's `SELECT`). **Filed and fixed 2026-10-20 as
+        `U-87`, `U-88` and `U-89`, below.**
       - **For the screen-reader pass.** Replace, Clear and Keep are named by their text alone, so
         a form with three secrets (SNMP) says "Replace" three times; whether the field's label
         before them is enough when tabbing is the pass's to judge. The notice after a save is a
-        polite status that is also focused.
+        polite status that is also focused. **The names are `U-90`, fixed 2026-10-20: each now
+        carries its field's label; how they read is still the pass's to judge.**
+
+- [x] **U-87 — buttons beyond the Credentials tab are edged in the hairline, under 1.4.11's 3:1**
+      · XS · U-23 · Found 2026-10-20 by `U-23`'s walk. `RediscoveryPanel.tsx` edges its buttons
+      in `--ms-border`, as the Credentials tab did, and `DiscoveryView.tsx` a run's Cancel; 1.36:1
+      on the light surface and 1.44:1 on the dark, where `index.css` holds every pressable edge to
+      3:1 with `--ms-control-border`. `U-23`'s "as drawn" test holds that tab only. **Done when**
+      every pressable edge in `packages/web` reaches 3:1 and no class names a colour the
+      stylesheet lacks, swept by a test that reads every component, so a page no test renders is
+      held too.
+      - **U-87 outcome.** The sweep found eight. Rediscovery's *New rule*, *Switch on/off*,
+        *Edit*, *Delete*, *Keep* and its form's *Cancel* (six, not five: the form's Cancel is in
+        the same file), and a discovery run's *Cancel*, are in the control grey now. A trigger's
+        *Yes, delete* was edged in `--ms-down-border`, a state's tint: 1.55:1 on its own fill and
+        1.80:1 on the surface light, 1.71:1 and 1.77:1 dark, with a fill that barely leaves the
+        surface. It is edged in `--ms-down-fg` now, 6.41:1 and 6.85:1, as Templates' delete is. No
+        class anywhere names a colour the stylesheet lacks: `U-23` fixed the one there was.
+      - **Test** (`control-edges.test.ts`, 3). Every `.tsx` under `src` is parsed with TypeScript,
+        and each name a `className` uses is followed to its declaration, in its file or the one it
+        is imported from (`CredentialsPanel`'s `BUTTON`, `discovery-fields`' `INPUT`, `Control`'s
+        ternary). Every `button`, `input`, `select`, `textarea`, `summary`, `a`, `Link` and
+        `NavLink` is edged in the control grey, the accent, a text colour, a state's `-fg`, or
+        `transparent` (a tab not chosen); every control given classes has them read; and no
+        element names a colour `index.css` lacks. **Mutants (6), each failing:** a rediscovery
+        button, a run's Cancel and *Yes, delete* put back; the list entry back to `border-subtle`;
+        `BUTTON`, and the imported `INPUT`, in the hairline.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a discovery level's card,
+        a `<label>` round a radio, keeps the hairline. The radio is the control and draws its own
+        edge; the card is its label, made larger to hit. 1.4.11 asks for what identifies the
+        component, which the radio does, and cards in the control grey would read as more
+        things to press beside the radios that already say so.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the sweep reads the source
+        rather than rendered pages. A render sees the states a test reaches on the pages it
+        mounts; the parse sees every control, and counts both branches of a ternary, which is the
+        right over-count for a rule about what may ever be drawn. It uses the TypeScript the
+        repository already builds with; nothing is added.
+
+- [x] **U-88 — a list's entries are named for the list: "Allowed targets 1"** · XS · U-23, U-12 ·
+      Found 2026-10-20 by `U-23`'s walk. Every credential kind's `allowedTargets` and SSH's
+      `hostKeys` declare no `items.title`, so `U-12`'s repeating control names each entry and its
+      buttons for the list: "Allowed targets 1", "Remove Allowed targets 1", "Add allowed
+      targets". A screen reader says that and nothing else of the entry. **Done when** every list
+      a shipped schema in `packages/sensors` declares names its entry, with a test.
+      - **U-88 outcome.** *Allowed target* and *Host key*. Every list of strings a sensor type
+        takes had one already (blocklists, arguments, volumes); the sweep went on to lists of
+        objects, which have the same gap, and found six: `http.advanced`'s expected headers
+        (*Expected header*), `http.transaction`'s captures (*Capture*), `rest.custom`'s values
+        that must be right (*Expected value*), `http.content`'s numbers to extract (*Number to
+        extract*), `snmp.table`'s columns (*Column*) and `ssh.script`'s channels (*Channel*).
+        `docs/adding-a-sensor-type.md` now says to give one, and its paragraph saying an array
+        falls back to a JSON box, stale since `U-12`, says what the form draws. The generated
+        references do not print an item's title and are unchanged (both `--check`s pass).
+      - **Test** (`entry-titles.test.ts`, sensors, 2): every list in every credential kind and in
+        every shipped type of the full profile has a string `items.title`, and the targets and
+        host keys read *Allowed target* and *Host key*. The web suite's credential fixtures carry
+        the titles as the core now sends them. **Mutants (3), each failing:** the title taken off
+        the targets, the host keys and `snmp.table`'s columns.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a test over what ships, not
+        a rule the catalogue enforces at registration. A missing title worsens a name, and the
+        fallback still names the entry for its list; `U-53`'s unsaid pattern, which is a rule,
+        told an operator a regular expression. And a registration rule would refuse the sensor
+        types the core's and the probe's tests register, for a property they never render.
+        Revisit if a type is ever written outside this repository.
+      - **Seen, not this ticket's, for whoever orders the queue to file.** The core's `exe`
+        notification method declares `args` and `secretArgs` with no title, on the list or the
+        item (`packages/core/src/notifications/methods.ts`), so its form reads "Args 1", "Remove
+        Args 1" and "Secret args 1". Many schema descriptions in `packages/sensors` name an
+        internal ticket to the operator, such as "(`P-07`)" and "(`A-41b`)".
+
+- [x] **U-89 — a schema's description shows its Markdown as typed** · S · U-23, U-08 · Found
+      2026-10-20 by `U-23`'s walk. The catalogue writes its descriptions in Markdown and
+      `docs/sensor-reference.md`, generated from them, renders it; 57 of the 192 description
+      strings in `packages/sensors` carry backticks or asterisks, by a scan of the source. The form printed them as
+      typed: "Give it \`SELECT\` on what it is watching", "two credential \*sets\*". **Done
+      when** what they mean is drawn, the same way wherever the UI shows a schema's description,
+      with tests.
+      - **U-89 outcome.** `components/inline-markdown.ts` reads code spans (any fence length),
+        `*` and `_` emphasis and strong emphasis by CommonMark's flanking rules, and backslash
+        escapes; `InlineMarkdown` draws them as `<code>` and `<strong>` in the body colour, as
+        `Overview`'s `<strong>` is, and `<em>`. Text only: React elements, never HTML. It draws
+        every description `SchemaForm` shows — a field's hint, which its box is described by, an
+        object's and a list's — so sensor parameters, credential fields, notification and trigger
+        settings all have it, and a credential kind's own description above its form. The stars
+        that open or close nothing stay stars, as on the generated page: `*.domain`,
+        `$.nodes[*].load`, `{{credential.*}}`, `MS_* overrides`; `CAP_NET_RAW` keeps its
+        underscores. Not read: links, lists, headings, `***`, which no description has.
+      - **Tests.** `inline-markdown.test.tsx` (7): the catalogue's own sentences, read; and a
+        field's, an object's and a list's description drawn by `SchemaForm`, with the hint still
+        what the box is described by and no backtick or star left on the page.
+        `credentials-panel.test.tsx`: a kind's description drawn with its code and emphasis.
+        **Mutants (8), each failing:** each of the four places typed out again; every star
+        opening and closing; underscores opening inside a word; a code span keeping its padding;
+        no backslash escapes.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** drawn, not stripped. The
+        generated reference draws the same text, and stripping would drop the emphasis the
+        authors wrote ("**all** of these", "the unit *per second*"). Code is set off by the body
+        colour against the muted line, not by a face or a box: the whole UI is monospace, and
+        `index.css`'s first rule is hierarchy by colour.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the descriptions of trigger
+        kinds, notification methods, summarisation modes and settings stay plain text. They are
+        the core's prose rather than a schema's, none uses Markdown, and a star in one is a star.
+
+- [x] **U-90 — a stored secret's Replace, Clear and Keep are named by their text alone** · XS ·
+      U-23, U-21 · Found 2026-10-20 by `U-23`'s walk. An SNMP v3 set's three secrets give a
+      screen reader's list of buttons, or a voice command, three "Replace" and three "Clear", with
+      nothing to tell them apart but where they sit. **Done when** each has a name that includes
+      its field's label, with a test; the text shown may stay.
+      - **U-90 outcome.** "Replace Community string", "Clear Authentication key", "Keep the
+        current one, Privacy key", the text shown unchanged. `SchemaForm`'s, so a sensor's
+        write-only parameters and a notification method's secrets have it too.
+      - **Test** (`credentials-panel.test.tsx`): with SNMP's three secrets stored, no button is
+        called "Replace" or "Clear" alone; each field has its own pair, showing the same text as
+        before; and the Keep after a Replace and the Keep after a Clear each name their field. The
+        tests that pressed these by text press them by name now. **Mutants (4), each failing:**
+        each of the four names taken off.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the name is the text shown,
+        then the label — "Keep the current one, Privacy key", not "Keep the current Privacy key".
+        WCAG 2.5.3 wants the words on the button in its name, so a voice command that says what
+        it sees presses it; the comma is a pause for a screen reader. Whether they read well is
+        still the screen-reader pass's, which is `U-23`'s and the user's.
+      - **The four together, 2026-10-20** (web and sensors only, four commits): the web suite 94
+        files and 1,252 tests green; sensors 2,314 tests, 2,313 passing and the one skipped as
+        before (the dev PostgreSQL offers no TLS); `docs/sensor-reference.md` and
+        `docs/api-reference.md` current. **Mutants 21, 21 killed**, each restored byte for byte.
+        Not walked in a browser again: what changed is class names, accessible names and the
+        description text, each read by a test as the browser is handed it.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
