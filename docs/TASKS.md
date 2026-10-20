@@ -40616,6 +40616,39 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           not a command, and `ms-enrol` then says which flag it needs. The test's pattern
           requires the installed path, as round 1's did.
         - **Quiet-machine runs: none.** Nothing here is measured.
+      - **Brought onto the gate track's second round, S7 and S8's `P-460` and `P-461`**
+        (2026-10-20, integration `integ/r6-1020`, one docs commit), the four documents made to
+        agree with what landed:
+        - **The cut checklist.** Step 0.1 names the commit that closed S6's re-check gaps (the gate
+          track's second round). Step 0.2 also holds the fixture to S8's run 7 (schema 3, 2,966
+          recordings, 42 answer recordings) and prints the policy build it names. Step 0.6 gives
+          run 7's times (about 45 minutes, each image's replay 337–384 s), the per-image line the
+          script prints now, and a host alarm of 10,800 s, S8's own, where 3,600 s left a 45 to 50
+          minute run little margin on a loaded VM. Step 0.6.1 says what `run.out` must show for
+          `P-460` and `P-461`, since the walk prints no line of its own: each image's plans, the 42
+          answer recordings, five budget lines and five off-box lines. Step 0.7 runs S7's two
+          commands from its findings file. Step 9 fills that file's `TODO(quiet-window)` Results.
+        - **The release notes**: `P-453` (only a crash is held against a name, and every name in
+          flight at an end is kept off the probe's lanes), run 7's walk, answer-row, budget and
+          off-box results, and S7's method linked under **Before `v1.0.0`**.
+        - **The runbook**: reading a helper loss by its signal, and what is held against a name.
+        - **The administration guide**: isolation begins at the child's second end in ten
+          minutes, by a crash or not, as `P-453` has it.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **The differential is not re-recorded for the gate track's change to
+            `system-names.ts`.** The fixture names S6's policy build (`e19f270b…`). The gate
+            track's fix round 1 changed that file, which run 7's build did not have, so that a load
+            past its bound is judged at the look after the one it was read from. The differential
+            plays no slow load. Its verdict holds each run to the build that run loaded, never to
+            the recordings' digest. The cut's step 0.6 replays the newer build without rewriting
+            anything, as already decided above, and the record names both digests.
+          - **S7's commands keep the checklist's 180 s settle**, with each bound raised by it.
+            Every other part of the line is S7's own, `MS_DNS_ARMS` included, so the lane
+            model's arms keep the third and fourth windows' numbers.
+          - **`spread10` and `walkrate` (`P-465`) are named in step 0.7 as not measured, not
+            made a gate of the cut.** The coordinator put `P-453`, `P-460`, `P-461` and S6's gaps
+            in before the cut, and `P-465` was filed after that list.
+        - **Quiet-machine runs: none.** Nothing here is measured.
 
 ## Release 1.1 — Windows
 

@@ -513,20 +513,38 @@ ms-probe`: the setting is read only at start
   clears after ten minutes up with no failure. After five failures in ten minutes the probe
   resolves as with `"system"` for ten minutes, doubling to an hour if it happens again
   (`nameResolverMode` 3). A name that crashes `getaddrinfo` in the helper is found, its checks
-  fail at once, and it is never asked on the probe's own lanes. `"system"` is the resolver rc.3
+  fail at once, and it is never asked on the probe's own lanes. **Only a crash is held against a
+  name** (`P-453`): a helper killed from outside (the kernel's OOM killer, a cgroup kill, an
+  operator) or past its memory bound, or one that exits with a code, makes no name poison, and
+  every name it was asking is kept off the probe's own lanes until ten minutes after the helper
+  is next up, since any of them may be what ended it. `"system"` is the resolver rc.3
   has without the gate: `P-426`'s, with `P-438`'s kept answers. Probe Health says which mode
   each probe ran and what the gate routed where (the upgrade item above). And in either mode it
   now warns once for the probe when its resolver gives up 100 checks in five minutes for want of
   an answer, naming the domains not answering (`P-441`, `lookupsGivenUpRecently`).
 
-  **Before rc.3 was cut**, the name policy the gate routes by was held to what glibc itself
-  asks, in boxes of seven distributions' own images, from glibc 2.28 (Rocky 8) to 2.41 (Debian
-  13), with `systemd-resolved` serving the stub on Ubuntu 24.04: 2,966 lookups, each glibc's
-  questions server by server and try by try, every one as the policy said
-  ([the differential](findings/2026-10-20-name-gate-differential.md)). The cut ran it again,
-  with the check's own questions beside glibc's (*Verified*, below).
+  **Before rc.3 was cut**, the name policy the gate routes by was held to what glibc itself asks, in
+  boxes of seven distributions' own images, from glibc 2.28 (Rocky 8) to 2.41 (Debian 13), with
+  `systemd-resolved` serving the stub on Ubuntu 24.04: 2,966 lookups, each glibc's questions server
+  by server and try by try, every one as the policy said. The name check's own questions were held
+  to glibc's beside them (`P-460`): for every lookup the check asked what glibc first asked, in
+  order, and heard an answer when glibc returned within a second and not otherwise, but where
+  `rotate` let glibc start at a server that answered while another was silent (2,128 heard, 70
+  silent, and 768 answered locally with nothing asked); gate mode answered as `"system"` does, and
+  the helper as the probe's own lanes. Six rows of what servers answer were played too (a truncated
+  answer with TCP refused, FORMERR, an AAAA SERVFAIL beside an answered A, and EDNS refused or
+  dropped), and the one where the check and glibc part, a server that drops EDNS questions, parts as
+  the limit below says (`P-454`). With 150 names of a silent zone asked at once through a dnsmasq
+  limited to 30 forwards, dnsmasq held at most 6 distinct questions for the probe at once without
+  the gate, 8 with it and 10 with its helper killed, and its table was never full;
+  `systemd-resolved` held 10 and 9. In boxes with `nscd`, `libnss-resolve`, `libnss-mdns`,
+  `LD_PRELOAD` or `/etc/ld.so.preload`, the check was off by the rule this item names and asked
+  nothing (`P-461`) ([the differential](findings/2026-10-20-name-gate-differential.md), run 7). The
+  cut ran it again (*Verified*, below).
 
-  **Before `v1.0.0`**: add the gate's measurement (`P-432` S7) to this item. The field test runs
+  **Before `v1.0.0`**: add the gate's measurement to this item: `P-432` S7's arms at 5,000
+  sensors against a simulated dnsmasq, in both modes, run at the cut
+  ([their method](findings/2026-10-20-name-lookups-gated.md)). The field test runs
   `"gate"` on every probe (`H-09`), and the default for 1.0 is decided again after it. Say here
   which it is, and why.
 - **Slipped to 1.0.1:**
@@ -573,8 +591,9 @@ ms-probe`: the setting is read only at start
 **Verified:** `v1.0.0-rc.3` at `<commit, filled at the rc.3 cut>`, on `<date>`: the four smoke
 tests of [runbook-field-test.md](runbook-field-test.md) on arm64, and on x86_64 all but the
 Ubuntu install, which this machine's emulator cannot boot (`H-29`); `P-432`'s differential
-against `getaddrinfo` in seven images, glibc's questions and the name check's (`P-460`); the
-full suite; and the gate's full-size measurement (S7). Run by
+against `getaddrinfo` in seven images, glibc's questions and the name check's (`P-460`), with
+the boxes that show the check off (`P-461`); the full suite; and the gate's full-size
+measurement (S7). Run by
 [the rc.3 cut checklist](findings/2026-10-19-rc3-cut-checklist.md), with their results in the
 rc.3 record.
 rc.2, for comparison, is `0a43b7bf`, cut 2026-10-04

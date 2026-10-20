@@ -1321,9 +1321,10 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   for a file glibc reads only once (`gai.conf`, `/etc/ld.so.preload`, and `nsswitch.conf` below
   glibc 2.33), or such a file changes
   under a running probe, the next loss rests it until the probe restarts.
-- **A name that crashes `getaddrinfo` is found and kept off every lane.** After the second crash
-  in ten minutes the names in flight are asked again one at a time, for 8 seconds after the last
-  crash, or longer while one of them is held, until it has been asked. A name that crashes the
+- **A name that crashes `getaddrinfo` is found and kept off every lane.** After the second time
+  in ten minutes the child ends with lookups to ask again, by a crash or not, the names in flight
+  are asked again one at a time, for 8 seconds after the last such end, or longer while one of
+  them is held, until it has been asked. A name that crashes the
   child while it is the only lookup in flight, then or later, is poison: its checks fail at once,
   saying the lookup helper failed while asking for it, and it is never asked on the probe's own
   lanes, resting included, where it would crash the probe. It is asked again after an hour, at a

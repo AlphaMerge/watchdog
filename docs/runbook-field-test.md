@@ -448,7 +448,15 @@ The numbers that decide the criterion:
     probe log's `lookup helper` lines.
   - **No loss and no rest.** `lookupHelperLosses` (helpers lost a second) is `0` throughout:
     every hour's `max` is `0`, or each hour above it matches a loss the probe's log explains,
-    with its reason. `lookupHelperState` reads `1` (up) in every hour's `min` and `max` but the
+    with its reason. Each loss is one `the lookup helper was lost` line, with its `reason` and
+    its `signal` or `exitCode`. Only a crash signal (SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE,
+    SIGTRAP or SIGSYS) is held against a name (`P-453`); when it is, the probe also logs
+    `asking getaddrinfo for <name> made the lookup helper fail` once, and that name, with the
+    crash line, is a finding to bring back. A `SIGKILL` with `reason` `exit` came from outside
+    the probe (the kernel's OOM killer or a cgroup kill, which `journalctl -k` names, or a
+    person), and `reason` `memory` is the helper's own 256 MiB bound, which `lookupHelperMemory`
+    shows climbing to it: neither is held against a name, and each is still a finding with its
+    reason. `lookupHelperState` reads `1` (up) in every hour's `min` and `max` but the
     hours of those losses; a `5` in it, or a `3` in `nameResolverMode`, is a rest, and a
     finding.
   - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
