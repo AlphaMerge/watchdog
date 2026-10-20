@@ -16064,9 +16064,10 @@ because each is a decision rather than a defect:
         A loaded test host fires a timer that late now and then, and any test here that waits on
         a real 60 ms silence can meet it. `DnsCheck` now takes `lateMs`, `LATE_MS` unless a test
         says, as it already takes `routeMs` and `missMs`. The file's `make` sets a minute, and
-        so does the simulator test. The D31 test sets `LATE_MS`. A new test holds the thread
-        310 ms past two scouts' deadlines under the file's minute and takes their verdicts,
-        where D31's test, under `LATE_MS`, drops them.
+        so does the simulator test. The D31 test runs on the default (corrected in fix round 1,
+        below: this said it set `LATE_MS`, which left the default untested). A new test holds the
+        thread 310 ms past two scouts' deadlines under the file's minute and takes their
+        verdicts, where D31's test, under `LATE_MS`, drops them.
       - **Still open: the split itself.** S6 decided that a step sent as its lookup was asked takes
         its key's verdict at the lookup's deadline, "so the two never disagree about the same
         silence". The code tells "as it was asked" by the 2 ms gap between two clock reads, and a
@@ -16095,6 +16096,33 @@ because each is a decision rather than a defect:
       - **Runs.** The file 20 runs in a row at loads of 15–29 (median 21), the load held near 21
         beside the pool-resolve and stall loops: 20 of 20, 33 tests each. Before the stall fix,
         the first twenty at loads of 16–22 had passed 19.
+      - **Fix round 1** (the review of `fix/flakes-r1`, its item 2).
+        - **No unit test ran `DnsCheck`'s default `lateMs`, so D31's own threshold had lost its
+          guard.** `make` set the file's minute for every test, the simulator test set it too,
+          and the D31 test passed `LATE_MS` itself. The other unit files that build a `DnsCheck`
+          through the resolver's gate (`name-resolver-check`, `name-resolution`,
+          `name-lookup-outage-scenario`) take the default, but none of them stalls the thread or
+          asserts `stall`. Only `perf/name-lookups` runs it, and `npm test` does not. A default
+          of a minute (`?? 60_000`) passed r1's whole file, 33 of 33. In production that probe,
+          stalled for 300 ms, would take its timers' silence as NotHeard evidence: `P-243`'s
+          faked evidence, which D31 exists to stop.
+        - **The D31 test runs on the default now.** `make` takes a `defaultLate` setup flag that
+          leaves `lateMs` unset (`exactOptionalPropertyTypes` rules out `lateMs: undefined`),
+          and the D31 test passes it. Its stall stays a fixed 250 ms past the deadlines.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:** the stall is not sized
+          from `LATE_MS`. Sized from it, a `LATE_MS` raised to a minute would hold the thread a
+          minute and pass. At a fixed 250 ms, any threshold raised past the stall fails the test
+          at once.
+        - **Mutants: 4 of 4 killed, and the r1 file shown to miss the first.**
+          - The default a minute (`?? 60_000`): the D31 test fails, its scouts routing `silent`
+            and the waiter `scoutWait` where all three should be `stall`. The r1 file passes it,
+            33 of 33.
+          - The default `Infinity`: the same, all three `silent`.
+          - `LATE_MS` raised to 300 ms: the same.
+          - `lateMs` ignored (r1's `p470-latems-ignored`), under the new `make`: 'takes the
+            verdict of a timer late by less than its `lateMs`' fails, its scouts `unvouched`.
+        - **Runs.** The file with `name-resolver.test.ts` and its resting twin, 20 runs in a row at
+          a load held near 20 (13.8–24.6, median 20.2): 20 of 20, 231 tests each.
 - [x] **P-471 — S7's helper-killing arms were read only against the helper before the gate
       track's second round** · XS · P-432, P-453 · Filed 2026-10-20 by `P-465`. S7 built and ran
       P1, P2, P5, P5b and P6 on `a95c3302`. `1b6bd68a` adds D27's refusals. An avoided name now

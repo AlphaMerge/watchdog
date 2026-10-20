@@ -18,7 +18,6 @@ import {
   type DnsCheckOptions,
 } from '../src/resolver/dns-check.js';
 import { ForwardBudget } from '../src/resolver/forward-budget.js';
-import { LATE_MS } from '../src/resolver/verdict-timer.js';
 import { CONF, ScriptedAsker, WalkPolicy } from './support/fake-dns.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -34,7 +33,7 @@ const ROUTE = 60;
  * How late a deadline's timer may fire here before its verdict is dropped as a stall (D31): a
  * minute. A loaded test host fires a timer over `LATE_MS` late now and then, which is not a stalled
  * probe, and a test whose silence came back `stall` failed for it (`P-470`). The stall's own test
- * sets `LATE_MS`.
+ * runs on the check's default, `LATE_MS`, so that the probe's own threshold is held by it.
  */
 const LATE = 60_000;
 
@@ -66,7 +65,14 @@ function captured() {
 const warns = (lines: readonly Line[], field: keyof Line): unknown[] =>
   lines.filter((line) => line.level === 40 && field in line).map((line) => line[field]);
 
-function make(options: Partial<DnsCheckOptions> = {}, setup: { proven?: boolean } = {}) {
+/**
+ * A check over a scripted asker. `defaultLate` leaves `lateMs` unset, so the check takes the
+ * probe's own `LATE_MS`; otherwise the file's minute.
+ */
+function make(
+  options: Partial<DnsCheckOptions> = {},
+  setup: { proven?: boolean; defaultLate?: boolean } = {},
+) {
   const clock = { now: 1_000_000 };
   const asker = new ScriptedAsker();
   const policy = new WalkPolicy();
@@ -81,7 +87,7 @@ function make(options: Partial<DnsCheckOptions> = {}, setup: { proven?: boolean 
     random: () => 0.5,
     routeMs: ROUTE,
     missMs: 80,
-    lateMs: LATE,
+    ...(setup.defaultLate === true ? {} : { lateMs: LATE }),
     onKeySilent: (key) => {
       silentKeys.push(key);
     },
@@ -306,13 +312,15 @@ describe('a key’s phase comes from its verdict times (D18)', () => {
   });
 
   it('releases a scout whose verdict is dropped by a stall, and its waiters route unvouched (D31)', async () => {
-    const { check, asker, route, ready } = make({ lateMs: LATE_MS });
+    // `lateMs` left unset: the probe's own threshold, so that its default is held here too.
+    const { check, asker, route, ready } = make({}, { defaultLate: true });
     await ready;
     asker.rule = () => 'silent';
     const scouts = [route('dev-1.zone-e.test'), route('dev-2.zone-e.test')];
     const waiting = route('dev-3.zone-e.test');
     // Every question out and its deadline armed, then the main thread blocked well past it: every
-    // timer fires late.
+    // timer fires about 250 ms late, past the probe's `LATE_MS` (100 ms). The stall is a fixed
+    // length, so that a default raised past it fails here too.
     await new Promise((resolve) => setImmediate(resolve));
     const until = performance.now() + ROUTE + 250;
     while (performance.now() < until) {
