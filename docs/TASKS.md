@@ -21188,7 +21188,11 @@ because each is a decision rather than a defect:
       - **The web.** No form validates against a core API schema with a pattern. Its schema forms
         draw sensor parameters, trigger settings and method settings. The only patterned method
         settings are `secretHeaders`, which the form draws as JSON, so `validate.ts` (`U-53`)
-        already says any sentence a string field carries. Nothing changed there.
+        already says any sentence a string field carries. Nothing changed there. **Corrected
+        2026-10-20 by `U-23`'s review round 1:** it did not draw it as JSON. `writeOnly` won over
+        the kind, so it was a password box, and what was typed was held as a string the core
+        refused as not an object. It is a JSON box since, and its names and values are judged by
+        the core, whose refusal the template form says.
       - **The reference.** The renderer says the sentence in brackets after the expression:
         ``matches `^[0-9]{1,19}$` (must be an audit entry id, …)``. In brackets because the
         sentence may hold the commas the constraints are joined with. The keyword is not printed
@@ -32781,6 +32785,116 @@ because each is a decision rather than a defect:
         polite status that is also focused. **The names are `U-90`, fixed 2026-10-20: each now
         carries its field's label; how they read is still the pass's to judge.**
 
+      **Review round 1, 2026-10-20: five medium and two low, all closed** (web only, six
+      commits). Six are older than this ticket, found by reading past the tab its walk covered;
+      the seventh came with its fourth fix above. Each focus fix asserts `document.activeElement`.
+      1. **The rediscovery rules did nothing with focus** (medium, since `D-11`; WCAG 2.4.3). After
+         nearly every action it fell to the page: *New rule*, a row's *Delete*, *Keep* and the
+         form's buttons were taken away as they were pressed; *Edit*, a switch, the confirmed
+         *Delete* and *Save* were disabled as they were; and every accepted change read the list
+         again through `useApi`, which goes back to `loading` and took the whole panel down. Now
+         the form's heading takes focus as the form opens; *Cancel* and *Show the rule as it is
+         now* give it back to *New rule* or that rule's *Edit*; a *Delete* puts it on its question,
+         a focusable group named "Confirm deleting Nightly", and *Keep* back on *Delete*; a save
+         or a delete puts it on a notice that says what was done ("Saved Nightly.", "Deleted
+         Nightly.", "Created Weekly sweep. It is off until it is switched on from its row."), as
+         the Credentials tab's does; a refused delete gives it back to the row's *Delete*. A
+         switch, the confirmed *Delete*, *Keep*, *Save* and the form's *Cancel* are `aria-disabled`
+         while their request is out, with a guard, so the one pressed keeps focus and a second
+         press sends nothing. The list as last read stays on screen while it is read again, and
+         when that read fails it stays, said to be the old one, with *Try again*. Focus is moved
+         only from the page or from inside the panel. The comment that said focus was on the
+         row's button when the core refused is true now, and says why.
+      2. **Start discovery and a run's Cancel disabled themselves as they were pressed** (medium).
+         Both are `aria-disabled` while out, with a guard. A run started from the button puts
+         focus on its card's heading (`Card` takes a `headingRef`, which makes its `h2`
+         focusable from script); a run that ends with focus on *Cancel* gives it to *Open the
+         group*, which takes the button's place. Focus moves from the button or from the page
+         only, never from where the operator moved it while the request was out. The two
+         comments that said focus was on the button when the core refused are true now.
+      3. **A sensor's parameter forms disabled everything while saving** (medium), the defect
+         `U-78` fixed for templates. `ParamsForm` and `AddSensor` passed `disabled={saving}` to
+         the whole generated form and disabled their buttons, the name and the type. Nothing is
+         disabled while out now: *Save parameters*, *Discard changes*, *Create sensor*, *Cancel*
+         and the type are `aria-disabled`, with guards, and Enter pressed in a box leaves focus
+         in it, through a refusal too. An accepted save, once the form shows what the core holds,
+         and a discard move focus from the button pressed, or from the page, to the status line,
+         focusable now, which says "Saved." or "Discarded. The form shows the parameters as they
+         are stored." `ParamsForm`'s comment that focus was on Save when the core refused is
+         corrected.
+      4. **A secret that is an object or a list was not drawn as a secret** (medium). The
+         webhook's `secretHeaders`, an object marked `writeOnly`, was a password box: what was
+         typed was held as a string, which the core refuses, and nothing said what it wanted. It
+         is a JSON box now, inside the keep, replace and clear every secret has, saying "Typed as
+         JSON: an object of names and values, such as {"name": "value"}." The program method's
+         `secretArgs`, a list marked at the list, was drawn as any list: stored, it read "Nothing
+         here yet.", and an entry added there, typed in clear, replaced every stored one on save.
+         It is kept, replaced or cleared whole now (`SecretList`): stored, it reads *set,
+         write-only* with Replace and Clear; replaced, it opens empty with focus on its *Add*, its
+         entries in password boxes, says that what is listed replaces every stored one, and
+         offers *Keep the current ones*; a list left empty keeps them. A secret object with
+         properties, which nothing ships, is one JSON value too, and its properties are not
+         judged missing while it is kept.
+      5. **A secret in error was not marked as one** (low; WCAG 3.3.1). A write-only box over its
+         `maxLength`, or one a refusal named, had the problem under it and neither
+         `aria-invalid` nor the error edge every other control in error has. It has both now.
+      6. **Storage that could not be read opened the theme light** (low). The boot script read
+         storage and the system in one `try`, and its `catch` set light whatever the system
+         asked, where `useTheme` treats the same failure as no stored choice and follows the
+         system; so the reader got light on every load and dark after the system's first change.
+         Storage is read in a `try` of its own now, and light is left for a `matchMedia` that
+         throws too. `public/theme-512c0bb4.js`; the test that required light is changed to
+         require the system's theme, and one for the last resort is added.
+      7. **Replace after Clear removed the secret on save** (medium, from the fourth fix). Replace
+         took *removed on save* away and left the form's `null` behind, so an empty box that
+         looked like any other Replace, which keeps the secret, removed it; a sensor's form sent
+         `null` with no sentence or confirmation anywhere. Replace from the cleared state now
+         starts from keeping, for a single secret and for a secret list.
+      - **Tests** (web, 36 new and one changed): `rediscovery-panel.test.tsx` +11 (the
+        confirmation's name in two older cases, and their waits read `aria-disabled`),
+        `discovery-view.test.tsx` +6, `params-form-refused.test.tsx` +5,
+        `add-sensor-refused.test.tsx` +3, `secret-shapes.test.tsx` (new, 8, over the core's
+        webhook and program schemas and a sensor's form), `credentials-panel.test.tsx` +2,
+        `theme-boot.test.ts` +1 and one changed. **Mutants 55, 55 killed**, each restored byte
+        for byte (`shutil.copy`, `os.utime`, `filecmp`); the theme script's renamed to its own
+        hash, so only its behaviour could catch them. Web suite 95 files and 1,288 tests, green;
+        Prettier, ESLint and `tsc --noEmit` clean on what changed. Not walked in a browser again:
+        what changed is focus and state, each asserted as the browser is handed it.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** after a rule is saved or
+        deleted, and after a parameter save or a discard, focus goes to a line that says what was
+        done, not back to the button that was pressed. A deleted rule's buttons are gone, a saved
+        form's and a discard's are disabled with nothing left to do, and a reader moved back to
+        *New rule* or *Edit* would hear a button and nothing of what happened (4.1.3). It is the
+        Credentials tab's rule (`U-21`). Cancel, which does nothing, gives focus back to the
+        button that opened the form.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the rediscovery list stays
+        on screen while it is read again, and through a read that fails, rather than focus being
+        put back after the loading line. Taking the list down and putting it back leaves focus on
+        the page for the length of a read, takes the refusal region with it, and is what made
+        every action lose focus; the Credentials tab keeps its list for the same reasons
+        (`useSets`).
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the sensor type is
+        `aria-disabled` while a create is out, and a choice then is not taken. Another type
+        replaces every parameter, and a refusal of the ones sent would be shown against the new
+        type's fields. Disabled, it would drop focus where Safari leaves it on a click of *Create
+        sensor*.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a parameter typed while its
+        save is out is not held for the next save: the read-back starts the form again from what
+        the core holds, as `U-36` and `U-82` decided. The window is one round trip; holding the
+        fields was what dropped focus, and keeping a change across the read-back would need the
+        form to tell a newer edit from the core's normalising, which it cannot.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** Replace after Clear opens an
+        empty box that keeps the stored secret, rather than a box still saying *removed on save*.
+        An empty box keeps the secret everywhere else in the UI, and Clear followed by Keep is
+        there for an operator who wants the secret kept on purpose; the other way would have given
+        one control two meanings for an empty box.
+      - **Seen, not this round's, for whoever orders the queue to file.** A save button disabled by
+        a problem drops focus in the same way: Tab from a box left invalid moves focus to *Save*,
+        the blur marks the box, its problem disables *Save*, and focus falls to the page. Every
+        generated form (`ParamsForm`, `AddSensor`, the Credentials tab's) has it. And a template's
+        refused `secretHeaders.<name>` is said in the form's alert but not at the field, since
+        the template form passes no `serverProblems` to `SchemaForm`.
+
 - [x] **U-87 — buttons beyond the Credentials tab are edged in the hairline, under 1.4.11's 3:1**
       · XS · U-23 · Found 2026-10-20 by `U-23`'s walk. `RediscoveryPanel.tsx` edges its buttons
       in `--ms-border`, as the Credentials tab did, and `DiscoveryView.tsx` a run's Cancel; 1.36:1
@@ -32888,7 +33002,10 @@ because each is a decision rather than a defect:
       its field's label, with a test; the text shown may stay.
       - **U-90 outcome.** "Replace Community string", "Clear Authentication key", "Keep the
         current one, Privacy key", the text shown unchanged. `SchemaForm`'s, so a sensor's
-        write-only parameters and a notification method's secrets have it too.
+        write-only parameters and a notification method's secrets have it too. **Corrected by
+        `U-23`'s review round 1:** not the two method secrets that are not a string, the webhook's
+        `secretHeaders` and the program's `secretArgs`, which were not drawn as secrets at all
+        and had no such buttons; they have them since, named the same way.
       - **Test** (`credentials-panel.test.tsx`): with SNMP's three secrets stored, no button is
         called "Replace" or "Clear" alone; each field has its own pair, showing the same text as
         before; and the Keep after a Replace and the Keep after a Clear each name their field. The
