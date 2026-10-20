@@ -1310,8 +1310,9 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   the middle of the outage included. A lookup the helper's child has run a second without an
   answer is stuck, held as above.
 - **A helper that fails is replaced, and the probe never waits on it.** The probe judges it
-  every second by its beats: quiet for 3 seconds, its lookups in flight are let go and asked
-  elsewhere; quiet for 20, or past 256 MiB resident, it is killed. A lost child is followed by a
+  every second by its beats: quiet for 3 seconds, its lookups in flight are let go and other
+  names asked elsewhere, the names it was asking kept off the probe's own lanes as below; quiet
+  for 20, or past 256 MiB resident, it is killed. A lost child is followed by a
   new one after 0, 250, 500 or 1,000 ms. Meanwhile, for up to 2 s, names wait for it; after that
   they are asked on the probe's own lanes, a domain not known to answer held to 3 of the first 4
   as in `system` mode. **The fifth loss in ten minutes rests it**, as does a loss within ten
@@ -1345,7 +1346,13 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   When the child's channel closes before its exit is read, the helper kills it and waits up to a
   second for the exit to say which it was. Every name in flight when the child ends, a crash or
   not, or when it runs out of memory, is kept off the probe's lanes until ten minutes after the
-  helper is next up, a rest included: any of them may be what ended it. On Windows a crash ends
+  helper is next up, a rest included: any of them may be what ended it. So is every name in
+  flight when the child goes quiet, and so every name a child killed for being quiet was asking
+  (`P-463`): `getaddrinfo` runs on the child's own threads, so only a lookup that reaches its
+  whole process (an NSS module holding a lock its main thread needs, or a lookup that grows it
+  until it swaps) can quiet it, and the same lookup could quiet the probe. At most 8 names are
+  let go at each quiet, as many as the helper runs at once. While the helper is not answering
+  their checks fail at once, and once it answers they are asked there. On Windows a crash ends
   with an exit code, so no end is held against a name there yet (`P-464`); the names are still
   kept off the probe's lanes, and losses rest the helper as above.
 - **Stopping.** The helper serves the check pool until the pool has drained, then stops with the

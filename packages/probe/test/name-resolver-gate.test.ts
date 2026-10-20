@@ -669,20 +669,39 @@ describe('losing the helper (P-432 S3, §1.11)', () => {
     assert.deepEqual(await next, A);
   });
 
-  it('N10: a quiet child’s lookups are detached: a new check asks again, and the detached EAI_AGAIN holds nothing', async () => {
-    const { helper, ask, calls } = make();
+  it('N10: a quiet child’s lookups are detached: a new check asks again, never on the probe’s lanes (P-463), and the detached EAI_AGAIN holds nothing', async () => {
+    const { helper, ask, calls, callsFor } = make();
     const first = outcome(ask('dev-1.zone-a.test', 4, { waitMs: 60_000 }));
     const detached = helper.last('dev-1.zone-a.test');
     helper.goQuiet();
-    const second = outcome(ask('dev-1.zone-a.test', 4, { waitMs: 60_000 }));
-    assert.equal(calls.length, 1, 'its own lookup, on the probe’s lanes while the helper is down');
+    // In flight as the child went quiet, it may be what quieted it (D27): while the helper is down
+    // its new check fails at once rather than ask the probe's own getaddrinfo.
+    const refused = await outcome(ask('dev-1.zone-a.test', 4, { waitMs: 60_000 }));
+    assert.ok(!refused.ok && codeOf(refused.error) === RESOLVER_FAULT);
+    assert.match(
+      messageOf(refused.error),
+      /does not ask its own getaddrinfo for dev-1\.zone-a\.test/u,
+    );
+    // A name the child was not asking goes to its P-426 class there.
+    const other = outcome(ask('dev-2.zone-a.test', 4, { waitMs: 60_000 }));
+    assert.deepEqual(
+      calls.map((call) => call.host),
+      ['dev-2.zone-a.test'],
+    );
     detached.fail('EAI_AGAIN');
     const gotFirst = await first;
     assert.ok(!gotFirst.ok, 'its own waiters are told');
-    calls[0]?.answer(B);
+    callsFor('dev-2.zone-a.test')[0]?.answer();
+    assert.ok((await other).ok);
+    // Heard again: a new check starts its own lookup, in the helper, and nothing holds it.
+    helper.move('up');
+    const second = outcome(ask('dev-1.zone-a.test', 4, { waitMs: 60_000 }));
+    assert.equal(helper.asksFor('dev-1.zone-a.test').length, 2, 'its own lookup, in the helper');
+    helper.last('dev-1.zone-a.test').answer(B);
     const gotSecond = await second;
     assert.ok(gotSecond.ok && gotSecond.value[0]?.address === B[0]?.address);
     assert.deepEqual(await ask('dev-1.zone-a.test'), B, 'kept, and nothing held');
+    assert.equal(callsFor('dev-1.zone-a.test').length, 0, 'never in the probe’s own getaddrinfo');
   });
 
   it('a lost child’s late answer settles a lookup still queued to be asked again, once', async () => {

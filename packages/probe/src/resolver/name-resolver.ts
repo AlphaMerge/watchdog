@@ -2700,8 +2700,9 @@ export class NameResolver implements PoolResolver {
 
   /**
    * Whether the probe's own `getaddrinfo` must not be asked for a name now, in any state (D27): a
-   * suspect, poison in a family a lookup of it asks, or a name in flight at a crash until ten
-   * minutes after the helper is next up. Such a name is never walked and never heard.
+   * suspect, poison in a family a lookup of it asks, or a name in flight at a crash, or when the
+   * helper's child went quiet (`P-463`), until ten minutes after the helper is next up. Such a name
+   * is never walked and never heard.
    */
   #avoided(gate: Gate, entry: Entry): boolean {
     return entry.suspect || gate.helper.avoidsSystem(entry.host, entry.family);

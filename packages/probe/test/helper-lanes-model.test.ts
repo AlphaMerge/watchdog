@@ -33,8 +33,8 @@ import { FakeHelper, StubPolicy, type FakeAsk } from './support/fake-helper.js';
  * kind with requeues, charges and isolation, answers after a loss, a failed send, the child going
  * quiet and being heard again, U rising and falling, time passing); after every command, I1 to I9.
  * And at every call of the probe's own `getaddrinfo`, I10 (D27): the name is not one the helper
- * keeps off the probe's lanes, each name in flight at an `exit` or `memory` loss marked as the
- * real helper marks it, and every poison mark.
+ * keeps off the probe's lanes, each name in flight at an `exit`, `memory` or `hung` loss or as the
+ * child goes quiet marked as the real helper marks it, and every poison mark.
  * The generator is a seeded PRNG of its own: `fast-check` is not one of the probe's dependencies,
  * and a failing run prints its seed and its last commands, which replay it exactly.
  *
@@ -426,8 +426,10 @@ function model(seed: number) {
       helper.markPoison(charged.host, charged.family, clock.now + LONG);
     }
     // Each name in flight may be what ended the child, crash or not (D27, `P-453`): the real
-    // helper keeps it off the probe's lanes for ten minutes after it is next up, here for good.
-    if (reason === 'exit' || reason === 'memory') {
+    // helper keeps it off the probe's lanes for ten minutes after it is next up, here for good. A
+    // hung child's were kept off as it went quiet (`goQuiet`, `P-463`); the model also loses a
+    // child as hung that never went quiet, and keeps its names off as the real one would have.
+    if (reason === 'exit' || reason === 'memory' || reason === 'hung') {
       for (const lost of inFlight()) helper.avoided.add(`${String(lost.family)}:${lost.host}`);
     }
     helper.lose(reason, route, {

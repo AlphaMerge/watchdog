@@ -3664,3 +3664,134 @@ describe('the lookup helper: only a crash is charged (P-453, scripted process, t
     }
   });
 });
+
+/** The child's beat with what is in flight, so that it is heard and no disagreement is logged. */
+function heardBeat(child: FakeChild, inFlight: number): void {
+  child.beat({ inFlight, asked: child.asks.at(-1)?.id ?? 0 });
+}
+
+/** Ticks with nothing heard until the helper says it is not answering: three. */
+async function goQuiet(made: FakeMade): Promise<HelperChange> {
+  await tickUntil(made, 3, 'not answering', () => made.helper.routeState() === 'down');
+  const change = made.changes.at(-1);
+  assert.ok(change !== undefined && change.detached !== undefined, 'a change that detaches');
+  return change;
+}
+
+/** Two heard ticks in a row: up again, the clock then. */
+async function answerAgain(made: FakeMade, child: FakeChild, inFlight: number): Promise<number> {
+  for (let i = 0; i < 2; i += 1) {
+    heardBeat(child, inFlight);
+    await tick(made);
+  }
+  assert.equal(made.helper.state, 'up');
+  return made.timers.clock;
+}
+
+describe('the lookup helper: names in flight when the child goes quiet are kept off the probe’s lanes (P-463, scripted process, the test’s clock)', () => {
+  it('a name in flight as the child goes quiet is avoided while it is quiet, however long, and for ten minutes after it answers again, in each family a lookup of it asks for', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await fakeUp(made);
+      void settled(made.helper.ask({ host: 'quiet-0.example.test', family: 0, max: 64 }));
+      void settled(made.helper.ask({ host: 'quiet-4.example.test', family: 4, max: 64 }));
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 4), false, 'not before');
+      const quiet = await goQuiet(made);
+      assert.equal(made.helper.state, 'unresponsive');
+      assert.equal(quiet.detached?.length, 2);
+      assert.equal(made.helper.avoidsSystem('quiet-0.example.test', 6), true, 'asked with 0');
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 4), true);
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 0), true, 'asked for with 4');
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 6), false);
+      assert.equal(made.helper.avoidsSystem('other.example.test', 4), false);
+      const said = made.lines.find((line) =>
+        String(line['msg']).startsWith('the lookup helper is not answering'),
+      );
+      assert.equal(said?.['keptOff'], 2, 'the line counts them');
+      assert.equal(said['detached'], 2);
+      // Quiet for an hour: its ten minutes have not begun, since the helper has not been up.
+      made.timers.clock += 3_600_000;
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 4), true, 'quiet an hour');
+      const upAt = await answerAgain(made, child, 2);
+      made.timers.clock = upAt + 600_000 - 1;
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 4), true);
+      assert.equal(made.helper.avoidsSystem('quiet-0.example.test', 0), true);
+      made.timers.clock = upAt + 600_000;
+      assert.equal(made.helper.avoidsSystem('quiet-4.example.test', 4), false, 'ten minutes up');
+      assert.equal(made.helper.avoidsSystem('quiet-0.example.test', 0), false, 'ten minutes up');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a name let go at an earlier quiet and still in flight at the next is avoided again, its ten minutes run from the next time the child answers', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await fakeUp(made);
+      const host = 'slow.example.test';
+      void settled(made.helper.ask({ host, family: 4, max: 64 }));
+      await goQuiet(made);
+      const firstUp = await answerAgain(made, child, 1);
+      made.timers.clock = firstUp + 600_000;
+      assert.equal(made.helper.avoidsSystem(host, 4), false, 'ten minutes up, still in flight');
+      const again = await goQuiet(made);
+      assert.deepEqual(again.detached, [], 'let go at the first quiet');
+      assert.equal(made.helper.avoidsSystem(host, 4), true, 'in flight at this quiet too');
+      made.timers.clock += 3_600_000;
+      assert.equal(made.helper.avoidsSystem(host, 4), true, 'quiet an hour');
+      const upAt = await answerAgain(made, child, 1);
+      made.timers.clock = upAt + 600_000 - 1;
+      assert.equal(made.helper.avoidsSystem(host, 4), true);
+      made.timers.clock = upAt + 600_000;
+      assert.equal(made.helper.avoidsSystem(host, 4), false, 'ten minutes up');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a name in flight at a hung loss is avoided through the backoff, or a rest, and for ten minutes after the next child is up', async () => {
+    const rows = [
+      { what: 'the first loss: a backoff', crashesFirst: 0, after: 'backoff' },
+      { what: 'the fifth loss in ten minutes: a rest', crashesFirst: 4, after: 'resting' },
+    ] as const;
+    for (const row of rows) {
+      const made = fakeMade();
+      void made.helper.start();
+      try {
+        if (row.crashesFirst > 0) {
+          made.timers.fire((await crashes(made, row.crashesFirst)).delayMs ?? -1);
+        }
+        await fakeUp(made);
+        const host = 'wedge.example.test';
+        const lost = settled(made.helper.ask({ host, family: 4, max: 64 }));
+        const losses = made.helper.stats().losses;
+        await tickUntil(made, 20, 'the hung loss', () => made.helper.stats().losses > losses);
+        assert.equal(made.helper.stats().lastLoss?.reason, 'hung', row.what);
+        const error = lostError((await within(WAIT, row.what, lost)).error);
+        assert.equal(error.reason, 'hung', row.what);
+        assert.equal(error.detached, true, row.what);
+        assert.equal(error.requeue, false, `${row.what}: never asked again`);
+        assert.equal(error.charged, false, `${row.what}: never charged`);
+        const change = made.changes.at(-1);
+        assert.equal(change?.state, row.after, row.what);
+        assert.equal(made.helper.avoidsSystem(host, 4), true, row.what);
+        assert.equal(made.helper.avoidsSystem(host, 0), true, `${row.what}: asked for with 4`);
+        assert.equal(made.helper.avoidsSystem('other.example.test', 4), false, row.what);
+        // As long as the rest, or longer: no child has been up since.
+        made.timers.clock += 3_600_000;
+        assert.equal(made.helper.avoidsSystem(host, 4), true, `${row.what}: not up since`);
+        made.timers.fire(change.delayMs ?? -1);
+        await fakeUp(made);
+        const upAt = made.timers.clock;
+        made.timers.clock = upAt + 600_000 - 1;
+        assert.equal(made.helper.avoidsSystem(host, 4), true, row.what);
+        made.timers.clock = upAt + 600_000;
+        assert.equal(made.helper.avoidsSystem(host, 4), false, `${row.what}: ten minutes up`);
+      } finally {
+        await stop(made);
+      }
+    }
+  });
+});

@@ -77,7 +77,8 @@ export class FakeHelper implements HelperPort {
   readonly poisoned = new Map<string, PoisonMark>();
   /**
    * Names kept off the probe's lanes, as `family:host`: what the real helper keeps for a name in
-   * flight at a loss. `avoidsSystem` reads it as the real one does, poison marks with it.
+   * flight at a loss, or as its child goes quiet (`goQuiet`). `avoidsSystem` reads it as the real
+   * one does, poison marks with it.
    */
   readonly avoided = new Set<string>();
   readonly skewed: string[] = [];
@@ -248,11 +249,14 @@ export class FakeHelper implements HelperPort {
     });
   }
 
-  /** The child judged quiet (D26): every ask in flight detached, and the route down. */
+  /**
+   * The child judged quiet (D26): every ask in flight detached, its name kept off the probe's lanes
+   * as the real helper keeps it (`P-463`), and the route down.
+   */
   goQuiet(): void {
-    const detached = this.inFlight()
-      .map((ask) => ask.ref)
-      .filter((ref): ref is object => ref !== undefined);
+    const quiet = this.inFlight();
+    for (const ask of quiet) this.avoided.add(`${String(ask.family)}:${ask.host}`);
+    const detached = quiet.map((ask) => ask.ref).filter((ref): ref is object => ref !== undefined);
     this.move('down', { state: 'unresponsive', detached });
   }
 

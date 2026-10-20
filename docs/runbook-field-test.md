@@ -513,6 +513,12 @@ The numbers that decide the criterion:
     which `gate-events.jsonl` has as `the lookup helper is not answering`; a `starting` with no
     loss or start before it; and a `resting`, which, like a `the lookup helper is resting` line
     or a `3` in `nameResolverMode`, is a rest.
+  - **A quiet helper** (`P-463`). Each `the lookup helper is not answering` line is a finding,
+    explained by the host's load at its time and recorded with its `keptOff`, the names kept off
+    the probe's own lanes from then until ten minutes after the helper answers again, whose
+    checks fail at once while it does not, and its `alsoNotAnswering`, the quiets since the last
+    line (it is said at most once a minute). Their sum over the week is the measure of what a
+    quiet helper costs.
   - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
     is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and is explained
     from the log line naming its host, or it is a finding.

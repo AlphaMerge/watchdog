@@ -14783,7 +14783,7 @@ because each is a decision rather than a defect:
       needs a box like `P-461`'s; the others need a row of their own, as the answer rows are.
       Not decided: whether any of them goes in before the rc.3 cut. **Done when** each is a box
       or a row of the differential, or a reason it is not is recorded here.
-- [ ] **P-463 — names in flight when the lookup helper goes quiet are not kept off the probe's
+- [x] **P-463 — names in flight when the lookup helper goes quiet are not kept off the probe's
       lanes** · XS · P-432, P-453 · Filed 2026-10-20 by `P-453`. D27 keeps every name in flight
       at an `exit` or `memory` loss off the probe's own `getaddrinfo` until ten minutes after
       the helper is next up. Two kinds of name get no such entry. The first is the lookups
@@ -14797,6 +14797,80 @@ because each is a decision rather than a defect:
       avoidance entry, with a test and a mutant each. The alternative is a decision recorded
       against a measured cost: how many names a starved host's quiet child keeps off the
       probe's lanes, and for how long.
+
+      **P-463 outcome. Every name in flight when the child goes quiet is kept off the probe's
+      lanes, and so every name in flight at a `hung` loss.** Built 2026-10-20 on
+      `feat/p432-helper-r3`, in `packages/probe/src/resolver/lookup-helper.ts`. No protocol
+      change and no migration.
+      - **At the quiet** (`#notAnswering`, the third quiet tick), every lookup in flight gets the
+        entry an `exit` or `memory` loss gives (`#keepOff`): kept off from then until ten minutes
+        after the helper is next up. That is each lookup detached at this quiet, and each one let
+        go at an earlier quiet and still running, whose ten minutes began when the child answered
+        again and begin again from the next time it does.
+      - **A `hung` loss adds no entry of its own.** A child is killed as hung only after it went
+        quiet (20 quiet ticks counted through the third), and nothing is asked of it until it
+        answers again: `ask` refuses unless the route is `up`, which a quiet child's is not. So
+        every lookup in flight at a `hung` loss was in flight at that quiet, with no `up` between
+        to start its ten minutes. A second write at the loss could not be told from none by any
+        test, an equivalent mutant, so none was added. The hung test proves the names are kept
+        off through the loss, the backoff or rest after it, and ten minutes of the next child.
+      - **The resolver is unchanged.** It asks `avoidsSystem` on every path to the probe's lanes
+        (`#start`, `#offProbe` and `#gateRefusal`). While the helper is down, such a name's check
+        fails at once with `RESOLVER_FAULT`, saying the probe does not ask its own `getaddrinfo`
+        for it. Once the child answers again it is asked in the helper, unvouched. This departs
+        from the design's §1.11 row for `up` to `unresponsive`, where a new check of a detached
+        name starts a lookup on the probe's lanes while the helper is down. It now fails at once
+        there, as a name of an `exit` loss does.
+      - **The warning says it.** `the lookup helper is not answering` now says the names are kept
+        off the probe's lanes, with `keptOff` (every lookup in flight) beside `detached` (those
+        let go at this quiet).
+      - **The doubles keep names off as the helper does.** `FakeHelper.goQuiet` adds the names in
+        flight to `avoided`. LR7's model also keeps a `hung` loss's names off, since the model can
+        lose a child as hung without its going quiet first.
+      - **Docs.** `administration.md`, in the helper's failures, and the release notes. The
+        runbook makes each `not answering` line a finding, recorded with its `keptOff`, so the
+        field test measures what this costs.
+      - **Tests.**
+        - `lookup-helper.test.ts`, 'names in flight when the child goes quiet are kept off the
+          probe's lanes (P-463)', 3 tests:
+          - a name in flight at the quiet, in each family a lookup of it asks for, kept off while
+            the child is quiet for an hour and for ten minutes after it answers again, with the
+            warning's `keptOff`;
+          - a name let go at an earlier quiet and still in flight at the next, its ten minutes
+            already run, kept off again until ten minutes after the next answer;
+          - a name in flight at a `hung` loss, as a first loss (a backoff) and as the fifth in ten
+            minutes (a rest), kept off through an hour with no child up and for ten minutes after
+            the next is up.
+        - `name-resolver-gate.test.ts`, N10 rewritten. A quiet child's lookup is detached, and a
+          new check of its name fails at once while the helper is down, never on the probe's own
+          `getaddrinfo`, while a name not in flight goes to its `P-426` class there. Once the
+          child answers, the name is asked in the helper, and the detached `EAI_AGAIN` holds
+          nothing.
+      - **Mutants: 3, all killed.**
+        - No entry at the quiet: all 3 fail, the hung test among them.
+        - An entry only for the lookups newly detached: the earlier-quiet test fails.
+        - The entry's ten minutes run from the quiet, not from the next `up`: all 3 fail.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **Kept off, without measuring the cost first.** The ticket allows a decision recorded
+          against a measured cost instead. Measuring would not change it.
+          - The cost is bounded by the code, not by the host. At most 8 names per quiet, as many
+            as the helper runs at once (6 lanes and 2 for Check now). A detached lookup keeps its
+            token until it settles, so the next quiet again finds at most 8.
+          - Each fails its check at once only while the helper is not answering or rests. For
+            ten minutes after it answers, each is asked in the helper rather than walked.
+          - A measurement here would only measure that bound. What it cannot show is how often a
+            starved host's child goes quiet. Only the field test shows that, and the warning's
+            `keptOff` and `detached` record it there.
+          - Against that cost: a name that quiets the child through its process would quiet the
+            probe if asked on the probe's lanes. D27 is on the design's never-cut list. An
+            `exit` loss's names already cost the same (`P-453`'s decision).
+        - **Every name in flight at the quiet, not only those detached at it.** A lookup let go at
+          an earlier quiet and still running when the child goes quiet again is as likely as any
+          to be what quieted it. Leaving its first entry would let its ten minutes run out while
+          the child is quiet, and its next check would then go to the probe's lanes. Measured
+          against the alternative by the second test's mutant.
+        - **The same ten minutes, from the next `up`, as an `exit` loss's.** A quiet child that
+          answers again has run the name, and a name that quiets it again is kept off again.
 - [ ] **P-464 — a lookup helper crash on Windows is charged to no one** · XS · P-453, Release
       1.1 · Filed 2026-10-20 by `P-453`. Only a crash signal charges a name. On Windows a
       process that crashes reports no signal: it exits with an NTSTATUS code, which Node

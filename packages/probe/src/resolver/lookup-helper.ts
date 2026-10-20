@@ -86,7 +86,8 @@ import { afterPolls } from './verdict-timer.js';
  * read, waits for the exit when a crash could be charged on it, at most `exitWaitMs`. One taken on
  * an ask that could not be written never waits: that ask stays in flight, never charged, so no
  * lookup in flight is one a crash could be charged to. Every name in flight at an `exit` loss,
- * crash or not, charged or not, is avoided, and at a `memory` loss too, and those asked again while
+ * crash or not, charged or not, is avoided, and at a `memory` loss too, and when the child goes
+ * quiet (`P-463`), which every `hung` loss follows; those asked again while
  * it isolates go alone; a poison name's re-ask asked again outside isolation starts first in the
  * next child, as its hourly ask does, and holds nothing back. A charged name is poison, never asked
  * on a probe lane, and asked again alone here after an hour, then after twice as long at each
@@ -99,10 +100,15 @@ import { afterPolls } from './verdict-timer.js';
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So in any state the resolver never asks the
  * probe's own `getaddrinfo` for a poison name, a current suspect, or a name in flight at an `exit`
- * or a `memory` loss: it sends it to the helper while the helper can ask it, and fails that check
- * at once while the route is `resting` or `down`. Such a name is avoided from its loss until ten
- * minutes after the helper is next up, so that a rest, or a start that does not come up, never
- * ends its ten minutes before a child has run them.
+ * or a `memory` loss or when the child went quiet (D26, `P-463`): it sends it to the helper while
+ * the helper can ask it, and fails that check at once while the route is `resting` or `down`. Such
+ * a name is avoided from then until ten minutes after the helper is next up, so that a rest, or a
+ * start that does not come up, never ends its ten minutes before a child has run them. A child's
+ * main thread does not run `getaddrinfo`, which runs on libuv's threads, so a name can quiet the
+ * child only through the process (an NSS module holding a lock the main thread needs, a lookup
+ * that grows it until it swaps), and the same lookup could do that to the probe. Every name in
+ * flight at a `hung` loss is one of those: a child is killed as hung only after it went quiet, and
+ * nothing is asked of it until it answers again.
  */
 
 /** libuv threads in the child: 16 lookup lanes, twice the helper's 8 tokens (D3). */
@@ -562,8 +568,8 @@ export const REAL_TIMERS: HelperTimers = {
  *   any state, and again as it starts there**: a name it names may be what crashed the helper, so
  *   it is asked in the helper while the route is `up` or `rejoining`, and fails its check at once
  *   (`RESOLVER_FAULT`) while it is `resting` or `down`. The name check never walks it, so it is
- *   never heard or sampled. A name becomes avoided at any loss, a lookup of it waiting on the
- *   probe's lanes included.
+ *   never heard or sampled. A name becomes avoided at a loss or as the child goes quiet, a lookup
+ *   of it waiting on the probe's lanes included.
  */
 export interface HelperPort {
   start(snapshot?: HelperSnapshot): Promise<boolean>;
@@ -898,8 +904,9 @@ export class LookupHelper implements HelperPort {
   #lapseGeneration = 0;
   readonly #poison = new Map<string, PoisonMark>();
   /**
-   * Each name in flight at an `exit` or a `memory` loss, charged or not, kept off probe lanes:
-   * with the time its ten minutes run from, the helper's next `up`, and undefined until then.
+   * Each name in flight at an `exit` or a `memory` loss, charged or not, or when the child went
+   * quiet (`P-463`), kept off probe lanes: with the time its ten minutes run from, the helper's
+   * next `up`, and undefined until then.
    */
   readonly #crashed = new Map<string, number | undefined>();
   /** The current suspects, sent alone until they answer or isolation ends (D27). */
@@ -1157,10 +1164,10 @@ export class LookupHelper implements HelperPort {
 
   /**
    * Whether the probe's own `getaddrinfo` must not be asked for this name now: it is poison, a
-   * current suspect, or was in flight at an `exit` or a `memory` loss, until `stableMs` after the
-   * helper was next up, in its family or one a lookup of it would also ask for. The resolver asks before routing a
-   * name to the probe's lanes in any state: in the helper instead while it can ask, and otherwise
-   * its check fails.
+   * current suspect, or was in flight at an `exit` or a `memory` loss or when the child went quiet
+   * (`P-463`), until `stableMs` after the helper was next up, in its family or one a lookup of it
+   * would also ask for. The resolver asks before routing a name to the probe's lanes in any state:
+   * in the helper instead while it can ask, and otherwise its check fails.
    */
   avoidsSystem(host: string, family: HelperFamily): boolean {
     const now = this.#timers.now();
@@ -1706,19 +1713,27 @@ export class LookupHelper implements HelperPort {
     }
   }
 
-  /** Quiet: its lookups in flight are detached (D26), and the resolver routes as `down`. */
+  /**
+   * Quiet: its lookups in flight are detached (D26), and the resolver routes as `down`. Every name
+   * in flight, detached now or at an earlier quiet, is kept off the probe's lanes (`P-463`).
+   */
   #notAnswering(): void {
     const record = this.#child;
     this.#answering = false;
     this.#heardTicks = 0;
     this.#heardSince = 0;
+    const now = this.#timers.now();
+    const inFlight = [...(record?.table.values() ?? [])];
     const detached: object[] = [];
-    for (const flight of record?.table.values() ?? []) {
+    for (const flight of inFlight) {
       if (flight.detached) continue;
       flight.detached = true;
       detached.push(flight.ref);
     }
-    const now = this.#timers.now();
+    // Any of them may be what quieted it (D27): only through the process, since `getaddrinfo` runs
+    // on libuv's threads, and the same lookup could quiet the probe. One let go at an earlier quiet
+    // and still running is one of them again, its ten minutes from that rejoin begun anew.
+    this.#keepOff(inFlight, now);
     if (
       this.#notAnsweringWarnAt === undefined ||
       now - this.#notAnsweringWarnAt >= NOT_ANSWERING_WARN_MS
@@ -1729,9 +1744,10 @@ export class LookupHelper implements HelperPort {
           quietTicks: this.#quiet,
           tickMs: this.#limits.tickMs,
           detached: detached.length,
+          keptOff: inFlight.length,
           alsoNotAnswering: this.#notAnsweringUnsaid,
         },
-        'the lookup helper is not answering: its lookups in flight are detached, and names are asked elsewhere',
+        'the lookup helper is not answering: its lookups in flight are detached and their names kept off the probe’s lanes, and other names are asked elsewhere',
       );
       this.#notAnsweringWarnAt = now;
       this.#notAnsweringUnsaid = 0;
@@ -1850,15 +1866,9 @@ export class LookupHelper implements HelperPort {
     // any of them may be what ended the child, a crash or a name whose lookup grows the child's
     // memory until this helper or the kernel's OOM killer ends it, neither of which is told from
     // a kill from outside or a leak. So none goes to the probe's own getaddrinfo until ten minutes
-    // after the helper is next up, resting or not.
-    if (reason === 'exit' || reason === 'memory') {
-      for (const [key, since] of this.#crashed) {
-        if (since !== undefined && now - since >= this.#limits.stableMs) this.#crashed.delete(key);
-      }
-      for (const flight of lost) {
-        this.#crashed.set(poisonKey(flight.host, flight.family), undefined);
-      }
-    }
+    // after the helper is next up, resting or not. A `hung` child's were kept off as it went
+    // quiet, with nothing asked of it since (`P-463`).
+    if (reason === 'exit' || reason === 'memory') this.#keepOff(lost, now);
 
     for (const { flight, requeue, candidate } of facts) {
       if (requeue) record.requeued.set(flight.id, flight.ref);
@@ -1954,6 +1964,19 @@ export class LookupHelper implements HelperPort {
       { pid: record.pid, why },
       'the lookup helper was lost with a lookup a crash would be charged to: waiting for its exit to say whether it crashed',
     );
+  }
+
+  /**
+   * Keeps each lookup's name off the probe's lanes from now until ten minutes after the helper is
+   * next up (D27), and lets go of those whose ten minutes have run.
+   */
+  #keepOff(flights: readonly InFlight[], now: number): void {
+    for (const [key, since] of this.#crashed) {
+      if (since !== undefined && now - since >= this.#limits.stableMs) this.#crashed.delete(key);
+    }
+    for (const flight of flights) {
+      this.#crashed.set(poisonKey(flight.host, flight.family), undefined);
+    }
   }
 
   #markPoison(flight: InFlight, now: number): { readonly key: string; readonly kind: ChargedKind } {
