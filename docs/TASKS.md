@@ -33119,7 +33119,12 @@ because each is a decision rather than a defect:
         `docs/sensor-reference.md` regenerated (the two `P-07`s); `docs/api-reference.md`
         unchanged, its `--check` passing. `docs/adding-a-sensor-type.md` says a title, a
         description, a channel's name and unit and a limit's message are the operator's and cite
-        nothing, the comment beside them being where a ticket goes.
+        nothing, the comment beside them being where a ticket goes. **Corrected by review round
+        1:** not every one. The core's log said three more — the empty catalogue's warning,
+        which the new hint sends the operator to, with `unblocks: 'P-08'`, and migrations 073's
+        "lost by a clone made before P-302" and 071's "stored before N-24" — and shared's reason
+        for asking port 5985 named `T-09`; the *Windows server* sentence kept, besides, a count of
+        four failing sensors for a set of three. All five are fixed, below.
       - **Tests.** `operator-text.test.ts` (core, 2) walks what the routes serve, as they serve
         it: every sensor type's summary and its channels, the reason v1 leaves a type out, every
         credential kind, notification method, trigger kind, summarisation mode, setting, built-in
@@ -33128,7 +33133,10 @@ because each is a decision rather than a defect:
         asserting that it reaches each of those and that none cites a ticket. Its web
         counterpart (`operator-text.test.ts`, web, 2) reads every string, template and JSX text
         under `src`, as `control-edges.test.ts` reads its classes. `map-images.test.ts` and the
-        sensors' `netflow5.test.ts` assert their refusals cite none. **Mutants (16), each
+        sensors' `netflow5.test.ts` assert their refusals cite none. **Corrected by review round
+        1:** a type's channels for `{}` alone, so a channel only a parameter turns on was never
+        read, nor the placeholders, the built-in schedules or a default; and nothing held what a
+        check says, a log line or a refusal. All of it is held since, below. **Mutants (16), each
         failing:** each of the eight citations put back in its place (`P-07`, `A-41b`, `V2-01`,
         `T-09`, `ADR-003`, `B-03`, the channel table's `P-05`, the stat's `P-08`), and a ticket
         written into a trigger kind's description, a setting's, a lookup's state text, a
@@ -33152,7 +33160,8 @@ because each is a decision rather than a defect:
         answer `D-04` will act on". Its readers write clients rather than run the product, but
         they cannot look one up either; the fix is a ticket of its own, the walk extended to the
         document `build-hygiene.test.ts` already builds. The core's start-up log has one too:
-        `logSensorTypes` warns with `unblocks: 'P-08'`.
+        `logSensorTypes` warns with `unblocks: 'P-08'`. **Fixed by review round 1, with the two
+        migration lines this note missed.**
       - **The two together, 2026-10-20** (three commits): shared 602 tests green; sensors 2,314,
         2,312 passing and two skipped for the machine, not the code (the dev PostgreSQL offers no
         TLS, and an IPv6 routing case found its port taken on 127.0.0.1); the web suite 96 files
@@ -33162,6 +33171,101 @@ because each is a decision rather than a defect:
         before the suites above. Under load one web run failed `retired-history-poll.test.tsx`
         on a poll's timing, a file nothing here touches; alone, and in the whole suite again, it
         passed.
+
+      **Review round 1, 2026-10-20: two medium and five low, all closed** (core, sensors, probe,
+      shared and web, four commits).
+      1. **The core's walk read a type's channels for `{}` alone** (medium). `port.tcp`'s *Banner
+         matched* exists only when a banner is asked for, and `mail.smtp`'s *Message accepted in*
+         only when there is a recipient, so a ticket in either passed. Each type whose channels
+         are not fixed is asked as well for parameters that turn its optional ones on, probed as
+         `scripts/docs/sensor-reference.mjs` probes them: a string is a word of its own path, a
+         number its least, a list one entry and an object its properties, booleans all on and
+         all off, and each value of an enum on its own. Channels are read by key, the walk
+         asserts it reaches those two, and a probe a type's channels refuse fails it, so the walk
+         cannot quietly read less.
+      2. **Two registries the core serves were not walked** (medium): `GET
+         /notification-placeholders`, listed beside the template editor, and the built-in
+         schedules, seeded at start and served by `GET /schedules`. Both are, each with a
+         presence assertion, so leaving one out fails the test.
+      3. **Nothing held what a check says, or a default** (low). The core's walk reads every
+         string under a `default`, an `examples`, an `enum` and a `const` now; `mail.smtp`'s
+         subject is one, and the sent mail's subject too. The sensors, the probe and shared each
+         have an `operator-text.test.ts` reading every string literal and template part under
+         `src`, comments left out, as the web's does: a check's `message`, an error `execute()`
+         throws, the message the probe writes for a check that never ran, a log line. They found
+         one, discovery's reason for asking port 5985, "a Windows machine that T-09 can actually
+         reach", now "the Windows sensors can actually reach".
+      4. **The core's log still cited tickets** (low). The empty-catalogue warning loses
+         `unblocks: 'P-08'`; migration 073's warning says a clone "made by an earlier release",
+         and 071's line "delivery errors stored by an earlier release made legible". A third test
+         in the core's `operator-text.test.ts` reads `src` for the strings of every logger call,
+         `child`'s bindings included, every `new …Error(…)` and every `throw`. It found those
+         three and nothing else, and it holds a refusal the core builds too, which the docblock
+         had left out. The outcome and the *Seen* note above are corrected.
+      5. **The guide said the core's test walks everything the API serves** (low). It says which
+         test holds what now: a check's `message` and an error's are the operator's too, the
+         sensors' test reads every string under `packages/sensors/src`, and the core's walks the
+         schemas, channels and registries the API serves.
+      6. **The *Sensor types* tile said "none registered" while it did not know** (low, older
+         than this ticket). `typeCount` is 0 while `/sensor-types` is out and after it fails, so
+         the tile read "—" over "none registered" while the card below said the read had failed.
+         The hint waits for the read.
+      7. **The *Windows server* template counted four failing sensors** (low, since `D-03`). Its
+         WMI set is three, and the ping does not fail for want of WinRM: "three", and the test's
+         comment with it.
+      - **Tests** (12 new): the core's `operator-text.test.ts` +1, and its walk wider (the probed
+        channels, the two registries and the shown values: 2,184 strings, 685 of them a
+        channel's, where it read about 1,500); an `operator-text.test.ts` in sensors, probe and
+        shared, 2 each; `overview-counts.test.tsx` +4 (the tile while the read is out, after it
+        failed, of an empty catalogue and of one with types); `device-templates.test.ts` +1, the
+        count held to the set, so a sensor added to it or taken out says the sentence is wrong. **Mutants (17), each failing:** a ticket put in
+        the channel a banner turns on and in the one a recipient does (the core's walk and the
+        sensors' test both fail), in a placeholder's description, a built-in schedule's and
+        `mail.smtp`'s default subject (both again), in an error `port.tcp` throws, a check
+        result's message and a template part of the catalogue (the sensors'), in the message the
+        probe writes for a check process it could not read (the probe's); `T-09` back in the
+        WinRM reason (shared's); `unblocks: 'P-08'`, `P-302` and `N-24` back in their log lines,
+        and a ticket in the refusal of a built-in group's deletion (the core's third test); "four"
+        back (the template's); and the tile's hint as before, and waiting only while the read is
+        out, not after it failed (the tile's).
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the core's walk probes a
+        type's parameters rather than reading a fixture written per type. A fixture is one more
+        file to remember when a type is added, and is wrong the day a parameter is; the probe
+        finds a channel a new type's parameter turns on with nothing written for it, and it is
+        the probe the sensor reference already trusts to say which parameters add channels.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the sensors, the probe and
+        shared hold every string under `src`, with no allowance; the core only what it logs and
+        the errors it builds. The three have no OpenAPI document and no SQL, so every string of
+        theirs is either the operator's or nobody's, and the one hit was reworded rather than
+        allowed. The core's `src` holds the route schemas the API reference is rendered from,
+        whose citations (126 in the reference) are `U-92`'s *Seen* note and a ticket of their
+        own, and the SQL whose comments are where a query's ticket goes: read whole, it found 176
+        strings that cite one, three of them the operator's, so it would need a list of
+        exceptions longer than what it held.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a test in each package,
+        each with its own thirty-line reader, rather than one in the core reading three trees. A
+        type's author runs the sensors' suite, and a package's tests hold its own source, as each
+        package's `within.ts` is its own.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the empty-catalogue
+        warning loses `unblocks` and gains nothing in its place. Its message says what is wrong
+        and what follows from it; a field naming what would fix it would be a release's name or
+        a type's, and neither is the operator's to act on.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the *Windows server*
+        sentence keeps a number, held to its set by a test, rather than wording that names none.
+        "Three failing sensors" is the concrete cost the sentence is there to state, and the test
+        says when it drifts, which the wording alone would only hide.
+      - **Seen, not this ticket's, for whoever orders the queue to file.** The *Web server*
+        template's description names a function of the core, "which is why `matchTemplates`
+        returns every match rather than the best": an operator reads it in discovery and cannot
+        look that up either. Not a ticket, so nothing here refuses it.
+      - **The round together, 2026-10-20** (four commits and this note): the core's
+        operator-text, device-template, migration, cloned-channel, credential, discovery,
+        schedule, placeholder, template and documentation files, 26 of them, 1,020 tests green
+        and none skipped; shared 604 green; the sensors' new test with their catalogue and
+        entry-title files, 91 green; the probe's with its catalogue, build-profile and identify
+        files, 39 green; the web suite 96 files and 1,294 tests green; both references
+        `--check` current and unchanged. **Mutants 17, 17 killed**, each restored byte for byte
+        and the tree rebuilt before the suites above.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
