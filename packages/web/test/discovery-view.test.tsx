@@ -114,6 +114,7 @@ function core({
   reads = [],
   started = [],
   bodies = [],
+  holdStart,
 }: {
   starts?: Answer[];
   cancels?: Answer[];
@@ -123,7 +124,10 @@ function core({
   started?: DiscoveryRun[];
   /** What run 7's accepted reads answer with, in turn; `RUN` once spent. */
   bodies?: DiscoveryRun[];
-}): void {
+  /** Holds every start's answer until it settles. */
+  holdStart?: Promise<void>;
+}): { readonly sent: { starts: number; cancels: number } } {
+  const sent = { starts: 0, cancels: 0 };
   const reply = (status: number, data: unknown): Promise<Response> =>
     Promise.resolve(
       new Response(JSON.stringify(data), {
@@ -172,12 +176,18 @@ function core({
           });
     }
     if (method === 'POST' && path === '/discovery') {
+      sent.starts += 1;
       const next = starts.shift() ?? null;
-      return said(next, next === null ? (started.shift() ?? RUN) : RUN);
+      const answering = (): Promise<Response> =>
+        said(next, next === null ? (started.shift() ?? RUN) : RUN);
+      return holdStart === undefined ? answering() : holdStart.then(answering);
     }
     if (path === '/discovery/8') return reply(200, RUN_8);
     if (path === '/discovery/7/summary') return reply(200, SUMMARY_7);
-    if (method === 'POST' && path === '/discovery/7/cancel') return answer(cancels, RUN);
+    if (method === 'POST' && path === '/discovery/7/cancel') {
+      sent.cancels += 1;
+      return answer(cancels, RUN);
+    }
     if (path.startsWith('/objects?kind=probe')) {
       return reply(200, { items: [object(10, 1, 'probe', 'probe-a')] });
     }
@@ -196,6 +206,7 @@ function core({
     }
     throw new Error(`no stub for ${method} ${path}`);
   });
+  return { sent };
 }
 
 beforeEach(() => {
@@ -668,6 +679,159 @@ describe('a run whose first read failed (U-56)', () => {
       );
       expect(screen.queryByRole('heading', { name: 'Run' })).toBeNull();
       expect(speaking()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * Focus through a start and a run (`U-23` review).
+ *
+ * *Start discovery* and a run's *Cancel* were `disabled` while their request was out, so each
+ * dropped the focus it held to the page the moment it was pressed, and nothing put it back: not on
+ * a refusal, not when the run's card came, and not when *Open the group* took Cancel's place. Each
+ * is now unavailable without being disabled, the run's card takes focus as it comes, and the link
+ * takes it from a Cancel that had it.
+ */
+describe('focus through a start and a run (U-23 review)', () => {
+  /** A start held until `release` is called. */
+  function holding(): { hold: Promise<void>; release: () => void } {
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { hold, release };
+  }
+
+  it('keeps focus on Start discovery while it starts, then gives it to the run’s card', async () => {
+    const { hold, release } = holding();
+    const { sent } = core({ holdStart: hold });
+    const card = await open();
+    const start = await ready(card);
+    start.focus();
+    fireEvent.click(start);
+
+    expect(start.textContent).toBe('Starting…');
+    expect(start.disabled).toBe(false);
+    expect(start.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(start);
+    // Pressed again while it is out: nothing more is sent.
+    fireEvent.click(start);
+    expect(sent.starts).toBe(1);
+
+    release();
+    const heading = await screen.findByRole('heading', { name: 'Run 7 — 10.0.0.0/29' });
+    expect(document.activeElement).toBe(heading);
+    expect(heading.getAttribute('tabindex')).toBe('-1');
+    expect(screen.getAllByRole('heading', { name: /^Run/u })).toHaveLength(1);
+  });
+
+  it('keeps focus on Start discovery when the core refuses the start', async () => {
+    core({ starts: [{ status: 409, message: NO_START }] });
+    const card = await open();
+    const start = await ready(card);
+    start.focus();
+    fireEvent.click(start);
+    expect(start.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(start);
+    await alertSaying(NO_START);
+    await waitFor(() => {
+      expect(start.getAttribute('aria-disabled')).toBe('false');
+    });
+    expect(document.activeElement).toBe(start);
+    expect(screen.queryByRole('heading', { name: /^Run/u })).toBeNull();
+  });
+
+  it('leaves focus where the operator moved it while the start was out', async () => {
+    const { hold, release } = holding();
+    core({ holdStart: hold });
+    const card = await open();
+    const start = await ready(card);
+    start.focus();
+    fireEvent.click(start);
+    range(card).focus();
+    release();
+    await screen.findByRole('heading', { name: 'Run 7 — 10.0.0.0/29' });
+    expect(document.activeElement).toBe(range(card));
+  });
+
+  it('keeps focus on a run’s Cancel while it cancels and when the core refuses', async () => {
+    const { sent } = core({ cancels: [{ status: 409, message: NO_CANCEL }] });
+    const card = await open();
+    fireEvent.click(await ready(card));
+    const heading = await screen.findByRole('heading', { name: 'Run 7 — 10.0.0.0/29' });
+    const panel = heading.closest('section');
+    if (panel === null) throw new Error('no run card');
+    const cancel = within(panel).getByRole<HTMLButtonElement>('button', { name: 'Cancel' });
+    cancel.focus();
+    fireEvent.click(cancel);
+    expect(cancel.textContent).toBe('Cancelling…');
+    expect(cancel.disabled).toBe(false);
+    expect(cancel.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(cancel);
+    // Pressed again while it is out: nothing more is sent.
+    fireEvent.click(cancel);
+    expect(sent.cancels).toBe(1);
+
+    await alertSaying(NO_CANCEL);
+    await waitFor(() => {
+      expect(cancel.getAttribute('aria-disabled')).toBe('false');
+    });
+    expect(within(panel).getByRole('button', { name: 'Cancel' })).toBe(cancel);
+    expect(document.activeElement).toBe(cancel);
+  });
+
+  /** The run's card, read once, with run 7 finishing on the next read five seconds on. */
+  async function finishing(): Promise<HTMLElement> {
+    core({ bodies: [RUN, RUN_7_DONE] });
+    const card = await open();
+    const start = await ready(card);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    fireEvent.click(start);
+    await turnUntil(
+      () => screen.queryByRole('heading', { name: 'Run 7 — 10.0.0.0/29' }) !== null,
+      'the run was not shown',
+    );
+    const panel = screen.getByRole('heading', { name: 'Run 7 — 10.0.0.0/29' }).closest('section');
+    if (panel === null) throw new Error('no run card');
+    return panel;
+  }
+
+  const finish = async (panel: HTMLElement): Promise<HTMLElement> => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    await turnUntil(
+      () => within(panel).queryByRole('link', { name: 'Open the group' }) !== null,
+      'the run did not finish',
+    );
+    return within(panel).getByRole('link', { name: 'Open the group' });
+  };
+
+  it('gives focus to Open the group when the run ends with focus on its Cancel', async () => {
+    try {
+      const panel = await finishing();
+      act(() => {
+        within(panel).getByRole('button', { name: 'Cancel' }).focus();
+      });
+      const link = await finish(panel);
+      expect(within(panel).queryByRole('button', { name: 'Cancel' })).toBeNull();
+      expect(document.activeElement).toBe(link);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves focus alone when the run ends with it elsewhere', async () => {
+    try {
+      const panel = await finishing();
+      const box = screen.getByLabelText('Range');
+      act(() => {
+        box.focus();
+      });
+      await finish(panel);
+      expect(document.activeElement).toBe(box);
     } finally {
       vi.useRealTimers();
     }

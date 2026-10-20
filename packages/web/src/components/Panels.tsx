@@ -1,4 +1,4 @@
-import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import type { ApiError } from '../api/client';
 import { NearerFocus, keepFocusOnThePage } from './keep-focus';
 
@@ -6,10 +6,16 @@ export function Card({
   title,
   actions,
   children,
+  headingRef,
 }: {
   title?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
+  /**
+   * For a card focus is moved to as it appears (a discovery run once started, `U-23` review):
+   * its heading, which is then focusable from script and not a stop in the tab order.
+   */
+  headingRef?: Ref<HTMLHeadingElement>;
 }): React.JSX.Element {
   return (
     <section className="border border-border bg-surface">
@@ -17,7 +23,13 @@ export function Card({
         <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
           {/* Uppercase and tracked, not bold: the rule under it is what separates the header
               from the body, so the type does not also have to shout. */}
-          <h2 className="ms-label">{title}</h2>
+          <h2
+            ref={headingRef}
+            tabIndex={headingRef === undefined ? undefined : -1}
+            className="ms-label"
+          >
+            {title}
+          </h2>
           {actions}
         </header>
       )}

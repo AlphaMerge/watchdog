@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, request, sameWords, send, useApi } from '../api/client';
 import type {
@@ -66,6 +66,11 @@ export function DiscoveryView(): React.JSX.Element {
   const [draft, setDraft] = useState<DiscoveryDraft>(EMPTY_DRAFT);
   const [startedId, setStartedId] = useState<number | null>(null);
   const [startError, setStartError] = useState<ApiError | null>(null);
+  /** A run just started from *Start discovery* while it had focus: its card takes it. */
+  const [focusRun, setFocusRun] = useState(false);
+  const runFocused = useCallback(() => {
+    setFocusRun(false);
+  }, []);
 
   if (probes.status !== 'ready' || groups.status !== 'ready' || templates.status !== 'ready') {
     return <ReadState read={[probes, groups, templates]} what="discovery" />;
@@ -82,9 +87,10 @@ export function DiscoveryView(): React.JSX.Element {
         groups={groups.data.items}
         templates={templates.data.items}
         error={startError}
-        onStarted={(run) => {
+        onStarted={(run, focused) => {
           setStartError(null);
           setStartedId(run.id);
+          setFocusRun(focused);
         }}
         onError={setStartError}
       />
@@ -92,7 +98,9 @@ export function DiscoveryView(): React.JSX.Element {
       {/* Keyed by the run (`U-64` review): everything the card holds — the run as last read, its
           summary, a refused cancel, a failed poll — is about that run, and a second start would
           otherwise show run 7's refusal and summary under run 8's heading for good. */}
-      {startedId !== null && <RunPanel key={startedId} runId={startedId} />}
+      {startedId !== null && (
+        <RunPanel key={startedId} runId={startedId} arriving={focusRun} onArrived={runFocused} />
+      )}
 
       {draft.groupId !== null && <RecentRuns groupId={draft.groupId} watching={startedId} />}
 
@@ -123,13 +131,15 @@ function StartPanel({
   groups: ObjectPage['items'];
   templates: DeviceTemplateSummary[];
   error: ApiError | null;
-  onStarted: (run: DiscoveryRun) => void;
+  /** `focused`: *Start discovery* still had focus, or the page did, so the run's card takes it. */
+  onStarted: (run: DiscoveryRun, focused: boolean) => void;
   /** Told `null` as an attempt starts, so a second refusal in the same words is said again. */
   onError: (error: ApiError | null) => void;
 }): React.JSX.Element {
   const [preview, setPreview] = useState<DiscoveryPreview | null>(null);
   const [previewError, setPreviewError, sayAgain] = useRefusal<ApiError>();
   const [starting, setStarting] = useState(false);
+  const startButton = useRef<HTMLButtonElement>(null);
 
   // Debounced, because the preview parses a range and an operator types one character at a time
   // — nine requests for `10.0.0.0/24` would each be answering a question nobody asked.
@@ -187,7 +197,8 @@ function StartPanel({
   const chosen = preview?.levels.find((one) => one.id === draft.level);
 
   const start = useCallback(() => {
-    if (draft.probeId === null || draft.groupId === null) return;
+    // Pressed again while the start is out: the button only says it is unavailable (below).
+    if (starting || draft.probeId === null || draft.groupId === null) return;
     setStarting(true);
     onError(null);
     send<DiscoveryRun>('POST', '/discovery', {
@@ -198,7 +209,11 @@ function StartPanel({
       templates: draft.templates,
       ...(draft.snmpCommunity === '' ? {} : { snmpCommunity: draft.snmpCommunity }),
     })
-      .then(onStarted)
+      .then((run) => {
+        // Only from the button, or the page: an operator who moved on is left where they are.
+        const at = document.activeElement;
+        onStarted(run, at === null || at === document.body || at === startButton.current);
+      })
       .catch((failure: unknown) => {
         onError(
           failure instanceof ApiError
@@ -209,7 +224,7 @@ function StartPanel({
       .finally(() => {
         setStarting(false);
       });
-  }, [draft, onStarted, onError]);
+  }, [draft, starting, onStarted, onError]);
 
   return (
     <Card title="Scan a range">
@@ -384,19 +399,26 @@ function StartPanel({
       )}
 
       {/* A refused start, in a region always there and empty until one (`U-54`, as `U-48` did):
-          focus is on *Start discovery* when the core refuses, and a region added with its text
-          already in it is not reliably announced (`U-41`). `start` empties it as it begins. */}
+          focus is on *Start discovery* when the core refuses — unavailable while the start is out,
+          not disabled, so it keeps the focus it had (`U-23` review) — and a region added with its
+          text already in it is not reliably announced (`U-41`). `start` empties it as it
+          begins. */}
       <p role="alert" className="mt-4 text-sm text-down-fg empty:mt-0">
         {error?.message}
         <CorrelationId id={error?.correlationId} />
       </p>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
+        {/* **Unavailable while the start is out, not `disabled`** (`U-23` review, as `U-73` made
+            the template form's Save): disabled, it dropped the focus it held to the page as it was
+            pressed. Still `disabled` while a box is empty, when focus is in the box. */}
         <button
+          ref={startButton}
           type="button"
-          disabled={blocked !== null || starting}
+          disabled={blocked !== null}
+          aria-disabled={starting}
           onClick={start}
-          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+          className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 aria-disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Start discovery'}
         </button>
@@ -414,8 +436,39 @@ function StartPanel({
 
 // ── watching ────────────────────────────────────────────────────────────────────────────────
 
-function RunPanel({ runId }: { runId: number }): React.JSX.Element {
+/**
+ * A run being watched.
+ *
+ * **Focus comes here when the run is started** (`U-23` review): to the card's heading, as it is
+ * drawn, so a screen reader says a run has started and reads on into it, where it used to stay on
+ * the page with nothing said. And **when the run ends with focus on its Cancel**, focus goes to
+ * the *Open the group* that takes the button's place, rather than to the page with the button.
+ */
+function RunPanel({
+  runId,
+  arriving,
+  onArrived,
+}: {
+  runId: number;
+  /** Just started from *Start discovery* while it had focus: the heading takes it. */
+  arriving: boolean;
+  onArrived: () => void;
+}): React.JSX.Element {
   const [run, setRun] = useState<DiscoveryRun | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const openGroup = useRef<HTMLAnchorElement>(null);
+  /** Set as a Cancel that had focus goes, and taken by the link put in its place. */
+  const owedToLink = useRef(false);
+  useEffect(() => {
+    if (!arriving) return;
+    heading.current?.focus();
+    onArrived();
+  }, [arriving, onArrived]);
+  useLayoutEffect(() => {
+    if (!owedToLink.current) return;
+    owedToLink.current = false;
+    openGroup.current?.focus();
+  });
   const [summary, setSummary] = useState<DiscoverySummary | null>(null);
   // Two regions, two kinds of news (`U-64`). `problem` is a read of the run failing — the polls'
   // own business, emptied by the next read that succeeds. `refused` is the operator's cancel,
@@ -504,7 +557,7 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
 
   if (run === null) {
     return (
-      <Card title="Run">
+      <Card title="Run" headingRef={heading}>
         {problem === null && <Loading what="the run" />}
         {/* The first read failing. **Always there, empty until it does** (`U-56`): it answers a
             read that went out as the card was drawn, and a region added with its text already in
@@ -534,18 +587,19 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
   return (
     <Card
       title={`Run ${String(run.id)} — ${run.range}`}
+      headingRef={heading}
       actions={
         isActive(run.status) ? (
-          <button
-            type="button"
-            onClick={cancel}
-            disabled={cancelling}
-            className="border border-control px-2 py-1 text-sm text-text hover:bg-surface disabled:opacity-50"
-          >
-            {cancelling ? 'Cancelling…' : 'Cancel'}
-          </button>
+          <CancelRun
+            cancelling={cancelling}
+            onCancel={cancel}
+            onGoneWithFocus={() => {
+              owedToLink.current = true;
+            }}
+          />
         ) : (
           <Link
+            ref={openGroup}
             to={`/objects/${String(run.groupId)}`}
             className="text-sm text-accent underline underline-offset-2"
           >
@@ -603,8 +657,9 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
 
       {/* A refused cancel. **Always there, empty until one** (`U-54`): a region added with its
           text already in it is not reliably announced (`U-41`). An alert, for `U-48`'s reason:
-          focus is on *Cancel* when the core refuses, and the run the operator thinks they stopped
-          is still going. **Its own region** (`U-64`): only the next cancel empties it, so the
+          focus is on *Cancel* when the core refuses — unavailable while the cancel is out, not
+          disabled, so it keeps the focus it had (`U-23` review) — and the run the operator thinks
+          they stopped is still going. **Its own region** (`U-64`): only the next cancel empties it, so the
           poll that succeeds two seconds later leaves it to be read. */}
       <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
         {refused?.message}
@@ -620,6 +675,49 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
         <CorrelationId id={problem?.correlationId} />
       </p>
     </Card>
+  );
+}
+
+/**
+ * A run's Cancel, **unavailable while the cancel is out, not `disabled`** (`U-23` review): it
+ * dropped the focus it held to the page as it was pressed. Its own component so that it can say,
+ * as it is taken away, whether it had focus: the run's end puts *Open the group* in its place.
+ */
+function CancelRun({
+  cancelling,
+  onCancel,
+  onGoneWithFocus,
+}: {
+  cancelling: boolean;
+  onCancel: () => void;
+  onGoneWithFocus: () => void;
+}): React.JSX.Element {
+  const button = useRef<HTMLButtonElement>(null);
+  // The latest, for the cleanup below, which is the one from the button's first commit.
+  const gone = useRef(onGoneWithFocus);
+  useLayoutEffect(() => {
+    gone.current = onGoneWithFocus;
+  });
+  // A layout cleanup runs as the button is taken out, while it still holds focus, as
+  // `ErrorPanel`'s does (`U-68`).
+  useLayoutEffect(() => {
+    const node = button.current;
+    return () => {
+      if (node !== null && node.contains(document.activeElement)) gone.current();
+    };
+  }, []);
+  return (
+    <button
+      ref={button}
+      type="button"
+      onClick={() => {
+        if (!cancelling) onCancel();
+      }}
+      aria-disabled={cancelling}
+      className="border border-control px-2 py-1 text-sm text-text hover:bg-surface aria-disabled:opacity-50"
+    >
+      {cancelling ? 'Cancelling…' : 'Cancel'}
+    </button>
   );
 }
 
