@@ -63,7 +63,7 @@ export const WALK_BURST = 20;
 /** D19: a per-name walk takes from a server's bucket only while more than this many are left. */
 export const WALK_KEY_RESERVE = 5;
 
-/** Why a walk did not send a step (`nameWalksDeferred`, §1.4, D31). */
+/** Why a walk did not send a step (§1.4, D31): the hourly summary counts each. */
 export type DeferReason = 'budget' | 'rate' | 'stall' | 'scoutWait';
 
 /** One question the DNS check sent: open until its first reply, or `FORWARD_HOLD_MS`. */
@@ -253,7 +253,7 @@ export class ForwardBudget {
     return true;
   }
 
-  /** A walk deferred, for `nameWalksDeferred`: the reason's running total, this one counted. */
+  /** A walk deferred, for the hourly summary: the reason's running total, this one counted. */
   deferred(reason: DeferReason): number {
     this.#deferred[reason] += 1;
     return this.#deferred[reason];

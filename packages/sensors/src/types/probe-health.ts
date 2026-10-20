@@ -292,39 +292,6 @@ const CHANNELS: readonly ChannelDef[] = [
     counter: { bits: 64 },
   },
   { key: 'nameQuestionsOpen', name: 'DNS questions open, most', unit: 'questions' },
-  // **The check's own and the rest of the helper's (`P-432` S6, protocol 39), gate mode only.**
-  // States read through lookups whose every entry is Up: the latch above is the helper's one
-  // alarm, and a stand-down or a check off for the system's shape raises nothing of its own. The
-  // rest have no limit: what the field test reads to see what the gate routed where.
-  { key: 'lookupHelperState', name: 'Lookup helper state', lookup: 'ms.probe.lookup-helper-state' },
-  {
-    key: 'lookupHelperLosses',
-    name: 'Lookup helper losses',
-    unit: 'losses',
-    counter: { bits: 64 },
-  },
-  // In megabytes, from the child's last beat: flat under the field test's hourly-trend rule.
-  { key: 'lookupHelperMemory', name: 'Lookup helper memory (resident)', unit: 'MB' },
-  { key: 'nameCheckState', name: 'Name check', lookup: 'ms.probe.name-check' },
-  {
-    key: 'nameLookupsHeard',
-    name: 'Name lookups heard, on the probe’s lanes',
-    unit: 'lookups',
-    counter: { bits: 64 },
-  },
-  {
-    key: 'nameLookupsToHelper',
-    name: 'Name lookups in the lookup helper',
-    unit: 'lookups',
-    counter: { bits: 64 },
-  },
-  { key: 'nameCheckMisses', name: 'Name check misses', unit: 'misses', counter: { bits: 64 } },
-  {
-    key: 'nameWalksDeferred',
-    name: 'Name check walks deferred',
-    unit: 'walks',
-    counter: { bits: 64 },
-  },
   // **How far memory lets the pool grow** (`P-236`). `P-34` derives the ceiling from the work
   // alone, and checks that hang to their timeout made it about 540 workers against a 4 GiB box
   // that held about a hundred: the probe grew until the kernel killed it, six times, while

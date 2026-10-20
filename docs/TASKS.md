@@ -14833,6 +14833,126 @@ because each is a decision rather than a defect:
       as the cases "skipped outright", so a green run reads as a claim about the gate that it is
       not. CLAUDE.md is the user's to edit. **Done when** its list names `MS_DNS_RESOLVER` and the
       findings file the command is in.
+- [x] **P-467 — Probe Health carries fourteen name fields, and the user decided six** · S ·
+      P-432 · Filed 2026-10-20 by the coordinator's decision on `integ/r6-1020` (under `P-432`).
+      The user decided on 2026-10-18 (OPEN-5) that Probe Health has six name fields at protocol
+      38: `nameResolverMode`, `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`,
+      `nameHelperStuck` and `nameQuestionsOpen`, with what the other eight would carry logged at
+      the design's levels and the helper's memory in the log and the hourly summary. S6 built the
+      eight anyway (`lookupHelperState`, `lookupHelperLosses`, `lookupHelperMemory`,
+      `nameCheckState`, `nameLookupsHeard`, `nameLookupsToHelper`, `nameCheckMisses`,
+      `nameWalksDeferred`) under a `nameCheck` capability at protocol 39. **Done when** they are
+      gone from the probe's report, the protocol, `healthForPeer`, the sensor type's channels, the
+      core's lookups, `/metrics`, the generated references and every document; what they carried
+      is in the log at the design's levels and in the hourly summary; and the runbook's step 4
+      reads the six and the summary, with the commands.
+
+      **P-467 outcome.**
+      - **The eight are gone, and 38 is the newest protocol again.** `nameCheck` and its strip in
+        `healthForPeer`, the eight fields and their schema entries, `PROTOCOL_VERSION` 39, the
+        eight Probe Health channels, the lookups `ms.probe.lookup-helper-state` and
+        `ms.probe.name-check`, the eight `/metrics` series, and the probe's report of them.
+        `NameResolutionHealth.gate` is the latch and three counts again, and `helperStateValue`
+        went with its one reader. Protocol 38's six are as they were. A heartbeat that sends one
+        of the eight is refused as a field the schema does not know.
+      - **Nothing else needs 39.** `nameCheck` was its only capability. S6's review had
+        `nameQuestionsOpen` count the check's own questions "from 39", but nothing gates it, and
+        no build at 38 has been released or landed (`origin/main` is at 37, rc.2 at 28), so no
+        peer reads the older meaning: at 38 it counts both, as the schema's comment now says.
+      - **What they carried is in the log.** Each event already had its line at the design's
+        level (§5's log table): the helper ready (info), not answering (warn, at most once a
+        minute, with a count) and answering again (info), lost (warn, with `reason`, `why` and
+        `signal` or `exitCode`), a name poisoned (error, once a name), resting (error) and out of
+        rest (info); the check proven or not yet (info), a miss and a zone skipped (warn), a
+        stand-down (error, then warn), walks deferred (warn at each episode's start), and the
+        name settings moved, slow or unreadable (warn, warn, error). The deferral line said
+        "counted in nameWalksDeferred", and now says the hourly summary.
+      - **The hourly summary** (`the probe’s resolver in gate mode, this hour`, info) now carries
+        what the field test read from the eight. Its `hour` gives this hour's lookups heard, in
+        the helper, misses, walks deferred and the two stuck counts. The same at the top level are
+        totals since the start, with `walksDeferred` by reason and `total`. Its `check` gives its
+        `state` (§5's numbers, 0 resting), the state in words (`said`), and while it is off,
+        `off`, the policy's `code` and `why`. Its `helper` gives `rss` now in bytes (`null` with
+        no child) beside `rssPeak`, and `losses` by reason with `total`. It also lists the hour's
+        `changes` of state (`at`, `from`, `to`, `loss`) and `lost` children (`at`, `reason`,
+        `pid`, `why`, `signal`, `exitCode`), the first 20 of each, counting the rest. The
+        resolver keeps them from `onHelperChange`. A loss whose child's end is not read yet (a
+        hang, a kill) takes its `signal` from the helper's last loss at the next gate tick, while
+        that is still the last. `lookup-helper.ts` is untouched: the helper track changes its
+        loss handling at the same time.
+      - **Documents.** `administration.md` gives Probe Health's six, a table of the log lines
+        with their levels, the summary's fields with two `journalctl` commands, and the six in
+        *What to watch*. The release notes give six channels, the rest in the log, protocol 28 to
+        38 and the Warning clearing at 38. In the runbook, step 1 checks the proven line, and
+        step 4 judges the six. Each criterion that read one of the eight now reads a field of the
+        hourly summary, with commands that keep the hours and the warnings in two files. The cut
+        checklist's step 0.1 names `P-467` and checks protocol 38. S7's findings drop three
+        mentions, the differential's words one, and the generated references their eight rows.
+        `config check`'s gate note names the summary.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **The lookups go with their channels.** A lookup no channel names is one nothing
+          reads, and an operator could pick it for a channel of their own and read words for a
+          value no probe sends. `lookups.test.ts` now holds every `ms.probe.` lookup to a Probe
+          Health channel that names it.
+        - **The probe's counters stay** in `GateHealth`: the tests, S7's perf arms and S8's
+          differential read them, and the summary is built from them. Only the report is cut.
+        - **The summary gives the hour and the totals.** The field test's criteria are per hour,
+          and the core used to make the hour from a counter. A line that gave totals alone would
+          leave the tester to subtract consecutive lines by hand.
+        - **The step 4 commands use `journalctl` and `grep` only.** `jq` is not assumed on a field
+          host. `--since` takes the start reading's time as `2026-10-04 13:44:34 UTC`, which every
+          systemd parses, and `grep -o` reads one field.
+        - **A stand-down within an hour is judged from its line.** The summary gives the check's
+          state as the hour ends, so step 4 makes any `the DNS check missed names in three zones`
+          line a finding, whatever the hour's state reads.
+      - **Tests**, each shown failing without its change:
+        - `capabilities.test.ts`: protocol 38 newest, six name fields in the schema, and each of
+          the eight refused as unknown.
+        - `health-types.test.ts`: the six name channels and no other.
+        - `lookups.test.ts`: no probe lookup without a channel.
+        - `metrics.test.ts`: the six name series, whatever a probe sends.
+        - `probe-health.test.ts`: the six name channels read.
+        - `probe-health-report.test.ts`: the six sent, the eight in neither mode.
+        - `name-resolution.test.ts`: the gate's four in `health()`.
+        - `config-problems.test.ts`: the note names the summary.
+        - `name-resolver-check.test.ts`: three summary tests. The helper's changes and losses
+          with their signals (one filled after the loss), memory, the check's state with its
+          off reason, and the hour's counts reset each hour. The lists capped at 20 with the rest
+          counted. The check's state and the deferred walks in the summary, and 0 while resting.
+        - `name-resolution-process.test.ts`: a gate probe's heartbeat has the six.
+        - `FakeHelper` keeps its losses and resident memory for them.
+        - `build-hygiene.test.ts` takes step 4's one reading ("is a reading").
+      - **Mutants: 19, all killed.** Each was restored with `shutil.copy` and `os.utime`, and
+        checked with `filecmp`. After the last rebuild no marker was left in `dist`, and every
+        changed file's `dist` is newer than its source.
+        - The protocol: one of the eight back in the schema, and the protocol at 39.
+        - The core and the sensor type: a channel back, a lookup back, a `/metrics` series
+          back, and a reading back.
+        - The probe: a field back in the report, `health()` spreading the resolver's counts,
+          and the old `config check` note.
+        - The summary: the changes not noted, the signal never filled, the hour's base never
+          moved, the helper's hour never reset, either list's cap off by one, the off reason
+          never given, the `rss` as its peak, resting not read as 0, and the last loss not read.
+        - The last of these first ran as a mutant that did not compile, and was taken again as
+          one that did.
+      - **Runs**, on the final build, beside other sessions' runs, not in a quiet window.
+        Prettier and eslint are clean on the changed files, and `tsc -b` on the tree. The
+        generated references were written again.
+        - `shared` 74 of 74: `capabilities`, `capability-versions`.
+        - `sensors` 27 of 27: `health-types`.
+        - `probe` 1,127 of 1,127, in sixteen files: `probe-health-report`, `name-resolution`,
+          `config-problems`, `name-resolver-check`, `dns-check`, `forward-budget`,
+          `name-resolver-gate`, `name-resolver`, `name-resolver-resting`, `helper-lanes-model`
+          (its default 1,000 runs), `names-differential`, `lane-rule`, `system-names`,
+          `lookup-helper`, `core-client` and `latch`.
+        - `core` 363 of 363, with no suite skipped: `lookups`, `probe-health`, `metrics`,
+          `build-hygiene`, `probe-endpoint`, `api-reference-render`.
+        - One file at a time: `name-resolution-process` 4 of 4, `name-lookup-outage-scenario`
+          14 of 14.
+      - **Quiet window, not run here.** Stop `ms-server`, then run
+        `./scripts/dev.sh "timeout 600 npx tsc -b"`, then each of these:
+        - `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-lookup-outage-scenario.test.js"`
+        - `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-resolution-process.test.js"`
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

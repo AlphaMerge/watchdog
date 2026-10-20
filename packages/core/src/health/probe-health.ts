@@ -692,17 +692,6 @@ export class ProbeHealthService {
       namePassedStuck: health?.namePassedStuck ?? null,
       nameHelperStuck: health?.nameHelperStuck ?? null,
       nameQuestionsOpen: health?.nameQuestionsOpen ?? null,
-      // `P-432` S6: the name check's, and the rest of the helper's, at protocol 39. Gaps below it,
-      // and in `system` mode. The helper's memory in megabytes, as the probe's own.
-      lookupHelperState: health?.lookupHelperState ?? null,
-      lookupHelperLosses: health?.lookupHelperLosses ?? null,
-      lookupHelperMemory:
-        health?.lookupHelperMemory === undefined ? null : round(health.lookupHelperMemory / MB, 1),
-      nameCheckState: health?.nameCheckState ?? null,
-      nameLookupsHeard: health?.nameLookupsHeard ?? null,
-      nameLookupsToHelper: health?.nameLookupsToHelper ?? null,
-      nameCheckMisses: health?.nameCheckMisses ?? null,
-      nameWalksDeferred: health?.nameWalksDeferred ?? null,
       // `P-438`. The answers the probe's resolver loaded at start from those it kept when it last
       // stopped: a gap for a build without the file and for either end below protocol 37.
       answersLoaded: health?.answersLoaded ?? null,

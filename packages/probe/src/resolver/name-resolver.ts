@@ -53,7 +53,9 @@ import type {
   HelperChange,
   HelperLostError,
   HelperPort,
+  HelperState,
   LateOutcome,
+  LossReason,
   RouteState,
 } from './lookup-helper.js';
 import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './protocol.js';
@@ -193,6 +195,27 @@ const NO_ADDRESS: ReadonlySet<string> = new Set(['ENOTFOUND', 'ENODATA']);
 export const GATE_TICK_MS = 1_000;
 /** How often gate mode logs its summary. */
 export const GATE_SUMMARY_MS = 3_600_000;
+/**
+ * The lookup helper's changes of state, and its losses, the hourly summary lists one by one: the
+ * first of the hour, and a count of the rest. A healthy hour has none, a helper failing over and
+ * over a few dozen, and each loss has its own line besides (`P-467`).
+ */
+export const SUMMARY_LISTED = 20;
+
+/**
+ * What the hourly summary says of the check's state (`P-467`), numbered as `GateHealth`'s
+ * `checkState`: 0 while the helper rests, else the check's own. Probe Health has no channel for
+ * it (OPEN-5), so the words are here, and the start line, the stand-down line and the lines of
+ * a file that moved say the rest.
+ */
+export const CHECK_STATE_SAID: Readonly<Record<0 | CheckState, string>> = {
+  0: 'resting: the lookup helper rests, and names are asked as with system',
+  1: 'on',
+  2: 'off for this system’s name settings or platform, or while they are slow to read: off says why',
+  3: 'not proven: no DNS server has answered it yet',
+  4: 'stood down after misses: the stand-down line names the zones',
+  5: 'walks off at a DNS server',
+};
 /** The domains Probe Health names as not answering (`P-441`). */
 export const NOT_ANSWERING_NAMED = 3;
 
@@ -244,7 +267,11 @@ export interface GateParts {
   >;
 }
 
-/** What gate mode has done since the probe started, for Probe Health and the log. */
+/**
+ * What gate mode has done since the probe started. Probe Health sends the mode, the time with the
+ * check on and the two stuck counts (protocol 38); the rest is the hourly summary's (OPEN-5,
+ * `P-467`), and the tests' and the perf arms'.
+ */
 export interface GateHealth {
   /** 2 while the helper serves its route, 3 while it rests and the probe resolves as `system`. */
   readonly mode: 2 | 3;
@@ -255,8 +282,9 @@ export interface GateHealth {
   /** Helper lookups the child said were stuck: a running total. */
   readonly helperStuck: number;
   /**
-   * `nameCheckState` (§5): 0 resting; 1 on; 2 off for the environment or platform; 3 not proven;
-   * 4 stood down; 5 walks off at a server (never in this build: the pressure detector is cut).
+   * The check's state (§5's numbering, `CHECK_STATE_SAID`): 0 resting; 1 on; 2 off for the
+   * environment or platform; 3 not proven; 4 stood down; 5 walks off at a server (never in this
+   * build: the pressure detector is cut).
    */
   readonly checkState: 0 | CheckState;
   /** Lookups run on the probe's lanes because their walk, or their zone's sample, was heard. */
@@ -492,6 +520,49 @@ function laneSet(pool: Pool, lanes: number): LaneSet {
   };
 }
 
+/** The counts the hourly summary gives for the hour, as their running totals stood at its start. */
+interface HourCounts {
+  readonly lookupsHeard: number;
+  readonly lookupsToHelper: number;
+  readonly misses: number;
+  readonly walksDeferred: number;
+  readonly passedStuck: number;
+  readonly helperStuck: number;
+}
+
+/** A change of the lookup helper's state, as the hourly summary lists it (`P-467`). */
+interface SummaryChange {
+  /** Wall-clock, to set beside the helper's own lines in the journal. */
+  readonly at: string;
+  readonly from: HelperState;
+  readonly to: HelperState;
+  /** The loss that moved it, when one did. */
+  readonly loss?: LossReason;
+}
+
+/** A loss of the lookup helper, as the hourly summary lists it: its reason, and how it ended. */
+interface SummaryLoss {
+  readonly at: string;
+  readonly reason: LossReason;
+  readonly pid: number | undefined;
+  readonly why: string | undefined;
+  /** How the child ended, once its exit says: null until then, and for a child never ended. */
+  signal: NodeJS.Signals | null;
+  exitCode: number | null;
+  /** The helper's own time of the loss, to know it again in `stats().lastLoss` (not logged). */
+  readonly lossAt: number | undefined;
+}
+
+/** What the hourly summary lists of the lookup helper this hour (`P-467`). */
+interface HelperHour {
+  readonly changes: SummaryChange[];
+  changesNotListed: number;
+  readonly lost: SummaryLoss[];
+  lostNotListed: number;
+  /** The last loss listed while its child's end is not yet read, to fill in from the helper. */
+  awaitingEnd: SummaryLoss | undefined;
+}
+
 /** The parts of gate mode the resolver keeps, made whole. */
 interface Gate {
   readonly helper: HelperPort;
@@ -527,6 +598,9 @@ interface Gate {
   /** For the hourly summary: what was routed where, and the highest at risk, since the last. */
   readonly routed: Record<'local' | 'helper' | 'probe' | 'faulted' | 'resting', number>;
   riskPeak: number;
+  /** For the hourly summary: the running totals at the last, and the helper's hour (`P-467`). */
+  hourFrom: HourCounts;
+  helperHour: HelperHour;
   /** What the policy was last told the hosts file says, for the first look. */
   loaded: boolean;
 }
@@ -835,7 +909,20 @@ function boundOf(waitMs: number | undefined): number {
   return waitMs !== undefined && Number.isFinite(waitMs) && waitMs > 0 ? waitMs : DEFAULT_WAIT_MS;
 }
 
-/** The walks deferred, every reason (`nameWalksDeferred`). */
+const NO_COUNTS: HourCounts = {
+  lookupsHeard: 0,
+  lookupsToHelper: 0,
+  misses: 0,
+  walksDeferred: 0,
+  passedStuck: 0,
+  helperStuck: 0,
+};
+
+function newHelperHour(): HelperHour {
+  return { changes: [], changesNotListed: 0, lost: [], lostNotListed: 0, awaitingEnd: undefined };
+}
+
+/** The walks deferred, every reason: a running total. */
 function walksDeferredOf(budget: ForwardBudget): number {
   const { deferred } = budget.stats();
   return deferred.budget + deferred.rate + deferred.stall + deferred.scoutWait;
@@ -996,6 +1083,8 @@ export class NameResolver implements PoolResolver {
             lastSummaryAt: this.#now(),
             routed: { local: 0, helper: 0, probe: 0, faulted: 0, resting: 0 },
             riskPeak: 0,
+            hourFrom: NO_COUNTS,
+            helperHour: newHelperHour(),
             loaded: false,
           };
     // Past the longest hold, an answer's life and its grace: a name a scan still checks has been
@@ -3089,6 +3178,7 @@ export class NameResolver implements PoolResolver {
     try {
       // The time with the check on runs to the change, not to the next read.
       this.#accrueCheckOn(gate, this.#now());
+      this.#noteHelperChange(gate, change);
       for (const ref of change.detached ?? []) this.#detach(gate, ref);
       // Isolation over, by the resolver's word or at the helper's lapse: no suspect is owed.
       if (!change.isolating) this.#dropSuspects(gate);
@@ -3112,6 +3202,63 @@ export class NameResolver implements PoolResolver {
         'the probe’s resolver failed on a lookup helper change',
       );
     }
+  }
+
+  /**
+   * A change of the helper's state, and the loss that moved it, for the hourly summary (`P-467`):
+   * Probe Health has no channel for either (OPEN-5). A loss is listed with what the helper says
+   * of it now; how its child ended is filled in once its exit says (`#fillLossEnd`).
+   */
+  #noteHelperChange(gate: Gate, change: HelperChange): void {
+    const hour = gate.helperHour;
+    const at = new Date().toISOString();
+    if (change.state !== change.previous) {
+      if (hour.changes.length < SUMMARY_LISTED) {
+        hour.changes.push({
+          at,
+          from: change.previous,
+          to: change.state,
+          ...(change.loss === undefined ? {} : { loss: change.loss }),
+        });
+      } else hour.changesNotListed += 1;
+    }
+    if (change.loss === undefined) return;
+    if (hour.lost.length >= SUMMARY_LISTED) {
+      hour.lostNotListed += 1;
+      return;
+    }
+    const last = gate.helper.stats().lastLoss;
+    const said = last?.reason === change.loss ? last : undefined;
+    const loss: SummaryLoss = {
+      at,
+      reason: change.loss,
+      pid: said?.pid,
+      why: said?.why,
+      signal: said?.signal ?? null,
+      exitCode: said?.exitCode ?? null,
+      lossAt: said?.at,
+    };
+    hour.lost.push(loss);
+    hour.awaitingEnd = loss.signal === null && loss.exitCode === null ? loss : undefined;
+  }
+
+  /**
+   * How the last loss listed ended, once the helper's word on it says: a child the probe killed,
+   * or one whose channel closed first, exits after its loss is taken. Only while it is still the
+   * helper's last loss; a later one ends the wait.
+   */
+  #fillLossEnd(gate: Gate): void {
+    const loss = gate.helperHour.awaitingEnd;
+    if (loss === undefined) return;
+    const last = gate.helper.stats().lastLoss;
+    if (last === undefined || last.at !== loss.lossAt || last.pid !== loss.pid) {
+      gate.helperHour.awaitingEnd = undefined;
+      return;
+    }
+    if (last.signal === null && last.exitCode === null) return;
+    loss.signal = last.signal;
+    loss.exitCode = last.exitCode;
+    gate.helperHour.awaitingEnd = undefined;
   }
 
   /** Routes what is queued again, by the helper's route now. */
@@ -3442,6 +3589,7 @@ export class NameResolver implements PoolResolver {
     try {
       const now = this.#now();
       this.#accrueCheckOn(gate, now);
+      this.#fillLossEnd(gate);
       if (gate.helper.routeState() === 'up') this.#askHeldSuspects(gate, now);
       if (now - gate.lastSummaryAt >= GATE_SUMMARY_MS) this.#summary(gate, now);
       this.#pump();
@@ -3451,7 +3599,7 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
-   * The time with the check on and the helper up (`nameCheckOnSeconds`), to now: `nameCheckState`
+   * The time with the check on and the helper up (`nameCheckOnSeconds`), to now: the check's state
    * 1, proven and not stood down. Without the check built, the policy's word alone.
    */
   #accrueCheckOn(gate: Gate, now: number): void {
@@ -3509,28 +3657,61 @@ export class NameResolver implements PoolResolver {
     return undefined;
   }
 
-  /** The hourly summary (§5): what was routed where, the helper's peaks and its losses. */
+  /**
+   * The hourly summary (§5): what was routed where, the helper's peaks and its losses. Since the
+   * user's decision of 2026-10-18 (OPEN-5) it is also where the field test reads what Probe Health
+   * does not carry (`P-467`): the helper's changes of state and its losses this hour, each loss
+   * with its reason and how its child ended, and its resident memory now; the check's state and
+   * why; and the lookups heard, run in the helper, the misses and the walks deferred, this hour
+   * and since the probe started.
+   */
   #summary(gate: Gate, now: number): void {
+    this.#fillLossEnd(gate);
     const helper = gate.helper.stats();
     const budget = gate.budget.stats();
+    const totals = this.#gateCounts(gate);
+    const from = gate.hourFrom;
+    const checkState = this.#checkState(gate);
+    const off = checkState === 2 ? gate.policy.describe().off : undefined;
+    const hour = gate.helperHour;
     this.#logger.info(
       {
         routed: { ...gate.routed },
+        hour: {
+          lookupsHeard: totals.lookupsHeard - from.lookupsHeard,
+          lookupsToHelper: totals.lookupsToHelper - from.lookupsToHelper,
+          misses: totals.misses - from.misses,
+          walksDeferred: totals.walksDeferred - from.walksDeferred,
+          passedStuck: totals.passedStuck - from.passedStuck,
+          helperStuck: totals.helperStuck - from.helperStuck,
+        },
         passedStuck: gate.passedStuck,
         helperStuck: gate.helperStuck,
         lookupsHeard: gate.lookupsHeard,
         lookupsToHelper: gate.lookupsToHelper,
-        walksDeferred: budget.deferred,
-        ...(gate.check === undefined ? {} : { check: gate.check.stats() }),
+        misses: totals.misses,
+        walksDeferred: { ...budget.deferred, total: totals.walksDeferred },
+        check: {
+          ...(gate.check === undefined ? {} : gate.check.stats()),
+          state: checkState,
+          said: CHECK_STATE_SAID[checkState],
+          ...(off === undefined ? {} : { off }),
+        },
         atRiskPeak: gate.riskPeak,
         questionsOpenPeak: budget.peak,
         helper: {
           state: helper.state,
-          losses: helper.lossesByReason,
+          // At the child's last beat; null with no child (lost, resting or stopped).
+          rss: helper.rss ?? null,
           rssPeak: helper.rssPeak,
           lagPeakMs: helper.lagPeakMs,
           poisoned: helper.poisoned,
           msInState: helper.msInState,
+          losses: { ...helper.lossesByReason, total: helper.losses },
+          changes: hour.changes.map((change) => ({ ...change })),
+          ...(hour.changesNotListed === 0 ? {} : { changesNotListed: hour.changesNotListed }),
+          lost: hour.lost.map(({ lossAt: _at, ...loss }) => loss),
+          ...(hour.lostNotListed === 0 ? {} : { lostNotListed: hour.lostNotListed }),
         },
       },
       'the probe’s resolver in gate mode, this hour',
@@ -3538,6 +3719,29 @@ export class NameResolver implements PoolResolver {
     gate.lastSummaryAt = now;
     for (const kind of Object.keys(gate.routed) as (keyof Gate['routed'])[]) gate.routed[kind] = 0;
     gate.riskPeak = 0;
+    gate.hourFrom = totals;
+    gate.helperHour = newHelperHour();
+  }
+
+  /** The running totals the hourly summary counts its hour by. */
+  #gateCounts(gate: Gate): HourCounts {
+    return {
+      lookupsHeard: gate.lookupsHeard,
+      lookupsToHelper: gate.lookupsToHelper,
+      misses: gate.check?.stats().misses ?? 0,
+      walksDeferred: walksDeferredOf(gate.budget),
+      passedStuck: gate.passedStuck,
+      helperStuck: gate.helperStuck,
+    };
+  }
+
+  /**
+   * The check's state (§5's numbering): 0 resting; 1 on; 2 off for the environment or platform;
+   * 3 not proven; 4 stood down; 5 walks off at a server (never in this build).
+   */
+  #checkState(gate: Gate): 0 | CheckState {
+    if (gate.helper.routeState() === 'resting') return 0;
+    return gate.check?.state() ?? (gate.policy.checkOn() ? 1 : 2);
   }
 
   /** What gate mode has done, for Probe Health: undefined in `system` mode. */
@@ -3546,16 +3750,17 @@ export class NameResolver implements PoolResolver {
     if (gate === undefined) return undefined;
     this.#accrueCheckOn(gate, this.#now());
     const resting = gate.helper.routeState() === 'resting';
+    const counts = this.#gateCounts(gate);
     return {
       mode: resting ? 3 : 2,
       checkOnSeconds: Math.floor(gate.checkOnMs / 1_000),
-      passedStuck: gate.passedStuck,
-      helperStuck: gate.helperStuck,
-      checkState: resting ? 0 : (gate.check?.state() ?? (gate.policy.checkOn() ? 1 : 2)),
-      lookupsHeard: gate.lookupsHeard,
-      lookupsToHelper: gate.lookupsToHelper,
-      misses: gate.check?.stats().misses ?? 0,
-      walksDeferred: walksDeferredOf(gate.budget),
+      passedStuck: counts.passedStuck,
+      helperStuck: counts.helperStuck,
+      checkState: this.#checkState(gate),
+      lookupsHeard: counts.lookupsHeard,
+      lookupsToHelper: counts.lookupsToHelper,
+      misses: counts.misses,
+      walksDeferred: counts.walksDeferred,
     };
   }
 

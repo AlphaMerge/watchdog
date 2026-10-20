@@ -4,7 +4,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import type { ProbeHealthReport } from '@ms/shared';
+import { PROTOCOL_VERSION, type ProbeHealthReport } from '@ms/shared';
 import { HELPER_TITLE } from '../src/resolver/lookup-helper-child.js';
 import {
   FakeCore,
@@ -116,7 +116,7 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
     { skip },
     async () => {
       assert.ok(core !== undefined);
-      core.protocolVersion = 39;
+      core.protocolVersion = PROTOCOL_VERSION;
       const from = core.received.length;
       const probe = start('gate');
       const health = await heartbeat(from, (one) => one.nameResolverMode !== undefined);
@@ -136,14 +136,20 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
       assert.equal((said['off'] as { code?: unknown } | undefined)?.code, 'env');
       const later = await heartbeat(from, (one) => (one.uptimeSeconds ?? 0) >= 3);
       assert.equal(later.nameCheckOnSeconds, 0, 'the helper up 3 s, the check off throughout');
-      // Protocol 39's eight: the check off for the system (2), the helper up, nothing walked.
-      assert.equal(later.nameCheckState, 2);
-      assert.equal(later.lookupHelperState, 1);
-      assert.equal(later.lookupHelperLosses, 0);
-      assert.ok((later.lookupHelperMemory ?? 0) > 0, 'the child’s memory from its beat');
-      assert.equal(later.nameLookupsHeard, 0);
-      assert.equal(later.nameCheckMisses, 0);
-      assert.equal(later.nameWalksDeferred, 0);
+      // Six name fields at protocol 38 (OPEN-5, `P-467`): what S6's eight carried is the log's.
+      assert.deepEqual(
+        Object.keys(later)
+          .filter((key) => /^(name|lookupHelper)/u.test(key))
+          .sort(),
+        [
+          'lookupHelperTrouble',
+          'nameCheckOnSeconds',
+          'nameHelperStuck',
+          'namePassedStuck',
+          'nameQuestionsOpen',
+          'nameResolverMode',
+        ],
+      );
       assert.equal(await probe.stop(), 0);
       // The shutdown stopped the names: the resolver, then the helper and the answer file, which
       // says so as it saves. A child never stopped would still die by its own backstop.
@@ -192,11 +198,6 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
         'namePassedStuck',
         'nameHelperStuck',
         'nameQuestionsOpen',
-        'lookupHelperState',
-        'lookupHelperMemory',
-        'nameCheckState',
-        'nameLookupsHeard',
-        'nameLookupsToHelper',
       ]) {
         assert.equal(field in health, false, `${field} in system mode`);
       }
@@ -233,7 +234,7 @@ describe('probe.nameResolver in the probe as a service manager runs it (P-432 S3
         );
         assert.equal(await probe.stop(), 0);
       } finally {
-        core.protocolVersion = 39;
+        core.protocolVersion = PROTOCOL_VERSION;
       }
     },
   );

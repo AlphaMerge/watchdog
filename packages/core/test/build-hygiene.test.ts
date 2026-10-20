@@ -1116,7 +1116,8 @@ describe('the field-test runbook', () => {
    * adds is held here without this list being written again. The runbook says which are counters,
    * which the core stores as rates and the criteria judge as such, which are readings and how many
    * are states; a counter called a reading, or a channel the week never reads, fails here. The
-   * prepared runbook named five of the fourteen, as the design named them before S3 and S6 landed.
+   * prepared runbook named five of the fourteen S6 had built, as the design named them before S3
+   * and S6 landed; the user's decision of 2026-10-18 (OPEN-5) left six (`P-467`).
    */
   it('judges every channel the gate adds, each as the kind it is declared', async () => {
     const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
@@ -1144,7 +1145,8 @@ describe('the field-test runbook', () => {
     const counters = /The counters are ([^;]+);/.exec(section);
     assert.ok(counters, 'step 4 does not say which of the gate’s channels are counters');
     assert.deepEqual(named(counters[1] ?? ''), declared(counter), 'the counters step 4 names');
-    const readings = /;([^;]+) are readings;/.exec(section);
+    // One reading at protocol 38's six, so the runbook says "is a reading" (`P-467`).
+    const readings = /;([^;]+) (?:are readings|is a reading);/.exec(section);
     assert.ok(readings, 'step 4 does not say which of the gate’s channels are readings');
     assert.deepEqual(
       named(readings[1] ?? ''),
@@ -1195,8 +1197,9 @@ describe('the field-test runbook', () => {
 
 /**
  * The 1.0 release notes name the protocol and the last migration an upgrade from rc.2 brings
- * (`H-50`). Both moved while rc.3 was prepared, the protocol three times (`P-438`'s 37, `P-432`
- * S3's 38 and S6's 39), and the prepared notes said 38 until they were brought onto the code. An
+ * (`H-50`). Both moved while rc.3 was prepared, the protocol four times (`P-438`'s 37, `P-432`
+ * S3's 38, S6's 39, and back to 38 when the user's decision of 2026-10-18 took S6's eight fields
+ * out, `P-467`), and the prepared notes said 38 until they were brought onto the code. An
  * operator reads that line to know what a core or probe left on rc.2 negotiates down from.
  */
 describe('the 1.0 release notes', () => {

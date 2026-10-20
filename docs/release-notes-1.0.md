@@ -122,7 +122,7 @@ spells its version `1.0.0~rc.3`, so that `1.0.0` upgrades it.
 upgrade*, *Every probe host* and *After the upgrade*. From anything older, including every build
 that says `0.1.0`, read *From a build older than rc.2* as well. From rc.2, the core's first start
 applies migrations 071 to 084 (there is no 083) while `database.autoMigrate` is on, the default,
-and the protocol between core and probe moves from 28 to 39.
+and the protocol between core and probe moves from 28 to 38.
 
 ### Before you upgrade
 
@@ -329,16 +329,19 @@ From rc.2 or anything older:
     the probe's address, or keep `"system"`.
   - **The lookup helper** is a child process of the probe, `ms-probe: lookups`, inside the
     probe's unit and its `MemoryMax`. It needs no change to the unit. Past 256 MiB resident it
-    is killed and replaced; `lookupHelperMemory` reports its resident memory.
-  - **Probe Health gains fourteen channels for it.** At protocol 38: `nameResolverMode`, sent in
-    both modes, and five sent under `"gate"` only: `lookupHelperTrouble`, the helper's one alarm
+    is killed and replaced; the probe's log gives its resident memory once an hour.
+  - **Probe Health gains six channels for it**, at protocol 38: `nameResolverMode`, sent in both
+    modes, and five sent under `"gate"` only: `lookupHelperTrouble`, the helper's one alarm
     (Warning at 1), `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck` and
-    `nameQuestionsOpen`. At protocol 39, eight more under `"gate"` only: `lookupHelperState`,
-    `lookupHelperLosses`, `lookupHelperMemory`, `nameCheckState`, `nameLookupsHeard`,
-    `nameLookupsToHelper`, `nameCheckMisses` and `nameWalksDeferred`. Under `"system"` the
-    thirteen gap, and a gap makes no state; a core or a probe older than rc.3 shows all fourteen
-    as gaps. A probe set to `"gate"` under a core below 38 warns once a connection that the
-    lookup helper's health does not reach the core.
+    `nameQuestionsOpen`. Under `"system"` the five gap, and a gap makes no state; a core or a
+    probe older than rc.3 shows all six as gaps. A probe set to `"gate"` under a core below 38
+    warns once a connection that the lookup helper's health does not reach the core.
+  - **The rest is in the probe's log** (`P-467`): the helper's changes of state, its losses with
+    their reason and signal, and its resident memory; the name check's state and why; and what
+    was asked where, the check's misses and the walks it deferred. Each is logged as it happens,
+    and once an hour in one line, `the probe’s resolver in gate mode, this hour`
+    ([the gate](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)
+    lists them).
 - **A probe left on rc.2 keeps working, and its newer channels gap.** Core and probe negotiate down
   to the older version
   ([ADR-001 Decision 13](ADR-001-architecture.md#decision-13--protocol-versions-negotiate-down-they-do-not-gate-admission)).
@@ -349,7 +352,7 @@ From rc.2 or anything older:
   its Probe Health reads Warning**: `protocol` reads `1`, *older than the core*, and the message
   names both protocols and what the probe cannot do until it is upgraded. A Warning state trigger
   on that sensor, as step 3 of [the field-test runbook](runbook-field-test.md) puts on every
-  Probe Health sensor, fires for it, and the Warning clears when the probe reconnects at 39.
+  Probe Health sensor, fires for it, and the Warning clears when the probe reconnects at 38.
   rc.1 and rc.2 both spoke 28, so this upgrade is the first in the 1.0 line to show it. Bring
   the probes level.
 

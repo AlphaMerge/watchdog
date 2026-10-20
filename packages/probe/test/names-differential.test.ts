@@ -1878,7 +1878,7 @@ describe('P-460: the budget boxes', () => {
       'budget box dnsmasq, system: dnsmasq said its forward table was full 3 times',
     ]);
     assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { gate: { checkState: 3 } })), [
-      'budget box dnsmasq, gate: the check was not on and proven (nameCheckState 3)',
+      'budget box dnsmasq, gate: the check was not on and proven (its state 3)',
     ]);
     assert.deepEqual(budgetProblems(budgetRun('dnsmasq', { 'gate-kill': { helperLosses: 0 } })), [
       'budget box dnsmasq, gate-kill: the helper was not lost',

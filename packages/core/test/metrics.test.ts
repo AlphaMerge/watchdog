@@ -536,40 +536,50 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_name_resolver_mode${label}`), false);
     });
 
-    it('exports gate mode’s name check and its helper in full, the memory in bytes, and nothing for one that sent none (`P-432` S6)', async () => {
+    /**
+     * Six name series, as Probe Health has six name channels at protocol 38 (the user's decision
+     * of 2026-10-18, OPEN-5; `P-467`). A probe that sent S6's eight anyway, as a build of that
+     * branch would, gets no series for them: the exporter reads only the fields it lists.
+     */
+    it('exports the six name series of protocol 38 and none of S6’s eight, whatever a probe sends (`P-467`)', async () => {
       const label = `{probe="${String(probeId)}"}`;
-      const check = (): ProbeLink => ({
+      const eight = {
+        lookupHelperState: 4,
+        lookupHelperLosses: 3,
+        lookupHelperMemory: 50 * 1024 * 1024,
+        nameCheckState: 1,
+        nameLookupsHeard: 31_200,
+        nameLookupsToHelper: 3_800,
+        nameCheckMisses: 2,
+        nameWalksDeferred: 14,
+      };
+      const sent = (): ProbeLink => ({
         ...connected,
         health: {
           ...connected.health,
-          lookupHelperState: 4,
-          lookupHelperLosses: 3,
-          lookupHelperMemory: 50 * 1024 * 1024,
-          nameCheckState: 1,
-          nameLookupsHeard: 31_200,
-          nameLookupsToHelper: 3_800,
-          nameCheckMisses: 2,
-          nameWalksDeferred: 14,
+          nameResolverMode: 2,
+          lookupHelperTrouble: 0,
+          nameCheckOnSeconds: 3_600,
+          namePassedStuck: 0,
+          nameHelperStuck: 0,
+          nameQuestionsOpen: 2,
+          ...(eight as Record<string, number>),
         },
       });
-      const metrics = parse((await varying(check).scrape()).body);
-      assert.equal(metrics.get(`ms_probe_lookup_helper_state${label}`), 4);
-      assert.equal(metrics.get(`ms_probe_lookup_helper_losses_total${label}`), 3);
-      assert.equal(metrics.get(`ms_probe_lookup_helper_memory_bytes${label}`), 50 * 1024 * 1024);
-      assert.equal(metrics.get(`ms_probe_name_check_state${label}`), 1);
-      assert.equal(metrics.get(`ms_probe_name_lookups_heard_total${label}`), 31_200);
-      assert.equal(metrics.get(`ms_probe_name_lookups_helper_total${label}`), 3_800);
-      assert.equal(metrics.get(`ms_probe_name_check_misses_total${label}`), 2);
-      assert.equal(metrics.get(`ms_probe_name_walks_deferred_total${label}`), 14);
-      const without = parse((await varying(() => connected).scrape()).body);
-      for (const name of [
-        'ms_probe_lookup_helper_state',
-        'ms_probe_lookup_helper_memory_bytes',
-        'ms_probe_name_check_state',
-        'ms_probe_name_lookups_heard_total',
-      ]) {
-        assert.equal(without.has(`${name}${label}`), false, name);
-      }
+      const metrics = parse((await varying(sent).scrape()).body);
+      const names = [...metrics.keys()]
+        .filter((key) => key.endsWith(label))
+        .map((key) => key.slice(0, -label.length))
+        .filter((name) => /^ms_probe_(name|lookup_helper|dns_questions)_/u.test(name))
+        .sort();
+      assert.deepEqual(names, [
+        'ms_probe_dns_questions_open',
+        'ms_probe_lookup_helper_stuck_total',
+        'ms_probe_lookup_helper_trouble',
+        'ms_probe_name_check_on_seconds_total',
+        'ms_probe_name_lookups_passed_stuck_total',
+        'ms_probe_name_resolver_mode',
+      ]);
     });
 
     it('exports the readings a probe could not send, and nothing for a probe that sent none', async () => {

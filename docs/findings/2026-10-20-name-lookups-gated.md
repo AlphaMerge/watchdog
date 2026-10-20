@@ -86,7 +86,7 @@ Health's `lookupsInFlight` and `lookupsGivenUp`; the forwarder's peak, its drops
 by source (walk, probe lanes, helper); the budget's own `questionsOpen` peak; the walk's questions,
 its busiest second and any past the bucket; routes by kind and pool, with each unvouched reason;
 sampled; keys routed both heard and silent; `getaddrinfo` on the probe's lanes and in the helper by
-group; the gate's Probe Health counters; the helper's state, losses, poisoned names, children,
+group; the gate's counters (`GateHealth`: Probe Health's, and those its hourly summary logs); the helper's state, losses, poisoned names, children,
 `stuck` messages and resident set; `lookupHelperTrouble`; the process's resident set at the
 wheel's start, its most at a 1 s sample and at the drain, and its file descriptors before the arm
 and once it is torn down (`/proc/self/fd`); the resolver's most running and queued at a 1 s sample;
@@ -146,7 +146,7 @@ Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.m
   the case D25's marks must survive.
 - **S6's cuts, as each arm adapts:** overflow (1) is cut, so `slow` reads its check run p95 with
   no overflow lanes; the pressure detector (3) is cut, so nothing is asserted of walks off at a
-  server (`nameCheckState` never reads 5); per-name walks of a key's queued lookups when it is
+  server (the check's state never reads 5); per-name walks of a key's queued lookups when it is
   heard again (4) are cut, so no arm asserts recovery speed; Check now's walk (5) is cut, so no arm
   asks Check now and every walk question counts against the bucket.
 - **P5 and `forwarder` are built, though S7's list names only the arms round 3 changed.** The
@@ -362,7 +362,7 @@ arm reaches what it asserts, not that it holds at full size (the numbers are the
 - **Torn down clean.** 19 file descriptors before and after every arm, and no lookup left on the
   probe's lanes; the process's resident set rose at most 30 MiB above its start in any arm.
 - **The check off is the gate with every name unvouched.** `partial` with `MS_DNS_CHECK=off`:
-  `nameCheckState` 2, no walk, every lookup routed `unvouched (off)` to the helper (100), the
+  the check's state 2, no walk, every lookup routed `unvouched (off)` to the helper (100), the
   answering and cached names all answered (450 and 30) and the silent ones given up (20).
 - **Read, not asserted:** after four kills in two minutes `lookupHelperTrouble` reads 1 in P5 and
   P5b, as D27's three failures in ten minutes say it should, and P6 logs the poisoned name once.

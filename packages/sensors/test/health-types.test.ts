@@ -207,45 +207,20 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
-  it('carries the name check’s and the lookup helper’s own, every state Up and no limit (`P-432` S6)', () => {
-    const channels = probeHealth.channels({});
-    const find = (key: string) => channels.find((one) => one.key === key);
-    assert.deepEqual(find('lookupHelperState'), {
-      key: 'lookupHelperState',
-      name: 'Lookup helper state',
-      lookup: 'ms.probe.lookup-helper-state',
-    });
-    assert.deepEqual(find('nameCheckState'), {
-      key: 'nameCheckState',
-      name: 'Name check',
-      lookup: 'ms.probe.name-check',
-    });
-    for (const [key, unit, counter] of [
-      ['lookupHelperLosses', 'losses', true],
-      ['lookupHelperMemory', 'MB', false],
-      ['nameLookupsHeard', 'lookups', true],
-      ['nameLookupsToHelper', 'lookups', true],
-      ['nameCheckMisses', 'misses', true],
-      ['nameWalksDeferred', 'walks', true],
-    ] as const) {
-      const channel = find(key);
-      assert.ok(channel !== undefined, key);
-      assert.equal(channel.unit, unit, key);
-      assert.equal(channel.limits, undefined, key);
-      assert.equal(channel.lookup, undefined, key);
-      assert.deepEqual(channel.counter, counter ? { bits: 64 } : undefined, key);
-    }
-    const keys = channels.map((one) => one.key);
-    const at = keys.indexOf('nameQuestionsOpen');
-    assert.deepEqual(keys.slice(at + 1, at + 9), [
-      'lookupHelperState',
-      'lookupHelperLosses',
-      'lookupHelperMemory',
-      'nameCheckState',
-      'nameLookupsHeard',
-      'nameLookupsToHelper',
-      'nameCheckMisses',
-      'nameWalksDeferred',
+  /**
+   * Six name channels at protocol 38, not the design's fourteen (the user's decision of
+   * 2026-10-18, OPEN-5; `P-467`): the helper's state, losses and memory and the check's state and
+   * counts are in the probe's log and its hourly summary, and have no channel.
+   */
+  it('has the six name channels of protocol 38 and no other (`P-432`, `P-467`)', () => {
+    const keys = probeHealth.channels({}).map((one) => one.key);
+    assert.deepEqual(keys.filter((key) => /^(name|lookupHelper)/u.test(key)).sort(), [
+      'lookupHelperTrouble',
+      'nameCheckOnSeconds',
+      'nameHelperStuck',
+      'namePassedStuck',
+      'nameQuestionsOpen',
+      'nameResolverMode',
     ]);
   });
 

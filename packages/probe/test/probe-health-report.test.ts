@@ -104,21 +104,28 @@ const DRAIN: DrainStats = {
   stalledForMs: 0,
 };
 
-/** Gate mode's own (`NameResolutionHealth.gate`), distinct values, the check's eight among them. */
+/** Gate mode's own (`NameResolutionHealth.gate`): the latch and three counts, protocol 38's. */
 const GATE = {
   trouble: 0,
   checkOnSeconds: 0,
   passedStuck: 0,
   helperStuck: 0,
-  helperState: 5,
-  helperLosses: 6,
-  helperMemory: 50_000_000,
-  checkState: 0,
-  lookupsHeard: 700,
-  lookupsToHelper: 80,
-  misses: 1,
-  walksDeferred: 23,
 } as const;
+
+/**
+ * The eight S6 built and the user's decision of 2026-10-18 left out (OPEN-5, `P-467`): never in a
+ * report, in either mode. What they would carry is the probe log's, and its hourly summary's.
+ */
+const NOT_SENT = [
+  'lookupHelperState',
+  'lookupHelperLosses',
+  'lookupHelperMemory',
+  'nameCheckState',
+  'nameLookupsHeard',
+  'nameLookupsToHelper',
+  'nameCheckMisses',
+  'nameWalksDeferred',
+] as const;
 
 function reporter(options: {
   children?: boolean;
@@ -254,22 +261,14 @@ describe('the probe’s own health report', () => {
     }).report();
     assert.equal(report.nameResolverMode, 1);
     assert.deepEqual(report.lookupsNotAnswering, ['zone-b.test', '']);
-    // Every gate field but the mode, S6's eight included: the documents say the thirteen gap
-    // under `system` (`H-50`).
+    // Every gate field but the mode: the documents say the five gap under `system` (`H-50`).
     for (const field of [
       'lookupHelperTrouble',
       'nameCheckOnSeconds',
       'namePassedStuck',
       'nameHelperStuck',
       'nameQuestionsOpen',
-      'lookupHelperState',
-      'lookupHelperLosses',
-      'lookupHelperMemory',
-      'nameCheckState',
-      'nameLookupsHeard',
-      'nameLookupsToHelper',
-      'nameCheckMisses',
-      'nameWalksDeferred',
+      ...NOT_SENT,
     ]) {
       assert.equal(field in report, false, `${field} sent in system mode`);
     }
@@ -299,24 +298,21 @@ describe('the probe’s own health report', () => {
     assert.equal(report.namePassedStuck, 4);
     assert.equal(report.nameHelperStuck, 9);
     assert.equal(report.nameQuestionsOpen, 12);
-    // The check's eight (protocol 39), each from its own source.
-    assert.equal(report.lookupHelperState, 5);
-    assert.equal(report.lookupHelperLosses, 6);
-    assert.equal(report.lookupHelperMemory, 50_000_000);
-    assert.equal(report.nameCheckState, 0);
-    assert.equal(report.nameLookupsHeard, 700);
-    assert.equal(report.nameLookupsToHelper, 80);
-    assert.equal(report.nameCheckMisses, 1);
-    assert.equal(report.nameWalksDeferred, 23);
-    // Before the child's first beat its memory gaps, never a zero.
-    const early = reporter({
-      names: () => {
-        const { helperMemory: _memory, ...gate } = GATE;
-        return { mode: 2, notAnswering: [], gate };
-      },
-    }).report({ seq: 1, peerVersion: PROTOCOL_VERSION });
-    assert.equal('lookupHelperMemory' in early, false);
-    assert.equal(early.lookupHelperState, 5);
+    // Six name fields, and none of the eight S6 built (OPEN-5, `P-467`).
+    assert.deepEqual(
+      Object.keys(report)
+        .filter((key) => /^(name|lookupHelper)/u.test(key))
+        .sort(),
+      [
+        'lookupHelperTrouble',
+        'nameCheckOnSeconds',
+        'nameHelperStuck',
+        'namePassedStuck',
+        'nameQuestionsOpen',
+        'nameResolverMode',
+      ],
+    );
+    for (const field of NOT_SENT) assert.equal(field in report, false, field);
   });
 
   it('reports the questions open at their most since the last heartbeat the core acknowledged (P-432)', () => {

@@ -188,10 +188,17 @@ first rule the host failed (`code`, and `why` in words), and every name is asked
 helper, the hosts file's included, so step 4's share of lookups in the helper counts them too:
 still the gate, and the write-up says which rule, since nothing the week records then tests the
 check. No such line means the probe runs `"system"`, which logs nothing of the mode, or has not
-restarted. Probe Health's `nameResolverMode` says the same from the core (step 4), and
-`nameCheckState` reads `1` once a DNS server has answered the check (`3` until then). Run this
-block once against a packaged probe before the week, as the dress rehearsal did for the rest of
-step 1.
+restarted. Probe Health's `nameResolverMode` says the same from the core (step 4). With the
+check on, the probe logs *the DNS check is proven: a DNS server answered it* once a server has
+answered it, within a minute of the start, and every hour's summary then reads `"state":1` in its
+`check` (step 4):
+
+```bash
+sudo journalctl -u ms-probe -b --no-pager -o cat | grep -F 'the DNS check is proven'
+```
+
+Run this block once against a packaged probe before the week, as the dress rehearsal did for the
+rest of step 1.
 
 ## 2. Restart everything, once, before you start counting
 
@@ -431,42 +438,68 @@ The numbers that decide the criterion:
   the workers it no longer reaches going quiet (`P-256`). Still high an `idleMs` after the checks
   stopped is a finding.
 - **The gate's channels, on every probe** (`P-432`), written down here before the week so that
-  nobody judges them after it: six at protocol 38 and eight at 39; on a probe running
-  `"system"` the thirteen beside `nameResolverMode` gap, and `nameResolverMode` reads `1`. Only
-  the trouble latch moves Probe Health's state (its lookup reads `1` as Warning, so step 3's
-  Warning trigger on that probe's sensor delivers it); read the others. **The core stores a
-  counter as a rate**, the difference between two readings over the time between them, per
-  second, so `/values` and the history give no running total to subtract: each criterion
-  below is on the hourly history since the start reading (the `curl` loop above,
-  `resolutionSeconds=3600`), in the form the core stores, and an hour with no value is a gap the
-  write-up explains. The counters are `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck`,
-  `lookupHelperLosses`, `nameLookupsHeard`, `nameLookupsToHelper`, `nameCheckMisses` and
-  `nameWalksDeferred`; `nameQuestionsOpen` and `lookupHelperMemory` are readings; the other four
-  are states, read as their numbers.
+  nobody judges them after it: six, at protocol 38; on a probe running `"system"` the five beside
+  `nameResolverMode` gap, and `nameResolverMode` reads `1`. Only the trouble latch moves Probe
+  Health's state (its lookup reads `1` as Warning, so step 3's Warning trigger on that probe's
+  sensor delivers it); read the others. **The core stores a counter as a rate**, the difference
+  between two readings over the time between them, per second, so `/values` and the history give
+  no running total to subtract: each criterion on a channel below is on the hourly history since
+  the start reading (the `curl` loop above, `resolutionSeconds=3600`), in the form the core
+  stores, and an hour with no value is a gap the write-up explains. The counters are
+  `nameCheckOnSeconds`, `namePassedStuck` and `nameHelperStuck`; `nameQuestionsOpen` is a
+  reading; the other two are states, read as their numbers.
+
+  **The rest is in the probe's log, not on Probe Health** (the user's decision of 2026-10-18,
+  `P-467`): the helper's changes of state, its losses and its resident memory, the check's state
+  and why, and the lookups heard, asked in the helper, missed and deferred. The probe logs each
+  as it happens, and once an hour one summary line, `the probe’s resolver in gate mode, this
+  hour`, whose fields the
+  [administration guide](administration.md#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver)
+  lists. Read both on each probe's host, from the start reading's time written as `journalctl`
+  takes it (`2026-10-04 13:44:34 UTC`), and keep the files with the write-up:
+
+  ```bash
+  SINCE='<start-reading-time, as 2026-10-04 13:44:34 UTC>'
+  # One line an hour: the criteria below read its hour, check and helper fields.
+  sudo journalctl -u ms-probe --since "$SINCE" --no-pager -o cat \
+    | grep -F 'in gate mode, this hour' > gate-hours.jsonl
+  wc -l gate-hours.jsonl                     # one an hour since the probe started, no gap
+  # Every warning and error of the helper, the check and the name settings.
+  sudo journalctl -u ms-probe --since "$SINCE" --no-pager -o cat \
+    | grep -E '"component":"(lookup-helper|dns-check|system-names|name-resolver)"' \
+    | grep -E '"level":"(warn|error)"' > gate-events.jsonl
+  ```
+
+  Each line is JSON. Read a field with `grep -o`, for example every hour's helper memory:
+  `grep -o '"rss":[0-9a-z]*' gate-hours.jsonl`.
   - `lookupHelperTrouble` is `0` throughout: every hour's `max` is `0`. Each Warning, and any
     time the probe's log says the lookup helper ran out of memory, is a finding, explained by the
     probe log's `lookup helper` lines.
-  - **No loss and no rest.** `lookupHelperLosses` (helpers lost a second) is `0` throughout:
-    every hour's `max` is `0`, or each hour above it matches a loss the probe's log explains,
-    with its reason. Each loss is one `the lookup helper was lost` line, with its `reason` and
-    its `signal` or `exitCode`. Only a crash signal (SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE,
-    SIGTRAP or SIGSYS) is held against a name (`P-453`); when it is, the probe also logs
-    `asking getaddrinfo for <name> made the lookup helper fail` once, and that name, with the
-    crash line, is a finding to bring back. A `SIGKILL` with `reason` `exit` came from outside
-    the probe (the kernel's OOM killer or a cgroup kill, which `journalctl -k` names, or a
-    person), and `reason` `memory` is the helper's own 256 MiB bound, which `lookupHelperMemory`
-    shows climbing to it: neither is held against a name, and each is still a finding with its
-    reason. `lookupHelperState` reads `1` (up) in every hour's `min` and `max` but the
-    hours of those losses; a `5` in it, or a `3` in `nameResolverMode`, is a rest, and a
+  - **No loss and no rest.** Every hour's summary lists no loss, `"lost":[]` in its `helper`,
+    and its `losses` `total` is the same as the first hour's, or each loss it lists matches a
+    loss the probe's log explains, with its reason. Each loss is one `the lookup helper was lost`
+    line, with its `reason` and its `signal` or `exitCode`, which the summary lists with it. Only
+    a crash signal (SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP or SIGSYS) is held against
+    a name (`P-453`); when it is, the probe also logs `asking getaddrinfo for <name> made the
+    lookup helper fail` once, and that name, with the crash line, is a finding to bring back. A
+    `SIGKILL` with `reason` `exit` came from outside the probe (the kernel's OOM killer or a
+    cgroup kill, which `journalctl -k` names, or a person), and `reason` `memory` is the
+    helper's own 256 MiB bound, which the summaries' `rss` shows climbing to: neither is held
+    against a name, and each is still a finding with its reason. The summaries' `changes` list
+    nothing but those losses' moves to `backoff` and back to `up`; a `resting` in them, a
+    `the lookup helper is resting` line, or a `3` in `nameResolverMode`, is a rest, and a
     finding.
   - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
     is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and is explained
     from the log line naming its host, or it is a finding.
-  - `nameCheckMisses` (misses a second) is `0` throughout, or each hour above it is explained
-    from the probe log's line naming the name and zone the check skipped. `nameCheckState` is
-    `1` (on) in every hour's `min` and `max` after the first; `4` is a stand-down after misses,
-    a finding with the zones the log names, and `2` the check off for the host's settings, from
-    the start line or the line that moved it.
+  - **No misses, and the check on.** Every hour's summary reads `"misses":0` in its `hour`, or
+    each hour above it is explained from the probe log's line naming the name and zone the check
+    skipped (`the DNS check missed a name`). Its `check` reads `"state":1` (on) in every hour
+    after the first. A `4` is a stand-down after misses, and so is any `the DNS check missed
+    names in three zones` line, at `error`, though the hour's summary says `1` again: a finding
+    with the zones it names. A `2` is the check off for the host's settings, with the rule that
+    turned it off in the summary's `off` (`code` and `why`), from the start line or the line
+    that moved it.
   - `nameCheckOnSeconds` (a counter of seconds, so seconds a second: `1` while the check is on
     and the helper up) averages at least `0.95` over the week: the mean of every hour's `avg`
     since the start reading. Less, and the write-up says the check was not tested for that share
@@ -477,18 +510,19 @@ The numbers that decide the criterion:
     `gai.conf`, `/etc/ld.so.preload`, the hostname's domain or an NSS module; on Ubuntu, most
     likely `systemd-resolved` rewriting its stub after a DHCP lease or netplan changed the search
     domains), and every name goes to the helper from then on. The line names the file and when,
-    `nameCheckState` reads `2` and `nameCheckOnSeconds` falls short from that hour.
+    the summaries' `check` reads `"state":2` and `nameCheckOnSeconds` falls short from that hour.
   - `nameHelperStuck` (lookups a second) is recorded, not judged: the hours whose `max` is above
     `0`, each a lookup that `"system"` would have held one of the probe's own lanes for. So are
-    `nameLookupsHeard` and `nameLookupsToHelper`, as each hour's share of the two, and
-    `nameWalksDeferred`, whose hours above `0` the probe's log says the reason for.
+    each hour's summary's `lookupsHeard` and `lookupsToHelper` in its `hour`, as the hour's share
+    of the two, and its `walksDeferred`, whose hours above `0` the probe's log says the reason
+    for (`the DNS check is deferring walks to the lookup helper`, with its `why`).
   - `nameQuestionsOpen` (the highest since the last heartbeat the core acknowledged) is recorded
     as the highest hourly `max` at each reading, beside the release notes' bound (about 24 in an
     outage, 40 at most).
-  - **The helper's memory**, `lookupHelperMemory`, in MB at the child's last beat. Flat is the
-    pass, judged as `memory` is, from the hourly averages, with the first hour after a restart
-    or a loss left out. A gap in it is a moment with no child, which `lookupHelperLosses` must
-    explain.
+  - **The helper's memory**, each hour's summary's `rss` in its `helper`, in bytes at the
+    child's last beat. Flat is the pass, judged as `memory` is, from the hourly values, with the
+    first hour after a restart or a loss left out. A `null` is an hour that ended with no child,
+    which that hour's `lost` must explain.
 - **`lookupsGivenUp` and `lookupsGivenUpRecently`, on every probe** (`P-426`, `P-441`).
   `lookupsGivenUp` is a counter, so lookups a second: at each reading, the hours since the start
   reading whose `max` is above `0`, from the same hourly history, each explained from the
@@ -530,7 +564,13 @@ and runs on the same installation once with `"gate"` and once with `"system"`:
 
    Probe Health's `answersLoaded` then reads `0`; anything else, and the restart kept something.
 3. Wait two scan intervals, then record every sensor state change since the zones went silent,
-   from `GET /api/v1/state-log`, and the gate's Probe Health channels above.
+   from `GET /api/v1/state-log`, the gate's Probe Health channels above, and the probe's log
+   since the time you noted, with the next hourly summary once it is logged:
+
+   ```bash
+   sudo journalctl -u ms-probe --since '<the time noted at 1, as 2026-10-04 13:44:34 UTC>' \
+     --no-pager -o cat | grep -E '"component":"(lookup-helper|dns-check|name-resolver)"'
+   ```
 4. Restore both zones, set the other mode in that probe's `probe.json`, and repeat from 1: step
    2's restart applies it.
 

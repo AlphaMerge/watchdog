@@ -62,7 +62,7 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * watched-file change, or a restart, clears it all.
  *
  * **Cut, by the design's cut order** (decided 2026-10-19, `docs/TASKS.md`): overflow (1), the
- * pressure detector (3; `nameCheckState` never reads 5), per-name walks of a key's queued helper
+ * pressure detector (3; the check's state never reads 5), per-name walks of a key's queued helper
  * lookups when it is heard again (4), and Check now's walk path (5: Check now goes to the helper on
  * an urgent token, as with the check off).
  */
@@ -268,7 +268,7 @@ export type CheckRoute =
     }
   | { readonly route: 'unvouched'; readonly key: string; readonly why: UnvouchedWhy };
 
-/** The check's state for Probe Health's `nameCheckState` (§5), less the helper's rest (0). */
+/** The check's state (§5's numbering), less the helper's rest (0): the hourly summary says it. */
 export type CheckState = 1 | 2 | 3 | 4 | 5;
 
 export interface DnsCheckStats {
@@ -472,7 +472,7 @@ export class DnsCheck {
     this.#standDownUntil = undefined;
   }
 
-  /** Probe Health's `nameCheckState`, less resting: on, off, unproven, stood down. */
+  /** The check's state, less resting: on, off, unproven, stood down. */
   state(): CheckState {
     if (!this.#policy.checkOn()) return 2;
     if (this.#standingDown(this.#now())) return 4;
@@ -654,7 +654,7 @@ export class DnsCheck {
         deferred: total,
       },
       `the DNS check is deferring walks to the lookup helper: ${DEFER_WORDS[why]}; ` +
-        'said once an episode, and counted in nameWalksDeferred',
+        'said once an episode, and counted in the hourly summary',
     );
   }
 

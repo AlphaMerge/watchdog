@@ -10,9 +10,11 @@ import { ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
 import {
   ANSWER_MS,
+  CHECK_STATE_SAID,
   GATE_SUMMARY_MS,
   NameResolver,
   STALE_MS,
+  SUMMARY_LISTED,
   type Family,
 } from '../src/resolver/name-resolver.js';
 import { ScriptedAsker, WalkPolicy } from './support/fake-dns.js';
@@ -144,6 +146,25 @@ const wait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+
+const SUMMARY = 'the probe’s resolver in gate mode, this hour';
+
+/**
+ * The next hour's summary: the clock moved on an hour, and the line the gate's tick then logs,
+ * the one after the `seen` already logged.
+ */
+async function summaryAfter(
+  lines: readonly Line[],
+  clock: { now: number },
+  seen: number,
+): Promise<Line> {
+  clock.now += GATE_SUMMARY_MS;
+  const summaries = (): Line[] => lines.filter((line) => line['msg'] === SUMMARY);
+  await pollWithin(1_000, `summary ${String(seen + 1)}`, () => summaries().length > seen, 5);
+  const line = summaries()[seen];
+  assert.ok(line !== undefined);
+  return line;
+}
 
 describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', () => {
   it('runs a heard name on the probe’s lanes and a silent one in the helper, and counts each', async () => {
@@ -386,8 +407,9 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
     resolver.stop();
   });
 
-  it('says the check’s state and counts for Probe Health: walks deferred past the pool, and 0 while the helper rests', async () => {
-    const { resolver, helper, asker, ask } = await make();
+  it('says the check’s state and counts in the hour’s summary: walks deferred past the pool, and 0 while the helper rests (P-467)', async () => {
+    const { logger, lines } = captured();
+    const { resolver, helper, asker, clock, ask } = await make({ logger, tickMs: 5 });
     asker.rule = () => 'silent';
     // Six zones none of which has been heard: the discovery pool holds 4 open, and the rest wait
     // out their routing wait for room, then go to the helper unwalked.
@@ -403,9 +425,20 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
     assert.ok(said.lookupsToHelper >= 4, 'in the helper');
     assert.ok(helper.asks.length >= 4);
     assert.equal(said.checkState, 1);
+    // Probe Health has no channel for these (OPEN-5): the hour's summary says them.
+    const first = await summaryAfter(lines, clock, 0);
+    assert.equal((first['hour'] as Record<string, unknown>)['walksDeferred'], 2);
+    assert.equal((first['walksDeferred'] as Record<string, unknown>)['total'], 2);
+    const check = first['check'] as Record<string, unknown>;
+    assert.equal(check['state'], 1);
+    assert.equal(check['said'], 'on');
+    assert.equal('off' in check, false, 'no reason while it is on');
     helper.move('resting');
     assert.equal(resolver.gateHealth()?.checkState, 0, 'resting: the check routes nothing');
     assert.equal(resolver.gateHealth()?.mode, 3);
+    const resting = (await summaryAfter(lines, clock, 1))['check'] as Record<string, unknown>;
+    assert.equal(resting['state'], 0);
+    assert.equal(resting['said'], CHECK_STATE_SAID[0]);
     resolver.stop();
   });
 
@@ -941,4 +974,136 @@ describe('D27 when "Check now" starts a lookup in its own ask (P-432 gate, fix r
       await joined(row);
     });
   }
+});
+
+/**
+ * The hour's summary (`P-467`), where the field test reads what Probe Health no longer carries
+ * since the user's decision of 2026-10-18 (OPEN-5): six name fields at protocol 38, not fourteen.
+ */
+describe('gate mode’s hourly summary (P-432, P-467)', () => {
+  /**
+   * What Probe Health carried before the user's decision of 2026-10-18 (OPEN-5) and does not now,
+   * the hour's summary says (`P-467`): the helper's changes of state and its losses, each loss with
+   * its reason and how its child ended, read once its exit says; its resident memory now; the
+   * check's state, and why when it is off; and the lookups heard, in the helper, the misses and
+   * the walks deferred, this hour and since the start. Each hour starts its own lists and counts.
+   */
+  it('says in the hour’s summary what Probe Health does not carry: the helper’s changes and losses, its memory, the check’s state, and the hour’s counts (P-467)', async () => {
+    const { logger, lines } = captured();
+    const { resolver, helper, policy, callsFor, clock, ask } = await make({ logger, tickMs: 5 });
+    helper.rss = 52_428_800;
+    const heard = ask('dev-21.zone-a.test');
+    const quiet = ask('dev-21.zone-b.test');
+    // Answered at once on the probe's lanes, so that it never runs past the bound for stuck.
+    await pollWithin(1_000, 'heard', () => callsFor('dev-21.zone-a.test').length === 1, 1);
+    callsFor('dev-21.zone-a.test')[0]?.answer();
+    await pollWithin(1_000, 'in the helper', () => helper.asks.length === 1, 2);
+    helper.last('dev-21.zone-b.test').answer(A);
+    assert.deepEqual(await heard, A);
+    assert.deepEqual(await quiet, A);
+    await pollWithin(1_000, 'the miss', () => resolver.gateHealth()?.misses === 1, 5);
+    // A crash, its signal read with the loss; then a hang, whose child exits after it.
+    helper.lose('exit', 'rejoining', { signal: 'SIGSEGV' });
+    await wait(1);
+    helper.move('up');
+    helper.lose('hung', 'rejoining');
+    await wait(1);
+    const lastLoss = helper.lastLoss;
+    assert.ok(lastLoss !== undefined);
+    lastLoss.signal = 'SIGKILL';
+
+    const first = await summaryAfter(lines, clock, 0);
+    assert.equal(first['level'], 30, 'info');
+    assert.deepEqual(first['hour'], {
+      lookupsHeard: 1,
+      lookupsToHelper: 1,
+      misses: 1,
+      walksDeferred: 0,
+      passedStuck: 0,
+      helperStuck: 0,
+    });
+    assert.equal(first['lookupsHeard'], 1);
+    assert.equal(first['lookupsToHelper'], 1);
+    assert.equal(first['misses'], 1);
+    const check = first['check'] as Record<string, unknown>;
+    assert.equal(check['state'], 1);
+    assert.equal(check['misses'], 1);
+    const said = first['helper'] as Record<string, unknown>;
+    assert.equal(said['state'], 'backoff');
+    assert.equal(said['rss'], 52_428_800, 'its resident memory now, in bytes');
+    assert.deepEqual(said['losses'], { start: 0, skew: 0, exit: 1, hung: 1, memory: 0, total: 2 });
+    const changes = said['changes'] as Record<string, unknown>[];
+    assert.deepEqual(
+      changes.map(({ at: _at, ...change }) => change),
+      [
+        { from: 'up', to: 'backoff', loss: 'exit' },
+        { from: 'backoff', to: 'up' },
+        { from: 'up', to: 'backoff', loss: 'hung' },
+      ],
+    );
+    for (const change of changes) assert.ok(!Number.isNaN(Date.parse(String(change['at']))));
+    const lost = said['lost'] as Record<string, unknown>[];
+    assert.deepEqual(
+      lost.map(({ at: _at, ...loss }) => loss),
+      [
+        {
+          reason: 'exit',
+          pid: 4242,
+          why: 'the test lost it (exit)',
+          signal: 'SIGSEGV',
+          exitCode: null,
+        },
+        {
+          reason: 'hung',
+          pid: 4242,
+          why: 'the test lost it (hung)',
+          signal: 'SIGKILL',
+          exitCode: null,
+        },
+      ],
+      'each loss with its reason, and the hang’s signal read after it',
+    );
+    assert.equal('changesNotListed' in said, false);
+
+    // The next hour starts its own: nothing happened in it. With no child, its memory is null.
+    helper.rss = undefined;
+    policy.off = { code: 'env', why: 'RES_OPTIONS is set' };
+    const second = await summaryAfter(lines, clock, 1);
+    assert.deepEqual(second['hour'], {
+      lookupsHeard: 0,
+      lookupsToHelper: 0,
+      misses: 0,
+      walksDeferred: 0,
+      passedStuck: 0,
+      helperStuck: 0,
+    });
+    assert.equal(second['misses'], 1, 'the running total stands');
+    const next = second['helper'] as Record<string, unknown>;
+    assert.deepEqual(next['changes'], []);
+    assert.deepEqual(next['lost'], []);
+    assert.equal(next['rss'], null);
+    const off = second['check'] as Record<string, unknown>;
+    assert.equal(off['state'], 2);
+    assert.equal(off['said'], CHECK_STATE_SAID[2]);
+    assert.deepEqual(off['off'], { code: 'env', why: 'RES_OPTIONS is set' });
+    resolver.stop();
+  });
+
+  it('lists the first of the helper’s changes and losses in an hour, and counts the rest (P-467)', async () => {
+    const { logger, lines } = captured();
+    const { resolver, helper, clock } = await make({ logger, tickMs: 5 });
+    for (let loss = 0; loss < SUMMARY_LISTED + 2; loss += 1) {
+      helper.lose('exit', 'rejoining', { exitCode: 1 });
+      await wait(0);
+      helper.move('up');
+    }
+    await wait(1);
+    const said = (await summaryAfter(lines, clock, 0))['helper'] as Record<string, unknown>;
+    assert.equal((said['changes'] as unknown[]).length, SUMMARY_LISTED);
+    assert.equal(said['changesNotListed'], (SUMMARY_LISTED + 2) * 2 - SUMMARY_LISTED);
+    assert.equal((said['lost'] as unknown[]).length, SUMMARY_LISTED);
+    assert.equal(said['lostNotListed'], 2);
+    assert.equal((said['losses'] as Record<string, unknown>)['total'], SUMMARY_LISTED + 2);
+    resolver.stop();
+  });
 });

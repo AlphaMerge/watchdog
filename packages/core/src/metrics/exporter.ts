@@ -763,53 +763,6 @@ const PROBE_METRICS: readonly Metric[] = [
     name: 'ms_probe_dns_questions_open',
     help: 'The most DNS questions a gate probe held open at its forwarder since the last heartbeat the core acknowledged: its getaddrinfo calls’, and the name check’s own, each until its first reply or 10 s.',
   },
-  // `P-432` S6: the name check's, and the rest of the lookup helper's, at protocol 39.
-  {
-    key: 'lookupHelperState',
-    name: 'ms_probe_lookup_helper_state',
-    help: 'A gate probe’s lookup helper: 1 up, 2 starting, 3 not answering, 4 restarting, 5 resting, 6 stopping.',
-  },
-  {
-    key: 'lookupHelperLosses',
-    name: 'ms_probe_lookup_helper_losses_total',
-    help: 'Times a gate probe’s lookup helper was lost: it exited, hung, ran out of memory or could not start.',
-    counter: true,
-  },
-  {
-    key: 'lookupHelperMemory',
-    name: 'ms_probe_lookup_helper_memory_bytes',
-    help: 'A gate probe’s lookup helper’s resident memory, at its last beat.',
-    scale: MB,
-  },
-  {
-    key: 'nameCheckState',
-    name: 'ms_probe_name_check_state',
-    help: 'A gate probe’s name check: 0 resting, 1 on, 2 off for the system’s resolver settings or platform, 3 not proven, 4 stood down, 5 walks off at a server.',
-  },
-  {
-    key: 'nameLookupsHeard',
-    name: 'ms_probe_name_lookups_heard_total',
-    help: 'Lookups a gate probe ran on its own lanes because their walk, or their zone’s sample, was heard.',
-    counter: true,
-  },
-  {
-    key: 'nameLookupsToHelper',
-    name: 'ms_probe_name_lookups_helper_total',
-    help: 'Lookups a gate probe ran in its lookup helper.',
-    counter: true,
-  },
-  {
-    key: 'nameCheckMisses',
-    name: 'ms_probe_name_check_misses_total',
-    help: 'Names a gate probe’s DNS check found unanswered that its lookup helper answered at once.',
-    counter: true,
-  },
-  {
-    key: 'nameWalksDeferred',
-    name: 'ms_probe_name_walks_deferred_total',
-    help: 'Walks a gate probe’s DNS check did not send for want of room, rate or a verdict.',
-    counter: true,
-  },
   {
     key: 'spoolCorrupt',
     name: 'ms_probe_spool_corrupt_total',

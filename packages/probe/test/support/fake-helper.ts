@@ -7,6 +7,7 @@ import {
   type HelperAnswer,
   type HelperAsk,
   type HelperChange,
+  type HelperLoss,
   type HelperPort,
   type HelperSnapshot,
   type HelperState,
@@ -81,6 +82,17 @@ export class FakeHelper implements HelperPort {
   readonly avoided = new Set<string>();
   readonly skewed: string[] = [];
   readonly snapshots: (HelperSnapshot | undefined)[] = [];
+  /** The child's resident set at its last beat, as `stats()` says it. */
+  rss: number | undefined = undefined;
+  /** The last loss `lose` took, as the real helper keeps it: its child's end can be set after. */
+  lastLoss: HelperLoss | undefined;
+  readonly lossTotals: Record<LossReason, number> = {
+    start: 0,
+    skew: 0,
+    exit: 0,
+    hung: 0,
+    memory: 0,
+  };
   onChange: ((change: HelperChange) => void) | undefined;
   readonly #now: () => number;
 
@@ -170,9 +182,28 @@ export class FakeHelper implements HelperPort {
       readonly charged?: FakeAsk;
       readonly suspects?: boolean;
       readonly ends?: boolean;
+      /** How the child ended, when its exit is read with the loss: unknown (null) unless said. */
+      readonly signal?: NodeJS.Signals;
+      readonly exitCode?: number;
     } = {},
   ): void {
     const ends = options.ends ?? route === 'resting';
+    this.lossTotals[reason] += 1;
+    this.lastLoss = {
+      at: this.#now(),
+      reason,
+      pid: 4242,
+      why: `the test lost it (${reason})`,
+      exitCode: options.exitCode ?? null,
+      signal: options.signal ?? null,
+      stderr: '',
+      fatal: undefined,
+      held: 0,
+      requeued: 0,
+      faulted: 0,
+      chargedTo: undefined,
+      charged: undefined,
+    };
     for (const ask of this.inFlight()) {
       const charged = ask === options.charged;
       const requeue = mayRequeue(reason, { stuck: ask.stuckSaid, detached: false, charged }, ends);
@@ -279,17 +310,16 @@ export class FakeHelper implements HelperPort {
   }
 
   stats(): LookupHelperStats {
-    const zero = { start: 0, skew: 0, exit: 0, hung: 0, memory: 0 };
     return {
       state: this.state,
       route: this.route,
       pid: 4242,
       inFlight: this.inFlight().length,
-      losses: 0,
-      lossesByReason: zero,
-      lastLoss: undefined,
-      rss: undefined,
-      rssPeak: 0,
+      losses: Object.values(this.lossTotals).reduce((sum, n) => sum + n, 0),
+      lossesByReason: { ...this.lossTotals },
+      lastLoss: this.lastLoss === undefined ? undefined : { ...this.lastLoss },
+      rss: this.rss,
+      rssPeak: this.rss ?? 0,
       lagMaxMs: undefined,
       lagPeakMs: 0,
       isolating: this.isolatingNow,

@@ -1282,11 +1282,11 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   `LD_PRELOAD`, `RES_OPTIONS`, and the like: the probe's log says which, at start, or when the
   settings move under a running probe, which turns it off until the probe restarts), and while
   they are slow to read. It then vouches for nothing, not even how glibc reads the hosts file, so
-  every name is asked in the helper, the hosts file's included (`nameCheckState` 2). **A slow
-  read turns it off for now, not until restart**: a read of the settings that has not ended in
-  10 s (30 s for the one at start) is let go, logged, and `nameCheckState` reads 2. At the next
-  look, every 5 s, a read that has ended since turns the check back on; one still not ended is
-  taken as hung, and the check is off until the probe restarts. At start the next look is not
+  every name is asked in the helper, the hosts file's included (state 2 in the hourly summary,
+  below). **A slow read turns it off for now, not until restart**: a read of the settings that
+  has not ended in 10 s (30 s for the one at start) is let go, logged, and the check is off. At
+  the next look, every 5 s, a read that has ended since turns the check back on; one still not
+  ended is taken as hung, and the check is off until the probe restarts. At start the next look is not
   the probe's first, which the settings were read from and which comes as the 30 s are up, but
   the one after it, at least 5 s later; a read that ends before then turns the check on as it
   ends. It is also off until a server has answered it (it asks `localhost.` of the first server
@@ -1299,9 +1299,9 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   hour; **three missed names of one zone in ten minutes** skip the zone for an hour; **three
   zones skipped in ten minutes** stand the check down for an hour, doubling to eight within a
   day, so a stand-down takes nine misses at least. A skipped name or zone, and every name but the
-  hosts file's while the check stands down, is asked in the helper, unwalked. A rising
-  `nameCheckMisses` with no stand-down is these skips; the probe's log names each name and zone
-  skipped.
+  hosts file's while the check stands down, is asked in the helper, unwalked. Misses with no
+  stand-down are these skips; the probe's log names each name and zone skipped, and the hourly
+  summary counts them.
 - **The helper's lanes keep a silent zone to its share.** At most 6 of its lookups run at once:
   4 for names with nothing kept, 4 for refreshes, 5 for the two together, and 1 for held
   names' retries, with `P-438`'s rule for a domain not known to answer (3 of the first 4) and 2
@@ -1355,8 +1355,8 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   is: the probe warns once a connection, `this core is older than protocol 38: the lookup
   helper’s health does not reach it`. Upgrade the core first.
 
-**What Probe Health says of it** (the channels are in the table in
-[What to watch](#probe-health--msprobehealth)):
+**What Probe Health says of it**: six channels, in the table in
+[What to watch](#probe-health--msprobehealth).
 
 - `nameResolverMode`: 1 `system`, 2 `gate`, 3 `gate` resting. Sent in both modes, every entry Up.
 - `lookupHelperTrouble`: **Warning at 1.** The helper has not been up for 30 s, has failed 3
@@ -1366,22 +1366,6 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   answering is the helper's job to carry, and leaves it at 0. The probe's log says why, in the
   lines of its `lookup-helper` component.
 - `nameCheckOnSeconds`: the seconds with the name check on and the helper up.
-- `nameCheckState`: 1 on, 2 off for the system's name settings or platform, or while they are
-  slow to read (the probe's log says why: at start, when the settings moved, or when a read was
-  slow), 3 not proven, 4 stood down, 0 the helper resting. Every entry Up: off, the helper
-  carries every name.
-- `nameLookupsHeard`, `nameLookupsToHelper`: the lookups the check sent to the probe's own lanes,
-  and those asked in the helper. `nameCheckMisses`: names the helper answered that the check had
-  found silent. `nameWalksDeferred`: names sent to the helper unwalked, for any of four
-  reasons: the check had no room for its questions, a server's rate of questions was spent, a
-  timer fired late or a verdict was dropped (the probe's main thread stalled), or a zone's two
-  scouts had no verdict by the lookup's deadline. The probe's log warns at the start of each
-  episode, a deferral after a minute with none for the same reason (and server, for its rate),
-  with the count so far; the hourly summary has the totals.
-- `lookupHelperState`: 1 up, 2 starting, 3 not answering, 4 restarting, 5 resting, 6 stopping.
-  Every entry Up: `lookupHelperTrouble` is its alarm. `lookupHelperLosses`: the children lost
-  since the probe started. `lookupHelperMemory`: the child's resident memory at its last beat,
-  in MB; a gap until its first.
 - `namePassedStuck`, `nameHelperStuck`: probe-lane lookups past their bound, and helper lookups
   the child said were stuck.
 - `nameQuestionsOpen`: the most DNS questions the probe held unanswered at once since the last
@@ -1392,10 +1376,54 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   What a forwarder such as dnsmasq, with a limit on the queries it forwards, sees of the probe.
 
 Each is a gap in `system` mode but the first, and a gap from a core or a probe older than
-protocol 38, or, for the eight `P-432` S6 added (`nameCheckState` to `lookupHelperMemory`),
-protocol 39. **Before downgrading a probe to a build without the setting, take
+protocol 38. **Before downgrading a probe to a build without the setting, take
 `probe.nameResolver` out of its `probe.json`**: an older probe refuses a key it does not know,
 and does not start.
+
+**What the probe's log says of it** (`P-467`). The helper's state, losses and memory, the
+check's state, and what was routed where have no channel (the user's decision of 2026-10-18 put
+six on Probe Health, not fourteen): the probe logs each as it happens, and once an hour in one
+line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`, `dns-check` or
+`system-names`), `level` and `msg`:
+
+| What happened | Level | `msg`, or how it starts |
+| --- | --- | --- |
+| The probe started in gate mode | info | `probe.nameResolver is gate: the name policy …`, with `check` (`on` or `off`) and, when off, `off`'s `code` and `why` |
+| The helper is up | info | `the lookup helper is ready`, with its `pid` |
+| It stopped answering, and again | warn, at most once a minute, with the count since / info | `the lookup helper is not answering: …` / `the lookup helper is answering again` |
+| It was lost | warn | `the lookup helper was lost`, with `reason` (`start`, `skew`, `exit`, `hung` or `memory`), `why` (for `memory`, its resident set), and `signal` or `exitCode` |
+| A name crashed it | error, once a name | `asking getaddrinfo for <name> made the lookup helper fail: …` |
+| It rests, and is started again | error / info | `the lookup helper is resting: …` (or `… resting until ms-probe restarts: …`) / `the lookup helper’s rest is over: …` |
+| A file glibc reads once changed | warn, once | `<file> changed: restart ms-probe to apply it` |
+| The settings moved, are slow to read, or could not be read | warn / warn / error | `the system’s name settings moved: …`, `… are slow to read: …`, `the system’s name policy could not be read: …` |
+| The check is proven, or not yet | info / info, at most once a minute | `the DNS check is proven: …` / `the DNS check is not proven yet: …` |
+| A miss, and a zone skipped | warn | `the DNS check missed a name …` / `the DNS check missed three names of one zone …` |
+| The check stands down | error, then warn for a repeat within a day | `the DNS check missed names in three zones in ten minutes: …` |
+| Walks deferred | warn at the start of each episode | `the DNS check is deferring walks to the lookup helper: …`, with `why` and the count so far |
+| The hour | info | `the probe’s resolver in gate mode, this hour` |
+
+**The hourly summary** says, for the hour since the last (the first an hour after the start):
+
+- `hour`: the lookups heard (`lookupsHeard`, on the probe's own lanes), asked in the helper
+  (`lookupsToHelper`), the check's `misses`, the walks deferred (`walksDeferred`), and
+  `passedStuck` and `helperStuck`. The same names at the top level are running totals since the
+  probe started, and `walksDeferred` there gives each reason (`budget`, `rate`, `stall`,
+  `scoutWait`) with their `total`. `routed` is the hour's routes by kind.
+- `check`: its `state` (0 the helper resting, 1 on, 2 off for the system's name settings or
+  platform, or while they are slow to read, 3 not proven, 4 stood down), `said` in words, and
+  while it is off, `off` with the `code` and `why` of the rule that turned it off; with its
+  totals (`misses`, `standDowns`) and the zones it keeps (`keys`, `silentKeys`, `mixedKeys`).
+- `helper`: its `state` now; `rss`, its resident memory in bytes at the child's last beat (`null`
+  with no child), and `rssPeak`; its `losses` since the probe started, by reason, with their
+  `total`; and the hour's `changes` of state (`at`, `from`, `to`, and the `loss` that moved it)
+  and `lost` children (`at`, `reason`, `pid`, `why`, `signal`, `exitCode`), the first 20 of each,
+  with `changesNotListed` and `lostNotListed` counting the rest. `msInState` is the time in each
+  state since the start.
+
+```bash
+sudo journalctl -u ms-probe --no-pager -o cat | grep -F 'in gate mode, this hour'
+sudo journalctl -u ms-probe --no-pager -o cat | grep -F '"component":"lookup-helper"'
+```
 
 ### A device's IP version
 
@@ -1662,7 +1690,7 @@ alarm.
 | `lookupsInFlight`, `lookupsGivenUp` | The probe's resolver (`A-66`, `P-426`). A sensor on a device given by host name has it resolved by [the probe's resolver](#how-a-probe-resolves-its-devices-names), to check it against [the target policy](#the-target-policy-every-sensor-that-connects-and-the-addresses-it-will-not) or a credential set's targets, and waits at most half the transport's timeout, ten seconds at the most. The resolver keeps answers 30 s and runs `getaddrinfo` at most six at a time on a thread pool the whole probe shares, where a lookup cannot be cancelled. `lookupsInFlight` is how many lookups the probe has asked and not had answered, waited for or not: those running, those queued for a lane, and the resolver's own refreshes and retries. `lookupsGivenUp` counts the checks that failed for want of an answer: at their bound, cancelled, or failed at once because `getaddrinfo` said `EAI_AGAIN`, the resolver holds the name, every lane the lookup could use is stuck, or its queue is full; each fails saying `the probe’s resolver is not answering`. A check that fails because the probe's own main thread was too busy to take the lookup says that instead, and is not counted. **No limits on these two**: those sensors already say it, Down or Unknown; `lookupsGivenUpRecently`, below, says it once for the probe. A climb in flight that does not fall is the system's resolver not answering. Counted, on a scan and on **Check now** alike: SNMP, SSH (when a connection is opened), HTTP, mail, the port and TLS sensors and the database sensors, under the default `link-local` or `private` policy, and any device whose credential set pins an address; a listener sensor's sender, under any policy; and discovery's identification. Not counted: [what still resolves for itself](#how-a-probe-resolves-its-devices-names). A gap for a probe or a core older than protocol 36 |
 | `answersLoaded` | The answers the probe's resolver loaded at start from [the file it wrote when it last stopped](#how-a-probe-resolves-its-devices-names) (`P-438`), each served while it is asked again: the same all the process's life. **No limits**: zero is a cold start, not an outage, and the checks it cannot answer already say so. It is zero for the first start, a file the probe could not use (its log says why, in one line), or one written more than 5½ minutes before. A gap for a probe or a core older than protocol 37 |
 | `lookupsGivenUpRecently` | **Warns from 100.** The checks the probe's resolver gave up for want of an answer in the last five minutes (`P-441`), counted by the core from `lookupsGivenUp` as `scriptGroupsRefusedRecently` is, so a restart's burst is not lost to the counter starting again, and it clears five minutes after the last. Each of those checks already fails naming the resolver; this says once, for the probe, that its resolver is the fault under them all, and the sensor's message names up to three domains the resolver finds not answering (`names of a single label` for those). A hundred is past one device's names: a zone that stops answering once its kept answers run out, a probe restarted cold into an outage, or every name failing; never a slow resolver that answers (0 given up in `P-426`'s 100 ms arm, 738 in its warm zone arm past the grace, 5,751 in the cold one). The same in both modes of [`probe.nameResolver`](#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver), so neither warns more. A gap for a probe older than protocol 36; a probe older than 38 sends no domains, and the message names none |
-| `nameResolverMode`, `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck`, `nameQuestionsOpen`, `lookupHelperState`, `lookupHelperLosses`, `lookupHelperMemory`, `nameCheckState`, `nameLookupsHeard`, `nameLookupsToHelper`, `nameCheckMisses`, `nameWalksDeferred` | How the probe resolves names, and the health of its lookup helper and name check when it runs them (`P-432`): see [the gate](#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver). **`lookupHelperTrouble` warns at 1**, for a helper that fails, never for a zone that stops answering; the two states' entries are every one Up. `nameResolverMode` is sent in both modes, every entry Up; the others gap in `system` mode. A gap for a probe or a core older than protocol 38, or 39 for the last eight |
+| `nameResolverMode`, `lookupHelperTrouble`, `nameCheckOnSeconds`, `namePassedStuck`, `nameHelperStuck`, `nameQuestionsOpen` | How the probe resolves names, and the health of its lookup helper when it runs one (`P-432`): see [the gate](#the-gate-a-lookup-helper-for-the-names-dns-answers-probenameresolver). **`lookupHelperTrouble` warns at 1**, for a helper that fails, never for a zone that stops answering. `nameResolverMode` is sent in both modes, every entry Up; the others gap in `system` mode. A gap for a probe or a core older than protocol 38. The helper's state, losses and memory and the name check's state and counts are in the probe's log and its hourly summary, not here (`P-467`) |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
 | `spoolRejected`, `spoolOversized`, `resultsDiscarded` | **`resultsDiscarded` is an error on any discard in the last five minutes.** Spooled results the drain threw away on their way to the core, each a reading that exists nowhere, as `spoolDropped`'s are (`P-277`, `P-283`). `spoolRejected`: the core refused their batch as invalid, which it answers only to a probe it has not approved — a probe whose approval was withdrawn with results still in its spool. `spoolOversized`: one result alone was larger than a frame can carry; a result this build made is fitted to the wire first and never is, so a count here is a record an earlier build spooled. Both are running totals recorded as rates, with no limit; `resultsDiscarded` is the two over the last five minutes, counted by the core from those totals, so it sees the first record after a restart or a long outage, when a draining spool is likeliest to discard (with the exceptions in the `scriptGroups` row above). The probe logs each discard. Both gap for a probe without a spool drain, and all three for a probe or a core older than protocol 32 |

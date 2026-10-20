@@ -1218,7 +1218,7 @@ export function budgetProblems(run: BudgetRun): string[] {
     if (each.arm === 'system') continue;
     if (each.checkState !== 1) {
       out.push(
-        `${at}, ${each.arm}: the check was not on and proven (nameCheckState ${String(each.checkState)})`,
+        `${at}, ${each.arm}: the check was not on and proven (its state ${String(each.checkState)})`,
       );
     }
     const bound =

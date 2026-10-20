@@ -1624,7 +1624,8 @@ describe('the gate with its name check on: one zone stops answering (P-432 S6)',
     const scan = scanner(running, clock, devices);
     try {
       for (let at = 0; at <= 5 * INTERVAL_MS; at += INTERVAL_MS) await scan.scanAt(at);
-      return { running, scan, devices, health: running.gate?.names.health() };
+      // The resolver's own counts: Probe Health carries none of these (OPEN-5, `P-467`).
+      return { running, scan, devices, health: running.gate?.names.resolver.gateHealth() };
     } finally {
       await running.stop();
     }
@@ -1672,7 +1673,7 @@ describe('the gate with its name check on: one zone stops answering (P-432 S6)',
     // The walk asked zone B's names and was not answered; it asked zone A's and was.
     assert.ok(gate.asker.askedFor('dev-0.zone-b.test').length > 0, 'zone B was walked');
     assert.ok(gate.asker.askedFor('dev-1.zone-a.test').length > 0, 'zone A was walked');
-    const said = health?.gate;
+    const said = health;
     assert.ok(said !== undefined);
     assert.equal(said.checkState, 1, 'on throughout: a silent zone is no reason to stand down');
     assert.equal(said.misses, 0, 'the helper answered nothing the walk missed');

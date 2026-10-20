@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
+import { probeHealth } from '@ms/sensors';
 import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
 import { LookupCatalogue } from '../src/lookups/catalogue.js';
 import {
@@ -123,34 +124,32 @@ describe('lookup validation', () => {
     assert.equal(applyLookup(trouble, 2).state, 'warning', 'a value it does not know warns');
   });
 
-  it('says what the lookup helper and the name check are doing, every state Up (`P-432` S6)', () => {
-    const named = (id: string): LookupDefinition => {
-      const found = BUILT_IN_LOOKUPS.find((definition) => definition.id === id);
-      assert.ok(found !== undefined, id);
-      return found;
-    };
-    // The latch is the helper's one alarm: its state, and the check's, raise nothing more.
-    const helper = named('ms.probe.lookup-helper-state');
+  /**
+   * Probe Health has six name channels at protocol 38, not fourteen (the user's decision of
+   * 2026-10-18, OPEN-5), and two of them read through a lookup: the mode and the trouble latch.
+   * S6's lookups for the helper's state and the check's went with their channels (`P-467`): a
+   * probe lookup no channel names is one nothing reads, and an operator could still pick it for a
+   * channel of their own and read words for a value no probe sends.
+   */
+  it('ships a probe lookup only for a Probe Health channel that names it (`P-432`, `P-467`)', () => {
+    const named = new Set(
+      probeHealth
+        .channels({})
+        .map((channel) => channel.lookup)
+        .filter((lookup): lookup is string => lookup !== undefined),
+    );
+    const probe = BUILT_IN_LOOKUPS.map((definition) => definition.id).filter((id) =>
+      id.startsWith('ms.probe.'),
+    );
+    assert.ok(probe.length >= 7, `found ${String(probe.length)} probe lookups`);
     assert.deepEqual(
-      [1, 2, 3, 4, 5, 6, 7].map((value) => applyLookup(helper, value).state),
-      ['up', 'up', 'up', 'up', 'up', 'up', 'up'],
+      probe.filter((id) => !named.has(id)),
+      [],
+      'a probe lookup no Probe Health channel names',
     );
-    assert.deepEqual(
-      [1, 2, 4, 6].map((value) => applyLookup(helper, value).text),
-      ['up', 'starting', 'restarting', 'stopping'],
-    );
-    assert.match(applyLookup(helper, 5).text, /^resting: names are asked as with system$/u);
-    const check = named('ms.probe.name-check');
-    assert.deepEqual(
-      [0, 1, 2, 3, 4, 5, 6].map((value) => applyLookup(check, value).state),
-      ['up', 'up', 'up', 'up', 'up', 'up', 'up'],
-    );
-    assert.equal(applyLookup(check, 1).text, 'on');
-    assert.match(
-      applyLookup(check, 2).text,
-      /^off for this system’s name settings or platform, or while they are slow to read: the probe log says why \(at start, when the settings moved, or when a read was slow\)$/u,
-    );
-    assert.match(applyLookup(check, 4).text, /^stood down after misses/u);
+    for (const gone of ['ms.probe.lookup-helper-state', 'ms.probe.name-check']) {
+      assert.equal(probe.includes(gone), false, gone);
+    }
   });
 
   it('refuses a value listed twice, because which entry wins is authoring order', () => {

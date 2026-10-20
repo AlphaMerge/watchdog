@@ -32,14 +32,15 @@ export function carriesFlow(listenerFor: ReadonlyMap<string, string>): boolean {
  * DNS servers first: a name they answer within 250 ms is asked on the probe's own lanes, one they
  * do not in the lookup helper, as is every name while the check is off. Whether the system's
  * settings let the check vouch for them (`nscd`, an NSS module, `LD_PRELOAD`, ...) is a property
- * of the host this command does not read, so the probe logs it at start and reports it as
- * `nameCheckState`.
+ * of the host this command does not read, so the probe logs it at start, and the check's state
+ * and why in its resolver's hourly summary: Probe Health has no channel for the check's state
+ * (OPEN-5, `P-467`).
  */
 export const GATE_NOTE =
   'probe.nameResolver: is gate: a name its DNS servers answer within 250 ms is asked on the ' +
   "probe's own lookup lanes, and one they do not in the lookup helper (ms-probe: lookups), as is " +
   "every name while the name check is off. The probe logs at start what the system's name " +
-  'settings say of the check, and Probe Health reports it as nameCheckState';
+  "settings say of the check, and the check's state each hour in its resolver's summary";
 
 export function buildFindings(
   config: Pick<ProbeConfig, 'flowListener'> & {

@@ -7,11 +7,7 @@ import { pino } from 'pino';
 import { DnsSimulator, replies } from '@ms/simulators';
 import type { ResolvedAddress } from '@ms/sensors';
 import { caresAsker } from '../src/resolver/dns-check.js';
-import {
-  buildNameResolution,
-  helperStateValue,
-  olderCoreWarning,
-} from '../src/resolver/name-resolution.js';
+import { buildNameResolution, olderCoreWarning } from '../src/resolver/name-resolution.js';
 import type { SystemFiles } from '../src/resolver/system-names.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -167,7 +163,7 @@ describe('probe.nameResolver as main.ts builds it (P-432 S3)', () => {
 });
 
 describe('probe.nameResolver gate with its name check built (P-432 S6)', () => {
-  it('asks DNS with c-ares first: a name its server answers runs on the probe’s lanes, one it does not in the helper, and Probe Health counts each', async (t) => {
+  it('asks DNS with c-ares first: a name its server answers runs on the probe’s lanes, one it does not in the helper, and the resolver counts each', async (t) => {
     const sim = await DnsSimulator.start({
       zones: {
         'zone-a.test': { reply: replies.addresses('192.0.2.10') },
@@ -226,13 +222,22 @@ describe('probe.nameResolver gate with its name check built (P-432 S6)', () => {
         'the helper’s child’s answer',
       );
       assert.deepEqual(asked, ['dev-1.zone-a.test'], 'the silent name never on the probe’s lanes');
+      const counted = names.resolver.gateHealth();
+      assert.ok(counted !== undefined);
+      assert.equal(counted.checkState, 1);
+      assert.equal(counted.lookupsHeard, 1);
+      assert.equal(counted.lookupsToHelper, 1);
+      // Probe Health is sent the latch and three counts of the gate, and none of the eight S6
+      // built (OPEN-5, `P-467`): those are the log's.
       const said = names.health().gate;
       assert.ok(said !== undefined);
-      assert.equal(said.checkState, 1);
-      assert.equal(said.lookupsHeard, 1);
-      assert.equal(said.lookupsToHelper, 1);
-      assert.equal(said.helperState, 1, 'up');
-      assert.equal(said.helperLosses, 0);
+      assert.deepEqual(Object.keys(said).sort(), [
+        'checkOnSeconds',
+        'helperStuck',
+        'passedStuck',
+        'trouble',
+      ]);
+      assert.equal(said.trouble, 0);
       const log = await sim.log();
       assert.deepEqual(
         log.filter((entry) => !entry.qname.startsWith('localhost')).map((entry) => entry.qname),
@@ -243,22 +248,6 @@ describe('probe.nameResolver gate with its name check built (P-432 S6)', () => {
       await within(WAIT, 'the stop', names.stop());
       rmSync(base, { recursive: true, force: true });
     }
-  });
-});
-
-describe('lookupHelperState (P-432 S6)', () => {
-  it('reads each of the helper’s states as Probe Health’s lookup names it', () => {
-    const states = [
-      'idle',
-      'starting',
-      'up',
-      'unresponsive',
-      'backoff',
-      'resting',
-      'stopping',
-      'stopped',
-    ] as const;
-    assert.deepEqual(states.map(helperStateValue), [2, 2, 1, 3, 4, 5, 6, 6]);
   });
 });
 

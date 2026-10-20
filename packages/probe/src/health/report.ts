@@ -136,16 +136,6 @@ export interface NameResolutionHealth {
     readonly checkOnSeconds: number;
     readonly passedStuck: number;
     readonly helperStuck: number;
-    /** The check's eight (protocol 39, D29): see `ProbeHealthReport`. */
-    readonly helperState: number;
-    readonly helperLosses: number;
-    /** The child's resident set at its last beat: absent before its first. */
-    readonly helperMemory?: number;
-    readonly checkState: number;
-    readonly lookupsHeard: number;
-    readonly lookupsToHelper: number;
-    readonly misses: number;
-    readonly walksDeferred: number;
   };
   /** At most three domains not answering, most failing first; `''` for single labels. */
   readonly notAnswering: readonly string[];
@@ -325,17 +315,6 @@ export class ProbeHealthReporter {
                   namePassedStuck: names.gate.passedStuck,
                   nameHelperStuck: names.gate.helperStuck,
                   ...(questions === undefined ? {} : { nameQuestionsOpen: questions }),
-                  // `P-432` S6: the check's own and the helper's, sent only to a core at 39.
-                  lookupHelperState: names.gate.helperState,
-                  lookupHelperLosses: names.gate.helperLosses,
-                  ...(names.gate.helperMemory === undefined
-                    ? {}
-                    : { lookupHelperMemory: names.gate.helperMemory }),
-                  nameCheckState: names.gate.checkState,
-                  nameLookupsHeard: names.gate.lookupsHeard,
-                  nameLookupsToHelper: names.gate.lookupsToHelper,
-                  nameCheckMisses: names.gate.misses,
-                  nameWalksDeferred: names.gate.walksDeferred,
                 }),
           }),
       // Absent on a build with no child-process runner, so the channels gap rather than reading

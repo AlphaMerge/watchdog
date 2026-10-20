@@ -441,7 +441,7 @@ describe('the budgets: the pools and each server’s rate (§1.6, D19)', () => {
     const short = await route('dev-1.zone-k.test', { boundMs: 220 });
     assert.deepEqual(short, { route: 'unvouched', key: 'd:zone-k.test', why: 'budget' });
     assert.equal(asker.askedFor('dev-1.zone-k.test').length, 0, 'nothing asked for it');
-    assert.equal(budget.stats().deferred.budget, 1, 'counted in nameWalksDeferred');
+    assert.equal(budget.stats().deferred.budget, 1, 'counted for the hourly summary');
     assert.deepEqual(warns(lines, 'pool'), ['discovery'], 'the episode said, with its pool');
     await Promise.all(scouts);
     check.stop();

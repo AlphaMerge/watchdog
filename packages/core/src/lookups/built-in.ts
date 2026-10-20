@@ -221,53 +221,6 @@ const PROBE_LOOKUP_HELPER_TROUBLE: LookupDefinition = {
   ],
 };
 
-/**
- * The state of gate mode's lookup helper (`P-432` S6). **Every entry Up**: its trouble is the
- * latch's to alarm on, once (`ms.probe.lookup-helper`), so a restart or a rest is said here in
- * words and raises nothing more.
- */
-const PROBE_LOOKUP_HELPER_STATE: LookupDefinition = {
-  id: 'ms.probe.lookup-helper-state',
-  name: 'Probe lookup helper state',
-  description: 'What the lookup helper of a probe with probe.nameResolver set to gate is doing.',
-  type: 'singleInt',
-  undefinedState: 'up',
-  entries: [
-    { value: 1, state: 'up', text: 'up' },
-    { value: 2, state: 'up', text: 'starting' },
-    { value: 3, state: 'up', text: 'not answering: its lookups are asked as if it were down' },
-    { value: 4, state: 'up', text: 'restarting' },
-    { value: 5, state: 'up', text: 'resting: names are asked as with system' },
-    { value: 6, state: 'up', text: 'stopping' },
-  ],
-};
-
-/**
- * Gate mode's name check (`P-432` S6, §1.10). **Every entry Up**: off, unproven or stood down, the
- * check sends its names to the lookup helper, which answers them, so none of these is an outage;
- * the field test reads it raw.
- */
-const PROBE_NAME_CHECK: LookupDefinition = {
-  id: 'ms.probe.name-check',
-  name: 'Probe name check',
-  description:
-    'Whether the name check of a probe with probe.nameResolver set to gate decides where its lookups run.',
-  type: 'singleInt',
-  undefinedState: 'up',
-  entries: [
-    { value: 0, state: 'up', text: 'resting: names are asked as with system' },
-    { value: 1, state: 'up', text: 'on' },
-    {
-      value: 2,
-      state: 'up',
-      text: 'off for this system’s name settings or platform, or while they are slow to read: the probe log says why (at start, when the settings moved, or when a read was slow)',
-    },
-    { value: 3, state: 'up', text: 'not proven: no DNS server has answered it yet' },
-    { value: 4, state: 'up', text: 'stood down after misses: the probe log says which zones' },
-    { value: 5, state: 'up', text: 'walks off at a DNS server' },
-  ],
-};
-
 export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   IF_OPER_STATUS,
   IF_ADMIN_STATUS,
@@ -278,6 +231,4 @@ export const BUILT_IN_LOOKUPS: readonly LookupDefinition[] = [
   PROBE_CHECKS,
   PROBE_NAME_RESOLVER,
   PROBE_LOOKUP_HELPER_TROUBLE,
-  PROBE_LOOKUP_HELPER_STATE,
-  PROBE_NAME_CHECK,
 ];

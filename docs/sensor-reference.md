@@ -1077,14 +1077,6 @@ cost: **light** · evaluated by the core, never by a probe
 | `namePassedStuck` | Name lookups past stuck on the probe’s lanes | lookups | 64-bit counter → rate |
 | `nameHelperStuck` | Lookup helper lookups stuck | lookups | 64-bit counter → rate |
 | `nameQuestionsOpen` | DNS questions open, most | questions | — |
-| `lookupHelperState` | Lookup helper state | — | lookup `ms.probe.lookup-helper-state` |
-| `lookupHelperLosses` | Lookup helper losses | losses | 64-bit counter → rate |
-| `lookupHelperMemory` | Lookup helper memory (resident) | MB | — |
-| `nameCheckState` | Name check | — | lookup `ms.probe.name-check` |
-| `nameLookupsHeard` | Name lookups heard, on the probe’s lanes | lookups | 64-bit counter → rate |
-| `nameLookupsToHelper` | Name lookups in the lookup helper | lookups | 64-bit counter → rate |
-| `nameCheckMisses` | Name check misses | misses | 64-bit counter → rate |
-| `nameWalksDeferred` | Name check walks deferred | walks | 64-bit counter → rate |
 | `poolCeiling` | Worker pool ceiling | workers | — |
 | `poolMemoryCap` | Workers memory can hold | workers | — |
 | `poolHeldBack` | Workers held back by memory | workers | — |

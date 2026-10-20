@@ -250,12 +250,6 @@ export interface ProbeCapabilities {
    * `lookupsNotAnswering`, stripped below this.
    */
   lookupsNotAnswering: boolean;
-  /**
-   * Reports gate mode's name check and its lookup helper in full (`P-432` S6): the helper's state,
-   * losses and memory, the check's state, the lookups run on each lane set, the check's misses and
-   * the walks it deferred. Eight fields, stripped below this together.
-   */
-  nameCheck: boolean;
 }
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -305,7 +299,6 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   nameResolver:
     'report how it resolves names, and the health of its lookup helper when it runs one',
   lookupsNotAnswering: 'name the domains its resolver finds not answering',
-  nameCheck: 'report what its name check routed, and its lookup helper’s state and memory',
 };
 
 /**
@@ -370,20 +363,6 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
-  if (!capabilities.nameCheck) {
-    const {
-      lookupHelperState: _state,
-      lookupHelperLosses: _losses,
-      lookupHelperMemory: _memory,
-      nameCheckState: _check,
-      nameLookupsHeard: _heard,
-      nameLookupsToHelper: _toHelper,
-      nameCheckMisses: _misses,
-      nameWalksDeferred: _deferred,
-      ...older
-    } = sent;
-    sent = older;
-  }
   if (!capabilities.lookupsNotAnswering) {
     const { lookupsNotAnswering: _domains, ...older } = sent;
     sent = older;

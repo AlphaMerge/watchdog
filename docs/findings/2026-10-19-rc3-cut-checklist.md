@@ -59,15 +59,18 @@ Each of these is a yes, or the cut waits.
    put in 1.0 before this cut on 2026-10-20 (`P-432`'s outcome in `TASKS.md`): `P-453` (a child
    killed from outside poisons no name), `P-460` (the differential records the check's questions
    too), `P-461` (boxes that show the check off), and S6's re-check gaps (no avoided name started
-   from the probe's queues, or settled after `stop()`). `P-454` stays open: it is a known limit
-   in the release notes.
+   from the probe's queues, or settled after `stop()`). And `P-467`: S6's eight Probe Health
+   fields out by the user's decision of 2026-10-18 (OPEN-5), so the cut speaks protocol 38 with
+   six name fields, and the field test reads the rest from the probe's hourly summary. `P-454`
+   stays open: it is a known limit in the release notes.
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem
    git fetch -q origin
    git log --oneline origin/main | grep -E 'P-432 S[0-9]'    # S1 to S8, each at least once
    git cat-file -e origin/main:docs/findings/2026-10-20-name-lookups-gated.md && echo "S7's findings"
-   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461) '    # 3
+   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461|P-467) '    # 4
+   git show origin/main:packages/shared/src/protocol/messages.ts | grep -c 'PROTOCOL_VERSION = 38;'    # 1
    ```
 
    The S6 gaps have no ticket of their own: the gate track's second round closed them, beside

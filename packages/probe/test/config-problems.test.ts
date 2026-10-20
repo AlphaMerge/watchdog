@@ -87,7 +87,9 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
       GATE_NOTE,
       /^probe\.nameResolver: is gate: a name its DNS servers answer within 250 ms is asked on the probe's own lookup lanes/u,
     );
-    assert.match(GATE_NOTE, /reports it as nameCheckState$/u);
+    // No Probe Health channel says the check's state (OPEN-5, `P-467`): the log does.
+    assert.match(GATE_NOTE, /the check's state each hour in its resolver's summary$/u);
+    assert.doesNotMatch(GATE_NOTE, /nameCheckState|Probe Health/u);
     assert.match(GATE_NOTE, /lookup helper \(ms-probe: lookups\)/);
     assert.deepEqual(gate.warnings ?? [], [], 'it starts, and an upgrade is not held');
     assert.deepEqual(gate.problems ?? [], []);
