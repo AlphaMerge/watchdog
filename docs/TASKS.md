@@ -14341,7 +14341,7 @@ because each is a decision rather than a defect:
       counters rather than a window of wall-clock time, so that a failure says which was slow;
       with a mutant per test that still fails it when the behaviour is removed, and twenty runs
       of the file in a row at a load near 20 with none of the six failing.
-- [ ] **P-450 — `pool-resolve`'s "replies on its port are not checks" bounds a worker's start at
+- [x] **P-450 — `pool-resolve`'s "replies on its port are not checks" bounds a worker's start at
       5 s** · XS · P-432, P-446 · Found 2026-10-19 by `P-432` S1. The test failed 6 of 7 twice at a
       host load of 16–22, timing out on the worker's 'ready' message (`until` → `pollWithin`, 5 s
       by default); in the quiet window of 2026-10-19 the file passed 7 of 7. Its worker loads
@@ -14350,6 +14350,20 @@ because each is a decision rather than a defect:
       not on the behaviour, and it is the start bound a loaded host exceeds. **Done when** the
       start bound is 15–20 s, the 200 ms "no result" window it then times is unchanged, and the
       file passes twenty runs in a row at a load near 20.
+
+      **P-450 outcome. The worker's start is bounded at 20 s, and the 200 ms window is
+      unchanged.** Built 2026-10-20 on `fix/flakes-r1`, in `pool-resolve.test.ts` only.
+      - **Reproduced.** On the base, the file failed 6 of 10 at loads of 20–43, each time with
+        "timed out after 5000 ms waiting for the worker to start". Every failure was at a load of
+        34 or more. In the same runs, the workers of the file's other tests took 3–25 s to start.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** 20 s, the top of the
+        ticket's range. `P-258` measured the catalogue's import at up to 14.8 s on a loaded host,
+        and the start is not what the test is about. The window it then times, 200 ms after the
+        two replies, is unchanged.
+      - **Mutation.** A worker that runs any message but `abort` as a check still fails the
+        test, inside the window.
+      - **Runs.** 20 runs in a row at loads of 11–20, as other sessions' runs ended, then 20 more at
+        a load held near 21 (15–29) beside the dns-check loops: 40 of 40.
 - [x] **P-453 — a lookup helper child killed from outside while isolating poisons a working name** · XS ·
       P-432 · Found 2026-10-19 by `P-432` S3, writing its scenarios. While the helper isolates
       (D27), a suspect is sent alone, and any `exit` loss with it alone in flight charges it

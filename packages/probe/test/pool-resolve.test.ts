@@ -297,7 +297,10 @@ describe('a check worker (P-426)', () => {
     try {
       const said: { type?: unknown }[] = [];
       worker.on('message', (message: { type?: unknown }) => said.push(message));
-      await until(() => said.some(({ type }) => type === 'ready'), 'the worker to start');
+      // A worker's start is bounded on its own, before the window below: a loaded host has taken
+      // over 5 s to load the catalogue (0.45 to 14.8 s, `P-258`), and the start is not what this
+      // test is about (`P-450`).
+      await until(() => said.some(({ type }) => type === 'ready'), 'the worker to start', 20_000);
       worker.postMessage({ type: 'resolve-ack', id: 1 });
       worker.postMessage({ type: 'resolved', id: 1, ok: true, addresses: FAKE_ANSWER });
       await new Promise((resolve) => setTimeout(resolve, 200));
