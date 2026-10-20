@@ -288,7 +288,7 @@ export function sensorTypeRoutes(app: FastifyInstance, options: SensorTypeRouteO
           'For a client that has to know a channel’s key before there is a sensor or a reading ' +
           '— the parameters form asks it which channel a table column it is putting back lands ' +
           'on, to hold the column to the channel the sensor kept when an earlier edit took the ' +
-          'column out (U-40). Limits are not in the answer: only a type whose channels never ' +
+          'column out. Limits are not in the answer: only a type whose channels never ' +
           'depend on its parameters declares them, and no edit changes one.\n\n' +
           '**Nothing is read and nothing is stored.** Parameters a create would refuse are ' +
           'refused here with the same 400 and the same problems; a type that is not registered ' +

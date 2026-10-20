@@ -54,7 +54,7 @@ Only the explicit ones. What an account may actually do here is the *resolved* r
 
 What an account may actually do with this object
 
-Resolves the three rules — inheritance up the tree, explicit beats inherited, highest wins across groups — and reports where the winning grant came from, which is what makes a refusal debuggable. Without `userId` it answers about the calling account; asking about somebody else needs an administrator. **An account that is not an administrator, asking about itself, is told `none` with no source** wherever it holds nothing, as it is for an id that does not exist, so that an object hidden from it cannot be told from one that is not there (`A-49`).
+Resolves the three rules — inheritance up the tree, explicit beats inherited, highest wins across groups — and reports where the winning grant came from, which is what makes a refusal debuggable. Without `userId` it answers about the calling account; asking about somebody else needs an administrator. **An account that is not an administrator, asking about itself, is told `none` with no source** wherever it holds nothing, as it is for an id that does not exist, so that an object hidden from it cannot be told from one that is not there.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -72,8 +72,8 @@ Resolves the three rules — inheritance up the tree, explicit beats inherited, 
 | `sourceGroupId` | integer | nullable |  |
 | `inherited` | boolean | **required** |  |
 | `viaAdminGroup` | boolean | **required** | The account administers everything, so no grant was consulted at all. |
-| `cappedByRole` | boolean |  | The account’s role held the right below what its groups granted (A-04). Reported rather than silent: "you have full on this device and may not edit it" is incomprehensible without it. |
-| `cappedByToken` | boolean |  | The API token used for this request held it below that (A-06). |
+| `cappedByRole` | boolean |  | The account’s role held the right below what its groups granted. Reported rather than silent: "you have full on this device and may not edit it" is incomprehensible without it. |
+| `cappedByToken` | boolean |  | The API token used for this request held it below that. |
 
 ### `PUT /api/v1/objects/{id}/access/{groupId}`
 
@@ -146,14 +146,14 @@ Listed by login, for the notification recipients editor. Only what choosing an a
 | `items[].id` | integer | **required** |  |
 | `items[].login` | string | **required** |  |
 | `items[].displayName` | string | **required** |  |
-| `items[].disabled` | boolean | **required** | A disabled account is skipped when a notification is sent (`M-19`). |
+| `items[].disabled` | boolean | **required** | A disabled account is skipped when a notification is sent. |
 | `items[].hasAddress` | boolean | **required** | Whether the account has an email address. One without is skipped when a notification is sent, and the log says so. The address itself is not listed. |
 
 ## audit
 
 ### `GET /api/v1/objects/{id}/audit`
 
-An object's configuration history, newest first: who changed it, when, and what changed. Page with `before`, using the `nextBefore` from the previous page. Sensor parameters changed are listed in `summary.paramsChanged` by key. Values appear in `diff` for parameters the sensor type does not mark `writeOnly`; a credential never appears in either, in any entry, at any age. **Grant entries are an administrator's**, as the grants themselves are: `full` on an object does not let an account read who else may see it, so for anybody else they are left out and a page is still a full page of the rest. **So are a probe's trust entries** (`A-46`) — its address, where it may connect from and the notes on it — as `GET /probes` is. **A count of what is beneath the object** (`sensorsAffected`, `movedCount`, `clonedCount`) is left out for a reader who cannot see all of it, and a reorder's positions for one who cannot see every sibling: each was counted over whoever acted, and would count what this reader cannot see. **An id naming an object the reader cannot see reads null** (`A-51`): where a move came from and went, the probes it left and joined, a reorder's parent, a clone's source and a dependency's master.
+An object's configuration history, newest first: who changed it, when, and what changed. Page with `before`, using the `nextBefore` from the previous page. Sensor parameters changed are listed in `summary.paramsChanged` by key. Values appear in `diff` for parameters the sensor type does not mark `writeOnly`; a credential never appears in either, in any entry, at any age. **Grant entries are an administrator's**, as the grants themselves are: `full` on an object does not let an account read who else may see it, so for anybody else they are left out and a page is still a full page of the rest. **So are a probe's trust entries** — its address, where it may connect from and the notes on it — as `GET /probes` is. **A count of what is beneath the object** (`sensorsAffected`, `movedCount`, `clonedCount`) is left out for a reader who cannot see all of it, and a reorder's positions for one who cannot see every sibling: each was counted over whoever acted, and would count what this reader cannot see. **An id naming an object the reader cannot see reads null**: where a move came from and went, the probes it left and joined, a reorder's parent, a clone's source and a dependency's master.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -190,7 +190,7 @@ Configuration history across the whole installation, newest first — the object
 
 Exchange a login and password for a session
 
-Every failure answers 401 with the same code and the same sentence. Distinguishing "no such account" from "wrong password" would let a caller test which logins exist, and a login is half a credential — so which it was goes to the core log instead. An attempt turned away before its password is checked answers 429 `AUTH_THROTTLED` with `Retry-After`: its address has failed too often (an IPv6 address counts as its /64), the account has failed and its delay has not passed, or another attempt at the same account is being checked. An address that has signed in as that account in the last 30 days skips the delay (`A-47`).
+Every failure answers 401 with the same code and the same sentence. Distinguishing "no such account" from "wrong password" would let a caller test which logins exist, and a login is half a credential — so which it was goes to the core log instead. An attempt turned away before its password is checked answers 429 `AUTH_THROTTLED` with `Retry-After`: its address has failed too often (an IPv6 address counts as its /64), the account has failed and its delay has not passed, or another attempt at the same account is being checked. An address that has signed in as that account in the last 30 days skips the delay.
 
 **Body**
 
@@ -238,7 +238,7 @@ Who this session belongs to
 
 Whether this installation needs a login, and whether this caller has one
 
-Public, and the first call a browser client makes (`U-17`). `GET /auth/me` cannot answer this: it refuses an anonymous caller with 401, and a 401 from it means both "log in" and "this installation does not need you to" — with `api.requireAuthentication` off, an anonymous caller may use the whole API and still gets that 401 from this one route. A client unable to tell those apart has to choose between demanding a login the core does not want and rendering an application whose every request will be refused. Nothing is disclosed that an unauthenticated request does not already reveal by being answered or refused.
+Public, and the first call a browser client makes. `GET /auth/me` cannot answer this: it refuses an anonymous caller with 401, and a 401 from it means both "log in" and "this installation does not need you to" — with `api.requireAuthentication` off, an anonymous caller may use the whole API and still gets that 401 from this one route. A client unable to tell those apart has to choose between demanding a login the core does not want and rendering an application whose every request will be refused. Nothing is disclosed that an unauthenticated request does not already reveal by being answered or refused.
 
 **200** { requireAuthentication, authenticated, principal }
 
@@ -494,7 +494,7 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 
 ### `GET /api/v1/credentials/unbounded`
 
-The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with the object it is stored on (`U-21`). `write` on that object is trust with the set (`A-41`), so this is the list to work through. **Only sets on objects the caller can see**: Core Health's `credentialsUnbounded` counts the installation's, and may be higher. No secret, and no public field either: the set itself is read from its object.
+The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with the object it is stored on. `write` on that object is trust with the set, so this is the list to work through. **Only sets on objects the caller can see**: Core Health's `credentialsUnbounded` counts the installation's, and may be higher. No secret, and no public field either: the set itself is read from its object.
 
 **200** { items }
 
@@ -511,7 +511,7 @@ The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with th
 
 ### `GET /api/v1/credential-kinds`
 
-The credential kinds this build can use, with the JSON Schema a form is generated from (`A-05`). Fields marked `writeOnly` are the secret half: they are encrypted at rest and **never returned by any route, to anyone**, so a form renders them as "set" with Replace and Clear rather than as a filled input. A kind absent from this list has no transport behind it yet, and storing a password nothing authenticates with is worse than not offering the field.
+The credential kinds this build can use, with the JSON Schema a form is generated from. Fields marked `writeOnly` are the secret half: they are encrypted at rest and **never returned by any route, to anyone**, so a form renders them as "set" with Replace and Clear rather than as a filled input. A kind absent from this list has no transport behind it yet, and storing a password nothing authenticates with is worse than not offering the field.
 
 **200** { items }
 
@@ -527,7 +527,7 @@ The credential kinds this build can use, with the JSON Schema a form is generate
 
 ### `PUT /api/v1/objects/{id}/credentials/{kind}`
 
-Stores the credential set of this kind on this object, where everything below it inherits it. **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret. **Storing a set here vouches for sending it** wherever the sensors beneath that now inherit it send it (`A-41`). **Unless it has `allowedTargets`, or an SSH set `hostKeys`** (`A-41b`): then it goes to every sensor inside them whoever wrote the sensor, and to none outside, and `withholds` says how many sensors beneath are outside now. **What this write changes is beside it** (`A-55`): `withheldBefore` is how many of the same sensors were outside before, `newlyWithheld` how many the write puts outside and `noLongerWithheld` how many it brings back, so a save that touches no target answers zero for both whatever `withholds` is. A sensor on a device entered by name is outside targets that are addresses when its type cannot be held to an address its probe checked; one whose type can is not counted, since its probe decides at each scan. **`byReason` gives each of the four for that case apart from a device the targets do not cover** (`A-59`), as `unpinnable` and `outside`. A write that widens them (an entry added, the list emptied, strict key checking turned off) clears the secrets it does not send again, and `secretsCleared` names them. **`?dryRun=true` is the same write, rolled back** (`U-21`): the same checks, the same refusals and the same answer, with nothing stored and nothing in the history, so a form can say what a save will do before it is confirmed. It is held to `write` on the object before anything is worked out, as the write is. **Every one of the four counts, whole and by reason, is of the sensors the caller can see**: with a `none` carved beneath the object, the sensors inside it are kept from the set and not counted here. The installation’s log keeps the whole numbers (outside after the write, put there by it, brought back by it); the history this API serves carries no count for a credential write.
+Stores the credential set of this kind on this object, where everything below it inherits it. **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret. **Storing a set here vouches for sending it** wherever the sensors beneath that now inherit it send it. **Unless it has `allowedTargets`, or an SSH set `hostKeys`**: then it goes to every sensor inside them whoever wrote the sensor, and to none outside, and `withholds` says how many sensors beneath are outside now. **What this write changes is beside it**: `withheldBefore` is how many of the same sensors were outside before, `newlyWithheld` how many the write puts outside and `noLongerWithheld` how many it brings back, so a save that touches no target answers zero for both whatever `withholds` is. A sensor on a device entered by name is outside targets that are addresses when its type cannot be held to an address its probe checked; one whose type can is not counted, since its probe decides at each scan. **`byReason` gives each of the four for that case apart from a device the targets do not cover**, as `unpinnable` and `outside`. A write that widens them (an entry added, the list emptied, strict key checking turned off) clears the secrets it does not send again, and `secretsCleared` names them. **`?dryRun=true` is the same write, rolled back**: the same checks, the same refusals and the same answer, with nothing stored and nothing in the history, so a form can say what a save will do before it is confirmed. It is held to `write` on the object before anything is worked out, as the write is. **Every one of the four counts, whole and by reason, is of the sensors the caller can see**: with a `none` carved beneath the object, the sensors inside it are kept from the set and not counted here. The installation’s log keeps the whole numbers (outside after the write, put there by it, brought back by it); the history this API serves carries no count for a credential write.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -547,7 +547,7 @@ Stores the credential set of this kind on this object, where everything below it
 
 ### `DELETE /api/v1/objects/{id}/credentials/{kind}`
 
-Removes the credential set defined *on this object*. It does not leave the object without credentials: whatever an ancestor defines comes back into force, and the response says which, so removing a device-level community string tells you the group's one is now in use rather than leaving it to be discovered. **403** when the set that comes back into force would reach a sensor somewhere nobody with `write` on where it is stored vouched for, and you do not have that `write` either (`A-41`); the set stays. `sensors` is how many sensors beneath were using the set, **of those the caller can see**. **`?dryRun=true` is the same removal, rolled back** (`U-21`): what would lose the set and what would come into force, or the same 403, with the set left where it is.
+Removes the credential set defined *on this object*. It does not leave the object without credentials: whatever an ancestor defines comes back into force, and the response says which, so removing a device-level community string tells you the group's one is now in use rather than leaving it to be discovered. **403** when the set that comes back into force would reach a sensor somewhere nobody with `write` on where it is stored vouched for, and you do not have that `write` either; the set stays. `sensors` is how many sensors beneath were using the set, **of those the caller can see**. **`?dryRun=true` is the same removal, rolled back**: what would lose the set and what would come into force, or the same 403, with the set left where it is.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -570,7 +570,7 @@ Removes the credential set defined *on this object*. It does not leave the objec
 
 ### `PUT /api/v1/objects/{id}/dependency`
 
-Sets what this object depends on. `parent` inherits from above, `object` names a master sensor, `none` depends on nothing, and `device` makes **this sensor** the master for its parent device — which is what auto-discovery sets on a Ping sensor, and what pauses the rest of a device when it stops answering. A master pauses its dependents only when it is genuinely Down or Down (Acknowledged); pausing a master by hand or by schedule does not. `delaySeconds` keeps dependents paused after the master recovers, so a flapping link does not alarm on every bounce. A dependency that would form a loop is refused: a loop of masters can never recover. The master has to be a sensor the caller can read, here, through the settings route and in bulk alike; one they cannot read is refused as one that does not exist, and a step of a refused loop they cannot see reads `null` in `details.path` (`A-77`).
+Sets what this object depends on. `parent` inherits from above, `object` names a master sensor, `none` depends on nothing, and `device` makes **this sensor** the master for its parent device — which is what auto-discovery sets on a Ping sensor, and what pauses the rest of a device when it stops answering. A master pauses its dependents only when it is genuinely Down or Down (Acknowledged); pausing a master by hand or by schedule does not. `delaySeconds` keeps dependents paused after the master recovers, so a flapping link does not alarm on every bounce. A dependency that would form a loop is refused: a loop of masters can never recover. The master has to be a sensor the caller can read, here, through the settings route and in bulk alike; one they cannot read is refused as one that does not exist, and a step of a refused loop they cannot see reads `null` in `details.path`.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -624,14 +624,14 @@ Parses a range and estimates every level, so an operator picks one knowing what 
 
 Start a discovery run
 
-Sweeps a range from one probe into one group. The probe is named rather than chosen: discovery is a local-network job, so the probe that can reach 10.0.0.0/24 is the one on that network. It has to be the probe the group is under, and one the caller can read: any other is refused `DISCOVERY_PROBE_INVALID` in the same words, so that a probe above the caller’s branch is answered as an id nobody used (`A-77`). Left out, it is the probe the group is under, which is how a writer granted a branch below a probe they cannot see starts one.
+Sweeps a range from one probe into one group. The probe is named rather than chosen: discovery is a local-network job, so the probe that can reach 10.0.0.0/24 is the one on that network. It has to be the probe the group is under, and one the caller can read: any other is refused `DISCOVERY_PROBE_INVALID` in the same words, so that a probe above the caller’s branch is answered as an id nobody used. Left out, it is the probe the group is under, which is how a writer granted a branch below a probe they cannot see starts one.
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `groupId` | integer, at least 1 | **required** |  |
-| `probeId` | integer, at least 1 |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
+| `probeId` | integer, at least 1 |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read. |
 | `range` | string, 1–4000 characters | **required** |  |
 | `timeoutMs` | integer, 100–60000 |  |  |
 | `concurrency` | integer, 1–512 |  |  |
@@ -674,8 +674,8 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 | --- | --- | --- | --- |
 | `runId` | integer | **required** |  |
 | `groupId` | integer |  |  |
-| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
-| `scheduleId` | integer | nullable | The rediscovery schedule that started it (`D-07`), or null for a run somebody started. What tells an operator where a run they did not start came from. |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe. |
+| `scheduleId` | integer | nullable | The rediscovery schedule that started it, or null for a run somebody started. What tells an operator where a run they did not start came from. |
 | `range` | string | **required** |  |
 | `level` | `ping` · `standard` · `detailed` |  |  |
 | `status` | `queued` · `running` · `identifying` · `done` · `cancelled` · `failed` | **required** |  |
@@ -750,7 +750,7 @@ Recorded immediately and sent to the probe as well, so a cancel works even while
 
 Create the devices and sensors this run found
 
-**Idempotent.** Devices are matched on address, then reverse name, then short name within the target group, and only sensors that are not already there are created — so running this twice creates nothing the second time. That matters because a discovery is re-run: on a schedule, or by an operator who has configured a credential and wants the sensors it unlocks. **A run whose rule was deleted creates nothing** (`A-41`): the account that wrote the rule vouched for sending the group’s credentials to the addresses it found, and deleting the rule withdraws that. With accounts on, the run is failed with the reason “its rule was deleted”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those addresses. **Nor does a run whose group has since moved under another probe** (`P-241`): what it found was read from the old probe’s network, and would become devices in the new one’s branch. The run is failed with the reason “its group moved to another probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with that sentence. Start a new run from the group’s new probe. **It answers its caller in their own view** (`A-77`). A host at the address of a device the caller cannot see is reported in `problems` as “a device outside your view already has this address”, with no id and nothing created under the device; a sensor a template names that is already there and hidden is reported the same way and not counted in `sensorsSkipped`; and nothing is added to a device the caller may read and not write. An administrator is answered as before.
+**Idempotent.** Devices are matched on address, then reverse name, then short name within the target group, and only sensors that are not already there are created — so running this twice creates nothing the second time. That matters because a discovery is re-run: on a schedule, or by an operator who has configured a credential and wants the sensors it unlocks. **A run whose rule was deleted creates nothing**: the account that wrote the rule vouched for sending the group’s credentials to the addresses it found, and deleting the rule withdraws that. With accounts on, the run is failed with the reason “its rule was deleted”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those addresses. **Nor does a run whose group has since moved under another probe**: what it found was read from the old probe’s network, and would become devices in the new one’s branch. The run is failed with the reason “its group moved to another probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with that sentence. Start a new run from the group’s new probe. **It answers its caller in their own view**. A host at the address of a device the caller cannot see is reported in `problems` as “a device outside your view already has this address”, with no id and nothing created under the device; a sensor a template names that is already there and hidden is reported the same way and not counted in `sensorsSkipped`; and nothing is added to a device the caller may read and not write. An administrator sees every device, and is answered about each.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -832,7 +832,7 @@ Empty on almost every installation, because there is no schedule until somebody 
 | `items` | object[] | **required** |  |
 | `items[].id` | integer | **required** |  |
 | `items[].groupId` | integer | **required** |  |
-| `items[].probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
+| `items[].probeId` | integer |  | Absent for a caller who cannot see the probe. |
 | `items[].name` | string | **required** |  |
 | `items[].enabled` | boolean | **required** |  |
 | `items[].range` | string | **required** |  |
@@ -849,10 +849,10 @@ Empty on almost every installation, because there is no schedule until somebody 
 | `items[].scheduleId` | integer | nullable |  |
 | `items[].lastRunAt` | string | nullable |  |
 | `items[].lastRunId` | integer | nullable |  |
-| `items[].lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `items[].lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said. |
 | `items[].nextRunAt` | string | nullable |  |
 | `items[].description` | string | **required** |  |
-| `items[].version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
+| `items[].version` | integer |  | What `If-Match` carries back on an edit; also the `ETag`. |
 
 ### `POST /api/v1/discovery/schedules`
 
@@ -865,7 +865,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `groupId` | integer, at least 1 | **required** |  |
-| `probeId` | integer, at least 1 |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
+| `probeId` | integer, at least 1 |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read. |
 | `name` | string, 1–200 characters | **required** |  |
 | `range` | string, 1–4000 characters | **required** |  |
 | `cadence` | `hourly` · `daily` · `weekly` | **required** |  |
@@ -879,7 +879,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | `concurrency` | integer, 1–512 | default `32` |  |
 | `ratePerSecond` | number, 0–100000 | default `0` |  |
 | `autoProvision` | boolean | default `false` |  |
-| `scheduleId` | integer | nullable default `null` | A schedule (`M-09`) used as a *permission window*: “weekly, but not during the change freeze”. It answers a different question from the cadence — is it allowed now, versus when is it next due — which is why both exist. |
+| `scheduleId` | integer | nullable default `null` | A schedule (`GET /schedules`) used as a *permission window*: “weekly, but not during the change freeze”. It answers a different question from the cadence — is it allowed now, versus when is it next due — which is why both exist. |
 | `enabled` | boolean | default `false` |  |
 
 **201** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
@@ -890,7 +890,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe. |
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
@@ -907,10 +907,10 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | `scheduleId` | integer | nullable |  |
 | `lastRunAt` | string | nullable |  |
 | `lastRunId` | integer | nullable |  |
-| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said. |
 | `nextRunAt` | string | nullable |  |
 | `description` | string | **required** |  |
-| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
+| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag`. |
 
 ### `POST /api/v1/discovery/schedules/{id}/enabled`
 
@@ -936,7 +936,7 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe. |
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
@@ -953,10 +953,10 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 | `scheduleId` | integer | nullable |  |
 | `lastRunAt` | string | nullable |  |
 | `lastRunId` | integer | nullable |  |
-| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said. |
 | `nextRunAt` | string | nullable |  |
 | `description` | string | **required** |  |
-| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
+| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag`. |
 
 ### `PATCH /api/v1/discovery/schedules/{id}`
 
@@ -998,7 +998,7 @@ Change a schedule
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  | Absent for a caller who cannot see the probe (A-80). |
+| `probeId` | integer |  | Absent for a caller who cannot see the probe. |
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
@@ -1015,10 +1015,10 @@ Change a schedule
 | `scheduleId` | integer | nullable |  |
 | `lastRunAt` | string | nullable |  |
 | `lastRunId` | integer | nullable |  |
-| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said. |
 | `nextRunAt` | string | nullable |  |
 | `description` | string | **required** |  |
-| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
+| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag`. |
 
 ### `DELETE /api/v1/discovery/schedules/{id}`
 
@@ -1068,7 +1068,7 @@ One template, in full
 
 What a fingerprint would produce
 
-The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one of the ones a discovery run recorded — and reports which templates matched and which sensors would actually be created, given the credential kinds available. The fingerprint is checked as a stored one is: without an IPv4 `address`, a known `kind` and a number on every port, or with anything but text in a text field, it is a 400 `FINGERPRINT_INVALID` naming the field. Fields this build does not know are accepted and ignored.
+The answer `POST /discovery/{id}/provision` will act on, before it acts on it. Takes a fingerprint — one of the ones a discovery run recorded — and reports which templates matched and which sensors would actually be created, given the credential kinds available. The fingerprint is checked as a stored one is: without an IPv4 `address`, a known `kind` and a number on every port, or with anything but text in a text field, it is a 400 `FINGERPRINT_INVALID` naming the field. Fields this build does not know are accepted and ignored.
 
 **Body**
 
@@ -1094,7 +1094,7 @@ The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one
 
 What a run’s hosts would produce
 
-The whole run at once, which is what an operator wants to look at before letting `D-04` create anything. Hosts with no fingerprint yet are reported with the generic plan, because that is what they would get.
+The whole run at once, which is what an operator wants to look at before letting `POST /discovery/{id}/provision` create anything. Hosts with no fingerprint yet are reported with the generic plan, because that is what they would get.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1921,7 +1921,7 @@ Needs full access: a share link is a grant to everybody, and `full` is the right
 
 Make a public share link
 
-Answers with the URL’s token **once**. Only its hash is stored, so it cannot be shown again — which is what keeps a database backup from being a set of working share links. An expiry is required (`ADR-002`): a link without one is a permanent unauthenticated route nobody remembers creating.
+Answers with the URL’s token **once**. Only its hash is stored, so it cannot be shown again — which is what keeps a database backup from being a set of working share links. An expiry is required: a link without one is a permanent unauthenticated route nobody remembers creating.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1980,7 +1980,7 @@ The stored bytes, with the SHA-256 of them as a strong ETag. Send `If-None-Match
 
 Put a background image behind a map
 
-PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decided by reading the file’s own header — the declared content type is a claim by the client and is never trusted. SVG is refused: it is a document rather than an image, and a background is drawn in the application’s own page (`ADR-003`). Needs `write`, the same right as moving a widget. The body is the file itself, not JSON.
+PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decided by reading the file’s own header — the declared content type is a claim by the client and is never trusted. SVG is refused: it is a document rather than an image, and a background is drawn in the application’s own page. Needs `write`, the same right as moving a widget. The body is the file itself, not JSON.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2166,7 +2166,7 @@ Read from the queue rather than counted in memory, deliberately: a core that res
 
 What happened to each notification
 
-Newest first, paged by `before` rather than by offset — notifications arrive while somebody is reading, and an offset page would show a row twice or not at all. `failed` is an alarm nobody received; `discarded` is one nobody was meant to receive any more, which is not the same thing. That is either a notification an activation schedule threw away on purpose (`N-12`), or a recovery or clear dropped because a newer alarm of the same sensor and trigger was delivered first (`N-22`); `lastError` says which. Only notifications about sensors the caller can read appear.
+Newest first, paged by `before` rather than by offset — notifications arrive while somebody is reading, and an offset page would show a row twice or not at all. `failed` is an alarm nobody received; `discarded` is one nobody was meant to receive any more, which is not the same thing. That is either a notification an activation schedule threw away on purpose, or a recovery or clear dropped because a newer alarm of the same sensor and trigger was delivered first; `lastError` says which. Only notifications about sensors the caller can read appear.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2274,7 +2274,7 @@ One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in th
 
 ### `PATCH /api/v1/objects/{id}`
 
-Changes what it is given and keeps the rest. **Where a sensor sends its inherited credentials** — a device's host or address family, or a sensor parameter its type says chooses the listener — **needs `write` on the object those credentials are stored on** (`A-41`), and is otherwise refused with 403 naming the kind and that object, never the secret. A device's new host also clears the secrets held in its sensors' own parameters, which the audit lists; enter them again.
+Changes what it is given and keeps the rest. **Where a sensor sends its inherited credentials** — a device's host or address family, or a sensor parameter its type says chooses the listener — **needs `write` on the object those credentials are stored on**, and is otherwise refused with 403 naming the kind and that object, never the secret. A device's new host also clears the secrets held in its sensors' own parameters, which the audit lists; enter them again.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2306,7 +2306,7 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 
 ### `POST /api/v1/objects/{id}/order`
 
-Moves an object within its parent's children, the way PRTG's move up / move down does. Siblings nobody has arranged keep sorting by name, so a tree that has never been ordered by hand reads exactly as it did before. Listings honour the arrangement through `GET /objects?parentId=…&sort=manual` and through the tree endpoint, which always does. A move that changes nothing is a no-op, not an error. **Among the siblings the caller can see** (`A-46`): every other sibling keeps its place, "up" passes the nearest one the caller can see, and the top it can see is the top.
+Moves an object within its parent's children, the way PRTG's move up / move down does. Siblings nobody has arranged keep sorting by name, so a tree that has never been ordered by hand reads exactly as it did before. Listings honour the arrangement through `GET /objects?parentId=…&sort=manual` and through the tree endpoint, which always does. A move that changes nothing is a no-op, not an error. **Among the siblings the caller can see**: every other sibling keeps its place, "up" passes the nearest one the caller can see, and the top it can see is the top.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2390,7 +2390,7 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 | `outcomes[].problem` | string |  |  |
 | `outcomes[].code` | string |  |  |
 | `outcomes[].createdId` | integer |  |  |
-| `outcomes[].grantsNotCarried` | integer |  | `clone` only: the positive grants the copy did not carry, as the single clone’s answer counts them (`A-76`). |
+| `outcomes[].grantsNotCarried` | integer |  | `clone` only: the positive grants the copy did not carry, as the single clone’s answer counts them. |
 | `outcomes[].deleted` | integer |  |  |
 
 ### `GET /api/v1/objects/{id}/tree`
@@ -2490,7 +2490,7 @@ The same totals as `/objects/:id/counts`, over every object the caller can read 
 
 Set or clear the addresses one device may reach although its probe’s policy refuses them
 
-The addresses of this device its probe may connect to although `probe.targetPolicy` refuses them (`A-64`), replacing any it had; an empty list clears it. **Only an administrator**, with a `full` token, may change it; anyone who may read the device sees it, as `targetPolicyException` on the device. **A device only, and never inherited**: a group, a probe or the root is refused with 409, and a device has none until one is set here: a clone or a template starts without one. **Addresses, one at a time**: not a name, a range or a zone, not multicast or the unspecified address, and never a cloud instance-metadata service (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `100.100.100.200`), each refused with 400. A sensor on the device whose host is a name connects only when every address the name resolves to is allowed by the policy or named here. Takes `If-Match`. Audited as an update of the device. Reaches a probe at protocol 28 or later; an older probe refuses those addresses as before.
+The addresses of this device its probe may connect to although `probe.targetPolicy` refuses them, replacing any it had; an empty list clears it. **Only an administrator**, with a `full` token, may change it; anyone who may read the device sees it, as `targetPolicyException` on the device. **A device only, and never inherited**: a group, a probe or the root is refused with 409, and a device has none until one is set here: a clone or a template starts without one. **Addresses, one at a time**: not a name, a range or a zone, not multicast or the unspecified address, and never a cloud instance-metadata service (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `100.100.100.200`), each refused with 400. A sensor on the device whose host is a name connects only when every address the name resolves to is allowed by the policy or named here. Takes `If-Match`. Audited as an update of the device. Reaches a probe at protocol 28 or later; an older probe refuses those addresses as before.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2510,7 +2510,7 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 
 Channels without the lookup their type declares
 
-The channels whose sensor type declares a lookup, for the sensor’s stored parameters, that the channel does not hold (`P-308`), so its value is judged by nothing. Most are channels a clone made before `P-302` lost, which migration 073 left empty; but an operator may also have cleared one on purpose, and nothing recorded tells the two apart, so nothing is filled: set the ones that should be judged in the sensor’s channel table, or with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the caller can see**, by sensor id and then key, at most 1000; `total` counts all of them. `unanswered` counts sensors whose type could not say what it declares for their parameters, or is not in this build: those are not judged either way.
+The channels whose sensor type declares a lookup, for the sensor’s stored parameters, that the channel does not hold, so its value is judged by nothing. Most are channels whose lookup a clone made by an earlier release lost, which the upgrade did not fill; but an operator may also have cleared one on purpose, and nothing recorded tells the two apart, so nothing is filled: set the ones that should be judged in the sensor’s channel table, or with `PATCH /objects/{id}/channels/{key}` and `lookupId`. **Only sensors the caller can see**, by sensor id and then key, at most 1000; `total` counts all of them. `unanswered` counts sensors whose type could not say what it declares for their parameters, or is not in this build: those are not judged either way.
 
 **200** { items, total, unanswered }
 
@@ -2552,19 +2552,19 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 | `items[].displayName` | string | **required** |  |
 | `items[].agentVersion` | string |  |  |
 | `items[].protocolVersion` | integer |  |  |
-| `items[].protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
-| `items[].protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `items[].protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion`. `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `items[].protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion`. `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
 | `items[].lastAddress` | string |  |  |
 | `items[].allowFrom` | string[] |  |  |
 | `items[].hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
-| `items[].certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `items[].certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to, as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
 | `items[].certificateBoundAt` | string | **required** nullable |  |
 | `items[].objectId` | integer | nullable |  |
 | `items[].note` | string |  |  |
 | `items[].firstSeenAt` | string | **required** |  |
 | `items[].lastSeenAt` | string | nullable |  |
 | `items[].decidedAt` | string | nullable |  |
-| `items[].skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `items[].skew` | object |  | What this probe’s protocol version means against this core. `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core: it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`). `unknown` is a 0 with neither time: nothing recorded. |
 | `items[].skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `items[].skew.peerVersion` | integer |  |  |
 | `items[].skew.ownVersion` | integer |  |  |
@@ -2576,7 +2576,7 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 
 Approve a probe onto a branch of the tree
 
-Binds this identity to a probe object. The probe is issued a key of its own at its **next handshake**, not here: approving a machine that is switched off is an ordinary thing to do, and a key delivered in a welcome it never received would lock it out. Nobody ever sees that key — it goes straight to the probe over the authenticated link, so it never passes through a clipboard or a support ticket. A probe that is already connected has its connection closed and comes back on its own retry — about a second — because the handshake is where both the key and the first configuration are issued. It said "starts scanning without reconnecting" until `P-189`, which was not implemented: the session’s approval is fixed at admission, so a probe approved after it connected sat there scanning nothing.
+Binds this identity to a probe object. The probe is issued a key of its own at its **next handshake**, not here: approving a machine that is switched off is an ordinary thing to do, and a key delivered in a welcome it never received would lock it out. Nobody ever sees that key — it goes straight to the probe over the authenticated link, so it never passes through a clipboard or a support ticket. A probe that is already connected has its connection closed and comes back on its own retry — about a second — because the handshake is where both the key and the first configuration are issued, and a connection admitted before the approval would scan nothing.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2587,7 +2587,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `objectId` | integer, at least 1 | **required** | The probe object this identity owns from now on. |
-| `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. One probe object is local (`P-382`): another one holding it with a probe still approved onto it refuses this with 409, and one whose probe was revoked or deleted gives it up, as the approval's audit entry records. `false` never clears it. |
+| `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. One probe object is local: another one holding it with a probe still approved onto it refuses this with 409, and one whose probe was revoked or deleted gives it up, as the approval's audit entry records. `false` never clears it. |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, certificateFingerprint, certificateBoundAt, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
@@ -2600,19 +2600,19 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `displayName` | string | **required** |  |
 | `agentVersion` | string |  |  |
 | `protocolVersion` | integer |  |  |
-| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
-| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion`. `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion`. `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
-| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to, as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
 | `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core. `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core: it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
@@ -2647,19 +2647,19 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | `displayName` | string | **required** |  |
 | `agentVersion` | string |  |  |
 | `protocolVersion` | integer |  |  |
-| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
-| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion`. `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion`. `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
-| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to, as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
 | `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core. `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core: it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
@@ -2694,19 +2694,19 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | `displayName` | string | **required** |  |
 | `agentVersion` | string |  |  |
 | `protocolVersion` | integer |  |  |
-| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
-| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion`. `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion`. `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
-| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to, as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
 | `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core. `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core: it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
@@ -2718,7 +2718,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 
 Bind a probe to the certificate it now holds
 
-The rotation path for a probe whose client certificate was renewed or reissued (`P-326`). A `fingerprint` binds that certificate: read it off the new certificate with `openssl x509 -noout -fingerprint -sha256 -in probe.crt`, colons optional. `null` clears the binding, and the next hello that proves this identity by its key binds whatever certificate it presents. Either way the probe’s live connection is closed, so it is judged at once against the new binding. Audited as `probe.certificate.set`.
+The rotation path for a probe whose client certificate was renewed or reissued. A `fingerprint` binds that certificate: read it off the new certificate with `openssl x509 -noout -fingerprint -sha256 -in probe.crt`, colons optional. `null` clears the binding, and the next hello that proves this identity by its key binds whatever certificate it presents. Either way the probe’s live connection is closed, so it is judged at once against the new binding. Audited as `probe.certificate.set`.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2741,19 +2741,19 @@ The rotation path for a probe whose client certificate was renewed or reissued (
 | `displayName` | string | **required** |  |
 | `agentVersion` | string |  |  |
 | `protocolVersion` | integer |  |  |
-| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
-| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion`. `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion`. `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
 | `lastAddress` | string |  |  |
 | `allowFrom` | string[] |  |  |
 | `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
-| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
+| `certificateFingerprint` | string | **required** nullable | The SHA-256 fingerprint of the client certificate this probe is bound to, as `openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other certificate is refused with `certificate-not-bound`. Null until a hello proves the identity: a probe recorded before the binding existed, or one whose binding an administrator cleared. |
 | `certificateBoundAt` | string | **required** nullable |  |
 | `objectId` | integer | nullable |  |
 | `note` | string |  |  |
 | `firstSeenAt` | string | **required** |  |
 | `lastSeenAt` | string | nullable |  |
 | `decidedAt` | string | nullable |  |
-| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew` | object |  | What this probe’s protocol version means against this core. `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core: it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says when a hello was refused over it (`protocolRefusedAt`). `unknown` is a 0 with neither time: nothing recorded. |
 | `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
@@ -3174,7 +3174,7 @@ Newest first, at most 50 of them. A run that failed carries the same code the AP
 
 Run this report now
 
-Renders the report against its span and its security context, and records the outcome. **Needs `write`, not `read`** — a render is minutes of work against the same database serving live checks, so starting one is a write even though it changes nothing about the report. **One run at a time.** A report already rendering answers 409 rather than queueing: a button pressed six times must not become six renders competing for the same pool. The constraint is a partial unique index, so two requests racing lose at the database rather than in a window between a check and an insert. The rendered document is not kept — `E-09` decides where a report goes. What this records is that it ran, what period it covered, how large it was, and why it failed if it did, which is what tells an operator at 09:00 whether last night worked.
+Renders the report against its span and its security context, and records the outcome. **Needs `write`, not `read`** — a render is minutes of work against the same database serving live checks, so starting one is a write even though it changes nothing about the report. **One run at a time.** A report already rendering answers 409 rather than queueing: a button pressed six times must not become six renders competing for the same pool. The constraint is a partial unique index, so two requests racing lose at the database rather than in a window between a check and an insert. Where the rendered document goes is the report’s `delivery`: kept for download, kept and emailed, or emailed and kept only until it has been sent, and `outputs` lists what the run still holds. The run records that it ran, what period it covered, how large it was, and why it failed if it did, which is what tells an operator at 09:00 whether last night worked.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3271,7 +3271,7 @@ Take a group’s access away
 
 Render this report now, as HTML, CSV, XML or PDF
 
-Runs the report against its span and its security context and answers the document. `?format=html` (the default), `?format=csv`, `?format=xml` or `?format=pdf`. **An interval with no reading is a gap, in every format** — an empty field in CSV, `—` in HTML and in PDF, and `xsi:nil="true"` in XML, never a zero and never the previous value carried forward. A row whose channels are all empty is still printed: dropping it would make the table claim the period was shorter than it was. A PDF is laid out by this service rather than by a browser (`ADR-006`), so it has a page limit as well as a value limit: a report over 400 pages answers 422 with the count and what to narrow. Subjects the report’s account cannot read are counted in the document rather than omitted from it, and answer as ids without saying which are deleted (`E-03`). A report whose account has been deleted or disabled answers 422, and one that would render more values than the limit answers 422 with the count and what to narrow — refused rather than truncated, because a report quietly missing its last four hundred sensors is the failure this whole surface exists to avoid.
+Runs the report against its span and its security context and answers the document. `?format=html` (the default), `?format=csv`, `?format=xml` or `?format=pdf`. **An interval with no reading is a gap, in every format** — an empty field in CSV, `—` in HTML and in PDF, and `xsi:nil="true"` in XML, never a zero and never the previous value carried forward. A row whose channels are all empty is still printed: dropping it would make the table claim the period was shorter than it was. A PDF is laid out by this service rather than by a browser, so it has a page limit as well as a value limit: a report over 400 pages answers 422 with the count and what to narrow. Subjects the report’s account cannot read are counted in the document rather than omitted from it, and answer as ids without saying which are deleted. A report whose account has been deleted or disabled answers 422, and one that would render more values than the limit answers 422 with the count and what to narrow — refused rather than truncated, because a report quietly missing its last four hundred sensors is the failure this whole surface exists to avoid.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3283,7 +3283,7 @@ Runs the report against its span and its security context and answers the docume
 
 Download what a run produced
 
-The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what the report was set to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` and a second download is a 304. **An email-only report keeps nothing once it has been delivered** (`ADR-005` Decision 4) and answers 404 here. It is stored between rendering and sending because a retry needs the bytes, and a re-render months later is a different document.
+The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what the report was set to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` and a second download is a 304. **An email-only report keeps nothing once it has been delivered**, and answers 404 here. It is stored between rendering and sending because a retry needs the bytes, and a re-render months later is a different document.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3353,7 +3353,7 @@ Whole-document: a partial update of a period list is a merge nobody can define. 
 
 Delete a schedule
 
-Refused while any object still assigns it — the refusal names them — and refused outright for the schedules this build ships. **The refusal names and counts only the objects, and the rediscovery rules, the caller can see** (`A-16`); `details.outsideView` is true when others outside the caller’s view are in the way too, and says nothing of how many. An administrator is shown every one.
+Refused while any object still assigns it — the refusal names them — and refused outright for the schedules this build ships. **The refusal names and counts only the objects, and the rediscovery rules, the caller can see**; `details.outsideView` is true when others outside the caller’s view are in the way too, and says nothing of how many. An administrator is shown every one.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3436,7 +3436,7 @@ For types whose parameters contain paths into a document — `rest.custom`’s `
 
 The channels these parameters would declare
 
-Which channels a sensor of this type would have with these parameters: each key, name, unit, lookup, whether it is primary, and whether it is a counter (`counterBits`, `null` for a gauge). The parameters are validated and given their defaults as a create would, and the **type’s own declaration** answers for them, so this is what a create would write and what an edit is compared against. For a client that has to know a channel’s key before there is a sensor or a reading — the parameters form asks it which channel a table column it is putting back lands on, to hold the column to the channel the sensor kept when an earlier edit took the column out (U-40). Limits are not in the answer: only a type whose channels never depend on its parameters declares them, and no edit changes one. **Nothing is read and nothing is stored.** Parameters a create would refuse are refused here with the same 400 and the same problems; a type that is not registered is a 404.
+Which channels a sensor of this type would have with these parameters: each key, name, unit, lookup, whether it is primary, and whether it is a counter (`counterBits`, `null` for a gauge). The parameters are validated and given their defaults as a create would, and the **type’s own declaration** answers for them, so this is what a create would write and what an edit is compared against. For a client that has to know a channel’s key before there is a sensor or a reading — the parameters form asks it which channel a table column it is putting back lands on, to hold the column to the channel the sensor kept when an earlier edit took the column out. Limits are not in the answer: only a type whose channels never depend on its parameters declares them, and no edit changes one. **Nothing is read and nothing is stored.** Parameters a create would refuse are refused here with the same 400 and the same problems; a type that is not registered is a 404.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3496,7 +3496,7 @@ Historic channel data for a sensor. The resolution is snapped up to a supported 
 
 Run this sensor’s check now and return what it said
 
-Asks the probe that owns the sensor to run **exactly** the check a scheduled scan would run — the same parameters, the same credentials, the same target — and hands back the result. **Nothing is stored**: a reading taken outside the schedule is not history, and ten presses of the button would otherwise draw ten spikes into a channel whose interval is a minute. `stored` says so on every response. A check that *fails* is a 200 carrying `outcome: "error"` and the reason, because that is the answer somebody pressed the button to get. The error statuses are for the query failing rather than the check: 503 the probe is not connected or is already running as many of these as it will, 504 it did not answer in time, 409 it is too old to be asked at all — or, as `OBJECT_CREDENTIALS_WITHHELD`, the sensor is not being sent its credentials because nobody who may still write where they are stored vouches for where it sends them (`A-41`); the message says what fixes it. A **paused** sensor can still be checked. A pause stops the monitoring; it does not stop an operator asking whether the thing they just fixed is working, which is exactly when a sensor is most likely to be paused.
+Asks the probe that owns the sensor to run **exactly** the check a scheduled scan would run — the same parameters, the same credentials, the same target — and hands back the result. **Nothing is stored**: a reading taken outside the schedule is not history, and ten presses of the button would otherwise draw ten spikes into a channel whose interval is a minute. `stored` says so on every response. A check that *fails* is a 200 carrying `outcome: "error"` and the reason, because that is the answer somebody pressed the button to get. The error statuses are for the query failing rather than the check: 503 the probe is not connected or is already running as many of these as it will, 504 it did not answer in time, 409 it is too old to be asked at all — or, as `OBJECT_CREDENTIALS_WITHHELD`, the sensor is not being sent its credentials because nobody who may still write where they are stored vouches for where it sends them; the message says what fixes it. A **paused** sensor can still be checked. A pause stops the monitoring; it does not stop an operator asking whether the thing they just fixed is working, which is exactly when a sensor is most likely to be paused.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3637,7 +3637,7 @@ Pauses an object and every sensor beneath it. Give `minutes` for a duration, `un
 
 ### `DELETE /api/v1/objects/{id}/pause`
 
-Resumes an object, or cancels a maintenance window it has not reached yet. Only the object that was directly paused can be resumed — a sensor paused because its device is paused has nothing of its own to clear, and the 409 names the object to resume instead. **By id alone when the caller cannot see it** (`A-16`): a pause inherited from a container above the caller’s branch, or a master in another branch, is named in the 409 as `GET` names it, with `pausedByName` or `masterName` null. A resumed sensor reads Unknown until its next scan, never the state it had before the pause, which the system has not checked since.
+Resumes an object, or cancels a maintenance window it has not reached yet. Only the object that was directly paused can be resumed — a sensor paused because its device is paused has nothing of its own to clear, and the 409 names the object to resume instead. **By id alone when the caller cannot see it**: a pause inherited from a container above the caller’s branch, or a master in another branch, is named in the 409 as `GET` names it, with `pausedByName` or `masterName` null. A resumed sensor reads Unknown until its next scan, never the state it had before the pause, which the system has not checked since.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3735,7 +3735,7 @@ What changed, when, from what, why, and how long it lasted. Scope to a branch wi
 
 Every sensor that is currently in an alarm state, worst first, and every held return
 
-Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states that are alarms. **Paused and Unknown are absent by design**: a paused sensor is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap in coverage rather than a fault. Reporting either as an alarm is how a list becomes one an operator scrolls past. `objectId` scopes to that object and everything beneath it. `counts` is per state across the whole scope and ignores the `state` filter, so a severity chip can still say how many it is hiding. A sensor that is back while its alarm waits to see the return last (`M-18`) is listed too, after everything still happening, with `recovering` saying when it is over. It counts as `recovering` rather than as its state, unless that state is one of the five, and `state=recovering` filters to those. `now` is the core's clock, to time the moment a hold ends against: that is not a state change, and the state stream does not announce it. Only sensors the caller can read are listed or counted, and `path` and `pathNames` carry only the steps the caller can read.
+Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states that are alarms. **Paused and Unknown are absent by design**: a paused sensor is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap in coverage rather than a fault. Reporting either as an alarm is how a list becomes one an operator scrolls past. `objectId` scopes to that object and everything beneath it. `counts` is per state across the whole scope and ignores the `state` filter, so a severity chip can still say how many it is hiding. A sensor that is back while its alarm waits to see the return last is listed too, after everything still happening, with `recovering` saying when it is over. It counts as `recovering` rather than as its state, unless that state is one of the five, and `state=recovering` filters to those. `now` is the core's clock, to time the moment a hold ends against: that is not a state change, and the state stream does not announce it. Only sensors the caller can read are listed or counted, and `path` and `pathNames` carry only the steps the caller can read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3819,7 +3819,7 @@ Every notification template
 
 Create a template
 
-Only an administrator may name an account or a group as a recipient (`M-20`); anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses (`A-44`).
+Only an administrator may name an account or a group as a recipient; anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses.
 
 **Body** — [ms:templateInput](#schema-ms-templateinput)
 
@@ -3843,7 +3843,7 @@ One template
 
 Replace a template
 
-Whole-document, with one exception: a secret the request does not carry is **kept**, because the form it came from was rendered without it. Send an explicit `null` to clear one. **A secret is kept only while it goes where it went:** a request that changes a webhook's `url`, or a program's `path` or any of its `args`, clears the secrets sent there unless it carries them again, so re-pointing a template never sends a token somebody else set to a new destination. A field left out counts as its default: a program with no `args` keeps its `secretArgs` through an edit that sends none. **Only an administrator may add an account or a group recipient** (`M-20`, `A-44`): anybody else may keep or remove the ones the template has, and gets 403 `AUTH_FORBIDDEN` for one it did not have.
+Whole-document, with one exception: a secret the request does not carry is **kept**, because the form it came from was rendered without it. Send an explicit `null` to clear one. **A secret is kept only while it goes where it went:** a request that changes a webhook's `url`, or a program's `path` or any of its `args`, clears the secrets sent there unless it carries them again, so re-pointing a template never sends a token somebody else set to a new destination. A field left out counts as its default: a program with no `args` keeps its `secretArgs` through an edit that sends none. **Only an administrator may add an account or a group recipient**: anybody else may keep or remove the ones the template has, and gets 403 `AUTH_FORBIDDEN` for one it did not have.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3859,7 +3859,7 @@ Whole-document, with one exception: a secret the request does not carry is **kep
 
 Remove a template
 
-Refused while a trigger still names it, with the list of triggers to fix: deleting one out from under a trigger would leave that trigger firing into nothing. **Only triggers on objects the caller can see are listed or counted** (`A-16`); `details.outsideView` is true when others outside the caller’s view use it too, and says nothing of how many. An administrator is shown every one.
+Refused while a trigger still names it, with the list of triggers to fix: deleting one out from under a trigger would leave that trigger firing into nothing. **Only triggers on objects the caller can see are listed or counted**; `details.outsideView` is true when others outside the caller’s view use it too, and says nothing of how many. An administrator is shown every one.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -3907,7 +3907,7 @@ Rendered against the sensor’s actual state, not an invented one. An operator w
 
 What an unsaved draft would say about one sensor
 
-The same rendering as the saved preview, against a template that does not exist yet — what an editor needs to show the text in the box rather than the text on disk (`U-10`). The draft goes through the same validation a write does, so one that could not be saved is refused here rather than previewing something the operator cannot keep. Nothing is sent, nothing is written, and no template is created.
+The same rendering as the saved preview, against a template that does not exist yet — what an editor needs to show the text in the box rather than the text on disk. The draft goes through the same validation a write does, so one that could not be saved is refused here rather than previewing something the operator cannot keep. Nothing is sent, nothing is written, and no template is created.
 
 **Body**
 
@@ -3924,7 +3924,7 @@ The same rendering as the saved preview, against a template that does not exist 
 
 Send a test notification through this template
 
-**This really sends.** The same rendering, the same transport, the same settings and the same recipients — testing an on-call template at three in the morning pages whoever is on call, which is why it is written to the audit log. What it skips is the queue: nothing is retried, summarised or suppressed by an activation schedule, because those would each turn "did my relay work" into "wait fifteen minutes and find out". `notes` reports what a real notification would have run into instead, so a green test on a template that is switched off cannot be mistaken for a working alarm. Without `sensorId` the message is rendered against an example sensor, which is what an installation with no sensors yet needs. Anybody the template names and the send missed is named in `detail` or `error` for an administrator, and counted by reason for anybody else — `not sent to 2 recipients (1 disabled, 1 no email address)` — because the names are the account and group lists, which are an administrator’s (`A-44`). **`subject` and `body` are the message as the caller may read it** (`A-16`): `%probe`, `%group`, `%device` and `%host` for a container outside the caller’s view read `(outside your view)`, as in a preview, and `notes` says so. What is sent is the real message.
+**This really sends.** The same rendering, the same transport, the same settings and the same recipients — testing an on-call template at three in the morning pages whoever is on call, which is why it is written to the audit log. What it skips is the queue: nothing is retried, summarised or suppressed by an activation schedule, because those would each turn "did my relay work" into "wait fifteen minutes and find out". `notes` reports what a real notification would have run into instead, so a green test on a template that is switched off cannot be mistaken for a working alarm. Without `sensorId` the message is rendered against an example sensor, which is what an installation with no sensors yet needs. Anybody the template names and the send missed is named in `detail` or `error` for an administrator, and counted by reason for anybody else — `not sent to 2 recipients (1 disabled, 1 no email address)` — because the names are the account and group lists, which are an administrator’s. **`subject` and `body` are the message as the caller may read it**: `%probe`, `%group`, `%device` and `%host` for a container outside the caller’s view read `(outside your view)`, as in a preview, and `notes` says so. What is sent is the real message.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -4064,7 +4064,7 @@ The shapes routes share, each declared once in the code and rendered once here.
 | `acknowledged` | boolean | **required** |  |
 | `acknowledgedUntil` | string | **required** nullable |  |
 | `consecutiveFailures` | integer | **required** |  |
-| `recovering` | object | **required** nullable | The return its alarm is holding (`M-18`), or null. `confirmsAt` is when the alarm is over if the sensor does not fail again. |
+| `recovering` | object | **required** nullable | The return its alarm is holding, or null. `confirmsAt` is when the alarm is over if the sensor does not fail again. |
 | `recovering.since` | string | **required** |  |
 | `recovering.confirmsAt` | string | **required** nullable |  |
 
@@ -4164,7 +4164,7 @@ one of 4 shapes, by `kind`
 | `showInGraph` | boolean | **required** |  |
 | `showInTable` | boolean | **required** |  |
 | `lookupId` | string | **required** nullable |  |
-| `counterBits` | `32` · `64` | **required** nullable | The counter width the channel was declared with, or `null` for a gauge: whether its samples are rates or values as read. Fixed for the channel’s life — an edit that would turn a counter into a gauge or back is refused with `409 OBJECT_CHANNEL_MODE_FIXED` — so a column an edit took out and another puts back is held to it (U-40). |
+| `counterBits` | `32` · `64` | **required** nullable | The counter width the channel was declared with, or `null` for a gauge: whether its samples are rates or values as read. Fixed for the channel’s life — an edit that would turn a counter into a gauge or back is refused with `409 OBJECT_CHANNEL_MODE_FIXED` — so a column an edit took out and another puts back is held to it. |
 | `declaredLookup` | string | **required** nullable | The lookup the sensor’s type declares for this channel, for its stored parameters, or `null`: none declared, or a type that cannot answer for them or is not registered. A channel created before its type declared one has `lookupId` null beside it; set it with `PATCH /objects/{id}/channels/{key}`. Worked out from the type on every read. |
 | `retired` | boolean | **required** | Nothing will read this channel again: the sensor’s type declares every channel it reports, and the sensor’s parameters no longer declare this one (an edit took it out), and it has no reading newer than the last change to the sensor’s parameters, which a probe running a newer build than the core could still send. A reading is timed by the probe’s clock, so after each change such a channel can read `true` for one scan interval plus however far that probe’s clock runs behind the core’s database. Its history is kept, and putting it back makes it live again. Worked out from the type on every read. `false` also where the type cannot say: one whose readings can name channels it does not declare, such as a script’s. |
 
@@ -4229,14 +4229,14 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `object` | [ms:objectDetail](#schema-ms-objectdetail) | **required** |  |
-| `grantsNotCarried` | integer, at least 0 | **required** | How many positive grants on what was copied the copy did not carry, because only a caller who may grant (the admin role with full scope) carries them (`A-76`). Anybody else’s copy carries each `none`, and each `read` that narrows what its group holds where the copy landed, and no other group’s `write` or `full`. This counts the `write` and `full` grants left behind. A `read` left behind because it would widen where the copy landed is not counted, since whether it would depends on grants there the caller may not read. Every grant left behind is in the copy’s history as `grant.notCarried`. Always 0 for a caller who may grant, whose copy carries every grant. |
+| `grantsNotCarried` | integer, at least 0 | **required** | How many positive grants on what was copied the copy did not carry, because only a caller who may grant (the admin role with full scope) carries them. Anybody else’s copy carries each `none`, and each `read` that narrows what its group holds where the copy landed, and no other group’s `write` or `full`. This counts the `write` and `full` grants left behind. A `read` left behind because it would widen where the copy landed is not counted, since whether it would depends on grants there the caller may not read. Every grant left behind is in the copy’s history as `grant.notCarried`. Always 0 for a caller who may grant, whose copy carries every grant. |
 | `clonedCount` | object | **required** |  |
 | `clonedCount.group` | integer | **required** |  |
 | `clonedCount.device` | integer | **required** |  |
 | `clonedCount.sensor` | integer | **required** |  |
 | `clonedCount.channel` | integer | **required** |  |
 | `clonedCount.setting` | integer | **required** |  |
-| `clonedCount.trigger` | integer | **required** | Notification triggers copied with the objects that own them (`P-141`). The clone already carried the trigger *fence* and none of the triggers behind it, so a cloned object with the fence up notified nobody and looked identical to one that did. |
+| `clonedCount.trigger` | integer | **required** | Notification triggers copied with the objects that own them. A copy carries the trigger *fence* and the triggers behind it together, so a cloned object with the fence up has the triggers the original had. |
 | `clonedCount.total` | integer | **required** |  |
 | `droppedCredentialKinds` | (`snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail`)[] | **required** |  |
 | `settingsChanged` | object[] | **required** |  |
@@ -4260,7 +4260,7 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | `ipVersion` | `auto` · `v4` · `v6` |  |  |
 | `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` (must be a sensor type id: two or more parts separated by dots, in lowercase letters and digits, with dashes allowed after the first dot, such as snmp.traffic or exe.script-advanced) |  |  |
 | `params` | object |  |  |
-| `gid` | string, 1–128 characters | nullable | Binds this probe branch to a connected probe. R-01 replaces setting it by hand with an enrolment flow; until then it is how a probe is told which subtree it owns. |
+| `gid` | string, 1–128 characters | nullable | The identity (GID) of the probe that owns this branch. Approving the probe with `POST /probes/{gid}/approve` sets it and is the usual way; setting it here binds the branch by hand. A GID another probe object already holds is refused. |
 
 - when `kind` is `device`, `host` is required
 - when `kind` is `sensor`, `sensorType` is required
@@ -4297,11 +4297,11 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
-| `publicParams` | object | **required** | The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in the clear. The `writeOnly` fields are encrypted at rest and served to nobody; `secretsSet` names the ones that hold a value (P-344). |
+| `publicParams` | object | **required** | The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in the clear. The `writeOnly` fields are encrypted at rest and served to nobody; `secretsSet` names the ones that hold a value. |
 | `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
 | `updatedAt` | string | **required** |  |
-| `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
-| `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values (`U-21`). Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
+| `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes. False means `write` on the object it is stored on is trust with it. |
+| `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values. Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
 
 <a id="schema-ms-credentialwrite"></a>
 
@@ -4310,16 +4310,16 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
-| `publicParams` | object | **required** | The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in the clear. The `writeOnly` fields are encrypted at rest and served to nobody; `secretsSet` names the ones that hold a value (P-344). |
+| `publicParams` | object | **required** | The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in the clear. The `writeOnly` fields are encrypted at rest and served to nobody; `secretsSet` names the ones that hold a value. |
 | `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
 | `updatedAt` | string | **required** |  |
-| `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
-| `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values (`U-21`). Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
+| `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes. False means `write` on the object it is stored on is trust with it. |
+| `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values. Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
 | `withholds` | integer, at least 0 | **required** | How many sensors beneath this set its allowed targets keep it from now, of those the caller can see: a sensor whose device's address is outside them, or whose device is entered by name where the targets are addresses and the sensor’s type cannot be held to an address its probe checked. They are not sent the set and read Unknown. Zero for a set with no targets. |
-| `withheldBefore` | integer, at least 0 | **required** | Of the sensors this set reaches now and the caller can see, how many a set’s targets kept it from before this write (`A-55`): this set’s as it was, or an ancestor’s where this write stores the first set of the kind here. `withholds` is this, plus `newlyWithheld`, less `noLongerWithheld`. |
-| `newlyWithheld` | integer, at least 0 | **required** | How many sensors this write puts outside (`A-55`): kept from the set after it and not before, of those the caller can see. What a narrowing takes to Unknown. |
-| `noLongerWithheld` | integer, at least 0 | **required** | How many sensors this write brings back inside (`A-55`): kept from a set before it and sent this one after, of those the caller can see. |
-| `byReason` | object | **required** | The four counts above for each of the two reasons a sensor is outside (`A-59`), over the same sensors the caller can see, so each count above is the sum of its two parts. A sensor outside after the write is counted for the reason that holds after it, and one outside before for the reason that held then, so a sensor that stays outside for another reason moves between the two without being newly outside. |
+| `withheldBefore` | integer, at least 0 | **required** | Of the sensors this set reaches now and the caller can see, how many a set’s targets kept it from before this write: this set’s as it was, or an ancestor’s where this write stores the first set of the kind here. `withholds` is this, plus `newlyWithheld`, less `noLongerWithheld`. |
+| `newlyWithheld` | integer, at least 0 | **required** | How many sensors this write puts outside: kept from the set after it and not before, of those the caller can see. What a narrowing takes to Unknown. |
+| `noLongerWithheld` | integer, at least 0 | **required** | How many sensors this write brings back inside: kept from a set before it and sent this one after, of those the caller can see. |
+| `byReason` | object | **required** | The four counts above for each of the two reasons a sensor is outside, over the same sensors the caller can see, so each count above is the sum of its two parts. A sensor outside after the write is counted for the reason that holds after it, and one outside before for the reason that held then, so a sensor that stays outside for another reason moves between the two without being newly outside. |
 | `byReason.outside` | object | **required** | Sensors on a device whose address, or whose name, the allowed targets do not cover. |
 | `byReason.outside.withholds` | integer, at least 0 | **required** |  |
 | `byReason.outside.withheldBefore` | integer, at least 0 | **required** |  |
@@ -4376,7 +4376,7 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
 | `groupId` | integer | **required** |  |
-| `probeId` | integer |  | The probe the run sweeps from. Absent for a caller who cannot see that probe (A-80): the run is read with read on its group, and the probe above it is another object. |
+| `probeId` | integer |  | The probe the run sweeps from. Absent for a caller who cannot see that probe: the run is read with read on its group, and the probe above it is another object. |
 | `range` | string | **required** |  |
 | `total` | integer | **required** |  |
 | `cursor` | integer | **required** |  |
@@ -4539,7 +4539,7 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | `credentialsChanged[].kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
 | `credentialsChanged[].before` | `own` · `inherited` · `none` | **required** |  |
 | `credentialsChanged[].after` | `own` · `inherited` · `none` | **required** |  |
-| `exceptionsCleared` | integer, at least 0 | **required** | Devices whose exception to the target policy the move cleared because it took them to another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused. |
+| `exceptionsCleared` | integer, at least 0 | **required** | Devices whose exception to the target policy the move cleared because it took them to another probe. Only an administrator’s move does; anybody else’s is refused. |
 
 <a id="schema-ms-notificationmethod"></a>
 
@@ -4577,7 +4577,7 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | `deliveredAt` | string | **required** nullable |  |
 | `nextAttemptAt` | string | **required** nullable |  |
 | `lastError` | string | **required** nullable |  |
-| `skippedRecipients` | string |  | Who a message named and did not reach, and why — a disabled account, one with no address, one that may not see the sensor. Empty when it reached everybody (`M-19`). By name for an administrator; for anybody else, by count and reason only — `2 recipients (1 disabled, 1 may not see this sensor)` — because the names are the account and group lists, which are an administrator’s (`A-44`). |
+| `skippedRecipients` | string |  | Who a message named and did not reach, and why — a disabled account, one with no address, one that may not see the sensor. Empty when it reached everybody. By name for an administrator; for anybody else, by count and reason only — `2 recipients (1 disabled, 1 may not see this sensor)` — because the names are the account and group lists, which are an administrator’s. |
 
 <a id="schema-ms-objectdetail"></a>
 
@@ -4602,9 +4602,9 @@ Where a failed check failed, as the probe named it (protocol 35): the phase, and
 | `targetPolicyException` | string[] |  |  |
 | `gid` | string | nullable |  |
 | `sensorType` | string |  |  |
-| `params` | object |  | A sensor’s parameters, shaped by its type’s `paramsSchema` (`GET /sensor-types`), with every parameter that schema marks `writeOnly` removed on every read, for every caller (P-05). The removal is made at run time from the type’s schema, which this document does not carry; build-hygiene checks that every parameter named like a secret is marked (P-344). |
+| `params` | object |  | A sensor’s parameters, shaped by its type’s `paramsSchema` (`GET /sensor-types`), with every parameter that schema marks `writeOnly` removed on every read, for every caller. The removal is made at run time from the type’s schema, which this document does not carry: read that schema to know which parameters are never returned. |
 | `redactedParams` | string[] |  | The dotted paths of the `writeOnly` parameters that hold a value and were removed from `params`. Never the values. |
-| `lookupsKept` | string[] |  | On an edit’s reply only: the channels whose lookup the new parameters declare differently and that were kept, because the sensor type could not say what the stored parameters declared (U-36, P-311). Absent when there were none. |
+| `lookupsKept` | string[] |  | On an edit’s reply only: the channels whose lookup the new parameters declare differently and that were kept, because the sensor type could not say what the stored parameters declared. Absent when there were none. |
 | `settings` | [ms:settingView](#schema-ms-settingview)[] |  |  |
 | `channels` | [ms:channelRecord](#schema-ms-channelrecord)[] |  |  |
 | `credentials` | [ms:credentialView](#schema-ms-credentialview)[] |  |  |
@@ -4900,7 +4900,7 @@ one of 3 shapes, by `kind`
 | `description` | string | **required** |  |
 | `method` | string | **required** |  |
 | `methodName` | string | **required** |  |
-| `settings` | object | **required** | The method’s settings, shaped by its `settingsSchema` (`GET /notification-methods`), with every setting that schema marks `writeOnly` removed on every read (P-344). |
+| `settings` | object | **required** | The method’s settings, shaped by its `settingsSchema` (`GET /notification-methods`), with every setting that schema marks `writeOnly` removed on every read. |
 | `redactedSettings` | string[] | **required** | The dotted paths of the `writeOnly` settings that hold a value and were removed from `settings`, so a form can say "set, not shown". Never the values. |
 | `subject` | string | **required** |  |
 | `body` | string | **required** |  |

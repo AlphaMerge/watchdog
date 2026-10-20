@@ -17,9 +17,10 @@ const choiceSchema = {
     id: { type: 'integer' },
     login: { type: 'string' },
     displayName: { type: 'string' },
+    // Skipped since `M-19`.
     disabled: {
       type: 'boolean',
-      description: 'A disabled account is skipped when a notification is sent (`M-19`).',
+      description: 'A disabled account is skipped when a notification is sent.',
     },
     hasAddress: {
       type: 'boolean',

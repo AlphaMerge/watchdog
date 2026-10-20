@@ -760,6 +760,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         params: idParams,
         tags: ['reports'],
         summary: 'Run this report now',
+        // Delivery is `E-09`'s.
         description:
           'Renders the report against its span and its security context, and records the ' +
           'outcome. **Needs `write`, not `read`** — a render is minutes of work against the same ' +
@@ -769,9 +770,11 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
           'button pressed six times must not become six renders competing for the same pool. The ' +
           'constraint is a partial unique index, so two requests racing lose at the database ' +
           'rather than in a window between a check and an insert.\n\n' +
-          'The rendered document is not kept — `E-09` decides where a report goes. What this ' +
-          'records is that it ran, what period it covered, how large it was, and why it failed ' +
-          'if it did, which is what tells an operator at 09:00 whether last night worked.',
+          'Where the rendered document goes is the report’s `delivery`: kept for download, kept ' +
+          'and emailed, or emailed and kept only until it has been sent, and `outputs` lists ' +
+          'what the run still holds. The run records that it ran, what period it covered, how ' +
+          'large it was, and why it failed if it did, which is what tells an operator at 09:00 ' +
+          'whether last night worked.',
         response: { 201: runResponse },
       },
     },
@@ -919,6 +922,7 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
         params: idParams,
         tags: ['reports'],
         summary: 'Render this report now, as HTML, CSV, XML or PDF',
+        // The PDF layout is `ADR-006`'s, and the security context `E-03`'s.
         description:
           'Runs the report against its span and its security context and answers the document. ' +
           '`?format=html` (the default), `?format=csv`, `?format=xml` or `?format=pdf`.\n\n' +
@@ -926,11 +930,11 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
           '`—` in HTML and in PDF, and `xsi:nil="true"` in XML, never a zero and never the ' +
           'previous value carried forward. A row whose channels are all empty is still printed: ' +
           'dropping it would make the table claim the period was shorter than it was.\n\n' +
-          'A PDF is laid out by this service rather than by a browser (`ADR-006`), so it has a ' +
+          'A PDF is laid out by this service rather than by a browser, so it has a ' +
           'page limit as well as a value limit: a report over ' +
           `${String(MAX_PDF_PAGES)} pages answers 422 with the count and what to narrow.\n\n` +
           'Subjects the report’s account cannot read are counted in the document rather than ' +
-          'omitted from it, and answer as ids without saying which are deleted (`E-03`). A report ' +
+          'omitted from it, and answer as ids without saying which are deleted. A report ' +
           'whose account has been deleted or disabled answers 422, and one that would render more ' +
           'values than the limit answers 422 with the count and what to narrow — refused rather ' +
           'than truncated, because a report quietly missing its last four hundred sensors is the ' +
@@ -984,13 +988,14 @@ export function reportDownloadRoute(app: FastifyInstance, options: ReportRouteOp
         params: outputParams,
         tags: ['reports'],
         summary: 'Download what a run produced',
+        // An email-only report keeps nothing once sent: `ADR-005`, Decision 4.
         description:
           'The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what the ' +
           'report was set ' +
           'to render. The bytes carry their own SHA-256 as a strong `ETag`; send `If-None-Match` ' +
           'and a second download is a 304.\n\n' +
-          '**An email-only report keeps nothing once it has been delivered** (`ADR-005` ' +
-          'Decision 4) and answers 404 here. It is stored between rendering and sending because a ' +
+          '**An email-only report keeps nothing once it has been delivered**, and answers 404 ' +
+          'here. It is stored between rendering and sending because a ' +
           'retry needs the bytes, and a re-render months later is a different document.',
       },
     },

@@ -120,10 +120,11 @@ export function scheduleRoutes(app: FastifyInstance, options: ScheduleRouteOptio
       schema: {
         tags: ['schedules'],
         summary: 'Delete a schedule',
+        // Named and counted in the caller's view since `A-16`.
         description:
           'Refused while any object still assigns it — the refusal names them — and refused ' +
           'outright for the schedules this build ships. **The refusal names and counts only ' +
-          'the objects, and the rediscovery rules, the caller can see** (`A-16`); ' +
+          'the objects, and the rediscovery rules, the caller can see**; ' +
           '`details.outsideView` is true when others outside the caller’s view are in the way ' +
           'too, and says nothing of how many. An administrator is shown every one.',
         params: idParams,

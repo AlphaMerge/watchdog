@@ -27,11 +27,12 @@ const registrationSchema = {
     displayName: { type: 'string' },
     agentVersion: { type: 'string' },
     protocolVersion: { type: 'integer' },
+    // `U-33`, and its refused twin `U-35`.
     protocolAcceptedAt: {
       type: ['string', 'null'],
       format: 'date-time',
       description:
-        'When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a ' +
+        'When a handshake this core accepted spoke `protocolVersion`. `null` beside a ' +
         'version a hello was refused over, and for one recorded before the core kept the time. ' +
         'Not `lastSeenAt`, which a hello refused over its version moves too.',
     },
@@ -39,7 +40,7 @@ const registrationSchema = {
       type: ['string', 'null'],
       format: 'date-time',
       description:
-        'When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a ' +
+        'When a hello was last refused over `protocolVersion`. `null` beside a version a ' +
         'handshake this core accepted, and for one recorded before the core kept the time. ' +
         'Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a ' +
         'probe that claimed 0 and was refused; with neither time it is a probe that has not ' +
@@ -53,10 +54,11 @@ const registrationSchema = {
         'Whether a key has been issued to this probe. Never the key — it is sent once, in the ' +
         'welcome that approves it, and no route can read it back.',
     },
+    // The binding `P-326` added.
     certificateFingerprint: {
       type: ['string', 'null'],
       description:
-        'The SHA-256 fingerprint of the client certificate this probe is bound to (`P-326`), as ' +
+        'The SHA-256 fingerprint of the client certificate this probe is bound to, as ' +
         '`openssl x509 -noout -fingerprint -sha256` prints it. A hello with any other ' +
         'certificate is refused with `certificate-not-bound`. Null until a hello proves the ' +
         'identity: a probe recorded before the binding existed, or one whose binding an ' +
@@ -68,18 +70,19 @@ const registrationSchema = {
     firstSeenAt: { type: 'string' },
     lastSeenAt: { type: ['string', 'null'] },
     decidedAt: { type: ['string', 'null'] },
+    // Version skew is `R-06`'s; a newer probe admitted is `P-178`'s.
     skew: {
       type: 'object',
       additionalProperties: false,
       required: ['kind', 'explanation'],
       description:
-        'What this probe’s protocol version means against this core (R-06). `outdated` is the ' +
+        'What this probe’s protocol version means against this core. `outdated` is the ' +
         'one worth reading: such a probe connects and heartbeats normally and is refused every ' +
         'feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning ' +
-        'nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and ' +
+        'nothing at all. `ahead` is a probe newer than this core: it is admitted and ' +
         'the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a ' +
         'version this core refuses at the handshake; its `explanation` says when a hello was ' +
-        'refused over it (`protocolRefusedAt`, U-35). `unknown` is a 0 with neither time: ' +
+        'refused over it (`protocolRefusedAt`). `unknown` is a 0 with neither time: ' +
         'nothing recorded.',
       properties: {
         // Every kind `describeSkew` returns (`P-313`): the serializer does not check an enum, so
@@ -189,6 +192,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
       schema: {
         tags: ['probes'],
         summary: 'Approve a probe onto a branch of the tree',
+        // The connection is closed since `P-189`: a session's approval is fixed at admission.
         description:
           'Binds this identity to a probe object. The probe is issued a key of its own at its ' +
           '**next handshake**, not here: approving a machine that is switched off is an ' +
@@ -197,9 +201,8 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
           'authenticated link, so it never passes through a clipboard or a support ticket. A ' +
           'probe that is already connected has its connection closed and comes back on its own ' +
           'retry — about a second — because the handshake is where both the key and the first ' +
-          'configuration are issued. It said "starts scanning without reconnecting" until ' +
-          '`P-189`, which was not implemented: the session\u2019s approval is fixed at ' +
-          'admission, so a probe approved after it connected sat there scanning nothing.',
+          'configuration are issued, and a connection admitted before the approval would scan ' +
+          'nothing.',
         params: gidParams,
         body: {
           type: 'object',
@@ -211,6 +214,7 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
               minimum: 1,
               description: 'The probe object this identity owns from now on.',
             },
+            // One local probe object since `P-382`.
             local: {
               type: 'boolean',
               default: false,
@@ -218,8 +222,8 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
                 'Whether this is the probe running beside the core. A local probe cannot be ' +
                 'deleted, matching PRTG. Said explicitly rather than guessed: an address proves ' +
                 'nothing on a host with several interfaces, and "the first one approved" is ' +
-                'wrong for anybody who stood up a remote probe first. One probe object is local ' +
-                '(`P-382`): another one holding it with a probe still approved onto it refuses ' +
+                'wrong for anybody who stood up a remote probe first. One probe object is local: ' +
+                'another one holding it with a probe still approved onto it refuses ' +
                 'this with 409, and one whose probe was revoked or deleted gives it up, as the ' +
                 "approval's audit entry records. `false` never clears it.",
             },
@@ -310,8 +314,8 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
         tags: ['probes'],
         summary: 'Bind a probe to the certificate it now holds',
         description:
-          'The rotation path for a probe whose client certificate was renewed or reissued ' +
-          '(`P-326`). A `fingerprint` binds that certificate: read it off the new certificate ' +
+          'The rotation path for a probe whose client certificate was renewed or reissued. ' +
+          'A `fingerprint` binds that certificate: read it off the new certificate ' +
           'with `openssl x509 -noout -fingerprint -sha256 -in probe.crt`, colons optional. ' +
           '`null` clears the binding, and the next hello that proves this identity by its key ' +
           'binds whatever certificate it presents. Either way the probe’s live connection is ' +

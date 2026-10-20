@@ -187,17 +187,17 @@ export const objectDetailSchema = {
     /**
      * Never contains a parameter the type marked `writeOnly` — `ObjectService` strips them
      * before a detail reaches a route. `fast-json-stringify` cannot help here: `params` is
-     * free-form by design, so the serialiser has no list of keys to omit.
+     * free-form by design, so the serialiser has no list of keys to omit. The contract since
+     * `P-05`; build hygiene holds every parameter named like a secret to `writeOnly` (`P-344`).
      */
     params: {
       type: 'object',
       additionalProperties: true,
       description:
         'A sensor’s parameters, shaped by its type’s `paramsSchema` (`GET /sensor-types`), with ' +
-        'every parameter that schema marks `writeOnly` removed on every read, for every caller ' +
-        '(P-05). The removal is made at run time from the type’s schema, which this document ' +
-        'does not carry; build-hygiene checks that every parameter named like a secret is marked ' +
-        '(P-344).',
+        'every parameter that schema marks `writeOnly` removed on every read, for every caller. ' +
+        'The removal is made at run time from the type’s schema, which this document does not ' +
+        'carry: read that schema to know which parameters are never returned.',
     },
     redactedParams: {
       type: 'array',
@@ -218,7 +218,7 @@ export const objectDetailSchema = {
       description:
         'On an edit’s reply only: the channels whose lookup the new parameters declare ' +
         'differently and that were kept, because the sensor type could not say what the stored ' +
-        'parameters declared (U-36, P-311). Absent when there were none.',
+        'parameters declared. Absent when there were none.',
     },
     // expansions
     settings: { type: 'array', items: { $ref: 'ms:settingView' } },
@@ -388,13 +388,14 @@ export const channelRecordSchema = {
     showInGraph: { type: 'boolean' },
     showInTable: { type: 'boolean' },
     lookupId: { type: ['string', 'null'] },
+    // Held across a retirement and a return since `U-40`.
     counterBits: {
       enum: [32, 64, null],
       description:
         'The counter width the channel was declared with, or `null` for a gauge: whether its ' +
         'samples are rates or values as read. Fixed for the channel’s life — an edit that would ' +
         'turn a counter into a gauge or back is refused with `409 OBJECT_CHANNEL_MODE_FIXED` — ' +
-        'so a column an edit took out and another puts back is held to it (U-40).',
+        'so a column an edit took out and another puts back is held to it.',
     },
     declaredLookup: {
       type: ['string', 'null'],
@@ -421,7 +422,10 @@ export const channelRecordSchema = {
   },
 } as const;
 
-/** No secret, no key id, no length, no hash. There is no field a secret could occupy. */
+/**
+ * No secret, no key id, no length, no hash. There is no field a secret could occupy. Which fields
+ * are secret is the kind's `writeOnly` (`P-344`); `bounded` is `A-41b`'s, `secretsSet` `U-21`'s.
+ */
 export const credentialViewSchema = {
   $id: 'ms:credentialView',
   type: 'object',
@@ -435,7 +439,7 @@ export const credentialViewSchema = {
       description:
         'The fields of the set its kind’s schema does not mark `writeOnly`, stored and served in ' +
         'the clear. The `writeOnly` fields are encrypted at rest and served to nobody; ' +
-        '`secretsSet` names the ones that hold a value (P-344).',
+        '`secretsSet` names the ones that hold a value.',
     },
     source: { $ref: 'ms:settingSource' },
     updatedAt: { type: 'string' },
@@ -443,15 +447,14 @@ export const credentialViewSchema = {
       type: 'boolean',
       description:
         "Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where " +
-        'the set goes (`A-41b`). False means `write` on the object it is stored on is trust ' +
-        'with it.',
+        'the set goes. False means `write` on the object it is stored on is trust with it.',
     },
     secretsSet: {
       type: 'array',
       items: { type: 'string' },
       description:
-        'The names of the secret fields that hold a value, never the values (`U-21`). Only on a ' +
-        'set stored on the object asked about, for its form to offer keep, replace and clear.',
+        'The names of the secret fields that hold a value, never the values. Only on a set ' +
+        'stored on the object asked about, for its form to offer keep, replace and clear.',
     },
   },
 } as const;
@@ -473,7 +476,8 @@ const credentialWriteCounts = (which: string) =>
 
 /**
  * What storing a set answers (`A-41b`): the set as a read shows it, and what the write did to where
- * it goes. Still no field a secret could occupy — `secretsCleared` is names.
+ * it goes. Still no field a secret could occupy — `secretsCleared` is names. The before-and-after
+ * counts are `A-55`'s, and their split by reason `A-59`'s.
  */
 export const credentialWriteSchema = {
   $id: 'ms:credentialWrite',
@@ -505,7 +509,7 @@ export const credentialWriteSchema = {
       minimum: 0,
       description:
         'Of the sensors this set reaches now and the caller can see, how many a set’s targets ' +
-        'kept it from before this write (`A-55`): this set’s as it was, or an ancestor’s where ' +
+        'kept it from before this write: this set’s as it was, or an ancestor’s where ' +
         'this write stores the first set of the kind here. `withholds` is this, plus ' +
         '`newlyWithheld`, less `noLongerWithheld`.',
     },
@@ -513,14 +517,14 @@ export const credentialWriteSchema = {
       type: 'integer',
       minimum: 0,
       description:
-        'How many sensors this write puts outside (`A-55`): kept from the set after it and not ' +
+        'How many sensors this write puts outside: kept from the set after it and not ' +
         'before, of those the caller can see. What a narrowing takes to Unknown.',
     },
     noLongerWithheld: {
       type: 'integer',
       minimum: 0,
       description:
-        'How many sensors this write brings back inside (`A-55`): kept from a set before it ' +
+        'How many sensors this write brings back inside: kept from a set before it ' +
         'and sent this one after, of those the caller can see.',
     },
     byReason: {
@@ -528,7 +532,7 @@ export const credentialWriteSchema = {
       additionalProperties: false,
       required: ['outside', 'unpinnable'],
       description:
-        'The four counts above for each of the two reasons a sensor is outside (`A-59`), over ' +
+        'The four counts above for each of the two reasons a sensor is outside, over ' +
         'the same sensors the caller can see, so each count above is the sum of its two ' +
         'parts. A sensor outside after the write is counted for the reason that holds after ' +
         'it, and one outside before for the reason that held then, so a sensor that stays ' +
@@ -584,9 +588,11 @@ export const createObjectSchema = {
       type: ['string', 'null'],
       minLength: 1,
       maxLength: 128,
+      // Kept beside `R-01`'s approval, which writes the same binding.
       description:
-        'Binds this probe branch to a connected probe. R-01 replaces setting it by hand with ' +
-        'an enrolment flow; until then it is how a probe is told which subtree it owns.',
+        'The identity (GID) of the probe that owns this branch. Approving the probe with ' +
+        '`POST /probes/{gid}/approve` sets it and is the usual way; setting it here binds the ' +
+        'branch by hand. A GID another probe object already holds is refused.',
     },
   },
   // Each name a `then` or a `not` requires is declared there, by `present` (`P-383`): strict mode
@@ -856,12 +862,13 @@ export const moveResultSchema = {
         },
       },
     },
+    // `A-64`.
     exceptionsCleared: {
       type: 'integer',
       minimum: 0,
       description:
         'Devices whose exception to the target policy the move cleared because it took them to ' +
-        'another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused.',
+        'another probe. Only an administrator’s move does; anybody else’s is refused.',
     },
   },
 } as const;
@@ -879,12 +886,13 @@ export const cloneResultSchema = {
   ],
   properties: {
     object: { $ref: 'ms:objectDetail' },
+    // `A-76`.
     grantsNotCarried: {
       type: 'integer',
       minimum: 0,
       description:
         'How many positive grants on what was copied the copy did not carry, because only a ' +
-        'caller who may grant (the admin role with full scope) carries them (`A-76`). Anybody ' +
+        'caller who may grant (the admin role with full scope) carries them. Anybody ' +
         'else’s copy carries each `none`, and each `read` that narrows what its group holds ' +
         'where the copy landed, and no other group’s `write` or `full`. This counts the ' +
         '`write` and `full` grants left behind. A `read` left behind because it would widen ' +
@@ -902,13 +910,13 @@ export const cloneResultSchema = {
         sensor: { type: 'integer' },
         channel: { type: 'integer' },
         setting: { type: 'integer' },
+        // Copied since `P-141`; before it a clone carried the fence and none of the triggers.
         trigger: {
           type: 'integer',
           description:
-            'Notification triggers copied with the objects that own them (`P-141`). The clone ' +
-            'already carried the trigger *fence* and none of the triggers behind it, so a ' +
-            'cloned object with the fence up notified nobody and looked identical to one that ' +
-            'did.',
+            'Notification triggers copied with the objects that own them. A copy carries the ' +
+            'trigger *fence* and the triggers behind it together, so a cloned object with the ' +
+            'fence up has the triggers the original had.',
         },
         total: { type: 'integer' },
       },

@@ -1,7 +1,9 @@
 import { strict as assert } from 'node:assert';
+import { execFile } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, it } from 'node:test';
+import { promisify } from 'node:util';
 import ts from 'typescript';
 import {
   BUILT_IN_SENSOR_TYPES,
@@ -20,6 +22,7 @@ import { coreCatalogue } from '../src/profile.js';
 import { builtInSchedules } from '../src/schedules/built-in.js';
 import { settingRegistry } from '../src/settings/registry.js';
 import { triggerKinds } from '../src/triggers/definition.js';
+import { within } from './support/within.js';
 
 /**
  * No internal ticket in what the API serves an operator to read (`U-92`).
@@ -35,15 +38,22 @@ import { triggerKinds } from '../src/triggers/definition.js';
  * title, description, name, text, unit, pattern sentence or limit message, or in any default,
  * example, enum value or constant, which a form shows as it is.
  *
+ * **And the API's own reference** (`U-93`): the OpenAPI document `GET /api/v1/openapi.json`
+ * serves and `docs/api-reference.md` is rendered from, built as `build-hygiene.test.ts` builds it.
+ * It cited tickets 126 times — "(`A-49`)", "the answer `D-04` will act on" — to whoever writes a
+ * client, who cannot look one up either. Every summary, description, title, name and pattern
+ * sentence in it is read, and every example, default, enum value and constant, as the reference
+ * shows them.
+ *
  * **And what the core writes when it runs**, which nothing registers: the message its own sensors
  * carry — Core Health's, Probe Health's — and the one a state is written with when a probe is lost
  * or changes or a parent is paused, each of which is the sensor's message, its state-log entry and
- * every notification carrying `%lastmessage`; every line it logs, which is the operator's journal;
- * and every refusal it builds. They are built from constants, from functions that assemble a
- * sentence and from property after property, so no list of the places they are written reaches
- * all of them. Every string under `src` is read instead, as the web's `operator-text.test.ts`
- * reads its own, except three kinds of text written for somebody else: a SQL comment, a
- * migration's SQL and the API reference (`leftOut`). What a sensor type or the probe says at check
+ * every notification carrying `%lastmessage`; every line it logs, which is the operator's journal,
+ * its fields as well as its message; and every refusal it builds. They are built from constants,
+ * from functions that assemble a sentence and from property after property, so no list of the
+ * places they are written reaches all of them. Every string under `src` is read instead, as the
+ * web's `operator-text.test.ts` reads its own, except two kinds of text written for somebody else:
+ * a SQL comment and a migration's SQL (`leftOut`). What a sensor type or the probe says at check
  * time is held by the sensors' and the probe's tests, which read every string of theirs.
  */
 
@@ -54,9 +64,13 @@ import { triggerKinds } from '../src/triggers/definition.js';
  */
 const TICKET = /\b(?:[A-Z]|V2|ADR)-\d+[a-z]?\b/u;
 
-/** The keys whose string an operator reads. Everything else is an id, a value or a type. */
+/**
+ * The keys whose string an operator reads, or a client's author: an OpenAPI operation's `summary`
+ * is the heading the reference gives a route. Everything else is an id, a value or a type.
+ */
 const READ = new Set([
   'title',
+  'summary',
   'description',
   'name',
   'text',
@@ -68,9 +82,10 @@ const READ = new Set([
 
 /**
  * The keys whose every string is shown as it is: a default fills the form's control (`mail.smtp`'s
- * subject is the sent mail's too), and an example, an enum's values and a constant are drawn.
+ * subject is the sent mail's too), and an example, an enum's values and a constant are drawn. An
+ * OpenAPI document spells an example both ways, JSON Schema's `examples` and its own `example`.
  */
-const SHOWN = new Set(['default', 'examples', 'enum', 'const']);
+const SHOWN = new Set(['default', 'examples', 'example', 'enum', 'const']);
 
 interface Read {
   readonly where: string;
@@ -239,6 +254,33 @@ function served(): { readonly texts: Read[]; readonly refused: string[] } {
   return { texts, refused };
 }
 
+const REPO = join(import.meta.dirname, '..', '..', '..', '..');
+
+/**
+ * The OpenAPI document, as `GET /api/v1/openapi.json` serves it: built by the generator the
+ * reference is rendered by, from the live route set with every optional route group, as
+ * `build-hygiene.test.ts` builds it. A child process, so its wait has a bound of its own: the
+ * child is killed at it, and `within` fails the wait if it is not.
+ */
+async function openApiDocument(): Promise<unknown> {
+  const { stdout } = await within(
+    90_000,
+    'the OpenAPI document from scripts/docs/api-reference.mjs --openapi',
+    promisify(execFile)(
+      process.execPath,
+      [join(REPO, 'scripts', 'docs', 'api-reference.mjs'), '--openapi'],
+      {
+        cwd: REPO,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 80_000,
+        killSignal: 'SIGKILL',
+      },
+    ),
+  );
+  return JSON.parse(stdout) as unknown;
+}
+
 const SRC = join(import.meta.dirname, '..', '..', 'src');
 
 function filesUnder(dir: string): string[] {
@@ -255,29 +297,27 @@ function filesUnder(dir: string): string[] {
  */
 const SQL_COMMENT = /(?<=^|\s)--(?=\s|$)[^\n]*/gu;
 
-const API = `api${sep}`;
 const MIGRATIONS = `${join('db', 'migrations')}${sep}`;
 
 /**
- * Whether a property holds text written for somebody other than the operator, and so not read.
+ * Whether a property holds text written for somebody other than the operator, and so not read:
+ * **a migration's `up` and `down`**, its SQL. The migrator checksums `up` byte for byte once it
+ * ships, so nothing in it can be reworded: 004's licence hint names the decision record it sends
+ * the operator to, a file the release ships in `docs/`, and changing a word of it would stop every
+ * installed core as drifted (`db/migrations/types.ts`). Its `COMMENT ON` text is the database's
+ * own documentation. A migration's name and what it logs are read; a `RAISE` in a new one's SQL is
+ * the operator's and is not, its words written knowing they cannot change.
  *
- * - **A migration's `up` and `down`**, its SQL. The migrator checksums `up` byte for byte once it
- *   ships, so nothing in it can be reworded: 004's licence hint names the decision record it sends
- *   the operator to, a file the release ships in `docs/`, and changing a word of it would stop
- *   every installed core as drifted (`db/migrations/types.ts`). Its `COMMENT ON` text is the
- *   database's own documentation. A migration's name and what it logs are read; a `RAISE` in a
- *   new one's SQL is the operator's and is not, its words written knowing they cannot change.
- * - **A `description` and a `summary` under `api/`**: the OpenAPI document, which is the API
- *   reference for whoever writes a client and cites tickets by the dozen; `U-92` records it as
- *   seen and leaves it to a ticket of its own. Everything else a route says is read.
+ * A route's `summary` and `description` are read, as everything else under `api/` is (`U-93`):
+ * they are the API reference, and the one route the OpenAPI document cannot carry, the stream's
+ * WebSocket, reaches the reference from its schema here and nowhere else.
  *
- * The third kind is a SQL comment, anywhere, which `textsIn` takes out of the string it is in.
+ * The other kind is a SQL comment, anywhere, which `textsIn` takes out of the string it is in.
  */
 function leftOut(node: ts.Node, file: string): boolean {
   if (!ts.isPropertyAssignment(node)) return false;
   const key = ts.isIdentifier(node.name) || ts.isStringLiteral(node.name) ? node.name.text : '';
   if (file.startsWith(MIGRATIONS)) return key === 'up' || key === 'down';
-  if (file.startsWith(API)) return key === 'description' || key === 'summary';
   return false;
 }
 
@@ -383,6 +423,86 @@ describe('the text the API serves an operator (U-92)', () => {
     );
   });
 
+  it('reads what the API reference shows of a route, and not its ids or types (U-93)', () => {
+    const read = readIn(
+      {
+        info: { title: 'The API', description: 'What it is' },
+        paths: {
+          '/things': {
+            get: {
+              operationId: 'listThings',
+              summary: 'Every thing',
+              description: 'Newest first',
+              parameters: [
+                {
+                  in: 'query',
+                  name: 'kind',
+                  description: 'Which kind',
+                  schema: {
+                    type: 'string',
+                    format: 'hostname',
+                    example: 'big',
+                    examples: ['small'],
+                    default: 'any',
+                    enum: ['any', 'big', 'small'],
+                  },
+                },
+              ],
+              responses: { 200: { description: 'The things' } },
+            },
+          },
+        },
+      },
+      'doc',
+    ).map((one) => `${one.where} = ${one.text}`);
+    assert.deepEqual(read, [
+      'doc.info.title = The API',
+      'doc.info.description = What it is',
+      'doc.paths./things.get.summary = Every thing',
+      'doc.paths./things.get.description = Newest first',
+      'doc.paths./things.get.parameters[0].name = kind',
+      'doc.paths./things.get.parameters[0].description = Which kind',
+      'doc.paths./things.get.parameters[0].schema.example = big',
+      'doc.paths./things.get.parameters[0].schema.examples[0] = small',
+      'doc.paths./things.get.parameters[0].schema.default = any',
+      'doc.paths./things.get.parameters[0].schema.enum[0] = any',
+      'doc.paths./things.get.parameters[0].schema.enum[1] = big',
+      'doc.paths./things.get.parameters[0].schema.enum[2] = small',
+      'doc.paths./things.get.responses.200.description = The things',
+    ]);
+  });
+
+  it('cites none in the API reference: the OpenAPI document the core serves (U-93)', async () => {
+    const texts = readIn(await openApiDocument(), 'openapi');
+    // The walk reaches every part of it a reader reads: the document's own description, a
+    // route's summary and description, a query parameter's, a request body field's, a response
+    // field's, a shared schema's field, a response's description, a default and an enum value.
+    assert.ok(texts.length > 1_000, String(texts.length));
+    for (const part of [
+      /^openapi\.info\.description$/u,
+      /^openapi\.paths\.\/api\/v1\/probes\.get\.summary$/u,
+      /^openapi\.paths\.\/api\/v1\/probes\/\{gid\}\/approve\.post\.description$/u,
+      /^openapi\.paths\.\/api\/v1\/objects\.get\.parameters\[\d+\]\.description$/u,
+      /^openapi\.paths\.\/api\/v1\/probes\/\{gid\}\/approve\.post\.requestBody\..+\.local\.description$/u,
+      /^openapi\.paths\.\/api\/v1\/probes\.get\.responses\.200\..+\.items\.properties\.skew\.description$/u,
+      /^openapi\.components\.schemas\.[\w-]+\.properties\.counterBits\.description$/u,
+      /^openapi\.paths\.\/api\/v1\/objects\.get\.responses\.200\.description$/u,
+      /^openapi\.paths\.[^ ]+\.parameters\[\d+\]\.schema\.default$/u,
+      /^openapi\.paths\.\/api\/v1\/probes\.get\.parameters\[\d+\]\.schema\.enum\[\d+\]$/u,
+    ]) {
+      assert.ok(
+        texts.some((one) => part.test(one.where)),
+        `the walk reaches ${part.source}`,
+      );
+    }
+    assert.deepEqual(
+      texts
+        .filter((one) => TICKET.test(one.text))
+        .map((one) => `${one.where}: ${around(one.text)}`),
+      [],
+    );
+  });
+
   it('takes a SQL comment out of a string, and leaves a flag and the query', () => {
     const strip = (text: string): string => text.replace(SQL_COMMENT, '');
     assert.equal(strip('SELECT 1 -- why (P-01)\nFROM t'), 'SELECT 1 \nFROM t');
@@ -390,7 +510,7 @@ describe('the text the API serves an operator (U-92)', () => {
     assert.equal(strip('run it with --config /etc/ms'), 'run it with --config /etc/ms');
   });
 
-  it('cites none in what the core writes: a sensor’s message, a log line, a refusal', () => {
+  it('cites none in what the core writes: a sensor’s message, a log line and its fields, a refusal', () => {
     const files = filesUnder(SRC);
     const texts = files.flatMap(textsIn);
     const reads = (file: string, text: string): boolean =>
@@ -398,10 +518,11 @@ describe('the text the API serves an operator (U-92)', () => {
     assert.ok(files.length > 100, String(files.length));
     assert.ok(texts.length > 10_000, String(texts.length));
     for (const [file, text] of [
-      // A line it logs, a migration's among them, and a refusal.
+      // A line it logs, a migration's among them, a field of one, and a refusal.
       [join('objects', 'sensor-type-gate.ts'), 'no sensor types are registered'],
       [join('db', 'migrations', '073-channel-declared-shape.ts'), 'nothing judges'],
       [join('db', 'migrations', '071-legible-delivery-errors.ts'), 'made legible'],
+      [join('state', 'declared-limits.ts'), 'declare-channels-on-ingest'],
       [join('auth', 'groups.ts'), 'cannot be deleted'],
       // A migration's name, which the migrator logs as it applies it.
       [join('db', 'migrations', '071-legible-delivery-errors.ts'), 'legible-delivery-errors'],
@@ -417,17 +538,20 @@ describe('the text the API serves an operator (U-92)', () => {
       [join('api', 'routes', 'stream.ts'), 'this account may not read that object'],
       [join('settings', 'registry.ts'), 'How often a sensor is scanned'],
       [join('objects', 'repository.ts'), 'AS has_children'],
+      // A route's description and summary, which are the API reference: the stream's are in
+      // the reference and not in the OpenAPI document, so this is the walk that reads them.
+      [join('api', 'routes', 'access.ts'), 'it cannot be told from one that is not there'],
+      [join('api', 'routes', 'stream.ts'), 'Live sensor state changes'],
+      [join('api', 'routes', 'stream.ts'), 'A WebSocket. Send'],
       // And what a template's placeholder holds.
       [join('timeseries', 'store.ts'), 'AND channel_id = ANY($4::int[])'],
     ] as const) {
       assert.ok(reads(file, text), `the walk reaches "${text}" in ${file}`);
     }
-    // And leaves out what is written for somebody else: a query's comment, a migration's SQL and
-    // the API reference.
+    // And leaves out what is written for somebody else: a query's comment and a migration's SQL.
     for (const [file, text] of [
       [join('objects', 'repository.ts'), 'The clock, not just the row'],
       [join('db', 'migrations', '004-rollups.ts'), 'Set timescaledb.license'],
-      [join('api', 'routes', 'access.ts'), 'it cannot be told from one that is not there'],
     ] as const) {
       assert.ok(!reads(file, text), `the walk leaves out "${text}" in ${file}`);
     }

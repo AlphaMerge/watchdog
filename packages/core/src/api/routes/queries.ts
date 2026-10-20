@@ -76,6 +76,7 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
       schema: {
         tags: ['sensors'],
         summary: 'Run this sensor’s check now and return what it said',
+        // `OBJECT_CREDENTIALS_WITHHELD` is `A-41`'s vouching.
         description:
           'Asks the probe that owns the sensor to run **exactly** the check a scheduled scan ' +
           'would run — the same parameters, the same credentials, the same target — and hands ' +
@@ -88,7 +89,7 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
           'already running as many of these as it will, 504 it did not answer in time, 409 it ' +
           'is too old to be asked at all — or, as `OBJECT_CREDENTIALS_WITHHELD`, the sensor is ' +
           'not being sent its credentials because nobody who may still write where they are ' +
-          'stored vouches for where it sends them (`A-41`); the message says what fixes it.\n\n' +
+          'stored vouches for where it sends them; the message says what fixes it.\n\n' +
           'A **paused** sensor can still be checked. A pause stops the monitoring; it does not ' +
           'stop an operator asking whether the thing they just fixed is working, which is ' +
           'exactly when a sensor is most likely to be paused.',

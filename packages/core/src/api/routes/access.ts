@@ -90,6 +90,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
       schema: {
         tags: ['access'],
         summary: 'What an account may actually do with this object',
+        // `none` with no source for a hidden object since `A-49`.
         description:
           'Resolves the three rules — inheritance up the tree, explicit beats inherited, highest ' +
           'wins across groups — and reports where the winning grant came from, which is what ' +
@@ -97,7 +98,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
           'asking about somebody else needs an administrator. **An account that is not an ' +
           'administrator, asking about itself, is told `none` with no source** wherever it ' +
           'holds nothing, as it is for an id that does not exist, so that an object hidden from ' +
-          'it cannot be told from one that is not there (`A-49`).',
+          'it cannot be told from one that is not there.',
         params: idParams,
         querystring: {
           type: 'object',
@@ -119,16 +120,17 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
                 description:
                   'The account administers everything, so no grant was consulted at all.',
               },
+              // The role's cap is `A-04`'s, the token's `A-06`'s.
               cappedByRole: {
                 type: 'boolean',
                 description:
-                  'The account’s role held the right below what its groups granted (A-04). ' +
+                  'The account’s role held the right below what its groups granted. ' +
                   'Reported rather than silent: "you have full on this device and may not edit ' +
                   'it" is incomprehensible without it.',
               },
               cappedByToken: {
                 type: 'boolean',
-                description: 'The API token used for this request held it below that (A-06).',
+                description: 'The API token used for this request held it below that.',
               },
             },
           },

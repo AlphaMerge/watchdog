@@ -89,9 +89,10 @@ export const alarmSchema = {
     acknowledged: { type: 'boolean' },
     acknowledgedUntil: { type: ['string', 'null'] },
     consecutiveFailures: { type: 'integer' },
+    // The hold `M-18` added.
     recovering: {
       description:
-        'The return its alarm is holding (`M-18`), or null. `confirmsAt` is when the alarm is ' +
+        'The return its alarm is holding, or null. `confirmsAt` is when the alarm is ' +
         'over if the sensor does not fail again.',
       type: ['object', 'null'],
       additionalProperties: false,
@@ -155,7 +156,7 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
           'one an operator scrolls past. `objectId` scopes to that object and everything ' +
           'beneath it. `counts` is per state across the whole scope and ignores the `state` ' +
           'filter, so a severity chip can still say how many it is hiding.\n\n' +
-          'A sensor that is back while its alarm waits to see the return last (`M-18`) is ' +
+          'A sensor that is back while its alarm waits to see the return last is ' +
           'listed too, after everything still happening, with `recovering` saying when it is ' +
           'over. It counts as `recovering` rather than as its state, unless that state is one ' +
           "of the five, and `state=recovering` filters to those. `now` is the core's clock, " +

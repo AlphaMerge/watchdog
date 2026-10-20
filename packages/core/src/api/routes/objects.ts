@@ -946,11 +946,12 @@ export async function objectRoutes(
       config: onObject('write'),
       schema: {
         tags: ['objects'],
+        // Where credentials go needs `write` where they are stored since `A-41`.
         description:
           'Changes what it is given and keeps the rest. **Where a sensor sends its inherited ' +
           "credentials** — a device's host or address family, or a sensor parameter its type " +
           'says chooses the listener — **needs `write` on the object those credentials are ' +
-          'stored on** (`A-41`), and is otherwise refused with 403 naming the kind and that ' +
+          'stored on**, and is otherwise refused with 403 naming the kind and that ' +
           "object, never the secret. A device's new host also clears the secrets held in its " +
           "sensors' own parameters, which the audit lists; enter them again.",
         params: idParams,
@@ -1029,13 +1030,14 @@ export async function objectRoutes(
       config: onObject('write'),
       schema: {
         tags: ['objects'],
+        // In the caller's view since `A-46`.
         description:
           "Moves an object within its parent's children, the way PRTG's move up / move down " +
           'does. Siblings nobody has arranged keep sorting by name, so a tree that has never ' +
           'been ordered by hand reads exactly as it did before. Listings honour the ' +
           'arrangement through `GET /objects?parentId=…&sort=manual` and through the tree ' +
           'endpoint, which always does. A move that changes nothing is a no-op, not an error. ' +
-          '**Among the siblings the caller can see** (`A-46`): every other sibling keeps its ' +
+          '**Among the siblings the caller can see**: every other sibling keeps its ' +
           'place, "up" passes the nearest one the caller can see, and the top it can see is ' +
           'the top.',
         params: idParams,
@@ -1271,11 +1273,12 @@ export async function objectRoutes(
                     problem: { type: 'string' },
                     code: { type: 'string' },
                     createdId: { type: 'integer' },
+                    // `A-76`.
                     grantsNotCarried: {
                       type: 'integer',
                       description:
                         '`clone` only: the positive grants the copy did not carry, as the ' +
-                        'single clone’s answer counts them (`A-76`).',
+                        'single clone’s answer counts them.',
                     },
                     deleted: { type: 'integer' },
                   },
@@ -1586,11 +1589,12 @@ export async function objectRoutes(
       config: onObject('write'),
       schema: {
         tags: ['state'],
+        // Named by id alone outside the caller's view since `A-16`.
         description:
           'Resumes an object, or cancels a maintenance window it has not reached yet. Only the ' +
           'object that was directly paused can be resumed — a sensor paused because its device ' +
           'is paused has nothing of its own to clear, and the 409 names the object to resume ' +
-          'instead. **By id alone when the caller cannot see it** (`A-16`): a pause inherited ' +
+          'instead. **By id alone when the caller cannot see it**: a pause inherited ' +
           'from a container above the caller’s branch, or a master in another branch, is ' +
           'named in the 409 as `GET` names it, with `pausedByName` or `masterName` null. A ' +
           'resumed sensor reads Unknown until its next scan, never the state it had before the ' +
@@ -1808,7 +1812,7 @@ export async function objectRoutes(
           'A dependency that would form a loop is refused: a loop of masters can never recover. ' +
           'The master has to be a sensor the caller can read, here, through the settings route ' +
           'and in bulk alike; one they cannot read is refused as one that does not exist, and ' +
-          'a step of a refused loop they cannot see reads `null` in `details.path` (`A-77`).',
+          'a step of a refused loop they cannot see reads `null` in `details.path`.',
         params: idParams,
         body: {
           type: 'object',
@@ -1976,9 +1980,10 @@ export async function objectRoutes(
         tags: ['objects'],
         summary:
           'Set or clear the addresses one device may reach although its probe’s policy refuses them',
+        // The exception `A-64` added.
         description:
           'The addresses of this device its probe may connect to although `probe.targetPolicy` ' +
-          'refuses them (`A-64`), replacing any it had; an empty list clears it. **Only an ' +
+          'refuses them, replacing any it had; an empty list clears it. **Only an ' +
           'administrator**, with a `full` token, may change it; anyone who may read the device ' +
           'sees it, as `targetPolicyException` on the device. **A device only, and never ' +
           'inherited**: a group, a probe or the root is refused with 409, and a device has none ' +
@@ -2057,10 +2062,11 @@ export async function objectRoutes(
       config: READS,
       schema: {
         tags: ['credentials'],
+        // `U-21`'s list; `write` as trust is `A-41`'s.
         description:
           'The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with the ' +
-          'object it is stored on (`U-21`). `write` on that object is trust with the set ' +
-          '(`A-41`), so this is the list to work through. **Only sets on objects the caller can ' +
+          'object it is stored on. `write` on that object is trust with the set, ' +
+          'so this is the list to work through. **Only sets on objects the caller can ' +
           "see**: Core Health's `credentialsUnbounded` counts the installation's, and may be " +
           'higher. No secret, and no public field either: the set itself is read from its object.',
         response: {
@@ -2105,13 +2111,15 @@ export async function objectRoutes(
       schema: {
         tags: ['objects'],
         summary: 'Channels without the lookup their type declares',
+        // `P-308`. The lost lookups are a clone's from before `P-302`, which migration 073 reports.
         description:
           'The channels whose sensor type declares a lookup, for the sensor’s stored ' +
-          'parameters, that the channel does not hold (`P-308`), so its value is judged by ' +
-          'nothing. Most are channels a clone made before `P-302` lost, which migration 073 ' +
-          'left empty; but an operator may also have cleared one on purpose, and nothing ' +
-          'recorded tells the two apart, so nothing is filled: set the ones that should be ' +
-          'judged in the sensor’s channel table, or with `PATCH /objects/{id}/channels/{key}` ' +
+          'parameters, that the channel does not hold, so its value is judged by nothing. ' +
+          'Most are channels whose lookup a clone made by an earlier release lost, which the ' +
+          'upgrade did not fill; but an operator may also have cleared one on purpose, and ' +
+          'nothing recorded tells the two apart, so nothing is filled: set the ones that ' +
+          'should be judged in the sensor’s channel table, or with ' +
+          '`PATCH /objects/{id}/channels/{key}` ' +
           'and `lookupId`. **Only sensors the ' +
           'caller can see**, by sensor id and then key, at most ' +
           `${String(MAX_CHANNELS_WITHOUT_LOOKUP)}; \`total\` counts all of them. ` +
@@ -2167,9 +2175,10 @@ export async function objectRoutes(
       config: READS,
       schema: {
         tags: ['credentials'],
+        // The kinds and their schemas are `A-05`'s.
         description:
           'The credential kinds this build can use, with the JSON Schema a form is generated ' +
-          'from (`A-05`). Fields marked `writeOnly` are the secret half: they are encrypted at ' +
+          'from. Fields marked `writeOnly` are the secret half: they are encrypted at ' +
           'rest and **never returned by any route, to anyone**, so a form renders them as ' +
           '"set" with Replace and Clear rather than as a filled input. A kind absent from this ' +
           'list has no transport behind it yet, and storing a password nothing authenticates ' +
@@ -2215,6 +2224,8 @@ export async function objectRoutes(
       config: onObject('write'),
       schema: {
         tags: ['credentials'],
+        // Vouching is `A-41`'s and targets `A-41b`'s; the counts are `A-55`'s and `A-59`'s, the
+        // dry run `U-21`'s.
         description:
           'Stores the credential set of this kind on this object, where everything below it ' +
           'inherits it. **A secret this omits is kept**, exactly as a ' +
@@ -2225,22 +2236,22 @@ export async function objectRoutes(
           'kind**, and a field it does not declare is refused with 400 naming it: a secret ' +
           'sent under a mistyped name would otherwise be stored as a public field. The ' +
           'response carries no secret. **Storing a set here vouches for sending it** wherever ' +
-          'the sensors beneath that now inherit it send it (`A-41`). **Unless it has ' +
-          '`allowedTargets`, or an SSH set `hostKeys`** (`A-41b`): then it goes to every sensor ' +
+          'the sensors beneath that now inherit it send it. **Unless it has ' +
+          '`allowedTargets`, or an SSH set `hostKeys`**: then it goes to every sensor ' +
           'inside them whoever wrote the sensor, and to none outside, and `withholds` says how ' +
-          'many sensors beneath are outside now. **What this write changes is beside it** ' +
-          '(`A-55`): `withheldBefore` is how many of the same sensors were outside before, ' +
+          'many sensors beneath are outside now. **What this write changes is beside it**: ' +
+          '`withheldBefore` is how many of the same sensors were outside before, ' +
           '`newlyWithheld` how many the write puts outside and `noLongerWithheld` how many it ' +
           'brings back, so a save that touches no target answers zero for both whatever ' +
           '`withholds` is. A sensor on a device entered by name is outside targets that are ' +
           'addresses when its type cannot be held to an address its probe checked; one whose ' +
           'type can is not counted, since its probe decides at each scan. **`byReason` gives ' +
-          'each of the four for that case apart from a device the targets do not cover** ' +
-          '(`A-59`), as `unpinnable` and `outside`. ' +
+          'each of the four for that case apart from a device the targets do not cover**, ' +
+          'as `unpinnable` and `outside`. ' +
           'A write that widens them (an entry added, the ' +
           'list emptied, strict key checking turned off) clears the secrets it does not send ' +
           'again, and `secretsCleared` names them. **`?dryRun=true` is the same write, rolled ' +
-          'back** (`U-21`): the same checks, the same refusals and the same answer, with nothing ' +
+          'back**: the same checks, the same refusals and the same answer, with nothing ' +
           'stored and nothing in the history, so a form can say what a save will do before it ' +
           'is confirmed. It is held to `write` on the object before anything is worked out, as ' +
           'the write is. **Every one of the four counts, whole and by reason, is of the sensors ' +
@@ -2280,16 +2291,17 @@ export async function objectRoutes(
       config: onObject('write'),
       schema: {
         tags: ['credentials'],
+        // The vouching is `A-41`'s and the dry run `U-21`'s.
         description:
           'Removes the credential set defined *on this object*. It does not leave the object ' +
           'without credentials: whatever an ancestor defines comes back into force, and the ' +
           'response says which, so removing a device-level community string tells you the ' +
           "group's one is now in use rather than leaving it to be discovered. **403** when the " +
           'set that comes back into force would reach a sensor somewhere nobody with `write` on ' +
-          'where it is stored vouched for, and you do not have that `write` either (`A-41`); ' +
+          'where it is stored vouched for, and you do not have that `write` either; ' +
           'the set stays. `sensors` is how many sensors beneath were using the set, **of ' +
           'those the caller can see**. ' +
-          '**`?dryRun=true` is the same removal, rolled back** (`U-21`): what would lose the ' +
+          '**`?dryRun=true` is the same removal, rolled back**: what would lose the ' +
           'set and what would come into force, or the same 403, with the set left where it is.',
         params: credentialKindParams,
         querystring: dryRunQuery,

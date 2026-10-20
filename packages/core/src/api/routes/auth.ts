@@ -118,6 +118,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       schema: {
         tags: ['auth'],
         summary: 'Exchange a login and password for a session',
+        // The known address that skips the delay is `A-47`'s.
         description:
           'Every failure answers 401 with the same code and the same sentence. Distinguishing ' +
           '"no such account" from "wrong password" would let a caller test which logins exist, ' +
@@ -126,7 +127,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
           'with `Retry-After`: its address has failed too often (an IPv6 address counts as its ' +
           '/64), the account has failed and its delay has not passed, or another attempt at the ' +
           'same account is being checked. An address that has signed in as that account in the ' +
-          'last 30 days skips the delay (`A-47`).',
+          'last 30 days skips the delay.',
         body: {
           type: 'object',
           additionalProperties: false,
@@ -297,8 +298,9 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       schema: {
         tags: ['auth'],
         summary: 'Whether this installation needs a login, and whether this caller has one',
+        // `U-17`'s login view asks it first.
         description:
-          'Public, and the first call a browser client makes (`U-17`). `GET /auth/me` cannot ' +
+          'Public, and the first call a browser client makes. `GET /auth/me` cannot ' +
           'answer this: it refuses an anonymous caller with 401, and a 401 from it means both ' +
           '"log in" and "this installation does not need you to" — with ' +
           '`api.requireAuthentication` off, an anonymous caller may use the whole API and still ' +

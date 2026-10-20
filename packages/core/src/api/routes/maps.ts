@@ -447,10 +447,11 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         params: idParams,
         tags: ['maps'],
         summary: 'Make a public share link',
+        // The required expiry is `ADR-002`'s.
         description:
           'Answers with the URL’s token **once**. Only its hash is stored, so it cannot be ' +
           'shown again — which is what keeps a database backup from being a set of working ' +
-          'share links. An expiry is required (`ADR-002`): a link without one is a permanent ' +
+          'share links. An expiry is required: a link without one is a permanent ' +
           'unauthenticated route nobody remembers creating.',
         body: {
           type: 'object',
@@ -529,11 +530,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         params: idParams,
         tags: ['maps'],
         summary: 'Put a background image behind a map',
+        // SVG refused under `ADR-003`.
         description:
           'PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decided by ' +
           'reading the file’s own header — the declared content type is a claim by the client ' +
           'and is never trusted. SVG is refused: it is a document rather than an image, and a ' +
-          'background is drawn in the application’s own page (`ADR-003`). Needs `write`, the ' +
+          'background is drawn in the application’s own page. Needs `write`, the ' +
           'same right as moving a widget. The body is the file itself, not JSON.',
         // **No body schema on purpose.** The body is a `Buffer`, and every JSON Schema that
         // could be written here — `type: string` included — is a claim AJV would check against

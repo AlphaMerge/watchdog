@@ -152,8 +152,10 @@ export function deviceTemplateRoutes(
       schema: {
         tags: ['discovery'],
         summary: 'What a fingerprint would produce',
+        // What `D-04`'s provisioning acts on.
         description:
-          'The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one of ' +
+          'The answer `POST /discovery/{id}/provision` will act on, before it acts on it. ' +
+          'Takes a fingerprint — one of ' +
           'the ones a discovery run recorded — and reports which templates matched and which ' +
           'sensors would actually be created, given the credential kinds available. The ' +
           'fingerprint is checked as a stored one is: without an IPv4 `address`, a known ' +
@@ -242,7 +244,8 @@ export function deviceTemplateRoutes(
           summary: 'What a run’s hosts would produce',
           description:
             'The whole run at once, which is what an operator wants to look at before letting ' +
-            '`D-04` create anything. Hosts with no fingerprint yet are reported with the ' +
+            '`POST /discovery/{id}/provision` create anything. Hosts with no fingerprint yet ' +
+            'are reported with the ' +
             'generic plan, because that is what they would get.',
           params: idParams,
           querystring: {

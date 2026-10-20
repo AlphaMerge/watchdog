@@ -166,14 +166,15 @@ const entrySchema = {
     deliveredAt: { type: ['string', 'null'] },
     nextAttemptAt: { type: ['string', 'null'] },
     lastError: { type: ['string', 'null'] },
+    // `M-19`'s, told to a reader who is not an administrator by count since `A-44`.
     skippedRecipients: {
       type: 'string',
       description:
         'Who a message named and did not reach, and why — a disabled account, one with no ' +
-        'address, one that may not see the sensor. Empty when it reached everybody (`M-19`). ' +
+        'address, one that may not see the sensor. Empty when it reached everybody. ' +
         'By name for an administrator; for anybody else, by count and reason only — ' +
         '`2 recipients (1 disabled, 1 may not see this sensor)` — because the names are the ' +
-        'account and group lists, which are an administrator’s (`A-44`).',
+        'account and group lists, which are an administrator’s.',
     },
   },
 } as const;
@@ -241,13 +242,14 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
       schema: {
         tags: ['notifications'],
         summary: 'What happened to each notification',
+        // The two discards are `N-12`'s and `N-22`'s.
         description:
           'Newest first, paged by `before` rather than by offset — notifications arrive while ' +
           'somebody is reading, and an offset page would show a row twice or not at all. ' +
           '`failed` is an alarm nobody received; `discarded` is one nobody was meant to ' +
           'receive any more, which is not the same thing. That is either a notification an ' +
-          'activation schedule threw away on purpose (`N-12`), or a recovery or clear dropped ' +
-          'because a newer alarm of the same sensor and trigger was delivered first (`N-22`); ' +
+          'activation schedule threw away on purpose, or a recovery or clear dropped ' +
+          'because a newer alarm of the same sensor and trigger was delivered first; ' +
           '`lastError` says which. Only notifications about sensors the caller can read appear.',
         querystring: {
           type: 'object',

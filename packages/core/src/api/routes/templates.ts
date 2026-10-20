@@ -102,14 +102,15 @@ const templateSchema = {
      *
      * Serialised against this schema by `fast-json-stringify`, which is the structural half of
      * the defence: a field the schema does not name cannot reach the wire even if the service
-     * somehow put it in the object.
+     * somehow put it in the object. Which settings are secret is the method's `writeOnly`
+     * (`P-344`).
      */
     settings: {
       type: 'object',
       additionalProperties: true,
       description:
         'The method’s settings, shaped by its `settingsSchema` (`GET /notification-methods`), ' +
-        'with every setting that schema marks `writeOnly` removed on every read (P-344).',
+        'with every setting that schema marks `writeOnly` removed on every read.',
     },
     /** The dotted paths that were removed, so a form can say "set, not shown". */
     redactedSettings: {
@@ -492,10 +493,11 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       schema: {
         tags: ['templates'],
         summary: 'What an unsaved draft would say about one sensor',
+        // For `U-10`'s editor.
         description:
           'The same rendering as the saved preview, against a template that does not exist yet ' +
-          '— what an editor needs to show the text in the box rather than the text on disk ' +
-          '(`U-10`). The draft goes through the same validation a write does, so one that could ' +
+          '— what an editor needs to show the text in the box rather than the text on disk. ' +
+          'The draft goes through the same validation a write does, so one that could ' +
           'not be saved is refused here rather than previewing something the operator cannot ' +
           'keep. Nothing is sent, nothing is written, and no template is created.',
         body: {
@@ -533,6 +535,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         schema: {
           tags: ['templates'],
           summary: 'Send a test notification through this template',
+          // Recipients counted for a reader who is not an administrator since `A-44`, and the
+          // message in the caller's view since `A-16`.
           description:
             '**This really sends.** The same rendering, the same transport, the same settings ' +
             'and the same recipients — testing an on-call template at three in the morning ' +
@@ -546,8 +550,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
             'Anybody the template names and the send missed is named in `detail` or `error` ' +
             'for an administrator, and counted by reason for anybody else — ' +
             '`not sent to 2 recipients (1 disabled, 1 no email address)` — because the names ' +
-            'are the account and group lists, which are an administrator’s (`A-44`). ' +
-            '**`subject` and `body` are the message as the caller may read it** (`A-16`): ' +
+            'are the account and group lists, which are an administrator’s. ' +
+            '**`subject` and `body` are the message as the caller may read it**: ' +
             '`%probe`, `%group`, `%device` and `%host` for a container outside the caller’s ' +
             'view read `(outside your view)`, as in a preview, and `notes` says so. What is sent ' +
             'is the real message.',
@@ -579,9 +583,10 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       schema: {
         tags: ['templates'],
         summary: 'Create a template',
+        // Account and group recipients are `M-20`'s, an administrator's since `A-44`.
         description:
-          'Only an administrator may name an account or a group as a recipient (`M-20`); ' +
-          'anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses (`A-44`).',
+          'Only an administrator may name an account or a group as a recipient; ' +
+          'anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses.',
         body: { $ref: 'ms:templateInput' },
         response: { 201: { $ref: 'ms:template' } },
       },
@@ -599,6 +604,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       schema: {
         tags: ['templates'],
         summary: 'Replace a template',
+        // Account and group recipients are `M-20`'s, an administrator's since `A-44`.
         description:
           'Whole-document, with one exception: a secret the request does not carry is **kept**, ' +
           'because the form it came from was rendered without it. Send an explicit `null` to ' +
@@ -607,8 +613,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
           'secrets sent there unless it carries them again, so re-pointing a template never ' +
           'sends a token somebody else set to a new destination. A field left out counts as ' +
           'its default: a program with no `args` keeps its `secretArgs` through an edit that ' +
-          'sends none. **Only an administrator may add an account or a group recipient** ' +
-          '(`M-20`, `A-44`): anybody else may keep or remove the ones the template has, and ' +
+          'sends none. **Only an administrator may add an account or a group recipient**: ' +
+          'anybody else may keep or remove the ones the template has, and ' +
           'gets 403 `AUTH_FORBIDDEN` for one it did not have.',
         params: idParams,
         body: { $ref: 'ms:templateInput' },
@@ -626,10 +632,11 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       schema: {
         tags: ['templates'],
         summary: 'Remove a template',
+        // Listed and counted in the caller's view since `A-16`.
         description:
           'Refused while a trigger still names it, with the list of triggers to fix: deleting ' +
           'one out from under a trigger would leave that trigger firing into nothing. **Only ' +
-          'triggers on objects the caller can see are listed or counted** (`A-16`); ' +
+          'triggers on objects the caller can see are listed or counted**; ' +
           '`details.outsideView` is true when others outside the caller’s view use it too, and ' +
           'says nothing of how many. An administrator is shown every one.',
         params: idParams,

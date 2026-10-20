@@ -54,10 +54,11 @@ const runSchema = {
   properties: {
     id: { type: 'integer' },
     groupId: { type: 'integer' },
+    // Absent outside the caller's view since `A-80`.
     probeId: {
       type: 'integer',
       description:
-        'The probe the run sweeps from. Absent for a caller who cannot see that probe (A-80): ' +
+        'The probe the run sweeps from. Absent for a caller who cannot see that probe: ' +
         'the run is read with read on its group, and the probe above it is another object.',
     },
     range: { type: 'string' },
@@ -224,7 +225,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
           'discovery is a local-network job, so the probe that can reach 10.0.0.0/24 is the one ' +
           'on that network. It has to be the probe the group is under, and one the caller can ' +
           'read: any other is refused `DISCOVERY_PROBE_INVALID` in the same words, so that a ' +
-          'probe above the caller’s branch is answered as an id nobody used (`A-77`). Left out, ' +
+          'probe above the caller’s branch is answered as an id nobody used. Left out, ' +
           'it is the probe the group is under, which is how a writer granted a branch below a ' +
           'probe they cannot see starts one.',
         body: {
@@ -238,7 +239,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               minimum: 1,
               description:
                 'The probe the group is under. Left out, that probe is used; named, it has to be ' +
-                'that one and one the caller can read (`A-77`).',
+                'that one and one the caller can read.',
             },
             range: { type: 'string', minLength: 1, maxLength: 4000 },
             timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },
@@ -358,12 +359,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               groupId: { type: 'integer' },
               probeId: {
                 type: 'integer',
-                description: 'Absent for a caller who cannot see the probe (A-80).',
+                description: 'Absent for a caller who cannot see the probe.',
               },
               scheduleId: {
                 type: ['integer', 'null'],
                 description:
-                  'The rediscovery schedule that started it (`D-07`), or null for a run ' +
+                  'The rediscovery schedule that started it, or null for a run ' +
                   'somebody started. What tells an operator where a run they did not start ' +
                   'came from.',
               },
@@ -559,29 +560,31 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         schema: {
           tags: ['discovery'],
           summary: 'Create the devices and sensors this run found',
+          // A deleted rule is `A-41`'s, a moved group `P-241`'s and the caller's view `A-77`'s.
           description:
             '**Idempotent.** Devices are matched on address, then reverse name, then short name ' +
             'within the target group, and only sensors that are not already there are created — ' +
             'so running this twice creates nothing the second time. That matters because a ' +
             'discovery is re-run: on a schedule, or by an operator who has configured a ' +
             'credential and wants the sensors it unlocks.\n\n' +
-            '**A run whose rule was deleted creates nothing** (`A-41`): the account that wrote ' +
+            '**A run whose rule was deleted creates nothing**: the account that wrote ' +
             'the rule vouched for sending the group’s credentials to the addresses it found, and ' +
             'deleting the rule withdraws that. With accounts on, the run is failed with the ' +
             'reason “its rule was deleted”, recorded in the audit log, and this answers 409 ' +
             '`DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those ' +
             'addresses.\n\n' +
-            '**Nor does a run whose group has since moved under another probe** (`P-241`): what ' +
+            '**Nor does a run whose group has since moved under another probe**: what ' +
             'it found was read from the old probe’s network, and would become devices in the ' +
             'new one’s branch. The run is failed with the reason “its group moved to another ' +
             'probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with ' +
             'that sentence. Start a new run from the group’s new probe.\n\n' +
-            '**It answers its caller in their own view** (`A-77`). A host at the address of a ' +
+            '**It answers its caller in their own view**. A host at the address of a ' +
             'device the caller cannot see is reported in `problems` as “a device outside your ' +
             'view already has this address”, with no id and nothing created under the device; ' +
             'a sensor a template names that is already there and hidden is reported the same way ' +
             'and not counted in `sensorsSkipped`; and nothing is added to a device the caller ' +
-            'may read and not write. An administrator is answered as before.',
+            'may read and not write. An administrator sees every device, and is answered ' +
+            'about each.',
           params: idParams,
           response: {
             200: {
@@ -738,7 +741,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         groupId: { type: 'integer' },
         probeId: {
           type: 'integer',
-          description: 'Absent for a caller who cannot see the probe (A-80).',
+          description: 'Absent for a caller who cannot see the probe.',
         },
         name: { type: 'string' },
         enabled: { type: 'boolean' },
@@ -767,17 +770,19 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         scheduleId: { type: ['integer', 'null'] },
         lastRunAt: { type: ['string', 'null'] },
         lastRunId: { type: ['integer', 'null'] },
+        // The refusal on firing is `A-28`'s.
         lastProblem: {
           type: 'string',
           description:
             'Why the last firing started nothing, or empty. A rule whose group has moved under ' +
-            'another probe is refused when it fires, and this is where that is said (`A-28`).',
+            'another probe is refused when it fires, and this is where that is said.',
         },
         nextRunAt: { type: ['string', 'null'] },
         description: { type: 'string' },
+        // `D-11`.
         version: {
           type: 'integer',
-          description: 'What `If-Match` carries back on an edit; also the `ETag` (`D-11`).',
+          description: 'What `If-Match` carries back on an edit; also the `ETag`.',
         },
       },
     } as const;
@@ -859,7 +864,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                 minimum: 1,
                 description:
                   'The probe the group is under. Left out, that probe is used; named, it has to be ' +
-                  'that one and one the caller can read (`A-77`).',
+                  'that one and one the caller can read.',
               },
               name: { type: 'string', minLength: 1, maxLength: 200 },
               range: { type: 'string', minLength: 1, maxLength: 4000 },
@@ -901,9 +906,10 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                 type: ['integer', 'null'],
                 default: null,
                 description:
-                  'A schedule (`M-09`) used as a *permission window*: “weekly, but not during ' +
-                  'the change freeze”. It answers a different question from the cadence — is it ' +
-                  'allowed now, versus when is it next due — which is why both exist.',
+                  'A schedule (`GET /schedules`) used as a *permission window*: “weekly, but ' +
+                  'not during the change freeze”. It answers a different question from the ' +
+                  'cadence — is it allowed now, versus when is it next due — which is why both ' +
+                  'exist.',
               },
               enabled: { type: 'boolean', default: false },
             },
