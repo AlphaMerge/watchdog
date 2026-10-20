@@ -33297,8 +33297,13 @@ because each is a decision rather than a defect:
          the unique-constraint registry's note that `seedBuiltIns` takes the next free name
          "(P-393)", and the enrolment route's reason for writing no audit entry "(A-18)". Each
          ticket moved to a comment beside it. **Not held:** a `RAISE` in a new migration's SQL,
-         which the operator reads in the journal when that migration fails. The test's docblock
-         says so.
+         which the operator reads at run time and not only in the journal. One the migration
+         runs itself, as 003's and 004's do, is read in the journal when that migration fails.
+         One in a function the migration creates, as the trigger functions of 001, 002, 008 and
+         034 are, fires on a later write, at any time, and a `check_violation` or a
+         `foreign_key_violation` goes back word for word as the 409 `OBJECT_INVALID` refusal
+         (`api/errors.ts`): a ticket in its message reaches every caller whose write trips it,
+         with every suite green. The test's docblock says so.
       - **Tests** (+1): `operator-text.test.ts` (core, 4). A new test takes a SQL comment out of
         a string and leaves a flag and the query. The third test reads the whole tree, and
         asserts both that it reaches a log line, a migration's log line and name, a refusal, Core
@@ -33336,12 +33341,34 @@ because each is a decision rather than a defect:
         shipped `up` cannot change (`db/migrations/types.ts`, `H-21`). Outside their comments, 42
         strings of migration SQL cite a ticket: 41 in `COMMENT ON` text, which is the database's
         documentation, and 004's hint, which nobody may reword. The gap left is a new migration's
-        `RAISE`, written knowing it cannot change once it ships.
+        `RAISE`, written knowing it cannot change once it ships, and read at run time as well as
+        in the journal: one in a function the migration creates answers a later write with the
+        API's refusal (the *Not held* note above, corrected by review round 3).
       - **The round together, 2026-10-20** (one commit and this note): the core's operator-text,
         unique-constraint, audit-sweep, schedule-seed, TOTP and build-hygiene files, six of them,
         79 tests green and none skipped; both references regenerated, unchanged, and `--check`
         current. **Mutants 18, 18 killed**, each restored byte for byte, and the tree rebuilt
         before the suites above.
+
+      **Review round 3, 2026-10-20: one new defect, closed** (`docs/TASKS.md` only, one commit
+      and this note).
+      9. **Round 2's *Not held* note set the gap too narrow** (new; the review's 8a). It said a
+         `RAISE` in a new migration's SQL is read in the journal when that migration fails.
+         Migrations 001, 002, 008 and 034 create trigger functions whose `RAISE` fires on a later
+         write, and `api/errors.ts` hands a `check_violation` or a `foreign_key_violation` back
+         word for word as the 409 `OBJECT_INVALID` refusal, so a ticket in a new one reaches
+         whoever calls the API, at any time. The note and round 2's third decision now say so.
+         The test's docblock states the gap without saying where it is read, which is accurate,
+         and stays. No code changed and nothing behaves differently, so no test and no mutant.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the gap is reworded, not
+        closed, and round 2's decision to leave a migration's `up` out whole stands. Where a new
+        `RAISE` is read changes what a ticket in it would cost, not what the test can hold
+        without reading PL/pgSQL inside a string: a message is a literal, a `format()` call, a
+        variable or a `USING MESSAGE`, and has to be told from the `COMMENT ON` text beside it,
+        where 41 strings cite a ticket. Every `RAISE` that has shipped was read for this round,
+        and none cites a ticket; the one match for the test's pattern is 004's hint, which names
+        `docs/ADR-001-architecture.md`, a file. Holding a new one is a ticket of its own if it
+        is wanted.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
