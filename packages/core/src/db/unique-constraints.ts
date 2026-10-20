@@ -102,7 +102,8 @@ export const UNIQUE_CONSTRAINTS = {
   schedule_pkey: { unreachable: 'generated' },
   schedule_name_key: {
     refused: 'SCHEDULE_NAME_TAKEN',
-    by: 'ScheduleService (create, update); seedBuiltIns takes the next free name (P-393)',
+    // The next free name since `P-393`.
+    by: 'ScheduleService (create, update); seedBuiltIns takes the next free name',
   },
   schedule_built_in_id_key: { unreachable: 'start-up seeding only, ON CONFLICT (built_in_id)' },
 

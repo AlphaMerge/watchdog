@@ -386,8 +386,9 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
     {
       config: {
         ...SELF,
+        // `A-18`: the confirmation is the audited step.
         ...notAudited(
-          'stores a secret that does nothing until /auth/mfa/confirm, which is audited (A-18)',
+          'stores a secret that does nothing until /auth/mfa/confirm, which is audited',
         ),
       },
       schema: {

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
 import {
@@ -35,16 +35,16 @@ import { triggerKinds } from '../src/triggers/definition.js';
  * title, description, name, text, unit, pattern sentence or limit message, or in any default,
  * example, enum value or constant, which a form shows as it is.
  *
- * **And what the core writes when it runs**: every line it logs, which is the operator's journal,
- * and the message of every error it builds or throws, which is how a refusal reaches the caller.
- * Those are read from `src` as the web's `operator-text.test.ts` reads its own, since nothing
- * registers them. What a sensor type or the probe says at check time is held by the sensors' and
- * the probe's tests, which read every string of theirs.
- *
- * **Not the OpenAPI document.** Its descriptions are the API reference, for whoever writes a
- * client, and cite tickets by the dozen; `U-92` records that as seen and leaves it to its own
- * ticket. So the route schemas are not read, nor the SQL, whose comments are where a query's
- * ticket goes.
+ * **And what the core writes when it runs**, which nothing registers: the message its own sensors
+ * carry — Core Health's, Probe Health's — and the one a state is written with when a probe is lost
+ * or changes or a parent is paused, each of which is the sensor's message, its state-log entry and
+ * every notification carrying `%lastmessage`; every line it logs, which is the operator's journal;
+ * and every refusal it builds. They are built from constants, from functions that assemble a
+ * sentence and from property after property, so no list of the places they are written reaches
+ * all of them. Every string under `src` is read instead, as the web's `operator-text.test.ts`
+ * reads its own, except three kinds of text written for somebody else: a SQL comment, a
+ * migration's SQL and the API reference (`leftOut`). What a sensor type or the probe says at check
+ * time is held by the sensors' and the probe's tests, which read every string of theirs.
  */
 
 /**
@@ -239,9 +239,6 @@ function served(): { readonly texts: Read[]; readonly refused: string[] } {
   return { texts, refused };
 }
 
-/** The methods a pino logger writes a line with, and `child`, whose bindings are on each. */
-const LOGS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'child']);
-
 const SRC = join(import.meta.dirname, '..', '..', 'src');
 
 function filesUnder(dir: string): string[] {
@@ -252,64 +249,89 @@ function filesUnder(dir: string): string[] {
   });
 }
 
-interface Written {
+/**
+ * A SQL comment, from `--` to the end of its line: where a query's ticket goes, as a comment is
+ * where the code's goes. Not `--` before a word, which is a command-line flag (`--config`).
+ */
+const SQL_COMMENT = /(?<=^|\s)--(?=\s|$)[^\n]*/gu;
+
+const API = `api${sep}`;
+const MIGRATIONS = `${join('db', 'migrations')}${sep}`;
+
+/**
+ * Whether a property holds text written for somebody other than the operator, and so not read.
+ *
+ * - **A migration's `up` and `down`**, its SQL. The migrator checksums `up` byte for byte once it
+ *   ships, so nothing in it can be reworded: 004's licence hint names the decision record it sends
+ *   the operator to, a file the release ships in `docs/`, and changing a word of it would stop
+ *   every installed core as drifted (`db/migrations/types.ts`). Its `COMMENT ON` text is the
+ *   database's own documentation. A migration's name and what it logs are read; a `RAISE` in a
+ *   new one's SQL is the operator's and is not, its words written knowing they cannot change.
+ * - **A `description` and a `summary` under `api/`**: the OpenAPI document, which is the API
+ *   reference for whoever writes a client and cites tickets by the dozen; `U-92` records it as
+ *   seen and leaves it to a ticket of its own. Everything else a route says is read.
+ *
+ * The third kind is a SQL comment, anywhere, which `textsIn` takes out of the string it is in.
+ */
+function leftOut(node: ts.Node, file: string): boolean {
+  if (!ts.isPropertyAssignment(node)) return false;
+  const key = ts.isIdentifier(node.name) || ts.isStringLiteral(node.name) ? node.name.text : '';
+  if (file.startsWith(MIGRATIONS)) return key === 'up' || key === 'down';
+  if (file.startsWith(API)) return key === 'description' || key === 'summary';
+  return false;
+}
+
+interface Text {
   readonly file: string;
   readonly line: number;
-  readonly how: 'log' | 'error';
   readonly text: string;
 }
 
 /**
- * Every string the core's source logs, or builds an error with: in the arguments of a logger's
- * call, of a `new …Error(…)`, and in what a `throw` throws. Comments are not strings, and the
- * OpenAPI schemas and the SQL are neither of these.
+ * Every string a file of the core's source holds, outside its comments and what `leftOut` leaves,
+ * with the line it starts on and its SQL comments taken out. A template is one text, its parts
+ * joined where the placeholders were, so that a SQL comment running past one is still a comment;
+ * what a placeholder holds is read for itself.
  */
-function writtenIn(file: string): Written[] {
+function textsIn(path: string): Text[] {
+  const file = relative(SRC, path);
   const source = ts.createSourceFile(
-    file,
-    readFileSync(file, 'utf8'),
+    path,
+    readFileSync(path, 'utf8'),
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS,
   );
-  const found: Written[] = [];
-  const collect =
-    (how: Written['how']) =>
-    (node: ts.Node): void => {
-      if (
-        ts.isStringLiteral(node) ||
-        ts.isNoSubstitutionTemplateLiteral(node) ||
-        ts.isTemplateHead(node) ||
-        ts.isTemplateMiddle(node) ||
-        ts.isTemplateTail(node)
-      ) {
-        const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
-        found.push({ file: relative(SRC, file), line: line + 1, how, text: node.text });
-      }
-      ts.forEachChild(node, collect(how));
-    };
+  const found: Text[] = [];
+  const add = (node: ts.Node, text: string): void => {
+    const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
+    found.push({ file, line: line + 1, text: text.replace(SQL_COMMENT, '') });
+  };
   const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      LOGS.has(node.expression.name.text)
-    ) {
-      node.arguments.forEach(collect('log'));
-      visit(node.expression);
+    if (leftOut(node, file)) return;
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      add(node, node.text);
       return;
     }
-    if (ts.isNewExpression(node) && /Error$/u.test(node.expression.getText(source))) {
-      node.arguments?.forEach(collect('error'));
-      return;
-    }
-    if (ts.isThrowStatement(node)) {
-      collect('error')(node.expression);
+    if (ts.isTemplateExpression(node)) {
+      const parts = [node.head, ...node.templateSpans.map((span) => span.literal)];
+      add(node, parts.map((part) => part.text).join(' '));
+      for (const span of node.templateSpans) visit(span.expression);
       return;
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
   return found;
+}
+
+/** A ticket with the words around it, enough to find it by in a long query or sentence. */
+function around(text: string): string {
+  const at = text.search(TICKET);
+  return text
+    .slice(Math.max(0, at - 60), at + 20)
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 describe('the text the API serves an operator (U-92)', () => {
@@ -361,26 +383,58 @@ describe('the text the API serves an operator (U-92)', () => {
     );
   });
 
-  it('cites none in a line the core logs or an error it builds', () => {
+  it('takes a SQL comment out of a string, and leaves a flag and the query', () => {
+    const strip = (text: string): string => text.replace(SQL_COMMENT, '');
+    assert.equal(strip('SELECT 1 -- why (P-01)\nFROM t'), 'SELECT 1 \nFROM t');
+    assert.equal(strip('  -- a whole line (M-08)\n  sr.state'), '  \n  sr.state');
+    assert.equal(strip('run it with --config /etc/ms'), 'run it with --config /etc/ms');
+  });
+
+  it('cites none in what the core writes: a sensor’s message, a log line, a refusal', () => {
     const files = filesUnder(SRC);
-    const written = files.flatMap(writtenIn);
-    // The walk reaches the start-up log, a migration's, and a refusal's message.
+    const texts = files.flatMap(textsIn);
+    const reads = (file: string, text: string): boolean =>
+      texts.some((one) => one.file === file && one.text.includes(text));
     assert.ok(files.length > 100, String(files.length));
-    for (const [file, how, text] of [
-      [join('objects', 'sensor-type-gate.ts'), 'log', 'no sensor types are registered'],
-      [join('db', 'migrations', '073-channel-declared-shape.ts'), 'log', 'nothing judges'],
-      [join('db', 'migrations', '071-legible-delivery-errors.ts'), 'log', 'made legible'],
-      [join('auth', 'groups.ts'), 'error', 'cannot be deleted'],
+    assert.ok(texts.length > 10_000, String(texts.length));
+    for (const [file, text] of [
+      // A line it logs, a migration's among them, and a refusal.
+      [join('objects', 'sensor-type-gate.ts'), 'no sensor types are registered'],
+      [join('db', 'migrations', '073-channel-declared-shape.ts'), 'nothing judges'],
+      [join('db', 'migrations', '071-legible-delivery-errors.ts'), 'made legible'],
+      [join('auth', 'groups.ts'), 'cannot be deleted'],
+      // A migration's name, which the migrator logs as it applies it.
+      [join('db', 'migrations', '071-legible-delivery-errors.ts'), 'legible-delivery-errors'],
+      // Its own sensors' messages: a check result's, written as it is and assembled by a function.
+      [join('health', 'core-health.ts'), 'Core Health could not read its own numbers: '],
+      [join('health', 'probe-health.ts'), 'not connected to the core'],
+      [join('health', 'probe-health.ts'), 'its heartbeats arrive without them'],
+      // The message a state is written with, as an argument and from a constant.
+      [join('probes', 'reachability.ts'), 'the probe carrying this sensor changed'],
+      [join('probes', 'reachability.ts'), 'the probe carrying this sensor stopped answering'],
+      [join('objects', 'service.ts'), 'created under a paused parent'],
+      // What a route says that is not its schema's, a description outside `api/`, and a query.
+      [join('api', 'routes', 'stream.ts'), 'this account may not read that object'],
+      [join('settings', 'registry.ts'), 'How often a sensor is scanned'],
+      [join('objects', 'repository.ts'), 'AS has_children'],
+      // And what a template's placeholder holds.
+      [join('timeseries', 'store.ts'), 'AND channel_id = ANY($4::int[])'],
     ] as const) {
-      assert.ok(
-        written.some((one) => one.file === file && one.how === how && one.text.includes(text)),
-        `the walk reaches the ${how} in ${file} that says "${text}"`,
-      );
+      assert.ok(reads(file, text), `the walk reaches "${text}" in ${file}`);
+    }
+    // And leaves out what is written for somebody else: a query's comment, a migration's SQL and
+    // the API reference.
+    for (const [file, text] of [
+      [join('objects', 'repository.ts'), 'The clock, not just the row'],
+      [join('db', 'migrations', '004-rollups.ts'), 'Set timescaledb.license'],
+      [join('api', 'routes', 'access.ts'), 'it cannot be told from one that is not there'],
+    ] as const) {
+      assert.ok(!reads(file, text), `the walk leaves out "${text}" in ${file}`);
     }
     assert.deepEqual(
-      written
+      texts
         .filter((one) => TICKET.test(one.text))
-        .map((one) => `${one.file}:${String(one.line)}: ${one.text.trim()}`),
+        .map((one) => `${one.file}:${String(one.line)}: …${around(one.text)}…`),
       [],
     );
   });
