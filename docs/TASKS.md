@@ -13777,7 +13777,7 @@ because each is a decision rather than a defect:
       not on the behaviour, and it is the start bound a loaded host exceeds. **Done when** the
       start bound is 15–20 s, the 200 ms "no result" window it then times is unchanged, and the
       file passes twenty runs in a row at a load near 20.
-- [ ] **P-453 — a lookup helper child killed from outside while isolating poisons a working name** · XS ·
+- [x] **P-453 — a lookup helper child killed from outside while isolating poisons a working name** · XS ·
       P-432 · Found 2026-10-19 by `P-432` S3, writing its scenarios. While the helper isolates
       (D27), a suspect is sent alone, and any `exit` loss with it alone in flight charges it
       (`lookup-helper.ts`, `#lose`), as it charges a poison name's hourly re-ask: the name is
@@ -13789,6 +13789,81 @@ because each is a decision rather than a defect:
       for the exit. The scenarios kill the child only between scans, so none ran into it. **Done when** only a signal a crash raises (SIGSEGV, SIGBUS, SIGABRT, SIGILL,
       SIGFPE, SIGTRAP, SIGSYS) charges a suspect or a re-ask, and any other end is an `exit` loss
       charged to no one, its suspects asked again alone, with a test for each and a mutant.
+
+      **P-453 outcome. Only a crash is charged, and every name in flight at any end stays off the
+      probe's lanes.** Built 2026-10-20 on `feat/p432-gate-r2`, in
+      `packages/probe/src/resolver/lookup-helper.ts`. No protocol change and no migration.
+      - **The signal decides.** `CRASH_SIGNALS` holds the seven, and `crashedBy` reads the
+        child's end. An `exit` loss charges its lookup only when the child ended by one of them.
+        S3's rule stands: only a lookup alone in flight is charged, a suspect or a poison name's
+        re-ask. SIGKILL, SIGTERM, SIGINT and any exit code charge no one. A suspect is asked
+        again alone. A poison mark keeps its retry, not doubled, and its name is asked again.
+      - **A channel that closes before the exit is read waits for the exit** (`#awaitExit`). This
+        happens only when a chargeable lookup is alone in flight: the channel closed, a send
+        failed, or the child broke the protocol. The child is sent SIGKILL at once. A process
+        already dead is not changed by it, and its exit still says how it died. While the helper
+        waits, nothing is sent to the child, nothing it says is read, and it is not judged. An
+        exit not read within `exitWaitMs` (1 s), counted after the polls, is taken as no crash.
+        The loss keeps the cause it was first taken on, with the exit's status added.
+      - **An ask that could not be written is never charged** (`unsent`): the child never saw
+        the name.
+      - **Tests.** `lookup-helper.test.ts` has 11 tests under 'the lookup helper: only a crash is
+        charged':
+        - a table of 12 ends: each crash signal charges and is the mark's signal; each other end
+          charges no one, asks again alone, keeps the helper isolating, and keeps the name off
+          the probe's lanes;
+        - three suspects ended by SIGKILL rest the helper on the fifth loss, with nothing poison;
+        - a poison re-ask ended by SIGKILL is not charged again, then one ended by SIGSEGV is;
+        - a channel closed before the exit is read: nothing is sent, read or judged until the
+          exit, and then a crash is charged;
+        - the same, with SIGTERM: not charged;
+        - a live child whose channel closed is killed, and its exit by that SIGKILL is not
+          charged;
+        - a protocol fault: nothing is sent to the child during the wait, and nothing it sends
+          is taken;
+        - an error the child reports during the wait takes no loss of its own;
+        - an exit not read within the wait: charged to no one, after the polls; a stop during
+          the wait ends it;
+        - an ask that could not be written is not charged;
+        - a memory loss keeps its names off the probe's lanes.
+      - **Mutants: 19, all killed.** Any signal taken as a crash. SIGSYS dropped from the set.
+        The signal ignored in the charge. The exit's signal not recorded. No wait for the exit.
+        Asks sent during the wait. Messages read during the wait. The child judged during the
+        wait. The wait's timer left after a stop. The timer left after the loss. The cause it
+        was first lost on dropped. The guard against other losses during the wait removed.
+        `over` never set. No polls before the timer's loss. Unsent asks charged. No avoidance on
+        a memory loss. No kill when the wait starts. Lookups charged when not alone in flight.
+        Lookups charged when neither suspect nor re-ask.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **An end that is not a crash still keeps every name in flight off the probe's lanes**
+          (the avoidance entry), and **so does a `memory` loss**, which kept none before.
+          - D27 says a name that may have ended the child never reaches the probe's own
+            `getaddrinfo`.
+          - A name whose lookup grows the child's memory is caught in one of two ways. The
+            helper's 256 MiB cap, read every 500 ms, catches it as a `memory` loss. If it grows
+            past the cap between reads, the kernel's or the cgroup's OOM killer catches it, as an
+            uncharged SIGKILL. Neither can be told apart from a leak or a kill from outside.
+          - So such an end is never charged, which would make a working name poison on a guess.
+            It is always avoided: asked on the probe's own lanes, the same name could grow the
+            probe, whose cgroup (`MemoryMax=6G`) holds every check.
+          - Repeated losses rest the helper as before, so a name that ends every child costs the
+            same rest a crash would.
+          - What is left: a cgroup-wide OOM kill takes the probe with the helper, and no routing
+            prevents it.
+        - **The exit wait is 1 s, and only for a lone chargeable lookup.** Node's `disconnect`
+          and `exit` come in either order. Without the wait, a crash first seen as a closed
+          channel would never be charged. The exit of a process sent SIGKILL is read within
+          milliseconds, and the bound covers one that never exits. The helper stays up
+          meanwhile, and its asks are refused as unavailable, which the resolver routes as it
+          routes any refused ask.
+        - **A Windows crash is not read** (`P-464`). On Windows a crash ends with an NTSTATUS
+          exit code, not a signal, so no end is charged there: names are still avoided and
+          losses still rest the helper. Release 1.1 is the Windows release.
+        - **Names in flight when the helper goes quiet, or is lost `hung`, are not avoided**
+          (`P-463`). Neither is a crash or a memory loss, and `P-453` is about how an `exit` is
+          read. A lookup that hangs on the probe's lanes holds a lane and nothing more, and
+          D25's stuck marks bound that. Whether a name can wedge the child itself, and so the
+          probe, is that ticket's to settle.
 - [ ] **P-454 — the name check asks without the EDNS record glibc sends under `options edns0`** · S ·
       P-432 · Filed 2026-10-20 by the coordinator, from S6's open list. `DnsCheck` asks through
       Node's `dns.Resolver` (c-ares 1.34.6 in Node 24.19.0), whose questions carry no OPT
@@ -13819,6 +13894,36 @@ because each is a decision rather than a defect:
       `files resolve [!UNAVAIL=return] dns`), `mdns4_minimal`, `LD_PRELOAD`. **Done when** the
       differential has a box for each, in which the policy loaded in situ reports the check off
       with the rule named, and the run fails if it does not.
+- [ ] **P-463 — names in flight when the lookup helper goes quiet are not kept off the probe's
+      lanes** · XS · P-432, P-453 · Filed 2026-10-20 by `P-453`. D27 keeps every name in flight
+      at an `exit` or `memory` loss off the probe's own `getaddrinfo` until ten minutes after
+      the helper is next up. Two kinds of name get no such entry. The first is the lookups
+      detached when the child goes quiet (`unresponsive`, D26). The second is those in flight
+      at a `hung` loss. While the helper is down, the next lookup of one of them runs on the
+      probe's lanes by its `P-426` class. The child's event loop does not run `getaddrinfo`,
+      which runs on libuv's threads. A name could wedge the child only through the process: an
+      NSS module holding a lock the main thread needs, or a lookup that grows the child until
+      it swaps. If it does, the same lookup on the probe's lanes could wedge the probe. **Done
+      when** the names detached at `unresponsive` and those in flight at a `hung` loss get the
+      avoidance entry, with a test and a mutant each. The alternative is a decision recorded
+      against a measured cost: how many names a starved host's quiet child keeps off the
+      probe's lanes, and for how long.
+- [ ] **P-464 — a lookup helper crash on Windows is charged to no one** · XS · P-453, Release
+      1.1 · Filed 2026-10-20 by `P-453`. Only a crash signal charges a name. On Windows a
+      process that crashes reports no signal: it exits with an NTSTATUS code, which Node
+      reports unsigned, for example 3221225477 for `0xC0000005`. The codes that matter:
+      - `0xC0000005` access violation;
+      - `0xC0000409` fail-fast, including the stack-buffer-overrun check;
+      - `0xC00000FD` stack overflow;
+      - `0xC000001D` illegal instruction;
+      - `0xC0000094` integer divide by zero;
+      - `0x80000003` breakpoint.
+
+      So no name is ever poison there. While the helper isolates, a name that crashes it is
+      asked again alone at every loss until five losses rest the helper. Its names are still
+      kept off the probe's lanes. **Done when** `crashedBy` also reads those exit codes on
+      `win32`, with a table test of codes and platforms and a mutant. Release 1.1's Windows
+      field run must confirm the code of a real crash of the child before the release.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

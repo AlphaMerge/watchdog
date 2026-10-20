@@ -78,12 +78,17 @@ import { afterPolls } from './verdict-timer.js';
  * hold has ended and the child could have said it is stuck. Every change says whether it is on. A
  * suspect asked while isolating stays one until it settles, isolation over or not. One rule
  * charges every crash: to a lookup alone in flight, a suspect or a poison name's re-ask, and
- * otherwise to no one, so that a working name is never poison for another's crash. Every name in
- * flight at a crash, charged or not, is avoided, and those asked again go alone. A charged name is
- * poison, never asked on a probe lane, and asked again alone here after an hour, then after twice
- * as long at each crash, to a day at most, at a moment nothing else is in flight; one that finds
- * none for a whole period waits for the next. An answer clears the mark; a restart of the probe
- * does too.
+ * otherwise to no one, so that a working name is never poison for another's crash. **Only a crash
+ * is charged** (`P-453`): a child ended by a signal a crash raises (`CRASH_SIGNALS`). SIGKILL,
+ * SIGTERM or SIGINT from outside (an operator, the kernel's OOM killer, a cgroup kill) and an exit
+ * code say nothing of a name, so such an end is an `exit` loss charged to no one, its suspects
+ * asked again alone. A loss taken on its channel closing, a failed send or a broken protocol,
+ * before the exit is read, waits for the exit when a crash could be charged on it, at most
+ * `exitWaitMs`. Every name in flight at an `exit` loss, crash or not, charged or not, is avoided,
+ * and at a `memory` loss too, and those asked again go alone. A charged name is poison, never
+ * asked on a probe lane, and asked again alone here after an hour, then after twice as long at each
+ * crash, to a day at most, at a moment nothing else is in flight; one that finds none for a whole
+ * period waits for the next. An answer clears the mark; a restart of the probe does too.
  * `memory`, `hung` and `start` losses are never charged to a name. A change and a loss say whether
  * a crash made a `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and
  * not the second.
@@ -91,10 +96,10 @@ import { afterPolls } from './verdict-timer.js';
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So in any state the resolver never asks the
  * probe's own `getaddrinfo` for a poison name, a current suspect, or a name in flight at an `exit`
- * loss: it sends it to the helper while the helper can ask it, and fails that check at once
- * while the route is `resting` or `down`. Such a name is avoided from its crash until ten minutes
- * after the helper is next up, so that a rest, or a start that does not come up, never ends its
- * ten minutes before a child has run them.
+ * or a `memory` loss: it sends it to the helper while the helper can ask it, and fails that check
+ * at once while the route is `resting` or `down`. Such a name is avoided from its loss until ten
+ * minutes after the helper is next up, so that a rest, or a start that does not come up, never
+ * ends its ten minutes before a child has run them.
  */
 
 /** libuv threads in the child: 16 lookup lanes, twice the helper's 8 tokens (D3). */
@@ -151,6 +156,34 @@ const STDERR_SAID = 400;
 const NOT_ANSWERING_WARN_MS = 60_000;
 /** How long a loss's log line waits for the child's exit status and the rest of its stderr. */
 export const HELPER_LOSS_SAY_MS = 1_000;
+/**
+ * How long a loss that a crash could be charged on waits for the child's exit status (`P-453`):
+ * its channel closed, a send failed or it broke the protocol first, and only the signal it ended
+ * with says whether `getaddrinfo` crashed. The child is killed meanwhile, so the exit comes at
+ * once unless the process cannot go; one that has not come by then charges no one.
+ */
+export const HELPER_EXIT_WAIT_MS = 1_000;
+/**
+ * The signals a crash raises (`P-453`): only a child ended by one of these is charged to the
+ * lookup alone in it. SIGKILL, SIGTERM and SIGINT come from outside (an operator, the kernel's OOM
+ * killer, a cgroup kill, or this helper), and an exit code is the child's own word: neither says
+ * anything of a name. SIGABRT is glibc's own end for a corrupted heap, and V8's for its heap
+ * limit.
+ */
+export const CRASH_SIGNALS: ReadonlySet<NodeJS.Signals> = new Set<NodeJS.Signals>([
+  'SIGSEGV',
+  'SIGBUS',
+  'SIGABRT',
+  'SIGILL',
+  'SIGFPE',
+  'SIGTRAP',
+  'SIGSYS',
+]);
+
+/** Whether a child ended by this signal crashed (`P-453`): undefined while its exit is not known. */
+export function crashedBy(signal: NodeJS.Signals | null | undefined): boolean {
+  return signal !== null && signal !== undefined && CRASH_SIGNALS.has(signal);
+}
 /** Inherited by the child from nowhere: systemd's, the probe's own settings, and every Node one. */
 const NOT_INHERITED = new Set(['NOTIFY_SOCKET', 'WATCHDOG_USEC', 'WATCHDOG_PID']);
 
@@ -178,6 +211,7 @@ export interface HelperLimits {
   readonly poisonRetryMaxMs: number;
   readonly isolationMaxMs: number;
   readonly lossSayMs: number;
+  readonly exitWaitMs: number;
 }
 
 export const HELPER_LIMITS: HelperLimits = {
@@ -203,6 +237,7 @@ export const HELPER_LIMITS: HelperLimits = {
   poisonRetryMaxMs: HELPER_POISON_RETRY_MAX_MS,
   isolationMaxMs: HELPER_ISOLATION_MAX_MS,
   lossSayMs: HELPER_LOSS_SAY_MS,
+  exitWaitMs: HELPER_EXIT_WAIT_MS,
 };
 
 export type HelperState =
@@ -387,7 +422,10 @@ export interface HelperLoss {
   readonly requeued: number;
   /** Lookups neither: hung, detached, or charged. */
   readonly faulted: number;
-  /** The name the crash is charged to: a suspect while isolating, or a poison name's re-ask. */
+  /**
+   * The name the crash is charged to: a suspect while isolating, or a poison name's re-ask, alone
+   * in a child ended by a signal a crash raises (`P-453`).
+   */
   readonly chargedTo: string | undefined;
   /** Whether that made a new poison mark or crashed again at a re-ask. */
   readonly charged: ChargedKind | undefined;
@@ -514,11 +552,15 @@ export const REAL_TIMERS: HelperTimers = {
  * - **Read `routeState()` just before each `ask`**, never the route of the last change: at a loss
  *   the state moves before its change is handed on, and a child judged quiet while the probe stops
  *   routes `down` at once. An ask refused for it rejects with reason `unavailable`: nothing was
- *   sent, so the lookup is kept and routed again, never faulted (`requeue` does not say so).
+ *   sent, so the lookup is kept and routed again, never faulted (`requeue` does not say so). So
+ *   is one asked while a lost child's exit is awaited (`P-453`), the route still `up` until the
+ *   loss is taken, a second at most.
  * - **Ask `avoidsSystem(host, family)` before any name goes to the probe's own `getaddrinfo`, in
- *   any state**: a name it names may be what crashed the helper, so it is asked in the helper
- *   while the route is `up` or `rejoining`, and fails its check at once (`RESOLVER_FAULT`) while
- *   it is `resting` or `down`. The name check never walks it, so it is never heard or sampled.
+ *   any state, and again as it starts there**: a name it names may be what crashed the helper, so
+ *   it is asked in the helper while the route is `up` or `rejoining`, and fails its check at once
+ *   (`RESOLVER_FAULT`) while it is `resting` or `down`. The name check never walks it, so it is
+ *   never heard or sampled. A name becomes avoided at any loss, a lookup of it waiting on the
+ *   probe's lanes included.
  */
 export interface HelperPort {
   start(snapshot?: HelperSnapshot): Promise<boolean>;
@@ -594,7 +636,7 @@ let lastAskId = 0;
 const poisonKey = (host: string, family: HelperFamily): string => `${String(family)}:${host}`;
 
 /** The families a lookup of `family` asks for: `0` asks both, so it meets 4 and 6 alike. */
-const meets = (family: HelperFamily): readonly HelperFamily[] =>
+export const familiesMet = (family: HelperFamily): readonly HelperFamily[] =>
   family === 0 ? [0, 4, 6] : [family, 0];
 
 interface InFlight {
@@ -610,8 +652,18 @@ interface InFlight {
   readonly onStuck: ((ranMs: number) => void) | undefined;
   stuck: boolean;
   detached: boolean;
+  /** Its ask could not be written to the child: it cannot have crashed it (`P-453`). */
+  unsent: boolean;
   readonly resolve: (answer: HelperAnswer) => void;
   readonly reject: (error: Error) => void;
+}
+
+/** A loss waiting for the child's exit (`P-453`): why it was lost, and the wait's bound. */
+interface ExitWait {
+  readonly why: string;
+  /** The bound has passed: the loss is taken with no exit read. */
+  over: boolean;
+  timer: HelperTimer | undefined;
 }
 
 interface ChildRecord {
@@ -634,6 +686,13 @@ interface ChildRecord {
   startTimer: HelperTimer | undefined;
   /** The poison mark its crash was charged to (D27). */
   chargedKey: string | undefined;
+  /** The signal it ended with, once its exit is read: undefined until then (`P-453`). */
+  endSignal: NodeJS.Signals | null | undefined;
+  /**
+   * Lost, and its loss waiting for the exit to say whether it crashed (`P-453`). Nothing is sent
+   * to it, and nothing it says is read, meanwhile.
+   */
+  ending: ExitWait | undefined;
   mismatches: number;
   readonly exit: Promise<void>;
   readonly markExited: () => void;
@@ -836,8 +895,8 @@ export class LookupHelper implements HelperPort {
   #lapseGeneration = 0;
   readonly #poison = new Map<string, PoisonMark>();
   /**
-   * Each name in flight at an `exit` loss, charged or not, kept off probe lanes: with the time
-   * its ten minutes run from, the helper's next `up`, and undefined until then.
+   * Each name in flight at an `exit` or a `memory` loss, charged or not, kept off probe lanes:
+   * with the time its ten minutes run from, the helper's next `up`, and undefined until then.
    */
   readonly #crashed = new Map<string, number | undefined>();
   /** The current suspects, sent alone until they answer or isolation ends (D27). */
@@ -936,10 +995,15 @@ export class LookupHelper implements HelperPort {
     }
   }
 
-  /** The current child, ready, not lost and connected. */
+  /** The current child, ready, not lost, not waiting for its exit (`P-453`) and connected. */
   #serving(): ChildRecord | undefined {
     const record = this.#child;
-    if (record?.ready === undefined || record.lost !== undefined || !record.connected) {
+    if (
+      record?.ready === undefined ||
+      record.lost !== undefined ||
+      record.ending !== undefined ||
+      !record.connected
+    ) {
       return undefined;
     }
     return record;
@@ -993,7 +1057,7 @@ export class LookupHelper implements HelperPort {
     const suspect = request.suspect === true && this.#isolating;
     if (suspect) this.#suspects.add(key);
     return new Promise<HelperAnswer>((resolve, reject) => {
-      record.table.set(id, {
+      const flight: InFlight = {
         id,
         host: request.host,
         family: request.family,
@@ -1004,9 +1068,11 @@ export class LookupHelper implements HelperPort {
         onStuck: request.onStuck,
         stuck: false,
         detached: false,
+        unsent: false,
         resolve,
         reject,
-      });
+      };
+      record.table.set(id, flight);
       const message: AskMessage = {
         t: 'ask',
         id,
@@ -1016,6 +1082,7 @@ export class LookupHelper implements HelperPort {
       };
       const failed = (error: unknown): void => {
         const words = error instanceof Error ? error.message : String(error);
+        flight.unsent = true;
         this.#lose(record, 'exit', `an ask could not be written to it: ${words}`);
       };
       try {
@@ -1087,14 +1154,14 @@ export class LookupHelper implements HelperPort {
 
   /**
    * Whether the probe's own `getaddrinfo` must not be asked for this name now: it is poison, a
-   * current suspect, or was in flight at an `exit` loss, until `stableMs` after the helper was next
-   * up, in its family or one a lookup of it would also ask for. The resolver asks before routing a
+   * current suspect, or was in flight at an `exit` or a `memory` loss, until `stableMs` after the
+   * helper was next up, in its family or one a lookup of it would also ask for. The resolver asks before routing a
    * name to the probe's lanes in any state: in the helper instead while it can ask, and otherwise
    * its check fails.
    */
   avoidsSystem(host: string, family: HelperFamily): boolean {
     const now = this.#timers.now();
-    for (const met of meets(family)) {
+    for (const met of familiesMet(family)) {
       const key = poisonKey(host, met);
       if (this.#poison.has(key) || this.#suspects.has(key)) return true;
       if (this.#crashed.has(key)) {
@@ -1196,6 +1263,7 @@ export class LookupHelper implements HelperPort {
     if (record !== undefined && record.lost === undefined) {
       record.lost = 'stop';
       this.#timers.clearTimeout(record.startTimer);
+      this.#timers.clearTimeout(record.ending?.timer);
       const lost = [...record.table.values()];
       record.table.clear();
       for (const flight of lost) {
@@ -1285,6 +1353,8 @@ export class LookupHelper implements HelperPort {
       stderr: '',
       startTimer: undefined,
       chargedKey: undefined,
+      endSignal: undefined,
+      ending: undefined,
       mismatches: 0,
       exit,
       markExited,
@@ -1359,6 +1429,7 @@ export class LookupHelper implements HelperPort {
 
   #onExit(record: ChildRecord, code: number | null, signal: NodeJS.Signals | null): void {
     record.exited = true;
+    record.endSignal = signal;
     record.markExited();
     const why =
       record.fatal !== undefined
@@ -1390,6 +1461,8 @@ export class LookupHelper implements HelperPort {
     const message = readChildMessage(raw);
     // Kept from any child, current or not: the loss's line says it.
     if (message?.t === 'fatal') record.fatal = message.message;
+    // Lost, and waiting for its exit (`P-453`): nothing more it says is taken.
+    if (record.ending !== undefined) return;
     if (record !== this.#child) {
       if (message?.t === 'answer') this.#lateAnswer(record, message);
       return;
@@ -1589,6 +1662,8 @@ export class LookupHelper implements HelperPort {
    * did not bring it back, so a child heard only now and then still reaches `hungTicks`.
    */
   #judge(): void {
+    // A child lost and waiting for its exit (`P-453`) is not judged: it has nothing more to say.
+    if (this.#child?.ending !== undefined) return;
     const judged =
       this.#state === 'up' ||
       this.#state === 'unresponsive' ||
@@ -1677,10 +1752,27 @@ export class LookupHelper implements HelperPort {
 
   /**
    * A child lost: every lookup it had is rejected now, in one turn, saying what it was; then a new
-   * child, a rest, or nothing when the probe is stopping. Idempotent per child.
+   * child, a rest, or nothing when the probe is stopping. Idempotent per child. An `exit` loss with
+   * a lookup a crash could be charged to, taken before the exit is read, waits for it
+   * (`#awaitExit`, `P-453`).
    */
   #lose(record: ChildRecord, reason: LossReason, why: string): void {
     if (record.lost !== undefined) return;
+    const wait = record.ending;
+    // Waiting for the exit: only the exit, or the wait's end, takes the loss.
+    if (wait !== undefined && record.endSignal === undefined && !wait.over) return;
+    if (
+      wait === undefined &&
+      reason === 'exit' &&
+      record.endSignal === undefined &&
+      this.#chargeable(record) !== undefined
+    ) {
+      this.#awaitExit(record, why);
+      return;
+    }
+    // The cause the loss was first taken on, the exit's status filling it in when it comes.
+    const said = wait?.why ?? why;
+    this.#timers.clearTimeout(wait?.timer);
     record.lost = reason;
     this.#timers.clearTimeout(record.startTimer);
     const current = this.#child === record;
@@ -1693,18 +1785,17 @@ export class LookupHelper implements HelperPort {
     this.#killProcess(record);
     const now = this.#timers.now();
 
-    const lost = [...record.table.values()];
-    record.table.clear();
     // One rule for every crash (D27): charged only to a lookup alone in flight, a suspect asked
     // while isolating (still in flight whether or not isolation has ended since) or a poison
     // name's re-ask. With anything else in flight, said stuck or let go included, no one is
-    // charged, so a working name is never made poison for another's crash. `memory`, `hung` and
-    // `start` losses are never charged.
-    let charged: InFlight | undefined;
-    const [only] = lost;
-    if (reason === 'exit' && lost.length === 1 && only !== undefined) {
-      if (only.suspect || only.poisonAsk) charged = only;
-    }
+    // charged, so a working name is never made poison for another's crash. And only a crash
+    // (`P-453`): an `exit` loss whose child ended by a signal a crash raises. Any other end, a
+    // kill from outside, an exit code or no exit read, is charged to no one, and its suspects are
+    // asked again alone. `memory`, `hung` and `start` losses are never charged.
+    const charged =
+      reason === 'exit' && crashedBy(record.endSignal) ? this.#chargeable(record) : undefined;
+    const lost = [...record.table.values()];
+    record.table.clear();
     let chargedKind: ChargedKind | undefined;
     if (charged !== undefined) {
       const marked = this.#markPoison(charged, now);
@@ -1751,8 +1842,13 @@ export class LookupHelper implements HelperPort {
         this.#lapseAt = Math.max(this.#lapseAt, now + this.#limits.isolationMaxMs);
         this.#armIsolationLapse();
       }
-      // Every name in flight, charged or not: any of them may be what crashed it, so none goes to
-      // the probe's own getaddrinfo until ten minutes after the helper is next up, resting or not.
+    }
+    // Every name in flight, charged or not, crash or not (`P-453`), and at a `memory` loss too:
+    // any of them may be what ended the child, a crash or a name whose lookup grows the child's
+    // memory until this helper or the kernel's OOM killer ends it, neither of which is told from
+    // a kill from outside or a leak. So none goes to the probe's own getaddrinfo until ten minutes
+    // after the helper is next up, resting or not.
+    if (reason === 'exit' || reason === 'memory') {
       for (const [key, since] of this.#crashed) {
         if (since !== undefined && now - since >= this.#limits.stableMs) this.#crashed.delete(key);
       }
@@ -1786,7 +1882,7 @@ export class LookupHelper implements HelperPort {
       at: now,
       reason,
       pid: record.pid,
-      why,
+      why: said,
       exitCode: null,
       signal: null,
       stderr: '',
@@ -1817,6 +1913,42 @@ export class LookupHelper implements HelperPort {
     } catch (error: unknown) {
       this.#logger.warn({ err: error, pid: record.pid }, 'the lookup helper could not be killed');
     }
+  }
+
+  /**
+   * The lookup a crash of this child would be charged to (D27): the one in flight, a suspect or a
+   * poison name's re-ask, whose ask reached the child. Undefined otherwise.
+   */
+  #chargeable(record: ChildRecord): InFlight | undefined {
+    if (record.table.size !== 1) return undefined;
+    const [only] = record.table.values();
+    if (only === undefined || only.unsent) return undefined;
+    return only.suspect || only.poisonAsk ? only : undefined;
+  }
+
+  /**
+   * An `exit` loss taken before the child's exit was read, with a lookup a crash would be charged
+   * to (`P-453`): its channel closed first, a send failed, or it broke the protocol. Whether it
+   * crashed is the signal it ends with, so the loss waits for the exit, the child killed now so
+   * that it exits whatever it was doing (a kill does nothing to one already dead, whose exit still
+   * says how it died). Nothing is sent to it, and nothing it says is read, meanwhile. An exit not
+   * read within `exitWaitMs`, after the polls so that one already in the pipe is read first, is
+   * taken as no crash: the loss is charged to no one.
+   */
+  #awaitExit(record: ChildRecord, why: string): void {
+    const wait: ExitWait = { why, over: false, timer: undefined };
+    record.ending = wait;
+    wait.timer = this.#timers.setTimeout(() => {
+      afterPolls(() => {
+        wait.over = true;
+        this.#lose(record, 'exit', why);
+      });
+    }, this.#limits.exitWaitMs);
+    this.#killProcess(record);
+    this.#logger.debug(
+      { pid: record.pid, why },
+      'the lookup helper was lost with a lookup a crash would be charged to: waiting for its exit to say whether it crashed',
+    );
   }
 
   #markPoison(flight: InFlight, now: number): { readonly key: string; readonly kind: ChargedKind } {

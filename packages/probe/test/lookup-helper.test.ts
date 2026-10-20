@@ -9,6 +9,7 @@ import { after, describe, it, type TestContext } from 'node:test';
 import { pino, type Logger } from 'pino';
 import {
   helperEnv,
+  CRASH_SIGNALS,
   helperSelf,
   HELPER_ISOLATION_MAX_MS,
   HELPER_LOST,
@@ -227,6 +228,7 @@ const QUICK: Partial<HelperLimits> = {
   startWaitMs: 60_002,
   stuckMs: 60_000,
   lossSayMs: 7_100,
+  exitWaitMs: 7_200,
 };
 
 interface Made {
@@ -1806,6 +1808,10 @@ class FakeChild extends EventEmitter implements HelperProcess {
   readonly killed: NodeJS.Signals[] = [];
   /** A process in D state: SIGKILL reaches it and it does not go. */
   holdOnKill = false;
+  /** Each send's callback is told this error, as when the channel is broken. */
+  sendError: Error | undefined;
+  /** Dead of this signal, its exit not read yet: a kill does nothing to it (`P-453`). */
+  #diedOf: NodeJS.Signals | undefined;
 
   constructor(readonly pid: number) {
     super();
@@ -1813,14 +1819,16 @@ class FakeChild extends EventEmitter implements HelperProcess {
 
   send(message: AskMessage, callback: (error: Error | null) => void): boolean {
     this.asks.push(message);
+    const error = this.sendError ?? null;
     queueMicrotask(() => {
-      callback(null);
+      callback(error);
     });
     return true;
   }
 
   kill(signalName: NodeJS.Signals): boolean {
     this.killed.push(signalName);
+    if (this.#diedOf !== undefined) return true;
     if (!this.holdOnKill) {
       setImmediate(() => {
         this.emit('exit', null, signalName);
@@ -1881,8 +1889,19 @@ class FakeChild extends EventEmitter implements HelperProcess {
     });
   }
 
-  die(): void {
-    this.emit('exit', null, 'SIGSEGV');
+  /** Exits now, by a signal or with a code: a crash in `getaddrinfo` unless the test says. */
+  die(signal: NodeJS.Signals | null = 'SIGSEGV', code: number | null = null): void {
+    this.emit('exit', code, signal);
+  }
+
+  /** Dies of `signal` with its exit not yet read: `reap` reads it (`P-453`). */
+  diesUnread(signal: NodeJS.Signals): void {
+    this.#diedOf = signal;
+  }
+
+  /** The exit of a child that `diesUnread`, read now. */
+  reap(): void {
+    this.emit('exit', null, this.#diedOf ?? null);
   }
 
   closeChannel(): void {
@@ -3181,6 +3200,353 @@ describe('the lookup helper: names kept off the probe’s lanes (scripted proces
       assert.equal(lostError((await relapse).error).charged, true);
       assert.equal(change.charged, 'new');
       assert.equal(made.helper.poison(host, 4)?.retryMs, hour);
+    } finally {
+      await stop(made);
+    }
+  });
+});
+
+/** Two crashes, each with a lookup asked again, and the next child up: isolating (D27). */
+async function isolating(made: FakeMade): Promise<FakeChild> {
+  made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+  made.timers.fire((await crashAsking(made)).delayMs ?? -1);
+  assert.equal(made.helper.isolating(), true);
+  return fakeUp(made);
+}
+
+/** The signals a crash raises, and the ends that say nothing of a name (`P-453`). */
+const CRASHES = ['SIGSEGV', 'SIGBUS', 'SIGABRT', 'SIGILL', 'SIGFPE', 'SIGTRAP', 'SIGSYS'] as const;
+const ENDS: readonly {
+  readonly what: string;
+  readonly signal: NodeJS.Signals | null;
+  readonly code: number | null;
+  readonly crash: boolean;
+}[] = [
+  ...CRASHES.map((signal) => ({ what: signal, signal, code: null, crash: true })),
+  ...(['SIGKILL', 'SIGTERM', 'SIGINT'] as const).map((signal) => ({
+    what: `${signal} from outside`,
+    signal,
+    code: null,
+    crash: false,
+  })),
+  { what: 'an exit code of 1', signal: null, code: 1, crash: false },
+  { what: 'an exit code of 0', signal: null, code: 0, crash: false },
+];
+
+describe('the lookup helper: only a crash is charged (P-453, scripted process, the test’s clock)', () => {
+  it('a suspect alone is charged only when its child ends by a signal a crash raises; any other end asks it again alone, and keeps it off the probe’s lanes', async () => {
+    assert.deepEqual([...CRASH_SIGNALS].sort(), [...CRASHES].sort());
+    for (const end of ENDS) {
+      const made = fakeMade();
+      void made.helper.start();
+      try {
+        const child = await isolating(made);
+        const host = 'bad.example.test';
+        const lost = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+        child.die(end.signal, end.code);
+        child.closeChannel();
+        await polls();
+        const error = lostError((await within(WAIT, end.what, lost)).error);
+        assert.equal(error.charged, end.crash, end.what);
+        assert.equal(made.changes.at(-1)?.charged, end.crash ? 'new' : undefined, end.what);
+        assert.equal(made.helper.stats().lastLoss?.chargedTo, end.crash ? host : undefined);
+        if (end.crash) {
+          assert.equal(made.helper.poison(host, 4)?.signal, end.signal, end.what);
+        } else {
+          assert.equal(made.helper.poison(host, 4), undefined, `${end.what}: not poison`);
+          assert.equal(error.requeue, true, `${end.what}: asked again`);
+          assert.equal(error.suspect, true, `${end.what}: alone, as a suspect`);
+          assert.equal(made.helper.isolating(), true, end.what);
+        }
+        // Crash or not, it may be what ended the child (D27).
+        assert.equal(made.helper.avoidsSystem(host, 4), true, end.what);
+      } finally {
+        await stop(made);
+      }
+    }
+  });
+
+  it('suspects each ended from outside are never charged, so their losses rest the helper as any do', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      await isolating(made);
+      const states: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        if (made.helper.state !== 'up') await fakeUp(made);
+        const child = newest(made);
+        const host = `bad-${String(i)}.example.test`;
+        const lost = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+        child.die('SIGKILL');
+        child.closeChannel();
+        await polls();
+        assert.equal(lostError((await lost).error).charged, false, host);
+        const change = made.changes.at(-1);
+        assert.ok(change !== undefined);
+        states.push(change.state);
+        if (change.state === 'backoff') made.timers.fire(change.delayMs ?? -1);
+      }
+      assert.deepEqual(states, ['backoff', 'backoff', 'resting'], 'the fifth loss in ten minutes');
+      assert.equal(made.helper.stats().poisoned, 0);
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a poison name’s re-ask ended from outside is not charged again: its mark stays as it was, and it is asked again', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      await isolating(made);
+      const host = 'bad.example.test';
+      const first = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      let change = await fakeCrash(made);
+      assert.equal(lostError((await first).error).charged, true);
+      made.helper.endIsolation();
+      const mark = made.helper.poison(host, 4);
+      assert.ok(mark !== undefined);
+      const retryMs = mark.retryMs;
+      made.timers.fire(change.delayMs ?? -1);
+      const next = await fakeUp(made);
+      const again = settled(made.helper.ask({ host, family: 4, max: 64 }));
+      next.die('SIGKILL');
+      next.closeChannel();
+      await polls();
+      const error = lostError((await again).error);
+      assert.equal(error.charged, false);
+      assert.equal(error.requeue, true, 'asked again');
+      change = made.changes.at(-1) ?? change;
+      assert.equal(change.charged, undefined, 'a loss like any other');
+      assert.equal(mark.retryMs, retryMs, 'its mark not doubled');
+      assert.equal(made.helper.poison(host, 4), mark, 'still poison: it has not answered');
+      // The same re-ask, alone, ended by a crash: charged again.
+      made.timers.fire(change.delayMs ?? -1);
+      const third = await fakeUp(made);
+      const alone = settled(made.helper.ask({ host, family: 4, max: 64 }));
+      third.die('SIGSEGV');
+      third.closeChannel();
+      await polls();
+      assert.equal(lostError((await alone).error).charged, true);
+      assert.equal(made.changes.at(-1)?.charged, 'again');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a channel closed before the exit is read waits for the exit, sends and judges nothing meanwhile, and a crash then is charged', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      const host = 'bad.example.test';
+      const lost = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      const losses = made.helper.stats().losses;
+      child.diesUnread('SIGSEGV');
+      child.closeChannel();
+      await polls();
+      assert.equal(made.helper.stats().losses, losses, 'no loss before the exit');
+      assert.deepEqual(child.killed, ['SIGKILL'], 'killed, so that it exits whatever it does');
+      const refused = settled(made.helper.ask({ host: 'dev-1.example.test', family: 4, max: 64 }));
+      assert.equal(lostError((await refused).error).reason, 'unavailable', 'nothing sent to it');
+      assert.equal(child.asks.length, 1, 'the suspect alone');
+      for (let i = 0; i < 3; i += 1) await tick(made);
+      assert.equal(made.helper.state, 'up', 'not judged quiet while its exit is awaited');
+      child.reap();
+      await polls();
+      const error = lostError((await within(WAIT, 'the suspect', lost)).error);
+      assert.equal(error.charged, true);
+      const loss = made.helper.stats().lastLoss;
+      assert.ok(loss !== undefined);
+      assert.equal(loss.why, 'its channel to the probe closed', 'the cause it was lost on');
+      assert.equal(loss.signal, 'SIGSEGV');
+      assert.equal(made.helper.poison(host, 4)?.signal, 'SIGSEGV');
+      assert.equal(made.timers.has(7_200), false, 'the wait is over');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a channel closed before an outside kill is read charges no one, and its suspect is asked again alone', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      const host = 'bad.example.test';
+      const lost = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      child.diesUnread('SIGTERM');
+      child.closeChannel();
+      await polls();
+      child.reap();
+      await polls();
+      const error = lostError((await within(WAIT, 'the suspect', lost)).error);
+      assert.equal(error.charged, false);
+      assert.equal(error.requeue, true);
+      assert.equal(error.suspect, true);
+      assert.equal(made.helper.poison(host, 4), undefined);
+      assert.equal(made.helper.avoidsSystem(host, 4), true);
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('an error the child reports while its exit is awaited takes no loss of its own: the exit, a crash, is still charged', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      const host = 'bad.example.test';
+      const lost = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      const losses = made.helper.stats().losses;
+      child.diesUnread('SIGSEGV');
+      child.closeChannel();
+      await polls();
+      // As Node reports a kill it could not send to a process already dead.
+      child.emit('error', new Error('kill ESRCH'));
+      await polls();
+      assert.equal(made.helper.stats().losses, losses, 'still waiting for the exit');
+      child.reap();
+      await polls();
+      const error = lostError((await within(WAIT, 'the suspect', lost)).error);
+      assert.equal(error.charged, true);
+      assert.equal(made.helper.stats().lastLoss?.why, 'its channel to the probe closed');
+      assert.equal(made.helper.poison(host, 4)?.signal, 'SIGSEGV');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a live child whose channel closed is killed, and its exit by that SIGKILL charges no one', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      const lost = settled(
+        made.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
+      );
+      child.closeChannel();
+      await polls();
+      const error = lostError((await within(WAIT, 'the suspect', lost)).error);
+      assert.equal(error.charged, false);
+      assert.equal(error.requeue, true);
+      assert.equal(made.helper.stats().lastLoss?.signal, 'SIGKILL');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a protocol fault with a suspect alone takes nothing more the child says: its answer after the fault settles nothing', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      const lost = settled(
+        made.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
+      );
+      const id = child.asks.at(-1)?.id ?? -1;
+      child.say({ t: 'nonsense' });
+      // Its channel still open, its exit awaited: nothing more is sent to it.
+      const refused = settled(made.helper.ask({ host: 'dev-1.example.test', family: 4, max: 64 }));
+      assert.equal(child.asks.length, 1, 'the suspect alone');
+      child.answer(id);
+      assert.equal(lostError((await refused).error).reason, 'unavailable');
+      await polls();
+      const settledAs = await within(WAIT, 'the suspect', lost);
+      assert.equal(settledAs.answer, undefined, 'not answered by a child already lost');
+      const error = lostError(settledAs.error);
+      assert.equal(error.charged, false, 'its own SIGKILL is no crash');
+      assert.equal(error.requeue, true);
+      assert.equal(made.helper.stats().lastLoss?.why, 'it sent a message the probe cannot read');
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('an exit not read within the wait takes the loss after the polls, charged to no one; a stop meanwhile ends the wait', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      child.holdOnKill = true;
+      const lost = settled(
+        made.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
+      );
+      const losses = made.helper.stats().losses;
+      child.closeChannel();
+      await polls();
+      made.timers.fire(7_200);
+      assert.equal(made.helper.stats().losses, losses, 'judged after the polls');
+      await polls();
+      assert.equal(made.helper.stats().losses, losses + 1);
+      const error = lostError((await within(WAIT, 'the suspect', lost)).error);
+      assert.equal(error.charged, false);
+      assert.equal(error.requeue, true);
+    } finally {
+      await stop(made);
+    }
+    const stopped = fakeMade();
+    void stopped.helper.start();
+    try {
+      const child = await isolating(stopped);
+      const lost = settled(
+        stopped.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
+      );
+      child.diesUnread('SIGSEGV');
+      child.closeChannel();
+      await polls();
+      assert.equal(stopped.timers.has(7_200), true, 'waiting for the exit');
+      const stopping = stopped.helper.stop();
+      assert.equal(stopped.timers.has(7_200), false, 'the stop ends the wait');
+      assert.equal(lostError((await lost).error).reason, 'stop');
+      child.reap();
+      await within(WAIT, 'the stop', stopping);
+      assert.equal(stopped.helper.poison('bad.example.test', 4), undefined);
+    } finally {
+      await stop(stopped);
+    }
+  });
+
+  it('a suspect whose ask could not be written is charged with nothing, whatever the child died of', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await isolating(made);
+      child.sendError = new Error('the channel is closed');
+      child.diesUnread('SIGSEGV');
+      const lost = settled(
+        made.helper.ask({ host: 'bad.example.test', family: 4, max: 64, suspect: true }),
+      );
+      await polls();
+      child.reap();
+      await polls();
+      const error = lostError((await within(WAIT, 'the suspect', lost)).error);
+      assert.equal(error.charged, false);
+      assert.equal(made.helper.poison('bad.example.test', 4), undefined);
+      assert.match(made.helper.stats().lastLoss?.why ?? '', /^an ask could not be written to it/u);
+    } finally {
+      await stop(made);
+    }
+  });
+
+  it('a name in flight at a memory loss is kept off the probe’s lanes too, until ten minutes after the helper is next up', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await fakeUp(made);
+      const lost = settled(made.helper.ask({ host: 'grow.example.test', family: 4, max: 64 }));
+      child.beat({ rss: HELPER_RSS_MAX + 1 });
+      await polls();
+      const error = lostError((await lost).error);
+      assert.equal(error.reason, 'memory');
+      assert.equal(error.charged, false, 'never charged');
+      assert.equal(made.helper.avoidsSystem('grow.example.test', 4), true);
+      assert.equal(made.helper.avoidsSystem('grow.example.test', 0), true, 'asked for both too');
+      assert.equal(made.helper.avoidsSystem('other.example.test', 4), false);
+      made.timers.fire(made.changes.at(-1)?.delayMs ?? -1);
+      await fakeUp(made);
+      made.timers.clock += 600_000 - 1;
+      assert.equal(made.helper.avoidsSystem('grow.example.test', 4), true);
+      made.timers.clock += 1;
+      assert.equal(made.helper.avoidsSystem('grow.example.test', 4), false, 'ten minutes up');
     } finally {
       await stop(made);
     }

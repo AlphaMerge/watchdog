@@ -1317,9 +1317,18 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   saying the lookup helper failed while asking for it, and it is never asked on the probe's own
   lanes, resting included, where it would crash the probe. It is asked again after an hour, at a
   moment the helper has nothing else in flight, then after twice as long at each crash it alone
-  was in flight for, to a day. An answer, or a restart of the probe, clears it. Every name in
-  flight at any crash is kept off the probe's lanes too, until ten minutes after the helper is
-  next up, a rest included.
+  was in flight for, to a day. An answer, or a restart of the probe, clears it.
+- **Only a crash is held against a name** (`P-453`): the child ending by a signal a crash
+  raises, SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP or SIGSYS. A child killed from
+  outside (SIGKILL, SIGTERM or SIGINT: an operator, the kernel's OOM killer, a cgroup kill), or
+  one that exits with a code, makes no name poison: a name it was asking alone is asked again,
+  alone.
+  When the child's channel closes before its exit is read, the helper kills it and waits up to a
+  second for the exit to say which it was. Every name in flight when the child ends, a crash or
+  not, or when it runs out of memory, is kept off the probe's lanes until ten minutes after the
+  helper is next up, a rest included: any of them may be what ended it. On Windows a crash ends
+  with an exit code, so no end is held against a name there yet (`P-464`); the names are still
+  kept off the probe's lanes, and losses rest the helper as above.
 - **Stopping.** The helper serves the check pool until the pool has drained, then stops with the
   probe. A probe killed outright takes it with it: the child exits within a second of its channel
   to the probe closing.
