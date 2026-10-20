@@ -16235,6 +16235,46 @@ because each is a decision rather than a defect:
       still unvouched at the SIGSTOP could be detached. **Done when** P2 is run scaled down on
       `P-463`'s build. Either it holds, or its answering rule says how many such refusals it
       allows and why, by a recorded decision.
+
+      **At full size, 2026-10-20 (S7's first full-size run, at rc.3's cut, on `28b97a7c`).** P2
+      failed with "8 answering checks given up" and "4 answering checks failed otherwise", of 4,500.
+      Read from the code and the run's row:
+      - **Both start the same way.** In the 3.3 s between the SIGSTOP and the third quiet tick,
+        D19's rate was still sending answering names to the helper unvouched. The silent zone held
+        3 of the helper's 4 first lanes, so one answering first lookup went to the stopped child
+        and about fourteen queued behind it.
+      - **The 4 failed otherwise are `P-463`'s, as this ticket said.** The one answering name in
+        flight at the quiet was kept off the probe's lanes (D27). Each of its checks in the 17 s
+        the route read `down` was refused at the ask, and after the `hung` loss the next child
+        answered it.
+      - **The 8 given up are a second case, which this ticket did not name.** They were checks
+        asked before `unresponsive` was judged, which waited out their 2,500 ms bound on that
+        lookup or in the queue behind it. At the detach, `#fallBack` moved the queued lookups to the
+        probe's lanes, and those answered. They are not D16's transient, which bounds forwarder
+        slots and held, and not `P-463`'s, which acts at the quiet. Any build since S7 would have
+        failed P2 on them at full size.
+      - **Why scaled down could not show it.** At 500 sensors the walk vouches every answering name
+        before 10 s. D19's rate binds at 10 s only from about 3,100 sensors.
+
+      **Decided 2026-10-20 by Claude, under the user's delegation: keep the code, and give P2's
+      answering rule an allowance read from the run's own facts.**
+      - **Why not a code change.** The design does not promise that no answering check is lost in a
+        hang: §1.11's `up` → `unresponsive` row leaves a detached lookup's waiters on it, and §9's
+        risk 3 counts about 3 s a hang. Every way to answer these twelve would need one of three
+        things. Asking the probe's own `getaddrinfo` for a name in flight in a quiet child weakens
+        D27. Answering from c-ares reverses the user's decision that c-ares never answers. Judging
+        the hang sooner on the parent's clock touches the quiet ticks that P3 guards.
+      - **The allowance.** A given-up answering check is allowed only if it was asked before the
+        route left `up`, for a name the stopped child held or held back. A check failed otherwise is
+        allowed only with D27's refusal, for a name in flight in the stopped child at the quiet,
+        asked while the route read `down`. Nothing else may fail.
+      - **A new assertion with it.** No such name reaches the probe's own lanes after the quiet.
+        Without it, `P-463`'s own mutant (no keep-off at the quiet) would pass the allowance.
+      - **Done when, in place of the scaled-down run above:**
+        - the judge's cases hold each part, with a mutant for each;
+        - P2 is run alone at its full 5,000 sensors on the build that lands `P-478` (it changes the
+          helper's lanes that P2's queue formed on) and passes;
+        - the rc.3 checklist's step 0.7 names both cases.
 - [x] **P-473 — `name-resolver`'s "at once" is under 20 ms of wall clock, which a loaded host
       can exceed** · XS · P-426, P-438 · Found 2026-10-20 beside a `test:perf` run: 'fails a check
       at once when every lane its lookup could use is stuck; the lookup stays queued' failed its
@@ -16431,6 +16471,74 @@ because each is a decision rather than a defect:
       dependency was down. **Done when** the dev PostgreSQL presents a self-signed certificate
       (`ssl = on`, a certificate from `scripts/dev-certs.sh`, clients that ask for none still
       served) and the case runs for all three engines, `pg`'s refusal read as the handshake.
+
+- [ ] **P-477 — at steady state the walk asks 7.5 questions a second where D20 says about
+      one a zone, because each second's refreshes reach `DnsCheck` together** · S · P-432 ·
+      Filed 2026-10-20 by the coordinator, from S7's first full-size run at rc.3's cut, on
+      `28b97a7c`. `warmzone` and `steady` failed in gate mode on the judge's steady-state rule:
+      "the walk asked 7.09 questions a second at steady state, past 1 + 2 keys × q = 3" and 7.54
+      likewise. Every answering check answered in both. Scaled down, the rule held at 0.87–1.13 a
+      second.
+      - **The cause.** `#sample` lets `SAMPLED_PER_KEY` (2) refreshes ride a heard zone since its
+        last answer, and walks the rest (`dns-check.ts`). The timing wheel hands each second's due
+        checks to the pool in one call. At 500 names, about ten refreshes of a zone reach the route
+        in the same turn, before any of their answers is read. So two ride, the rest walk, and D19's
+        bucket is what holds the walk to 7–7.5 a second.
+      - **What the design assumed.** The code follows D20's rules, and `dns-check.test.ts` pins "a
+        third is walked". D20's cost sentence ("about one refresh a second is walked and the rest
+        ride it") assumed refreshes spread across the second.
+      - **Decided 2026-10-20 by Claude, under the user's delegation: fix the code, keep the bound.**
+        The bound is the design's own (§7.6: 1 + keys × q), and S-F3's promise to the site's DNS
+        server is that the probe adds about nothing at steady state. Raising the bound to D19's
+        ceiling would measure the walk against the wrong promise. A refresh that qualifies to ride
+        but finds the zone's riders taken waits on the zone, up to its own routing deadline, for an
+        answer that frees one, rather than walking. While the zone's sample window is closed, one
+        refresh walks as the pilot and the rest wait on its verdict. A wait that reaches its
+        deadline routes as a stall does (D31). This departs from §1.5's table row "a third is
+        walked", which becomes "a third waits for the zone's next answer, then rides".
+      - **Done when** all of the following hold:
+        - `dns-check.test.ts` routes a burst of a heard zone's refreshes in one turn and holds the
+          questions sent to the design's count, with the window both open and closed;
+        - a mock-clock loop of 90 simulated seconds holds the walk to the judge's bound;
+        - an outage case shows that waiters do not ride after a NotHeard;
+        - mutants are killed: the shipped behaviour, no pilot, `SAMPLED_PER_KEY` ignored, and
+          waiters riding after a NotHeard;
+        - `steady` and `warmzone` pass at full size in gate mode, and every other arm still passes.
+
+- [ ] **P-478 — the helper keeps no lane for zones that answer, so silent lookups starve answering
+      names' first lookups** · S · P-432 · Filed 2026-10-20 by the coordinator, from S7's first
+      full-size run at rc.3's cut, on `28b97a7c`. In gate mode, `partial` gave up 1,542 answering
+      and 200 cached checks with the check on, and 2,248 and 314 with it off. `forwarder` gave up
+      4,437 answering of 14,000. In `partial` the silent zone held 5 of the helper's lanes against
+      the cap of 3. The gate is still better than `system` (2,206 and 298 in `partial`, 12,733 in
+      `forwarder`), but the design promises every answering check answered in `partial`, with the
+      check on and off (§3).
+      - **The cause.** At a cold start, D19's rate sends hundreds of answering names to the helper
+        unwalked. There they queue for its 4 first-lookup lanes behind silent lookups that hold each
+        lane for 30 s, and fail as stuck, which the arm counts as given up.
+        - `KEY_QUIET` (3) holds a key only while it is quiet (`lane-rule.ts`).
+        - In `partial`, one cached answer makes the silent names' key not quiet, so its silent
+          names take every first lane.
+        - In `forwarder`, a hundred keys of three names each means the per-key cap never binds, and
+          the at-risk gate admits 5.
+        - D23's `vouched` is hard-coded `false` in both of `name-resolver.ts`'s admission reads,
+          left for S6, which never wired it.
+        - The design's K2, K17 and SC16 tests were never built.
+      - **Decided 2026-10-20 by Claude, under the user's delegation: fix the code.**
+        - Every key the walk has not vouched for is held to `KEY_QUIET` helper lanes, quiet or not.
+        - D23's `vouched` is wired, so that a vouched key is not held. Without it, `slow` is at
+          risk, and the first change does not land without this one.
+        - With the check on, the helper's last first-lookup lane and its last shared lane are kept
+          for lookups the gate does not hold.
+        - The judge's reading that exempts check-off `partial` from the cap is corrected: the cap
+          is the helper's, and holds with the check off.
+      - **Done when**:
+        - K2, K17 and SC16 are built;
+        - a unit test reproduces each starvation at small scale: a cached answer lifting the quiet
+          bit, many small keys, and the check off;
+        - mutants kill each part of the change;
+        - `partial`, with the check on and off, and `forwarder` pass at full size in gate mode, and
+          every other arm still passes, `slow` among them.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
