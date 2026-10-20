@@ -15,7 +15,7 @@ What a type is *for* is documented where its author wrote it, in `packages/senso
 - **SNMP** — `snmp.cpu`, `snmp.custom`, `snmp.custom.string`, `snmp.diskfree`, `snmp.memory`, `snmp.table`, `snmp.traffic`, `snmp.trap`, `snmp.uptime`
 - **SSH** — `ssh.diskfree`, `ssh.load`, `ssh.meminfo`, `ssh.script`
 - **System** — `ms.core.health`, `ms.probe.health`
-- **Traffic** — `flow.netflow`
+- **Traffic** — `flow.netflow` (not in 1.0 — v2)
 - **Web** — `http.advanced`, `http.content`, `http.request`, `http.transaction`, `rest.custom`, `tls.certificate`, `tls.security`
 - **Windows** — `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` (not in 1.0 — release 1.1)
 
@@ -1153,6 +1153,8 @@ cost: **light** · evaluated by the core, never by a probe
 - **Probe** (`probeId`) — Which probe this reports on. Left unset, it is the probe this sensor sits under — which is what an operator means every time but one, and the exception is a sensor deliberately placed elsewhere so that losing the probe does not also lose the view of it.
 
 ## Traffic
+
+**Not in 1.0.** Flow monitoring is v2: no probe that ships constructs the collector this type reads, so the v1 build profile leaves it out of its catalogue (`H-12`) rather than offer a sensor that could only fail.
 
 ### `flow.netflow`
 

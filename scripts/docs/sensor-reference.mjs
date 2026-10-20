@@ -16,7 +16,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { standardCatalogue } from '../../packages/sensors/dist/src/index.js';
+import { standardCatalogue, WITHHELD_FROM_V1 } from '../../packages/sensors/dist/src/index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const target = join(root, 'docs', 'sensor-reference.md');
@@ -138,9 +138,17 @@ for (const summary of summaries) {
 const categories = [...byCategory.keys()].sort();
 
 // A category that is in the catalogue but not in every release, said where a reader meets it:
-// in the index and under its heading. 1.0 is Linux-only (`H-10`, `H-16`), and these types need a
-// probe running on Windows.
+// in the index and under its heading. 1.0 is Linux-only (`H-10`, `H-16`), and the Windows types
+// need a probe running on Windows. Flow monitoring is v2, and said so only once this reference
+// shipped in /opt/ms/docs (`H-52`): it listed `flow.netflow` as though 1.0 had it.
 const RELEASE_NOTES = {
+  Traffic: {
+    short: 'not in 1.0 — v2',
+    long:
+      '**Not in 1.0.** Flow monitoring is v2: no probe that ships constructs the collector this ' +
+      'type reads, so the v1 build profile leaves it out of its catalogue (`H-12`) rather than ' +
+      'offer a sensor that could only fail.',
+  },
   Windows: {
     short: 'not in 1.0 — release 1.1',
     long:
@@ -150,6 +158,27 @@ const RELEASE_NOTES = {
       'Windows — none of their queries ever has.',
   },
 };
+
+// **Which types the v1 build leaves out comes from the build's own list** (`H-52`), so a type
+// withheld later cannot be printed as one 1.0 has. A category is marked whole, so one that mixes
+// withheld types with carried ones stops this rather than marking all of them.
+for (const category of categories) {
+  const ids = byCategory.get(category).map((one) => one.id);
+  const withheld = ids.filter((id) => WITHHELD_FROM_V1.has(id));
+  if (withheld.length > 0 && withheld.length < ids.length) {
+    throw new Error(
+      `${category} has types the v1 build withholds (${withheld.join(', ')}) beside types it ` +
+        'carries; mark them one by one',
+    );
+  }
+  if ((withheld.length > 0) !== (RELEASE_NOTES[category] !== undefined)) {
+    throw new Error(
+      withheld.length > 0
+        ? `the v1 build withholds every ${category} type, and RELEASE_NOTES does not say so`
+        : `RELEASE_NOTES says ${category} is not in 1.0, and the v1 build carries all of it`,
+    );
+  }
+}
 
 say(`${String(summaries.length)} types in ${String(categories.length)} categories.`, '');
 for (const category of categories) {
