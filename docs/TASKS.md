@@ -40576,6 +40576,46 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           is filed: it needs a number.
         - **Whether a name the hosts file gives should stay on the probe's lanes while the
           check is off**, a change to `classifyName` (above). Not filed, for the same reason.
+      - **Review of the integrated documents, fix round 2** (2026-10-20, on `3fccd219`): one
+        finding, fixed in a new commit on `prep/rc3-docs-2`:
+        - **`install-probe.ps1`'s usage passes `--host` too.** Round 1's claim, here and in
+          `e97eaa3c`'s message, that every `ms-enrol` command in `docs/` and `deploy/` passes
+          `--host` was not true: `deploy/install-probe.ps1:13` still said
+          `sudo /opt/ms/bin/ms-enrol web-dc2 --out web-dc2.enrol`, and `package.sh` ships that
+          file in every probe-only tarball, rc.3's `ms-probe-…-linux-*.tar.gz` among them. Run on
+          a default core, it stopped with *pass --host*. It now gives the command
+          `install-probe.sh` and `installation.md` give, `--host "$(hostname -f)"`; the command
+          runs on the core host, so it stays a shell line inside the PowerShell help. The test
+          read `deploy/*.sh` alone, which is how it missed it.
+        - **Tests**: `build-hygiene` and `candidate-surface` (core) 48 of 48. *Passes --host
+          wherever a document or a script's usage runs ms-enrol* reads every file under
+          `deploy/`, its subdirectories included, where it read the top level's `.sh` files, and
+          asserts that it found a command in `installation.md`, `install-probe.sh` and
+          `install-probe.ps1`, so that a narrower read fails rather than passing on fewer
+          files. Three mutants, each restored with `shutil.copy` and `os.utime` and compared
+          with `filecmp`, all killed: the `.ps1` line without `--host`; a command without
+          `--host` planted in `deploy/winsw/ms-probe.xml`, a file neither `.sh` nor `.ps1` and
+          one directory down; and the test's read narrowed back to `.sh` files (rebuilt, its
+          marker in `dist` while mutated and gone after the rebuild), killed by the presence
+          check on `install-probe.ps1`. `prettier` and `eslint` on the changed test file.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (review fix round 2):
+        - **The line is fixed and the claim kept, rather than the claim narrowed.** The file
+          ships to the probe hosts the field test installs, and the command it gives should be
+          one a default core accepts, whatever release Windows itself waits for.
+        - **The test reads every file under `deploy/`, not `.sh` and `.ps1`.** `package.sh`
+          copies files from `deploy/` and its subdirectories (`systemd/`, `winsw/`, `examples/`)
+          into the tarballs, and `deploy/windows/` holds two more scripts; a filter by extension
+          is the gap this finding was, one extension later. Reading them all costs nothing: no
+          other file matches.
+        - **`docs/` stays the top-level guides**, the files a reader runs commands from;
+          `docs/findings/` is a record of what was run when, and holding a dated record to
+          today's command would rewrite it. None of them names `ms-enrol` today. `TASKS.md` is
+          left out as before.
+        - **The two installers' error messages are not changed.** `install-probe.sh:97` and
+          `install-probe.ps1:99` say to run `ms-enrol <name>` on the core host: a placeholder,
+          not a command, and `ms-enrol` then says which flag it needs. The test's pattern
+          requires the installed path, as round 1's did.
+        - **Quiet-machine runs: none.** Nothing here is measured.
 
 ## Release 1.1 — Windows
 

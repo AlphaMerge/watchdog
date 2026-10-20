@@ -2025,9 +2025,13 @@ describe('enrolling a remote probe', () => {
     const docs = (await readdir(join(repoRoot, 'docs')))
       .filter((name) => name.endsWith('.md') && name !== 'TASKS.md')
       .map((name) => join('docs', name));
-    const scripts = (await readdir(join(repoRoot, 'deploy')))
-      .filter((name) => name.endsWith('.sh'))
-      .map((name) => join('deploy', name));
+    // Every file under deploy/, not its shell scripts alone: package.sh ships install-probe.ps1
+    // in every probe-only tarball, and the next file to carry a command may be neither.
+    const scripts = (
+      await readdir(join(repoRoot, 'deploy'), { recursive: true, withFileTypes: true })
+    )
+      .filter((entry) => entry.isFile())
+      .map((entry) => relative(repoRoot, join(entry.parentPath, entry.name)));
     const commands: string[] = [];
     const without: string[] = [];
     for (const file of [...docs, ...scripts]) {
@@ -2038,10 +2042,16 @@ describe('enrolling a remote probe', () => {
         if (!line.includes('--host ')) without.push(`${file}:${String(index + 1)}: ${line.trim()}`);
       }
     }
-    assert.ok(
-      commands.some((at) => at.startsWith(join('docs', 'installation.md'))),
-      'no command',
-    );
+    for (const file of [
+      join('docs', 'installation.md'),
+      join('deploy', 'install-probe.sh'),
+      join('deploy', 'install-probe.ps1'),
+    ]) {
+      assert.ok(
+        commands.some((at) => at.startsWith(`${file}:`)),
+        `no ms-enrol command read in ${file}: ${commands.join(', ')}`,
+      );
+    }
     assert.deepEqual(without, [], 'an ms-enrol command a default core refuses');
   });
 
