@@ -268,6 +268,19 @@ export interface GateParts {
 }
 
 /**
+ * The helper's lanes at risk (§1.8) at a pick, at their most since the resolver started
+ * (`riskSeen`, `P-465`'s perf arms).
+ */
+export interface RiskSeen {
+  /** The most at risk at one pick. */
+  atRisk: number;
+  /** At that pick, those at risk that the gate did not admit: ghosts, U, and lookups started ungated. */
+  overshoot: number;
+  /** The most at risk at one pick that the gate admitted at risk: gated as they started. */
+  admitted: number;
+}
+
+/**
  * What gate mode has done since the probe started. Probe Health sends the mode, the time with the
  * check on and the two stuck counts (protocol 38); the rest is the hourly summary's (OPEN-5,
  * `P-467`), and the tests' and the perf arms'.
@@ -611,6 +624,8 @@ interface Gate {
   /** For the hourly summary: the running totals at the last, and the helper's hour (`P-467`). */
   hourFrom: HourCounts;
   helperHour: HelperHour;
+  /** The same at a pick since the start, never reset, with what the at-risk gate admitted (`riskSeen`). */
+  readonly riskSeen: RiskSeen;
   /** What the policy was last told the hosts file says, for the first look. */
   loaded: boolean;
 }
@@ -1100,6 +1115,7 @@ export class NameResolver implements PoolResolver {
             riskPeak: 0,
             hourFrom: NO_COUNTS,
             helperHour: newHelperHour(),
+            riskSeen: { atRisk: 0, overshoot: 0, admitted: 0 },
             loaded: false,
           };
     // Past the longest hold, an answer's life and its grace: a name a scan still checks has been
@@ -2961,6 +2977,7 @@ export class NameResolver implements PoolResolver {
     }
     const atRisk = this.#atRisk(gate);
     gate.riskPeak = Math.max(gate.riskPeak, atRisk);
+    this.#seeRisk(gate, atRisk);
     const admitted = new Map<string, HelperToken | undefined>();
     const admit = (pending: Pending): HelperToken | undefined => {
       const at = `${pending.key}|${pending.cls}|${String(pending.urgent)}`;
@@ -3445,6 +3462,29 @@ export class NameResolver implements PoolResolver {
     return risk;
   }
 
+  /**
+   * `riskSeen` at a pick: the most at risk, the overshoot at that pick, and the most the at-risk
+   * gate admitted. Those are at risk now and started gated (`pending.ungated` false); the rest of
+   * `#atRisk`'s count, ghosts, U and lookups that started ungated, is the overshoot. Counted only
+   * past the most admitted so far, since the admitted are never more than the at risk.
+   */
+  #seeRisk(gate: Gate, atRisk: number): void {
+    const seen = gate.riskSeen;
+    if (atRisk <= seen.admitted) return;
+    let admitted = 0;
+    for (const pending of helperRunning(gate)) {
+      const token = pending.token;
+      if (token === undefined || token.kind === 'urgent' || pending.ungated) continue;
+      if (pending.stuck || pending.detached) admitted += 1;
+      else if (token.kind === 'shared' && !this.#ungatedNow(gate, pending)) admitted += 1;
+    }
+    seen.admitted = Math.max(seen.admitted, admitted);
+    if (atRisk > seen.atRisk) {
+      seen.atRisk = atRisk;
+      seen.overshoot = atRisk - admitted;
+    }
+  }
+
   #ungatedNow(gate: Gate, pending: Pending): boolean {
     return helperUngated({
       overflow: false,
@@ -3835,6 +3875,16 @@ export class NameResolver implements PoolResolver {
   /** The same peak, read without taking it: undefined in `system` mode. */
   questionsPeak(): number | undefined {
     return this.#gate?.budget.stats().peak;
+  }
+
+  /**
+   * The helper's lanes at risk at their most at a pick since the start (§1.8), and how many of
+   * those the at-risk gate admitted, for the perf arms (`P-465`): the hourly summary's peak starts
+   * again each hour. Undefined in `system` mode.
+   */
+  riskSeen(): RiskSeen | undefined {
+    const seen = this.#gate?.riskSeen;
+    return seen === undefined ? undefined : { ...seen };
   }
 
   /**

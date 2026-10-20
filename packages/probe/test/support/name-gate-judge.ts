@@ -1,6 +1,7 @@
 import { SAMPLED_PER_KEY } from '../../src/resolver/dns-check.js';
 import { FORWARD_HOLD_MS, WALK_BURST, WALK_RATE } from '../../src/resolver/forward-budget.js';
-import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
+import { RISK_F, RISK_T } from '../../src/resolver/lane-rule.js';
+import { ANSWER_MS, type RiskSeen } from '../../src/resolver/name-resolver.js';
 
 /**
  * What the name gate's perf arms assert (`P-432` S7, the design's §7.6), as one pure function of
@@ -28,6 +29,10 @@ import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
  * not given up, it means every one of them answered: a check that failed in any other way (the
  * gate's own refusals, `RESOLVER_FAULT` at a helper loss, `ENODATA`) fails the arm as one given up
  * does, since `GIVEN_UP`'s words are only the resolver's for a name it did not hear.
+ *
+ * Two arms are held to another run of the same process (`baseline`), and fail without it
+ * (`P-465`): `walkrate`'s event loop to the `addresses` arm's in its mode, and `spread10`'s
+ * answering checks in gate mode to its own run in `system`.
  */
 
 export type GateMode = 'system' | 'gate';
@@ -179,6 +184,48 @@ export interface WorldFacts {
   };
   /** P6: `getaddrinfo` asked on the probe's own lanes for the crash name: the probe would crash. */
   readonly probeCrashes?: number;
+  /**
+   * P6: the crash name's checks once its zone answered, after it was poisoned: a walk of it would
+   * be heard from then on, so only D27 keeps it off the probe's lanes.
+   */
+  readonly crashAskedOnceAnswering?: number;
+  /**
+   * The event loop's delay at its 99th percentile while the wheel ran (`monitorEventLoopDelay`),
+   * in ms past its resolution.
+   */
+  readonly eventLoopP99Ms?: number;
+  /** The walk's channels opened in the busiest second. */
+  readonly channelsBusiestSecond?: number;
+  /** The walk's questions for a name: every one but the canary's, which proves the check. */
+  readonly namesWalked?: number;
+  /** The answering group's checks that ran: answered, given up or failed otherwise. */
+  readonly answeringResults?: number;
+  /** Probe Health's `lookupsInFlight` at its highest, sampled each second and at the drain. */
+  readonly inFlightMax?: number;
+  /** Gate mode: the helper's lanes at risk at a pick at their most, as the resolver kept them. */
+  readonly risk?: RiskSeen;
+  /** The run this arm is held against, of the same process (`walkrate`, `spread10`). */
+  readonly baseline?: Baseline;
+}
+
+/** What an arm's baseline run measured, for the arm held against it (`P-465`). */
+export interface Baseline {
+  readonly arm: string;
+  readonly mode: GateMode;
+  readonly eventLoopP99Ms: number | undefined;
+  /** Its answering checks that did not answer: given up, or failed any other way. */
+  readonly answeringNotAnswered: number;
+}
+
+/** What a run's facts give an arm held against it. */
+export function baselineOf(facts: WorldFacts): Baseline {
+  return {
+    arm: facts.arm,
+    mode: facts.mode,
+    eventLoopP99Ms: facts.eventLoopP99Ms,
+    answeringNotAnswered:
+      count(facts.givenUp, 'answering') + count(facts.failedOtherwise, 'answering'),
+  };
 }
 
 /** How many sends a token bucket of `burst` refilled at `perSecond` could not have admitted. */
@@ -230,6 +277,23 @@ const UP_BY_MS = 23_000;
 const FORK_TO_READY_MS = 1_000;
 const FORK_LAG_OVER_MS = 100;
 const HELPER_RSS_MAX = 128 * 1024 * 1024;
+/** `walkrate`: its event loop's p99 past the `addresses` arm's, at most (round 2's §7.6). */
+export const WALKRATE_P99_OVER_MS = 10;
+/**
+ * `walkrate`: the walk's channels in any one second, at most: one a question for SNMP's one type,
+ * so D19's bucket, its burst with the one more `overBucket` allows and a second's refill (§1.6:
+ * "about 30 a second").
+ */
+export const CHANNELS_A_SECOND = WALK_BURST + 1 + WALK_RATE;
+/** `spread10`: the helper's lanes at risk at a pick that the gate admitted, at most (T + F). */
+const RISK_ADMITTED_MAX = RISK_T + RISK_F;
+/**
+ * `spread10`: how far past `system`'s the gate's answering checks not answered may be, as a share
+ * of them. The two modes run one lane rule here, the helper's lanes a copy of `P-426`'s with the
+ * check off, and two full-size minutes of each differed by up to 34 of 3,000 within a mode and 26
+ * across (`P-465`): a strict bound is a coin flip between equals. Three times that spread.
+ */
+export const SPREAD10_NOISE = 0.03;
 
 type Rule = (facts: WorldFacts, said: (violation: string) => void) => void;
 
@@ -557,6 +621,92 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
     }
     if ((facts.probeCrashes ?? 0) > 0) {
       said(`the crash name was asked on the probe’s own lanes ${String(facts.probeCrashes)} times`);
+    }
+    // While its zone is silent no walk sends it to the probe's lanes: the bound above holds only
+    // once one would (`P-471`).
+    if ((facts.crashAskedOnceAnswering ?? 0) === 0) {
+      said(
+        'the crash name was not checked once its zone answered, so nothing but its zone’s silence kept it off the probe’s lanes',
+      );
+    }
+  },
+  addresses(facts, said) {
+    // `walkrate`'s baseline (round 2's row): every device given as an address, so nothing resolved.
+    allAnswered(facts, said, ['answering']);
+    if (facts.inFlightMax === undefined) said('lookupsInFlight was not measured');
+    else if (facts.inFlightMax > 0) {
+      said(
+        `a device given as an address was resolved: lookupsInFlight read ${String(facts.inFlightMax)}`,
+      );
+    }
+    // The canary, `localhost.`, proves the check whatever it is asked: it is no walk of a name.
+    if (facts.namesWalked === undefined) said('the walk’s questions for names were not measured');
+    else if (facts.namesWalked > 0) {
+      said(
+        `the check walked ${String(facts.namesWalked)} questions for names, devices given as addresses`,
+      );
+    }
+    const asked = [facts.probeLanes, facts.helperPeak].reduce(
+      (sum, of) => sum + Object.values(of).reduce((n, v) => n + v, 0),
+      0,
+    );
+    if (asked > 0)
+      said(`getaddrinfo was asked ${String(asked)} times for devices given as addresses`);
+    if (facts.eventLoopP99Ms === undefined) {
+      said('the event loop was not measured, so walkrate has no baseline');
+    }
+  },
+  walkrate(facts, said) {
+    const base = facts.baseline;
+    const p99 = facts.eventLoopP99Ms;
+    if (
+      base?.arm !== 'addresses' ||
+      base.mode !== facts.mode ||
+      base.eventLoopP99Ms === undefined
+    ) {
+      said(
+        `the addresses arm was not measured in ${facts.mode} mode, so the event loop was held to nothing`,
+      );
+    } else if (p99 === undefined) said('the event loop was not measured');
+    else if (p99 > base.eventLoopP99Ms + WALKRATE_P99_OVER_MS) {
+      said(
+        `the event loop’s p99 was ${p99.toFixed(1)} ms, past the addresses arm’s ${base.eventLoopP99Ms.toFixed(1)} ms + ${String(WALKRATE_P99_OVER_MS)} ms`,
+      );
+    }
+    const channels = facts.channelsBusiestSecond;
+    if (channels === undefined) said('the walk’s channels were not measured');
+    else if (channels > CHANNELS_A_SECOND) {
+      said(
+        `the walk opened ${String(channels)} channels in one second, past ${String(CHANNELS_A_SECOND)}`,
+      );
+    }
+  },
+  spread10(facts, said) {
+    // `system`'s run is the gate's bound, and holds only every arm's.
+    if (facts.mode === 'system') return;
+    if (facts.checkOn) said('spread10 runs the gate with its name check off, and the check was on');
+    const base = facts.baseline;
+    if (base?.arm !== 'spread10' || base.mode !== 'system') {
+      said(
+        'spread10 was not measured in system mode, so the gate’s answering checks were held to nothing',
+      );
+    } else {
+      const notAnswered =
+        count(facts.givenUp, 'answering') + count(facts.failedOtherwise, 'answering');
+      const noise = Math.ceil(SPREAD10_NOISE * (facts.answeringResults ?? 0));
+      if (facts.answeringResults === undefined) said('the answering checks run were not counted');
+      else if (notAnswered > base.answeringNotAnswered + noise) {
+        said(
+          `${String(notAnswered)} answering checks not answered in the gate, past system’s ${String(base.answeringNotAnswered)} and ${String(noise)} (${String(SPREAD10_NOISE * 100)}% of ${String(facts.answeringResults)})`,
+        );
+      }
+    }
+    const risk = facts.risk;
+    if (risk === undefined) said('the helper’s lanes at risk were not measured');
+    else if (risk.admitted > RISK_ADMITTED_MAX) {
+      said(
+        `${String(risk.admitted)} of the helper’s lanes at risk at one pick that the gate admitted, past T + F = ${String(RISK_ADMITTED_MAX)} (at risk at most ${String(risk.atRisk)}, overshoot ${String(risk.overshoot)})`,
+      );
     }
   },
 };

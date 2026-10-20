@@ -13,7 +13,12 @@ import { DnsSimulator, replies, type DnsBehaviour, type DnsQueryRecord } from '@
 import { systemResolve, type ResolvedAddress } from '@ms/sensors';
 import { lookupsBesideThePool, ProbeHealthReporter } from '../../src/health/report.js';
 import { AnswerFile, answerFilePath } from '../../src/resolver/answer-file.js';
-import { caresAsker, KEY_SETTLE_MS, type DnsAsker } from '../../src/resolver/dns-check.js';
+import {
+  CANARY_NAME,
+  caresAsker,
+  KEY_SETTLE_MS,
+  type DnsAsker,
+} from '../../src/resolver/dns-check.js';
 import { FORWARD_HOLD_MS, questionsOf } from '../../src/resolver/forward-budget.js';
 import type {
   ForkHelper,
@@ -56,7 +61,9 @@ import {
   type Recording,
 } from '../support/glibc-model.js';
 import {
+  baselineOf,
   busiestSecond,
+  CHANNELS_A_SECOND,
   gapBound,
   heldBound,
   JUDGED_ARMS,
@@ -64,6 +71,7 @@ import {
   LOSS_WINDOW_MS,
   overBucket,
   stretches,
+  WALKRATE_P99_OVER_MS,
   type GateMode,
   type Group,
   type LossAt,
@@ -172,9 +180,13 @@ import {
  * Every assertion is `support/name-gate-judge.ts`'s, a pure function of what the arm measured, and
  * each is shown failing on a run made to break it in the third block, which runs in every
  * `test:perf` with the model's table held to the recordings and the model's code to its table.
- * Each arm also asserts that nothing is left asking on the probe's lanes once it is torn down. The arms: `slow`, `warmzone`, `zone`,
- * `partial`, `steady` and `forwarder` in both modes; `P1` to `P3`, `P5`, `P5b` and `P6`, the
- * helper's, in gate mode.
+ * Each arm also asserts that nothing is left asking on the probe's lanes once it is torn down. The
+ * arms: `slow`, `warmzone`, `zone`, `partial`, `steady` and `forwarder` in both modes; `P1` to
+ * `P3`, `P5`, `P5b` and `P6`, the helper's, in gate mode; and the pick's cost (`P-465`, the
+ * design's open risk 19): `spread10` in both modes, twenty silent keys of ten names with the check
+ * off, the gate's answering checks held to `system`'s; and `walkrate` in gate mode, 10,000 names of
+ * one sensor at 120 s, its event loop held to `addresses`', the same load with every device an
+ * address, which runs first in its mode where it has not.
  * `MS_DNS_ARMS` takes `world/<name>` and `lanes/<name>` where the blocks' names overlap.
  * `MS_DNS_STEADY_MINUTES` (`MS_DNS_MINUTES` unless set, 10 at full size) is `steady`'s time after
  * its scan interval; `MS_DNS_CHECK=off` runs the gate with its name check off for the
@@ -1080,6 +1092,14 @@ const INTERVAL_MS = INTERVAL_SECONDS * 1_000;
 const STEADY_WINDOW_MIN_MS = 10_000;
 /** P3: how long the main thread is held. */
 const STALL_MS = 15_000;
+/**
+ * P6: how long the crash name may take to be poisoned, from the wheel's start (its first check
+ * within a scan interval, then three crashes), and how long it is checked once its zone answers.
+ */
+const CRASH_POISONED_BY_MS = 90_000;
+const CRASH_ASKED_AFTER_MS = 30_000;
+/** `spread10`'s silent keys. */
+const SPREAD_KEYS = 20;
 /** P5 and P5b: the kills; P5b, the pool's ceiling for memory, a half of its size. */
 const RESPAWN_EVERY_MS = 30_000;
 const RESPAWN_KILLS = 4;
@@ -1109,8 +1129,27 @@ interface WorldArm {
   readonly respawn?: boolean;
   /** The pool's ceiling held to half its size by memory (P5b). */
   readonly memoryGate?: boolean;
-  /** The silent names three a key under zone b: a hundred keys at full size (`forwarder`). */
-  readonly spreadKeys?: boolean;
+  /**
+   * The silent names spread over keys under zone b, `k<n>.zone-b.test`, by this device's key:
+   * `forwarder`'s hundred keys of three, `spread10`'s twenty of ten, at full size.
+   */
+  readonly silentKey?: (device: number) => number;
+  /** The gate with its name check off, whatever `MS_DNS_CHECK` says (`spread10`). */
+  readonly checkOff?: boolean;
+  /** Every device given as an address: nothing resolved (`addresses`, `walkrate`'s baseline). */
+  readonly addresses?: boolean;
+  /**
+   * Twice the names, one sensor a device at twice the interval, so the checks a second are the v1
+   * target's: 10,000 names at full size (`walkrate`, and its baseline).
+   */
+  readonly twiceTheNames?: boolean;
+  /**
+   * The run this arm is held against, of the same process, run first where it has not been
+   * (`P-465`): `walkrate`'s `addresses` in its mode; `spread10`'s own in `system`, in gate mode.
+   */
+  readonly baseline?: (
+    mode: GateMode,
+  ) => { readonly arm: string; readonly mode: GateMode } | undefined;
   /** How long the wheel runs. */
   readonly runMs: () => number;
   /** What happens to the world while it runs. */
@@ -1153,6 +1192,8 @@ interface WorldRecord {
    */
   killedAt: number[];
   helperRssAt60s?: number | undefined;
+  /** P6: when the crash name's zone began to answer, once the name was poisoned. */
+  crashZoneAnsweredAt?: number;
 }
 
 const oneInTenSilent = (device: number): Group => (device % 10 === 0 ? 'silent' : 'answering');
@@ -1327,15 +1368,64 @@ const WORLD_ARMS: readonly WorldArm[] = [
     modes: ['system', 'gate'],
     group: (device) => (device % 5 < 3 ? 'silent' : 'answering'),
     perClient: true,
-    spreadKeys: true,
+    // Devices 5k to 5k + 2 share the key `d:k<k>.zone-b.test`: 300 silent names over 100 keys.
+    silentKey: (device) => Math.floor(device / 5),
     runMs: () => COLD_MINUTES * 60_000,
   },
   {
     name: 'P6',
-    label: 'P6: one name whose getaddrinfo crashes the helper’s child, its zone silent',
+    label:
+      'P6: one name whose getaddrinfo crashes the helper’s child, its zone silent until it is poisoned',
     modes: ['gate'],
     group: (device) => (device === 0 ? 'crash' : 'answering'),
     runMs: () => Math.max(1, MINUTES) * 60_000,
+    events: async ({ names, sim, record }) => {
+      const helper = names.gate?.helper;
+      if (helper === undefined) return;
+      // Poisoned, its zone then answers: from here its walk would be heard and run on the probe's
+      // own lanes, so only D27 keeps it off them (`P-471`). While its zone was silent nothing could
+      // send it there, and the judge fails a run with no check of it since.
+      await pollWithin(
+        CRASH_POISONED_BY_MS,
+        'the crash name poisoned',
+        () => helper.stats().poisoned > 0,
+        50,
+      ).catch(() => undefined);
+      if (helper.stats().poisoned === 0) return;
+      await sim.set({ zone: 'zone-c.test' }, { reply: replies.addresses('192.0.2.30') });
+      record.crashZoneAnsweredAt = performance.now();
+      await new Promise((resolve) => setTimeout(resolve, CRASH_ASKED_AFTER_MS));
+    },
+  },
+  {
+    // Two names in five silent, in twenty keys: 200 names over 20 keys at full size, each key the
+    // devices whose silent index is the same mod 20. The check off, so every name is unvouched.
+    name: 'spread10',
+    label: 'two names in five silent, twenty keys of ten, cold, the check off',
+    modes: ['system', 'gate'],
+    group: (device) => (device % 5 < 2 ? 'silent' : 'answering'),
+    silentKey: (device) => (Math.floor(device / 5) * 2 + (device % 5)) % SPREAD_KEYS,
+    checkOff: true,
+    baseline: (mode) => (mode === 'gate' ? { arm: 'spread10', mode: 'system' } : undefined),
+    runMs: () => COLD_MINUTES * 60_000,
+  },
+  {
+    name: 'addresses',
+    label: 'every device given as an address, at walkrate’s load: walkrate’s baseline',
+    modes: ['gate'],
+    group: allAnswering,
+    addresses: true,
+    twiceTheNames: true,
+    runMs: () => MINUTES * 60_000,
+  },
+  {
+    name: 'walkrate',
+    label: 'twice the names, one in ten silent, one sensor a device at twice the interval, cold',
+    modes: ['gate'],
+    group: oneInTenSilent,
+    twiceTheNames: true,
+    baseline: (mode) => ({ arm: 'addresses', mode }),
+    runMs: () => COLD_MINUTES * 60_000,
   },
 ];
 
@@ -1347,12 +1437,12 @@ function killChild(names: NameResolution, signal: NodeJS.Signals): void {
 
 /** A device's name in the world: its zone by its group, and the slow arm's own. */
 function worldHost(arm: WorldArm, device: number): string {
+  if (arm.addresses === true) return `192.0.2.${String((device % 250) + 1)}`;
   const group = arm.group(device);
   if (group === 'crash') return `crash-${String(device)}.zone-c.test`;
-  if (arm.spreadKeys === true) {
-    // Devices 5k to 5k + 2 share the key `d:k<k>.zone-b.test`: 300 silent names over 100 keys.
+  if (arm.silentKey !== undefined) {
     return group === 'silent'
-      ? `dev-${String(device)}.k${String(Math.floor(device / 5))}.zone-b.test`
+      ? `dev-${String(device)}.k${String(arm.silentKey(device))}.zone-b.test`
       : `dev-${String(device)}.zone-a.test`;
   }
   const zone = group === 'answering' ? (arm.slow === true ? 's' : 'a') : 'b';
@@ -1375,7 +1465,16 @@ function worldZones(arm: WorldArm): Record<string, DnsBehaviour> {
 }
 
 /** The arms whose zone b is silent from the start. */
-const WORLD_ARMS_SILENT = new Set(['zone', 'partial', 'forwarder', 'P1', 'P2', 'P3']);
+const WORLD_ARMS_SILENT = new Set([
+  'zone',
+  'partial',
+  'forwarder',
+  'P1',
+  'P2',
+  'P3',
+  'spread10',
+  'walkrate',
+]);
 
 /** One lookup on the probe's lanes: when it began, and when and how it settled. */
 interface LaneFlight {
@@ -1597,6 +1696,8 @@ class WalkCounter {
   readonly sends = new Map<string, number[]>();
   /** When each channel was opened. */
   readonly channels: number[] = [];
+  /** Questions for a name, the canary's (`localhost.`, sent to prove the check) aside. */
+  names = 0;
 
   wrap(inner: DnsAsker): DnsAsker {
     return {
@@ -1608,6 +1709,7 @@ class WalkCounter {
             const times = this.sends.get(server) ?? [];
             times.push(performance.now());
             this.sends.set(server, times);
+            if (name !== CANARY_NAME) this.names += 1;
             return channel.ask(name, type);
           },
           close: () => {
@@ -1874,14 +1976,26 @@ interface Routed {
   readonly key: string;
 }
 
-/** The gate's log, at debug: each lookup's route (§1.3), and the warnings the arms count. */
+/**
+ * The gate's log, at debug: each lookup's route (§1.3), and the lines the arms count. What Probe
+ * Health no longer carries (the user's OPEN-5: six name fields, not fourteen) is read here, from
+ * the lines the resolver and its check log: the check proven, its misses and its stand-downs.
+ */
 class GateLog {
   readonly routed: Routed[] = [];
   readonly passedStuck: string[] = [];
   unsafe = 0;
+  proven = false;
+  misses = 0;
+  standDowns = 0;
   readonly errors: string[] = [];
   readonly stream = {
     write: (line: string): void => {
+      if (line.includes('the DNS check is proven')) this.proven = true;
+      if (line.includes('the DNS check missed a name the lookup helper answered')) this.misses += 1;
+      if (line.includes('it stands down, and every name is asked in the lookup helper')) {
+        this.standDowns += 1;
+      }
       if (line.includes('"msg":"routed a lookup"')) {
         const said = JSON.parse(line) as Record<string, unknown>;
         this.routed.push({
@@ -1940,11 +2054,31 @@ const DELAY_RESOLUTION_MS = 10;
 const lagMs = (nanoseconds: number): string =>
   `${Math.max(0, nanoseconds / 1e6 - DELAY_RESOLUTION_MS).toFixed(1)} ms`;
 
+/** An arm's sensors, how many a device, and their interval. */
+interface WorldShape {
+  readonly sensors: number;
+  readonly perDevice: number;
+  readonly intervalSeconds: number;
+}
+
+/**
+ * The v1 target's 5,000 sensors on 500 devices at 60 s, or for `walkrate` and its baseline twice
+ * the names at the same checks a second: 10,000 devices of one sensor at 120 s.
+ */
+function worldShape(arm: WorldArm): WorldShape {
+  return arm.twiceTheNames === true
+    ? { sensors: 2 * SENSORS, perDevice: 1, intervalSeconds: 2 * INTERVAL_SECONDS }
+    : { sensors: SENSORS, perDevice: SENSORS_PER_DEVICE, intervalSeconds: INTERVAL_SECONDS };
+}
+
 async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
   const fdsBefore = openFds();
-  const devices = Math.ceil(SENSORS / SENSORS_PER_DEVICE);
+  const shape = worldShape(arm);
+  const devices = Math.ceil(shape.sensors / shape.perDevice);
   const deviceOf = (sensorId: number): number =>
-    Math.floor((sensorId - 1) / SENSORS_PER_DEVICE) % devices;
+    Math.floor((sensorId - 1) / shape.perDevice) % devices;
+  /** Whether the name check is on: off for the environment where the arm or `MS_DNS_CHECK` says. */
+  const checkOn = !(CHECK_OFF || arm.checkOff === true);
   const groupByHost = new Map<string, Group>();
   const deviceByHost = new Map<string, number>();
   for (let device = 0; device < devices; device += 1) {
@@ -2043,7 +2177,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
         env: { ...process.env, [WORLD_ENV]: JSON.stringify(world) },
         fork: tap.fork,
       },
-      policy: { files, platform: 'linux', env: CHECK_OFF ? { RES_OPTIONS: 'ndots:1' } : {} },
+      policy: { files, platform: 'linux', env: checkOn ? {} : { RES_OPTIONS: 'ndots:1' } },
       check: { asker: walks.wrap(caresAsker({ port })) },
       resolver: {
         lookup: lanes.lookup,
@@ -2061,14 +2195,15 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     });
     names = built;
     await within(START_BOUND_MS, 'the names’ start', built.start());
-    if (mode === 'gate') {
-      // On and proven by its canary, or off for the environment as `MS_DNS_CHECK` says.
-      const wanted = CHECK_OFF ? 2 : 1;
+    const policy = built.gate?.policy;
+    if (policy !== undefined) {
+      // On and proven by its canary, or off for the environment as the arm or `MS_DNS_CHECK` says:
+      // the policy's word and the check's own log, not Probe Health's `nameCheckState`.
       await pollWithin(
         START_BOUND_MS,
         () =>
-          `the check in state ${String(wanted)}: ${String(built.resolver.gateHealth()?.checkState)}`,
-        () => built.resolver.gateHealth()?.checkState === wanted,
+          `the check ${checkOn ? 'on and proven' : 'off'}: the policy says ${policy.checkOn() ? 'on' : 'off'}, proven ${String(log.proven)}`,
+        () => (checkOn ? policy.checkOn() && log.proven : !policy.checkOn()),
         10,
       );
     }
@@ -2141,8 +2276,8 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       },
     });
     wheel = ticking;
-    for (let id = 1; id <= SENSORS; id += 1) {
-      ticking.add({ id, intervalSeconds: INTERVAL_SECONDS });
+    for (let id = 1; id <= shape.sensors; id += 1) {
+      ticking.add({ id, intervalSeconds: shape.intervalSeconds });
     }
     const health = new ProbeHealthReporter({
       scheduler: () => ticking.stats(),
@@ -2208,7 +2343,10 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     const wheelStats = ticking.stats();
     const gauge = (await sim.gauge('ns1'))[0];
     const queries = await sim.log();
+    // Of gate mode's own counters, only the two Probe Health still carries (OPEN-5): the rest are
+    // read from the log and the helper's channel below.
     const gateHealth = built.resolver.gateHealth();
+    const risk = built.resolver.riskSeen();
     const helperStats: LookupHelperStats | undefined = built.gate?.helper.stats();
     const trouble = built.gate?.latch.value() ?? 0;
     const budgetPeak = built.questionsPeak?.peek();
@@ -2328,7 +2466,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     const facts: WorldFacts = {
       arm: arm.name,
       mode,
-      checkOn: !CHECK_OFF,
+      checkOn,
       q: Q,
       ...peakFacts(gauge?.peakHeldByClass['other'] ?? 0, peaks, lossTimes(record)),
       transient: arm.transient === true ? 8 * Q : 0,
@@ -2382,7 +2520,20 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
             },
           }),
       ...(respawn === undefined ? {} : { respawn }),
-      ...(arm.name === 'P6' ? { probeCrashes: lanes.crashes } : {}),
+      ...(arm.name === 'P6'
+        ? {
+            probeCrashes: lanes.crashes,
+            crashAskedOnceAnswering: (asks.get(0) ?? []).filter(
+              (at) => record.crashZoneAnsweredAt !== undefined && at >= record.crashZoneAnsweredAt,
+            ).length,
+          }
+        : {}),
+      eventLoopP99Ms: Math.max(0, delay.percentile(99) / 1e6 - DELAY_RESOLUTION_MS),
+      channelsBusiestSecond: busiestSecond(walks.channels),
+      namesWalked: walks.names,
+      answeringResults: tallies.answering.results,
+      inFlightMax: Math.max(inFlightMax, report.lookupsInFlight ?? 0),
+      ...(risk === undefined ? {} : { risk }),
     };
 
     // --- What is printed ---------------------------------------------------------------------
@@ -2422,7 +2573,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     const tally = (label: string, t: WorldTally): string =>
       `${label} ${String(t.answered)} of ${String(t.results)} answered, ${String(t.givenUp)} given up, ${String(t.other)} failed otherwise`;
     lines = [
-      `${arm.label}: ${mode}${mode === 'gate' && CHECK_OFF ? ' (check off)' : ''}`,
+      `${arm.label}: ${mode}${mode === 'gate' && !checkOn ? ' (check off)' : ''}`,
       `${String(wheelStats.dispatched)} dispatched; ${tally('all', tallies.all)}; refused ${String(stats.refused)}, deferred ${String(stats.deferred)}, timed out ${String(stats.timedOut)}`,
       (['answering', 'silent', 'cached', 'crash'] as const)
         .filter((group) => tallies[group].results > 0)
@@ -2441,7 +2592,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       ...(gateHealth === undefined
         ? []
         : [
-            `gate: lookupsHeard ${String(gateHealth.lookupsHeard)}, lookupsToHelper ${String(gateHealth.lookupsToHelper)}, passedStuck ${String(gateHealth.passedStuck)}, helperStuck ${String(gateHealth.helperStuck)}, misses ${String(gateHealth.misses)}, walksDeferred ${String(gateHealth.walksDeferred)}, checkState ${String(gateHealth.checkState)}`,
+            `gate: routed heard or sampled ${String(log.routed.filter(({ route }) => route === 'heard' || route === 'sampled').length)}, sent to the helper's children ${String(tap.byChild.reduce((sum, asked) => sum + Object.values(asked).reduce((n, v) => n + v, 0), 0))}, passedStuck ${String(gateHealth.passedStuck)}, helperStuck ${String(gateHealth.helperStuck)}; the check ${checkOn ? 'on' : 'off'}, proven ${String(log.proven)}, misses ${String(log.misses)}, stood down ${String(log.standDowns)}, walks deferred ${String(log.routed.filter(({ why }) => why === 'budget' || why === 'rate' || why === 'stall' || why === 'scoutWait').length)}; at risk at a pick at most ${risk === undefined ? 'unread' : `${String(risk.atRisk)} (overshoot ${String(risk.overshoot)}), the gate admitted at most ${String(risk.admitted)}`}`,
           ]),
       ...(helperStats === undefined
         ? []
@@ -2475,7 +2626,9 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
           ]),
       ...(facts.probeCrashes === undefined
         ? []
-        : [`the crash name asked on the probe's own lanes: ${String(facts.probeCrashes)}`]),
+        : [
+            `the crash name asked on the probe's own lanes: ${String(facts.probeCrashes)}; its zone answering from ${record.crashZoneAnsweredAt === undefined ? 'never' : `${ms(record.crashZoneAnsweredAt - startedAt)} into the arm`}, and the name checked ${String(facts.crashAskedOnceAnswering ?? 0)} times since`,
+          ]),
       ...(log.errors.length === 0
         ? []
         : [
@@ -2522,7 +2675,9 @@ describe('the name gate’s arms, on a DNS simulator and a getaddrinfo model (P-
         `${String(Math.ceil(SENSORS / SENSORS_PER_DEVICE))} devices, pool ${String(POOL_SIZE)}, ` +
         `${String(availableParallelism())} cores; slow ${String(MINUTES)} min, warmzone ` +
         `${String(INTERVAL_SECONDS)} s answering then ${String(WARM_MINUTES)} min, zone and partial ` +
-        `${String(COLD_MINUTES)} min, steady ${String(INTERVAL_SECONDS)} s then ${String(STEADY_MINUTES)} min\n` +
+        `${String(COLD_MINUTES)} min, steady ${String(INTERVAL_SECONDS)} s then ${String(STEADY_MINUTES)} min; ` +
+        `walkrate and its baseline ${String(2 * SENSORS)} names of one sensor at ${String(2 * INTERVAL_SECONDS)} s, ` +
+        `${String(COLD_MINUTES)} min and ${String(MINUTES)} min; spread10 ${String(COLD_MINUTES)} min\n` +
         `    the world: one DNS server (the simulator) as dnsmasq, dns-forward-max ${String(FORWARD_MAX)} ` +
         `with ${String(BACKGROUND_SLOTS)} held by other clients, a ${ms(FORWARD_HOLD_MS)} hold; ` +
         `getaddrinfo the model, ${String(WORLD_SCHEDULE.tries)} tries ${ms(WORLD_SCHEDULE.waitMs)} apart; ` +
@@ -2549,10 +2704,32 @@ describe('the name gate’s arms, on a DNS simulator and a getaddrinfo model (P-
           t.skip(`MS_DNS_ARMS leaves out "${arm.name}"`);
           return;
         }
+        // Held against another run of this process (`P-465`), run first where it has not been,
+        // whatever MS_DNS_ARMS and MS_DNS_RESOLVER pick: without it the arm is held to nothing.
+        const wanted = arm.baseline?.(mode);
+        let base: WorldRun | undefined;
+        if (wanted !== undefined) {
+          base = runs.find((run) => run.arm.name === wanted.arm && run.mode === wanted.mode);
+          const baseArm = WORLD_ARMS.find(({ name }) => name === wanted.arm);
+          if (base === undefined && baseArm !== undefined) {
+            base = await worldSoak(baseArm, wanted.mode);
+            base.lines[0] = `${base.lines[0] ?? ''} (run first, as ${arm.name}'s baseline)`;
+            runs.push(base);
+            assert.deepEqual(judgeWorld(base.facts), [], base.lines.join('\n'));
+            assert.equal(base.teardown.laneLookupsLeft, 0, base.lines.join('\n'));
+          }
+        }
         const one = await worldSoak(arm, mode);
         runs.push(one);
+        const facts: WorldFacts =
+          base === undefined ? one.facts : { ...one.facts, baseline: baselineOf(base.facts) };
+        if (base !== undefined) {
+          one.lines.push(
+            `held against ${base.arm.name}, ${base.mode}: event loop p99 ${base.facts.eventLoopP99Ms === undefined ? 'unread' : `${base.facts.eventLoopP99Ms.toFixed(1)} ms`}, answering checks not answered ${String(baselineOf(base.facts).answeringNotAnswered)}`,
+          );
+        }
         assert.ok(one.results > 0, 'checks ran');
-        assert.deepEqual(judgeWorld(one.facts), [], one.lines.join('\n'));
+        assert.deepEqual(judgeWorld(facts), [], one.lines.join('\n'));
         // Torn down: nothing left asking on the probe's lanes, to run on into the next arm.
         assert.equal(one.teardown.laneLookupsLeft, 0, one.lines.join('\n'));
       });
@@ -3008,7 +3185,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
   const clean = (arm: string, mode: GateMode): WorldFacts => ({
     arm,
     mode,
-    checkOn: true,
+    checkOn: arm !== 'spread10',
     q: 1,
     peakHeld: mode === 'system' ? 6 : withLosses(arm) ? 26 : 18,
     transient: withLosses(arm) ? 8 : 0,
@@ -3033,6 +3210,33 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     // P5's pool is at its full size, so its kills are never at the memory gate.
     respawn: arm === 'P5' ? { ...cleanRespawn, heldAtEveryKill: false } : cleanRespawn,
     probeCrashes: 0,
+    crashAskedOnceAnswering: 5,
+    eventLoopP99Ms: arm === 'addresses' ? 4 : 9,
+    channelsBusiestSecond: 25,
+    namesWalked: arm === 'addresses' || mode === 'system' ? 0 : 3,
+    answeringResults: 3_000,
+    inFlightMax: arm === 'addresses' ? 0 : 40,
+    // The gate admitted T + F at a pick, and one more at risk was a stuck lookup started ungated.
+    ...(mode === 'gate' ? { risk: { atRisk: 6, overshoot: 1, admitted: 5 } } : {}),
+    // The addresses arm resolves nothing: no walk, no getaddrinfo anywhere.
+    ...(arm === 'addresses' ? { walkSends: new Map(), probeLanes: {}, helperPeak: {} } : {}),
+    ...(arm === 'walkrate'
+      ? { baseline: { arm: 'addresses', mode, eventLoopP99Ms: 4, answeringNotAnswered: 0 } }
+      : {}),
+    // System gave 40 answering checks up behind its twenty silent domains; the gate 90 more, the
+    // 3% of 3,000 two runs of one rule may differ by.
+    ...(arm === 'spread10' && mode === 'gate'
+      ? {
+          givenUp: { answering: 120, silent: 40, cached: 0 },
+          failedOtherwise: { answering: 10, silent: 9, cached: 0 },
+          baseline: {
+            arm: 'spread10',
+            mode: 'system',
+            eventLoopP99Ms: 9,
+            answeringNotAnswered: 40,
+          },
+        }
+      : {}),
   });
 
   const cases: readonly {
@@ -3492,6 +3696,21 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       patch: { helper: { ...cleanHelper('P6'), poisoned: 0 } },
       says: /0 names poisoned/u,
     },
+    {
+      arm: 'P6',
+      mode: 'gate',
+      breaks: 'the crash name never checked once its zone answered',
+      patch: { crashAskedOnceAnswering: 0 },
+      says: /not checked once its zone answered/u,
+    },
+    {
+      arm: 'P6',
+      mode: 'gate',
+      breaks: 'its zone never answering (the name never poisoned to begin it)',
+      patch: {},
+      omit: ['crashAskedOnceAnswering'],
+      says: /not checked once its zone answered/u,
+    },
     // Each rule's own call of what it shares with others, so that none is seen only passing.
     {
       arm: 'warmzone',
@@ -3618,11 +3837,186 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       says: /2 exit losses, where 3/u,
     },
     {
-      arm: 'walkrate',
+      arm: 'walkmemory',
       mode: 'gate',
       breaks: 'no rules of its own (an arm the judge does not know)',
       patch: {},
-      says: /no rules for the arm walkrate/u,
+      says: /no rules for the arm walkmemory/u,
+    },
+    // `P-465`: walkrate, its baseline, and spread10.
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'a lookup in flight',
+      patch: { inFlightMax: 1 },
+      says: /a device given as an address was resolved: lookupsInFlight read 1/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'its lookups in flight not measured',
+      patch: {},
+      omit: ['inFlightMax'],
+      says: /lookupsInFlight was not measured/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'a name walked',
+      patch: { namesWalked: 1 },
+      says: /walked 1 questions for names, devices given as addresses/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'its walk not measured',
+      patch: {},
+      omit: ['namesWalked'],
+      says: /the walk’s questions for names were not measured/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'getaddrinfo asked',
+      patch: { probeLanes: { answering: 2 } },
+      says: /getaddrinfo was asked 2 times for devices given as addresses/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'getaddrinfo asked in the helper',
+      patch: { helperPeak: { answering: 1 } },
+      says: /getaddrinfo was asked 1 times for devices given as addresses/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'its event loop not measured',
+      patch: {},
+      omit: ['eventLoopP99Ms'],
+      says: /the event loop was not measured, so walkrate has no baseline/u,
+    },
+    {
+      arm: 'addresses',
+      mode: 'gate',
+      breaks: 'a check failed otherwise',
+      patch: { failedOtherwise: { answering: 1 } },
+      says: /1 answering checks failed otherwise/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'its event loop past the baseline’s and 10 ms',
+      patch: { eventLoopP99Ms: 4 + WALKRATE_P99_OVER_MS + 0.5 },
+      says: /p99 was 14\.5 ms, past the addresses arm’s 4\.0 ms \+ 10 ms/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'no baseline',
+      patch: {},
+      omit: ['baseline'],
+      says: /the addresses arm was not measured in gate mode/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'a baseline of the other mode',
+      patch: {
+        baseline: { arm: 'addresses', mode: 'system', eventLoopP99Ms: 4, answeringNotAnswered: 0 },
+      },
+      says: /the addresses arm was not measured in gate mode/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'a baseline whose event loop was not measured',
+      patch: {
+        baseline: {
+          arm: 'addresses',
+          mode: 'gate',
+          eventLoopP99Ms: undefined,
+          answeringNotAnswered: 0,
+        },
+      },
+      says: /the addresses arm was not measured in gate mode/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'its own event loop not measured',
+      patch: {},
+      omit: ['eventLoopP99Ms'],
+      says: /^the event loop was not measured$/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'more channels in a second than the bucket allows',
+      patch: { channelsBusiestSecond: CHANNELS_A_SECOND + 1 },
+      says: /opened 32 channels in one second, past 31/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'its channels not measured',
+      patch: {},
+      omit: ['channelsBusiestSecond'],
+      says: /the walk’s channels were not measured/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'the check on',
+      patch: { checkOn: true },
+      says: /runs the gate with its name check off, and the check was on/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'one answering check more not answered than system’s and its noise',
+      patch: { failedOtherwise: { answering: 11, silent: 9 } },
+      says: /131 answering checks not answered in the gate, past system’s 40 and 90 \(3% of 3000\)/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'its answering checks not counted',
+      patch: {},
+      omit: ['answeringResults'],
+      says: /the answering checks run were not counted/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'system’s run not measured',
+      patch: {},
+      omit: ['baseline'],
+      says: /spread10 was not measured in system mode/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'a baseline of its own mode',
+      patch: {
+        baseline: { arm: 'spread10', mode: 'gate', eventLoopP99Ms: 9, answeringNotAnswered: 40 },
+      },
+      says: /spread10 was not measured in system mode/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'six at risk the gate admitted',
+      patch: { risk: { atRisk: 7, overshoot: 1, admitted: 6 } },
+      says: /6 of the helper’s lanes at risk at one pick that the gate admitted, past T \+ F = 5/u,
+    },
+    {
+      arm: 'spread10',
+      mode: 'gate',
+      breaks: 'its lanes at risk not measured',
+      patch: {},
+      omit: ['risk'],
+      says: /the helper’s lanes at risk were not measured/u,
     },
   ];
 

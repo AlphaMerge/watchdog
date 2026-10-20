@@ -1,10 +1,12 @@
 # The name gate at 5,000 sensors: its perf arms (`P-432` S7)
 
 2026-10-20, `P-432` S7 on `feat/p432-s7-perf` (on `a95c3302`, `integ/r5-1019`: S3, S6 and S8
-integrated). `packages/probe/test/perf/name-lookups.test.ts`, the second and third blocks. **This
-file has the method and the command. The results are owed to a quiet window:** every number below
-the results heading is `TODO(quiet-window)`. The scaled-down runs that proved each arm executes are
-not results and are recorded only as that.
+integrated), with `P-465`'s `spread10`, `walkrate` and `addresses` and `P-471`'s re-read of the
+helper's arms on `feat/p432-s7-r2` (on `1b6bd68a`, `integ/r6-1020`: the gate track's second round
+and `P-453` with them). `packages/probe/test/perf/name-lookups.test.ts`, the second and third
+blocks. **This file has the method and the command. The results are owed to a quiet window:** every
+number below the results heading is `TODO(quiet-window)`. The scaled-down runs that proved each arm
+executes are not results and are recorded only as that.
 
 ## What is measured, and on what
 
@@ -75,10 +77,18 @@ passing.
 
 **"Given up" in the arms' rows means more than the words.** Where an arm says a group's checks are
 0 given up, it asserts that every one of them answered: none failed naming the resolver
-(`the probe’s resolver is not answering`), and none failed in any other way. The gate's own
-refusals (a poison name, an avoided one while the helper rests or is down) and a lookup lost with
-the helper end `RESOLVER_FAULT`, which the check words as "could not be resolved", never as given
-up, so a bound on the words alone could not see the gate failing names that answer.
+(`the probe’s resolver is not answering`), and none failed in any other way. Since the gate track's
+second round (`P-471`'s re-read), these end `RESOLVER_FAULT`, which the check words as "could not
+be resolved", never as given up:
+- the gate's own refusals: a poison name in any state; and, while the helper rests or is down, a
+  name the probe's own `getaddrinfo` must not be asked for (a suspect, or a name in flight at an
+  `exit` or `memory` loss until ten minutes after the helper is next up), whether at its check's
+  ask (`#gateRefusal`) or as its lookup would start on the probe's lanes (`#offProbe`);
+- a lookup lost with the helper and not asked again: a hung child's, a detached one, one charged
+  with a crash, or one with no child to ask it in.
+
+A lookup stuck when its child is lost is held, and its checks fail in the resolver's words. So a
+bound on the words alone could not see the gate failing names that answer.
 
 **Printed in every arm**: results by group; refused, deferred, timed out; jitter and check run time;
 event-loop delay p50, p99 and max (`monitorEventLoopDelay`, net of its 10 ms resolution); Probe
@@ -86,16 +96,20 @@ Health's `lookupsInFlight` and `lookupsGivenUp`; the forwarder's peak, its drops
 by source (walk, probe lanes, helper); the budget's own `questionsOpen` peak; the walk's questions,
 its busiest second and any past the bucket; routes by kind and pool, with each unvouched reason;
 sampled; keys routed both heard and silent; `getaddrinfo` on the probe's lanes and in the helper by
-group; the gate's counters (`GateHealth`: Probe Health's, and those its hourly summary logs); the helper's state, losses, poisoned names, children,
-`stuck` messages and resident set; `lookupHelperTrouble`; the process's resident set at the
+group; the gate's counters, read from its own log and the helper's channel, since Probe Health
+carries only `namePassedStuck` and `nameHelperStuck` of them (the user's OPEN-5 decision, six name
+fields): lookups routed heard or sampled, lookups sent to the helper's children, the check on or
+off, proven, its misses and stand-downs, walks deferred; the helper's lanes at risk at a pick at
+their most, the overshoot then, and the most the gate admitted at risk (`riskSeen`, `P-465`); the
+helper's state, losses, poisoned names, children, `stuck` messages and resident set (its own
+`stats()`); `lookupHelperTrouble`; the process's resident set at the
 wheel's start, its most at a 1 s sample and at the drain, and its file descriptors before the arm
 and once it is torn down (`/proc/self/fd`); the resolver's most running and queued at a 1 s sample;
 the walk's channels and their busiest second; the lookups each of the helper's children was asked,
 by group; in P1 and P2 the forwarder's peak by window (runs of windows of one kind merged, with the
 number read, the arm's end and the losses' times); in P3 the replies the simulator sent to every client while the main
 thread was held, and its own lookup's three facts with how long after the stall it was answered.
-Not printed, by decision (below): the helper's at-risk peak, first looks, overshoot and class caps
-hit.
+Not printed, by decision (below): first looks and class caps hit.
 
 ## The arms
 
@@ -112,7 +126,10 @@ hit.
 | `forwarder` | three devices in five silent, 300 names over 100 keys (`k<n>.zone-b.test`) and 200 answering, cold, at a forwarder that merges per client and goes silent when full | both | gate: the answering zone 0 given up. `system`: only every arm's (0 dropped) | `system`'s answering given up beside the gate's; routes by kind |
 | P5 | every name answering, the child SIGKILLed 4 times 30 s apart, the pool at its full size | gate | 0 given up; fork to `ready` ≤ 1,000 ms; the event loop's most within 1 s of each fork ≤ its most in the 20 s before the first kill + 100 ms; the helper's resident set at 55 s ≤ 128 MB | each fork's time; the probe's resident set at each kill |
 | P5b (new) | P5, with the pool's ceiling held to half its size by memory | gate | as P5, and held at the memory gate at every kill | as P5 |
-| P6 (new) | one name whose `getaddrinfo` crashes the child, its zone silent | gate | 3 `exit` losses and no other; one name poisoned; the answering zone 0 given up; the crash name never asked on the probe's own lanes | the latch |
+| P6 (new) | one name whose `getaddrinfo` crashes the child, its zone silent until the name is poisoned, then answering for 30 s | gate | 3 `exit` losses and no other; one name poisoned; the answering zone 0 given up; the crash name never asked on the probe's own lanes, and checked at least once after its zone answered (`P-471`) | the latch |
+| `spread10` (`P-465`) | two names in five silent, 200 over 20 keys of 10 under zone b, 300 answering in zone a, cold, the check off in gate mode | both | gate: the answering zone's checks not answered at most `system`'s, run first where it has not been, and 3% of the gate's answering checks; the helper's lanes at risk that the gate admitted at a pick at most T + F = 5 | event-loop p99 in each mode; at risk at most, and its overshoot |
+| `addresses` (`P-465`) | `walkrate`'s load with every device an address: 10,000 devices of one sensor at 120 s | gate | every check answered; nothing in flight; no name walked (the canary aside); no `getaddrinfo` anywhere | event-loop p99: `walkrate`'s baseline |
+| `walkrate` (`P-465`) | 10,000 names, one in ten silent (zone b), one sensor a device at 120 s, cold | gate | event-loop p99 at most the `addresses` arm's in its mode, run first where it has not been, + 10 ms; the walk's channels at most 31 in any second | the walk, the routes, the helper's queue |
 
 ## What was built differently from the design, and why
 
@@ -158,7 +175,7 @@ Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.m
 - **Not in S7's list, so not built here:** P4 (`helperipc`), `hung`, `hungdead`, `spread`,
   `deaf`, `warmbig`, `singles`, `spread10`, `deadns1`, `walkrate` and `walkmemory`. The verdict
   also needs `spread10` and `walkrate`'s event-loop p99 read before the runbook sets `gate`:
-  `P-465`. The rest are decided in the review's round below.
+  `P-465`, built since (below). The rest are decided in the review's round below.
 
 ### The review's first round (2026-10-20)
 
@@ -306,6 +323,105 @@ Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.m
   late timer's. P1's kill is stamped before its cut, so its transient starts at the kill, and a
   run that starts before it fails.
 
+### `P-465`: `spread10`, `walkrate` and `walkrate`'s baseline (2026-10-20)
+
+The design's verdict on `gate` as the field test's setting reads `spread10`'s and `walkrate`'s
+event-loop p99 before the runbook sets it: its open risk 19, the pick's cost with thousands of
+lookups queued, O(keys + admitted). Round 2's §7.6 gives the arms: `spread10`, 20 silent keys of 10
+names with the check off, answering given up at most `system`'s and at risk at most 5 plus the
+overshoot counted; `walkrate`, 10,000 names, event-loop p99 at most the `addresses` arm's + 10 ms
+and channels at most 300 a second. Built as the table above says.
+
+Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.md`, under `P-465`):
+
+- **`walkrate`'s baseline is a world arm, `addresses`, not the lane model's.** The ticket reads
+  "the lane model's `addresses` arm's"; round 2's table gives `addresses` gate assertions of its own
+  (0 in flight, 0 walks), so it runs in this world. The lane model's arm runs another harness (no
+  simulator worker, no helper child, no policy, no canary) at 5,000 sensors on 500 devices, not
+  `walkrate`'s load: a p99 held across the two would measure the harness. `addresses` is
+  `walkrate`'s own load, sensors, devices, interval and mode, with every device given as an
+  address, so the difference between them is the names. It runs first in `walkrate`'s mode where
+  the run has not, whatever `MS_DNS_ARMS` picks, and is judged with its own rules.
+- **10,000 names at the v1 target's checks a second.** Twice `MS_DNS_SENSORS`, one sensor a device,
+  at twice the interval: 10,000 devices at 120 s, 83 checks a second as 5,000 sensors at 60 s are.
+  Ten sensors a device would be 100,000 sensors, and 10,000 at 60 s would double the checks, which
+  the arm would then measure. One name in ten is silent (zone b), as round 2's §3 has it: "10,000
+  names, 1,000 of them silent".
+- **The walk's channels at most 31 in any second, not 300.** 300 is round 2's, whose bucket refilled
+  at 300 a second. The final design's D19 bucket is 20 at once and 10 a second, and its §1.6 puts the
+  channels at "about 30 a second"; a channel is opened only for a question sent (`#ask`'s
+  `channelOf`), one a question for SNMP's one type. 31 is the burst, the one more `overBucket`
+  allows, and a second's refill. At 300 the bound passes a check whose bucket was ignored, and one
+  that opens a channel for every step whether or not it sends: at 83 first asks a second neither
+  reaches 300.
+- **`spread10`'s gate is held to `system`'s run with 3% of its answering checks.** Its rule is
+  "answering given up at most `system`'s" because the two modes run one lane rule here: the
+  helper's lanes are a copy of `P-426`'s, and with the check off every name is unvouched. Two
+  full-size minutes of each, beside one other session's run, gave up 2,945 and 2,979 of 3,000 in
+  `system` and 2,964 and 2,953 in the gate: 34 apart within a mode, 19 worse and 26 better across.
+  A strict bound between equals is a coin flip, so the gate may be 3% of its answering checks past
+  `system`'s, three times that spread. `system`'s run is the one before it in the same process,
+  run first where it has not been. Both modes gave up nearly every answering check in the first
+  minute: the first class's 4 lanes go to the silent keys' first lookups, 30 s each, in both.
+- **The at-risk hook is production code, and minimal.** `NameResolver.riskSeen()`: the most of the
+  helper's lanes at risk at a pick since the start, the overshoot at that pick, and the most at one
+  pick that the at-risk gate admitted at risk (gated as they started). No arm could read them
+  otherwise: the resolver keeps its at-risk peak only for the hourly summary and resets it each
+  hour, and telling the admitted from the overshoot needs each running lookup's `ungated` at its
+  start, which only the resolver has; a test outside could only re-derive the rule. It is computed
+  in `#nextHelper` only past the most admitted so far, in about 25 lines of `name-resolver.ts`, with
+  a unit test; nothing in `lookup-helper.ts`, which another track changes. **First looks and class
+  caps hit are not printed:** the design's print list has them, nothing asserts them, and a hook
+  for a print alone is not worth widening a file another track edits.
+- **"At risk ≤ 5 plus the overshoot counted" is the admitted at most T + F at every pick.** In this
+  world three things hold it: T + F itself, the five shared tokens with the kept one for an ungated
+  lookup only, and the first class's 4 lanes with retry's 1, since a silent name never refreshes.
+  A code mutant that removes one is held by the other two, so the bound is shown failing on a run
+  made to break it (the judge's case), not through the arm; `lane-rule.test.ts`'s LR5 and LR7's I4
+  and I8 hold each guard alone. Read at full size, the gate admitted 4 at most: the first class's 4
+  silent first lookups, and a silent retry is gated at T.
+- **The check off is `spread10`'s own**, whatever `MS_DNS_CHECK` says, since the design's row is
+  the check off; the judge fails a gate run of it with the check on.
+- **Twenty keys at every size.** A silent device's key is its silent index mod 20, so a scaled-down
+  run has twenty keys of fewer names, not fewer keys: the pick's cost is O(keys + admitted).
+- **Their lengths:** `spread10` `MS_DNS_COLD_MINUTES` in each mode and `walkrate` the same, as the
+  other cold arms; `addresses` `MS_DNS_MINUTES`, since a baseline's p99 is the harness's at its load,
+  read over a minute as `slow`'s.
+
+### `P-471`: the helper's arms read again on the gate track's second round (2026-10-20)
+
+S7 built P1, P2, P5, P5b and P6 on `a95c3302`. `1b6bd68a` adds two things the helper's arms could
+reach:
+
+- **D27's refusals.** An avoided name fails at once with `RESOLVER_FAULT` while the helper is down
+  or resting, at its check's ask (`#gateRefusal`) and as its lookup would start on the probe's lanes
+  (`#offProbe`).
+- **`P-453`.** Only a crash signal is charged, after a wait of up to 1 s for the exit, and every
+  name in flight at an `exit` or `memory` loss is avoided until ten minutes after the helper is next
+  up.
+
+Each arm's assertions were read against that code:
+
+- **P6's "the crash name never asked on the probe's own lanes" held by construction.** Its zone was
+  silent throughout, so no walk ever routed the name to the probe's lanes. P6's three losses never
+  rest the helper, the one state in which a silent name's lookup goes to the probe's lanes, so
+  nothing but the zone's silence was tested. Now zone c answers once the name is poisoned, for 30 s,
+  and the judge fails a run in which the name was not checked in that time
+  (`crashAskedOnceAnswering`). From then on, only the poison mark keeps the name off the probe's
+  lanes. The world's child raises SIGABRT, a crash signal, so the mark is still made.
+- **P1, P2, P5 and P5b hold as written.** Their children end by SIGKILL or stop at SIGSTOP. Neither
+  is charged, so nothing is poisoned, as their assertions already said. Their answering names are
+  vouched heard, and heard and sampled lookups run on the probe's lanes, so no avoidance entry can
+  refuse one. A restart within `HELPER_REJOIN_MS` keeps the route `rejoining`, where nothing is
+  refused. Zone b's names in flight at a loss are avoided now, so a second rule beside their route
+  keeps them off the probe's lanes. P2 is to be run again once `P-463` avoids the names detached at
+  `unresponsive` (`P-472`): its child is stopped for about 17 s, with the route `down`.
+- **The eight Probe Health fields the user's OPEN-5 decision removes are not read.** The print and
+  the facts take the gate's counters from its own log, the helper's channel, `riskSeen()`, the
+  helper's `stats()` and the trouble latch. The resolver's `gateHealth()` is read only for
+  `passedStuck` and `helperStuck`, behind two of the six fields Probe Health keeps. The arm's start
+  waits on the policy's word and the check's log, not on `nameCheckState`.
+
 ## How each arm was shown to run
 
 Scaled down to 500 sensors on 50 devices, a pool of 16 and a minute an arm, on the VM with other
@@ -400,17 +516,104 @@ same scale, not on a quiet machine, so not a measurement):
   its runs as having no loss to open them. Each mutant changed only its own arm, so the two were
   run in one build.
 
+`P-465` and `P-471` ran the helper's arms and the three new ones on `1b6bd68a` with their change,
+in one run of 877 s, all nine runs held (the same scale, beside other sessions' runs, so not a
+measurement):
+
+```
+./scripts/dev.sh "timeout 2600 sh -c 'cd packages/probe && MS_DNS_SENSORS=500 MS_DNS_POOL=16 MS_DNS_MINUTES=1 MS_DNS_WARM_MINUTES=1.5 MS_DNS_COLD_MINUTES=1 MS_DNS_STEADY_MINUTES=1 MS_DNS_RESOLVER=system,gate MS_DNS_ARMS=P1,P2,P5,P5b,P6,world/spread10,world/addresses,world/walkrate node --test --test-concurrency=1 dist/test/perf/name-lookups.test.js'"
+```
+
+- **The helper's arms on the second round's code.** P1: two `exit` losses, nothing poisoned, the
+  latch at 0, every answering check answered (967), zone b routed `silent/helper` 12 times and
+  never on the probe's lanes; the forwarder's peak 5 and 2 in the windows after the kills and at
+  most 5 outside. P2: the route `down` 2.95 s after the SIGSTOP, `hung` at 20.0 s, the next child
+  up at 20.2 s; every answering check answered (450), and zone b's 22 failed otherwise while the
+  child was stopped, as before; the peak at most 3 in and out of the losses' windows. P5 and P5b:
+  four kills each, nothing poisoned, every check answered (1,258 and 1,252); fork to `ready` 79 to
+  137 ms and 82 to 334 ms; the event loop's most within a second of each fork 11 to 23 ms and 9 to
+  22 ms; the helper at 52 MiB at 55 s; P5b at its memory gate at every kill (ceiling 8 of 16); the
+  latch at 1 in both. P6: three `exit` losses, one name poisoned, zone c answering from 10.7 s into
+  the arm, and the crash name checked 9 times after that, each failing at once with the poison
+  refusal, never asked on the probe's lanes; every answering check answered (490).
+- **`spread10`**: in `system`, 155 of 298 answering checks given up and every silent one (198),
+  the resolver's queue at most 39, p99 5.2 ms; in the gate with the check off, every lookup routed
+  `unvouched (off)` to the helper (62 routes), 143 answering given up, 12 fewer than `system`'s,
+  at most 4 of the helper's lanes at risk at a pick, all admitted (overshoot 0), p99 8.8 ms.
+- **`addresses` and `walkrate`**, at 1,000 devices: `addresses` answered all 507 checks with
+  nothing in flight, one question walked (the canary) and no `getaddrinfo` anywhere, p99 5.2 ms.
+  `walkrate` answered all 462 answering checks; its walk asked 467 questions, the busiest second 23
+  (at most 31), and its channels the same; p99 11.0 ms against the baseline's 5.2 ms + 10 ms.
+- **Torn down clean**: 19 file descriptors before and after every arm, and no lookup left on the
+  probe's lanes.
+
+The rest of the world's arms and P3 ran on the same build, in one run of 1,202 s, and `partial`
+with the check off in 91 s, all held:
+
+```
+./scripts/dev.sh "timeout 3100 sh -c 'cd packages/probe && MS_DNS_SENSORS=500 MS_DNS_POOL=16 MS_DNS_MINUTES=1 MS_DNS_WARM_MINUTES=1.5 MS_DNS_COLD_MINUTES=1 MS_DNS_STEADY_MINUTES=1 MS_DNS_RESOLVER=system,gate MS_DNS_ARMS=world/slow,world/warmzone,world/zone,world/partial,world/steady,world/forwarder,P3 node --test --test-concurrency=1 dist/test/perf/name-lookups.test.js'"
+./scripts/dev.sh "timeout 540 sh -c 'cd packages/probe && MS_DNS_SENSORS=500 MS_DNS_POOL=16 MS_DNS_COLD_MINUTES=1 MS_DNS_CHECK=off MS_DNS_RESOLVER=gate MS_DNS_ARMS=world/partial node --test dist/test/perf/name-lookups.test.js'"
+```
+
+- **Every answering check answered** in every arm and mode, but for `system`'s in `forwarder` (23
+  of 200, against the gate's 200 with 12 lookups routed `unvouched (budget)`), and every cached one
+  in `partial` (30).
+- **The warm arms**: `warmzone`'s walk asked 0.90 questions a second after the silence and
+  `steady`'s 1.07, against 3; after the silence zone b was on the probe's lanes neither sampled nor
+  otherwise, and the longest an answering name went between answers was 60.0 s in the gate and
+  65.0 s in `system`.
+- **`zone`**: zone b routed `silent/helper` (8), never on the probe's lanes in the gate, where
+  `system` put it 6 times; each answering name kept within 99 ms of its first ask in the gate and
+  52 ms in `system`.
+- **P3**: the stall held 15.0 s, its lookup open as it began, its reply sent before it ended and
+  the lookup answered 222 ms after it; no zone unsafe and nothing passed-stuck.
+- **`partial` with the check off**: every lookup routed `unvouched (off)` to the helper (100), the
+  answering and cached names all answered (450 and 30) and the silent ones given up (20).
+
+`addresses` and `walkrate` also ran at full size for a minute and a minute and a half, as the
+control of the mutants run through them (below), beside one other session's run, so not a
+measurement: `MS_DNS_MINUTES=1 MS_DNS_COLD_MINUTES=1.5 MS_DNS_RESOLVER=gate
+MS_DNS_ARMS=world/addresses,world/walkrate`, 247 s, both held.
+
+- **`addresses`**: 4,998 checks, all answered, nothing in flight, the canary the walk's one
+  question; p99 13.9 ms.
+- **`walkrate`**: every answering check answered (6,773) and the silent ones given up (750); p99
+  19.8 ms against 13.9 ms + 10 ms. The walk asked 900 questions, its busiest second 24 (at most 31),
+  and deferred 5,878 walks, by its rate and the budget: those names went to the helper unvouched
+  (3,957 and 1,920 routes). The resolver's queue reached 729, and `lookupsInFlight` 744. At risk at
+  a pick at most 4, all admitted. This is D19's cost on a cold start of 10,000 names, and the quiet
+  window's run is the one that says whether the p99 holds.
+
+**Each new assertion fails on a run made to break it.** Each judge case is one (`P-465`'s 22, and
+`P-471`'s two for P6), and a mutant of each rule was killed by its case. Four mutants of the code
+were run through the arms, one run each, at the scale of the control they are read against:
+
+- **A channel opened at every step**, whether or not it sends (`#ask`): `walkrate` at full size
+  failed at 157 channels in a second, past 31.
+- **The helper's lanes 2 short**: `spread10` scaled down failed its gate at 234 answering checks
+  not answered, against `system`'s 154 and 9.
+- **The pick's admission memo removed** (`#nextHelper`): `walkrate` at full size failed at p99
+  29.6 ms, against `addresses`' 13.9 ms + 10 ms; its control read 19.8 ms. Both ran beside other
+  sessions' runs, so the margin is one run's, not a measurement.
+- **D27's avoidance and the poison refusal both removed**: P6 scaled down failed with the crash
+  name asked on the probe's lanes 3 times. The same mutant against P6 as S7 built it, its zone
+  silent throughout and the new rule off, asked the name there 0 times. That arm failed only on its
+  loss count, 11 `exit` losses, as the poisoned name went back to the helper. So that assertion
+  could not fail before `P-471`.
+
 ## The quiet-window command
 
 With `ms-server` stopped and no other toolchain run, after a build of its own
 (`./scripts/dev.sh "timeout 600 npx tsc -b"`):
 
 ```
-./scripts/dev.sh "timeout 9000 sh -c 'node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 MS_DNS_STEADY_MINUTES=10 MS_DNS_ARMS=world/slow,world/warmzone,world/zone,world/partial,world/steady,world/forwarder,P1,P2,P3,P5,P5b,P6 node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'"
+./scripts/dev.sh "timeout 12000 sh -c 'node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 MS_DNS_STEADY_MINUTES=10 MS_DNS_ARMS=world/slow,world/warmzone,world/zone,world/partial,world/steady,world/forwarder,P1,P2,P3,P5,P5b,P6,world/spread10,world/addresses,world/walkrate node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'"
 ```
 
-About 100 minutes: `slow` 1 minute a mode, `warmzone` 8, `zone`, `partial` and `forwarder` 7,
-`steady` 11, P1 2¼, P2 1, P3 1¼, P5 and P5b 2½, P6 1, each with its pool's start and drain.
+About 125 minutes: `slow` 1 minute a mode, `warmzone` 8, `zone`, `partial` and `forwarder` 7,
+`steady` 11, P1 2¼, P2 1, P3 1¼, P5 and P5b 2½, P6 1½ to 2½ (30 s past the poisoning), `spread10`
+7 a mode, `addresses` 1 and `walkrate` 7, each with its pool's start and drain. `addresses` runs
+before `walkrate`, which is held to it; `spread10`'s `system` run before its gate's.
 `MS_DNS_ARMS` leaves out the lane model's arms, whose numbers are the third and fourth windows';
 leave it out to re-take those too (about 20 minutes more). The check-off half of `partial` is a
 second run, about 8 minutes:
@@ -437,7 +640,14 @@ TODO(quiet-window): the perf conditions, and each arm's printed row in both mode
 | P5 | — | TODO(quiet-window) |
 | P5b | — | TODO(quiet-window) |
 | P6 | — | TODO(quiet-window) |
+| `spread10` | TODO(quiet-window) | TODO(quiet-window) |
+| `addresses` | — | TODO(quiet-window) |
+| `walkrate` | — | TODO(quiet-window) |
 
 TODO(quiet-window): whether each assertion held at full size, and what the read-only rows say
 (`slow`'s check run p95, `warmzone`'s longest gap, P2's checks failed while the child was stopped,
 P3's given up by the stall, P5's and P5b's forks).
+
+TODO(quiet-window): **the design's verdict reads these two before the runbook sets `gate`** (open
+risk 19, the pick's cost): `spread10`'s event-loop p99 in each mode, with its at-risk peak and
+overshoot, and `walkrate`'s event-loop p99 against `addresses`', with its channels' busiest second.

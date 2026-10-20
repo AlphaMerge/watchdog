@@ -15182,7 +15182,7 @@ because each is a decision rather than a defect:
       kept off the probe's lanes. **Done when** `crashedBy` also reads those exit codes on
       `win32`, with a table test of codes and platforms and a mutant. Release 1.1's Windows
       field run must confirm the code of a real crash of the child before the release.
-- [ ] **P-465 — the gate's verdict reads an event-loop p99 that no arm measures yet** · S ·
+- [x] **P-465 — the gate's verdict reads an event-loop p99 that no arm measures yet** · S ·
       P-432 · Filed 2026-10-20 by `P-432` S7. The design's verdict on `gate` as the field test's
       setting, and its open risk 19 (the pick's cost with thousands of lookups queued, O(keys +
       admitted), unmeasured), need `spread10` and `walkrate`'s event-loop p99 read before the
@@ -15194,6 +15194,96 @@ because each is a decision rather than a defect:
       second). **Done when** both are arms of `name-lookups.test.ts`'s world block with their
       assertions in `name-gate-judge.ts`, each shown failing on a run made to break it, and a
       quiet window's p99 for each is in `docs/findings/2026-10-20-name-lookups-gated.md`.
+
+      **P-465 outcome. `spread10`, `walkrate` and `walkrate`'s baseline, `addresses`, are arms of
+      the world block, judged, and owed a quiet window.** Built 2026-10-20 on `feat/p432-s7-r2` (on
+      `1b6bd68a`, `integ/r6-1020`), in `packages/probe/test/perf/name-lookups.test.ts` and
+      `packages/probe/test/support/name-gate-judge.ts`, with one hook in
+      `packages/probe/src/resolver/name-resolver.ts`. No protocol change and no migration. The
+      method, the decisions at length and the quiet window's command are in
+      `docs/findings/2026-10-20-name-lookups-gated.md`.
+      - **`spread10`**, in both modes: two devices in five silent, 200 names over 20 keys of 10
+        under zone b, 300 answering in zone a, cold, the gate's check off. The gate's run is held to
+        the `system` run before it, run first where the run has not: its answering checks not
+        answered at most `system`'s and 3% of its own answering checks. The most of the helper's
+        lanes at risk at one pick that the gate admitted is at most T + F = 5, and the most at risk
+        and the overshoot at that pick are printed with each mode's event-loop p99.
+      - **`addresses`**, gate: `walkrate`'s load with every device given as an address. Every
+        check answered, nothing in flight, no name walked but the check's canary, and no
+        `getaddrinfo` on either side. Its event-loop p99 is `walkrate`'s baseline.
+      - **`walkrate`**, gate: 10,000 names, one in ten silent, one sensor a device at 120 s, cold.
+        Its event-loop p99 is at most the `addresses` run's in its mode, run first where the run
+        has not, + 10 ms, and the walk opens at most 31 channels in any second.
+      - **The hook**: `NameResolver.riskSeen()`, kept in `#nextHelper` only past the most admitted
+        so far (`#seeRisk`, about 25 lines). Nothing in `lookup-helper.ts`.
+      - **Tests.** 22 judge cases in `name-lookups.test.ts`'s third block, each a run made to break
+        one assertion: `addresses` 8, `walkrate` 7, `spread10` 7. The clean case covers the three
+        arms. `name-resolver-gate.test.ts` has a test of `riskSeen()` (a stuck lookup that started
+        ungated is overshoot, not admitted), and K14 has it undefined in `system` mode.
+      - **Mutants: 15, all killed.**
+        - **In the judge, 10, each by its own case.** `walkrate`'s bound at + 100 ms. Its
+          channels at 300. Its baseline's mode not checked. `spread10`'s noise at 10%. Its
+          admitted at T + F + 1. Its check-on rule removed. Its baseline's mode not checked. And
+          `addresses`' lookups in flight, names walked and `getaddrinfo` asked, each letting one
+          through.
+        - **In the hook, 2, by its unit test.** A lookup started ungated counted as admitted:
+          {5, 0, 5} where {5, 1, 4} is right. And `#seeRisk` not called.
+        - **Through the arms, 3**, one run each, beside other sessions' runs:
+          - A channel opened at every step, whether it sends or not: `walkrate` failed at full
+            size, at 157 channels in a second.
+          - The helper's lanes 2 short: `spread10` failed its gate scaled down, at 234 answering
+            checks not answered against `system`'s 154 and 9.
+          - The pick's admission memo removed: `walkrate` failed at full size, at p99 29.6 ms
+            against `addresses`' 13.9 ms + 10 ms. Its control read 19.8 ms.
+      - **Scaled down** (500 sensors, a pool of 16, a minute an arm, beside other sessions' runs,
+        so not a measurement), every run held:
+        - `spread10`: 155 of 298 answering checks given up in `system` and 143 in the gate. At
+          most 4 of the helper's lanes were at risk at a pick, all admitted.
+        - `addresses`: all 507 checks answered, with nothing in flight or walked.
+        - `walkrate`, at 1,000 names: p99 11.0 ms against 5.2 ms, and the busiest second 23.
+        - At full size, for a minute and a half, as the arm mutants' control: `walkrate`'s p99
+          19.8 ms against `addresses`' 13.9 ms, the busiest second 24, with 5,878 walks deferred
+          by the rate and the budget.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **`walkrate`'s baseline is a world arm, `addresses`, not the lane model's.** Round 2's
+          table gives `addresses` gate assertions of its own (0 in flight, 0 walks), so it runs
+          in this world. The lane model's arm runs another harness (no simulator worker, no
+          helper child, no policy, no canary) at 5,000 sensors on 500 devices, so a p99 held
+          across the two would measure the harness. `addresses` is `walkrate`'s own load with
+          every device an address, so the difference between them is the names.
+        - **10,000 names at the v1 target's checks a second**: 10,000 devices of one sensor at
+          120 s, 83 checks a second, as 5,000 sensors at 60 s are. At 60 s the arm would measure
+          twice the checks.
+        - **The walk's channels at most 31 a second, not 300.** 300 is round 2's, whose bucket
+          refilled at 300 a second. The final design's D19 bucket is 20 at once and 10 a second,
+          and a channel opens only for a question sent. 31 is the burst, the one more
+          `overBucket` allows, and a second's refill. At 83 first asks a second, a walk that
+          ignored its bucket would not reach 300.
+        - **`spread10`'s gate may be 3% of its answering checks past `system`'s.** The two modes
+          run one lane rule here, the helper's lanes a copy of `P-426`'s, every name unvouched
+          with the check off. Two full-size minutes of each, beside another session's run, gave
+          up 2,945 and 2,979 of 3,000 in `system` and 2,964 and 2,953 in the gate: 34 apart
+          within a mode. A strict bound between equals is a coin flip, and 3% is three times
+          that spread.
+        - **The at-risk hook is production code, kept minimal.** The resolver keeps its at-risk
+          peak only for the hourly summary, resets it each hour, and only it knows which running
+          lookups started ungated. A test outside could only re-derive the rule.
+        - **First looks and class caps hit are not printed.** Nothing asserts them, and a hook
+          for a print alone is not worth widening a file another track edits.
+        - **The admitted at most T + F is shown failing on a run made to break it, not through the
+          arm.** Three guards hold it in this world: T + F, the five shared tokens with the kept
+          one for ungated lookups only, and the first class's 4 lanes with retry's 1. A code
+          mutant that removes one is held by the other two. `lane-rule.test.ts`'s LR5 and LR7's
+          I4 and I8 hold each guard alone. The full-size gate admitted 4 at most.
+        - **The check off is `spread10`'s own**, whatever `MS_DNS_CHECK` says, and twenty keys
+          at every size: a scaled-down run has twenty keys of fewer names.
+        - **Their lengths**: `spread10` and `walkrate` `MS_DNS_COLD_MINUTES`, as the other cold
+          arms; `addresses` `MS_DNS_MINUTES`.
+      - **Quiet-machine runs: owed.** The findings file's quiet-window command runs the three, and
+        its results table has their `TODO(quiet-window)` rows. The rc.3 cut checklist's step 0.7
+        runs that command, now about 125 minutes, and says what the verdict reads from them:
+        `spread10`'s p99 in each mode and `walkrate`'s against `addresses`', before the runbook
+        sets `gate`. Until that run, the last clause of **Done when** is the cut's.
 - [ ] **P-466 — CLAUDE.md's `test:perf` paragraph does not say the gate's arms are skipped** · XS ·
       P-432 · Filed 2026-10-20 by `P-432` S7. A default `test:perf` skips the name gate's
       eighteen arm runs and prints how to run them (`MS_DNS_RESOLVER=system,gate`, with
@@ -15570,6 +15660,68 @@ because each is a decision rather than a defect:
       found from a run that reproduces it under load, the test waits for every reply of the
       key's walks before it moves the clock (or reads the verdicts it means), with a mutant, and
       the file passes twenty runs in a row at a load near 20.
+- [x] **P-471 — S7's helper-killing arms were read only against the helper before the gate
+      track's second round** · XS · P-432, P-453 · Filed 2026-10-20 by `P-465`. S7 built and ran
+      P1, P2, P5, P5b and P6 on `a95c3302`. `1b6bd68a` adds D27's refusals. An avoided name now
+      fails at once with `RESOLVER_FAULT` while the helper is down or resting, both at its
+      check's ask (`#gateRefusal`) and as its lookup would start on the probe's lanes
+      (`#offProbe`). It also adds `P-453`: only a crash signal is charged, with a 1 s wait for
+      the exit, and every name in flight at any `exit` or `memory` loss is avoided. **Done when**
+      each arm's assertions are re-read against that code, any it falsifies or makes vacuous is
+      fixed, and every arm is run scaled down on it.
+
+      **P-471 outcome. One assertion was vacuous, and none was falsified.** Built 2026-10-20 on
+      `feat/p432-s7-r2` with `P-465`, in `name-lookups.test.ts` and `name-gate-judge.ts`.
+      - **P6's "the crash name never asked on the probe's own lanes" held by construction.** Its
+        zone was silent throughout, so no walk ever routed the name to the probe's lanes, and P6's
+        three losses never rest the helper, the one state in which a silent name's lookup goes to
+        the probe's lanes. Now the zone answers once the name is poisoned, for 30 s, and the judge
+        fails a run in which the name was not checked in that time (`crashAskedOnceAnswering`, two
+        judge cases). From then on, only the poison mark keeps the name off the probe's lanes. A run
+        with D27's avoidance and the poison refusal removed fails with the name asked there (the
+        mutant below).
+      - **P1, P2, P5 and P5b hold as written.** Their children are killed with SIGKILL or
+        stopped with SIGSTOP. Neither is charged, so nothing is poisoned, as their assertions
+        already said. Their answering names are vouched heard and run on the probe's lanes, so
+        no avoidance entry can refuse one. A helper restart within `HELPER_REJOIN_MS` keeps the
+        route `rejoining`, where nothing is refused. Zone b's names in flight at a loss are
+        avoided now, which keeps them off the probe's lanes by a second rule beside their route.
+      - **The eight Probe Health fields the user's OPEN-5 decision removes are no longer read.**
+        The arms read the gate's own counters instead: its log (routes, proven, misses,
+        stand-downs, walks deferred), the helper's channel (lookups sent to each child),
+        `riskSeen()`, the helper's `stats()` and the trouble latch itself. The resolver's
+        `gateHealth()` is read only for `passedStuck` and `helperStuck`, behind two of the six
+        fields Probe Health keeps, and Probe Health's report only for `lookupsInFlight` and
+        `lookupsGivenUp`. The findings' paragraph on `RESOLVER_FAULT` now lists every refusal
+        and loss that ends in it.
+      - **Scaled down** on `1b6bd68a` with this change (500 sensors, a pool of 16, a minute an
+        arm, not a quiet machine, so not a measurement), every run held:
+        - The helper's arms and the three new ones: nine runs in 877 s.
+        - P6: its zone answered from 10.7 s, and the crash name was checked 9 times after that.
+          Each check was refused at once, and the name was never asked on the probe's lanes.
+        - P1 and P2: no transient at this size, as before.
+        - P5 and P5b: forks ready in 79 to 334 ms.
+        - The other world arms and P3: in 1,202 s.
+        - `partial` with the check off: in 91 s.
+      - **Mutants: 2, both killed.**
+        - The new P6 rule let a run through with no check of the name after its zone answered:
+          killed by its two judge cases.
+        - D27's avoidance and the poison refusal both removed: P6 failed scaled down, with the
+          crash name asked on the probe's lanes 3 times and 6 `exit` losses.
+        - The same mutant against P6 as S7 built it (its zone silent throughout, the new rule
+          off): the name was asked on the probe's lanes 0 times. That arm failed only on its
+          loss count, 11, as the poisoned name went back to the helper.
+      - **Quiet-machine runs: owed**, with the rest of the findings file's command.
+- [ ] **P-472 — P2's answering checks once `P-463` avoids the names detached at `unresponsive`** ·
+      XS · P-432, P-463 · Filed 2026-10-20 by `P-471`. While P2's child is stopped, the helper is
+      `unresponsive` for about 17 s, and `routeState()` reads `down`. Today no name detached then
+      is avoided. `P-463` is to give each of them the avoidance entry, so the next check of any
+      such name in that window will fail at once with `RESOLVER_FAULT`. That counts as failed
+      otherwise, and P2 asserts that every answering check answered. Answering names are vouched
+      heard, and a heard or sampled lookup runs on the probe's lanes, so only an answering name
+      still unvouched at the SIGSTOP could be detached. **Done when** P2 is run scaled down on
+      `P-463`'s build. Either it holds, or its answering rule says how many such refusals it
+      allows and why, by a recorded decision.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

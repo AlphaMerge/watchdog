@@ -1655,6 +1655,33 @@ describe('gate mode’s start, watch and health (P-432 S3)', () => {
     assert.equal(resolver.takeQuestionsPeak(), 0);
   });
 
+  it('keeps the helper’s lanes at risk at their most since the start, and how many the gate admitted: a stuck lookup that started ungated is overshoot (P-465)', async () => {
+    const { resolver, helper, ask, clock } = make();
+    assert.deepEqual(resolver.riskSeen(), { atRisk: 0, overshoot: 0, admitted: 0 });
+    const seed = ask('a0.zone-a.test');
+    helper.last('a0.zone-a.test').answer();
+    assert.deepEqual(await seed, A);
+    // Four never-seen zones' first looks, each gated on a shared token as it starts.
+    const silentOnes = [0, 1, 2, 3].map((i) =>
+      outcome(ask(`dev.zone-${String(i)}.test`, 4, { waitMs: 60_000 })),
+    );
+    assert.equal(helper.inFlight().length, 4);
+    assert.deepEqual(resolver.riskSeen(), { atRisk: 4, overshoot: 0, admitted: 4 });
+    // The answering zone's refresh starts ungated on the last shared token; said stuck, it is at
+    // risk, and not one the gate admitted at risk.
+    clock.now = ANSWER_MS + 1;
+    assert.deepEqual(await ask('a0.zone-a.test'), A, 'served what it had while refreshed');
+    assert.equal(helper.asksFor('a0.zone-a.test').length, 2, 'its refresh, in the helper');
+    helper.last('a0.zone-a.test').stuck();
+    await settled();
+    assert.deepEqual(resolver.riskSeen(), { atRisk: 5, overshoot: 1, admitted: 4 });
+    // Never reset: the most since the start, once every lookup has ended.
+    for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+    await settled();
+    for (const got of await Promise.all(silentOnes)) assert.ok(!got.ok);
+    assert.deepEqual(resolver.riskSeen(), { atRisk: 5, overshoot: 1, admitted: 4 });
+  });
+
   it('counts both lane sets in flight for Probe Health', () => {
     const { resolver, ask } = make({ local: (host) => host === 'gw.test' });
     void outcome(ask('gw.test', 4, { waitMs: 60_000 }));
@@ -1695,6 +1722,7 @@ describe('system mode builds none of it (P-432 S3)', () => {
     });
     assert.equal(resolver.gateHealth(), undefined);
     assert.equal(resolver.takeQuestionsPeak(), undefined);
+    assert.equal(resolver.riskSeen(), undefined);
     resolver.onHelperChange({ state: 'up', previous: 'starting', route: 'up', isolating: false });
     resolver.onHelperLateAnswer({}, { ok: true, answer: { addresses: B, total: 1, ranMs: 1 } });
     assert.deepEqual(await resolver.resolve('dev.zone-a.test', 4, {}), A);

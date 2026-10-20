@@ -226,20 +226,20 @@ Each of these is a yes, or the cut waits.
 
 7. **S7's full-size name-lookups run, on the commit to be cut**, in step 0.4's worktree: the gate's
    `test:perf` arms, whose findings file is `2026-10-20-name-lookups-gated.md` in `docs/findings/`.
-   Six world arms in both modes (`slow`, `warmzone`, `zone`, `partial`, `steady`, `forwarder`) and
-   six in gate mode only (P1, P2, P3, P5, P5b, P6), on S5's DNS simulator playing dnsmasq with 30
-   forwards left for the probe, glibc's wire held to the recordings, and the real helper, policy
-   and walk, at 5,000 sensors. **A quiet window**: `ms-server` stopped, no other toolchain run, and
-   the other projects' containers paused only with the user's leave, asked each time. The
-   conditions print at the top of each run (`P-192`), and go in the record with the numbers. The
-   commands are the two that findings file gives under *The quiet-window command*, at full size,
-   about 100 minutes and then about 8 for the check-off half of `partial`; each waits 180 s first
-   for the VM to settle after `ms-server`, and its bound is S7's plus that. `MS_DNS_ARMS` leaves
-   out the lane model's arms, whose numbers are `P-426`'s third and fourth windows. The block stops
-   `ms-server` itself, from the main checkout (`stop` removes the container, so Docker does not
-   start it again), and refuses to go on while it or any toolchain run is up: the VM count in step
-   0.5 does not see `ms-server`, which is not a toolchain run, and `perf-conditions.mjs` warns and
-   never blocks.
+   Seven world arms in both modes (`slow`, `warmzone`, `zone`, `partial`, `steady`, `forwarder`,
+   `spread10`) and eight in gate mode only (P1, P2, P3, P5, P5b, P6, `addresses`, `walkrate`), on
+   S5's DNS simulator playing dnsmasq with 30 forwards left for the probe, glibc's wire held to the
+   recordings, and the real helper, policy and walk, at 5,000 sensors. **A quiet window**:
+   `ms-server` stopped, no other toolchain run, and the other projects' containers paused only with
+   the user's leave, asked each time. The conditions print at the top of each run (`P-192`), and go
+   in the record with the numbers. The commands are the two that findings file gives under *The
+   quiet-window command*, at full size, about 125 minutes and then about 8 for the check-off half of
+   `partial`; each waits 180 s first for the VM to settle after `ms-server`, and its bound is S7's
+   plus that. `MS_DNS_ARMS` leaves out the lane model's arms, whose numbers are `P-426`'s third and
+   fourth windows. The block stops `ms-server` itself, from the main checkout (`stop` removes the
+   container, so Docker does not start it again), and refuses to go on while it or any toolchain run
+   is up: the VM count in step 0.5 does not see `ms-server`, which is not a toolchain run, and
+   `perf-conditions.mjs` warns and never blocks.
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem && ./scripts/dev-services.sh stop
@@ -250,24 +250,24 @@ Each of these is a yes, or the cut waits.
    [ "$(cat /tmp/rc3-suite-commit 2>/dev/null)" = "$(git rev-parse HEAD)" ] || { echo "step 0.4 has not passed on this commit"; exit 1; }
    mkdir -p /tmp/rc3-diff
    perl -e 'alarm 660; exec @ARGV' ./scripts/dev.sh "timeout 600 npx tsc -b"
-   perl -e 'alarm 9300; exec @ARGV' ./scripts/dev.sh "timeout 9180 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 MS_DNS_STEADY_MINUTES=10 MS_DNS_ARMS=world/slow,world/warmzone,world/zone,world/partial,world/steady,world/forwarder,P1,P2,P3,P5,P5b,P6 node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups.out
+   perl -e 'alarm 12300; exec @ARGV' ./scripts/dev.sh "timeout 12180 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 MS_DNS_STEADY_MINUTES=10 MS_DNS_ARMS=world/slow,world/warmzone,world/zone,world/partial,world/steady,world/forwarder,P1,P2,P3,P5,P5b,P6,world/spread10,world/addresses,world/walkrate node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups.out
    perl -e 'alarm 1440; exec @ARGV' ./scripts/dev.sh "timeout 1380 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_CHECK=off MS_DNS_RESOLVER=gate MS_DNS_COLD_MINUTES=7 MS_DNS_ARMS=world/partial node --test packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups-check-off.out
    ```
 
    Both runs pass (`fail 0`, `cancelled 0`): each arm's bounds are asserted in the run, by
-   `name-gate-judge.ts` (the findings file's *Asserted in every arm* and its table of arms say
-   which and why), so a bound crossed fails its arm. The findings file has no full-size numbers yet
-   (its Results are `TODO(quiet-window)`): this run is the first, and its rows fill that table in
-   step 9. Read, beside the bounds, what the arms print and do not assert: P5's and P5b's
+   `name-gate-judge.ts` (the findings file's *Asserted in every arm* and its table of arms say which
+   and why), so a bound crossed fails its arm. The findings file has no full-size numbers yet (its
+   Results are `TODO(quiet-window)`): this run is the first, and its rows fill that table in step 9.
+   Read, beside the bounds, what the arms print and do not assert: P5's and P5b's
    `lookupHelperTrouble` (1 after four kills in two minutes, as D27 says), P3's checks failed
    "otherwise", each arm's event-loop p50, p99 and max, and its routes. A result on the other side
    of the design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
-   loop's p99) stops the cut. `spread10` and `walkrate`, whose event-loop p99 that verdict also
-   reads, are not arms yet (`P-465`), and the record says so. Then, **however the block above
-   ended**, `ms-server` is started from the main checkout and verified: it runs `origin/main`, both
-   services name that commit at start, the probe connects, the log has no error line, and the API
-   answers 401 without a credential. Unpause what was paused for the window (`docker unpause` on
-   each).
+   loop's p99) stops the cut. That verdict also reads `spread10`'s event-loop p99 in each mode, with
+   its lanes at risk, and `walkrate`'s against `addresses`', with its channels' busiest second
+   (`P-465`): the record gives them. Then, **however the block above ended**, `ms-server` is started
+   from the main checkout and verified: it runs `origin/main`, both services name that commit at
+   start, the probe connects, the log has no error line, and the API answers 401 without a
+   credential. Unpause what was paused for the window (`docker unpause` on each).
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin && ./scripts/dev-services.sh start || exit 1
