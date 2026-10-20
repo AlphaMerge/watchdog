@@ -23,7 +23,7 @@ import {
   type ProcessView,
 } from '../src/runner/script-groups.js';
 import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
-import { pollWithin } from './support/within.js';
+import { pollWithin, type Waited } from './support/within.js';
 import { assertFits } from './support/fits.js';
 
 /**
@@ -82,7 +82,7 @@ function runnerOf(
   return { runner, seen };
 }
 
-function until(predicate: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
+function until(predicate: () => boolean, what: Waited, timeoutMs = 30_000): Promise<void> {
   return pollWithin(timeoutMs, what, predicate, 10);
 }
 
@@ -1151,22 +1151,37 @@ describe('a script check in a process of its own (`P-262`)', () => {
      * The real `/proc`, behind a runner that reads a script's line only once the check process has
      * reaped the script: a runner whose loop was busy elsewhere while the script ran (`P-278`).
      * The check process is the runner's own child; any other process it reads is a script leader.
+     * A leader's first read is late when it finds the leader reaped: held until it was, or already
+     * gone, as on a loaded host whose runner got to the line after the check process had reaped
+     * it. Counting only the held read, the test waited 30 s for a count that could not come.
      */
-    function lateReader(): { view: ProcessView; late: () => number } {
+    function lateReader(): { view: ProcessView; late: () => number; reads: () => string } {
       const real = linuxProcessView();
       assert.ok(real !== null);
       let late = 0;
+      const first = new Map<number, string>();
       const pause = new Int32Array(new SharedArrayBuffer(4));
       return {
         late: () => late,
+        reads: () => JSON.stringify([...first]),
         view: {
           read: (pid) => {
             const entry = real.read(pid);
-            if (entry === null || entry.ppid === process.pid) return entry;
+            if (entry?.ppid === process.pid) return entry;
+            if (first.has(pid)) return entry;
+            if (entry === null) {
+              first.set(pid, 'reaped before it was read');
+              late += 1;
+              return null;
+            }
             // Synchronous, as the runner's own read is, so its loop stands still meanwhile.
             const deadline = Date.now() + 10_000;
             while (real.read(pid) !== null && Date.now() < deadline) Atomics.wait(pause, 0, 0, 10);
             const after = real.read(pid);
+            first.set(
+              pid,
+              after === null ? 'reaped while its read was held' : 'running after 10 s',
+            );
             if (after === null) late += 1;
             return after;
           },
@@ -1177,7 +1192,7 @@ describe('a script check in a process of its own (`P-262`)', () => {
     }
 
     it('ends what a script left when its leader was reaped before its line was read (`P-278`)', async () => {
-      const { view, late } = lateReader();
+      const { view, late, reads } = lateReader();
       const { runner, seen } = runnerOf({
         registryModule: CATALOGUE,
         childEnv: { [SCRIPT_DIR_ENV]: dir },
@@ -1188,7 +1203,10 @@ describe('a script check in a process of its own (`P-262`)', () => {
       await until(() => existsSync(file), 'the script to start its helper', 40_000);
       const [scriptPid = 0, helperPid = 0, checkPid = 0] = await numbersIn(file, 3);
       try {
-        await until(() => late() === 1, 'the runner to read the line once the script was reaped');
+        await until(
+          () => late() === 1,
+          () => `the runner to read the line once the script was reaped: ${reads()}`,
+        );
         assert.equal(gone(scriptPid), true, 'the script was reaped');
         assert.equal(gone(helperPid), false, 'its helper is running');
 

@@ -16235,6 +16235,38 @@ because each is a decision rather than a defect:
         - the early timer moved to the bound.
       - **Runs.** The file and its twin together, 20 runs in a row at loads of 21–33 (median 26):
         20 of 20, 198 tests each.
+- [x] **P-474 — `process-runner`'s `P-278` test waits 30 s for a late read it counts only when it
+      forced the lateness** · XS · P-278 · Filed 2026-10-20 by the flakes track. 'ends what a script
+      left when its leader was reaped before its line was read' timed out at its 30 s `until` once
+      in a concurrent probe suite, and passed alone. **Done when** the cause is found from a run
+      that reproduces it under load, and it is fixed or bounded honestly, and the test passes
+      twenty runs in a row at a load near 20.
+
+      **P-474 outcome. The test counted the read as late only when its own hold made it late.**
+      Built 2026-10-20 on `fix/flakes-r1`, in `process-runner.test.ts` only.
+      - **Reproduced.** On the base, the test alone failed 5 of 15 at loads of 30–41, each time
+        with "timed out after 30000 ms waiting for the runner to read the line once the script
+        was reaped". A build that kept the old count and recorded each first read failed 1 of 12
+        at loads of 14–16, and its failure named the read:
+        `[[2457,"reaped before it was read"]]`.
+      - **Why.** `lateReader` holds the runner's first read of a script leader until the check
+        process has reaped it, and counts the read as late only if the hold saw the leader go. A
+        leader already reaped at that first read was returned without being counted. On a
+        loaded host the runner gets to the `started` line after the check process has reaped the
+        script: the script only starts `sleep 60 &`, writes a file and exits. That is `P-278`'s
+        own case, and the runner recorded the group by its members as it should. But
+        `late() === 1` could not come, so the test waited out its 30 s. More time would not have
+        helped.
+      - **The fix.** A leader's first read is late when it finds the leader reaped, whether the
+        hold made it so or the runner's own loop did. Each first read is recorded ('reaped before
+        it was read', 'reaped while its read was held', 'running after 10 s'), and the wait's
+        failure names them. The hold stays: on a quiet host it is what makes the read late.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** a ticket of its own
+        rather than a round on `P-278`, which is done. New work gets new tasks.
+      - **Mutation.** `P-278`'s first mutant, a leader gone at `started` passed over, still fails
+        the test: the helper outlives the check process. The diagnostic build above is the old
+        count under the new record.
+      - **Runs.** The test alone, 20 runs in a row at a load held near 21 (19–24): 20 of 20.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
