@@ -88,9 +88,9 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
     id: 'ms.windows',
     name: 'Windows server',
     description:
-      'Ping, plus the WMI set where WinRM is reachable. `T-09` needs a Windows-hosted probe, so ' +
-      'these are created only when port 5985 or 5986 answered — on a Linux-only installation ' +
-      'that is never, which is the honest outcome rather than four failing sensors.',
+      'Ping, plus the WMI set where WinRM is reachable. Those checks need a Windows-hosted ' +
+      'probe, so they are created only when port 5985 or 5986 answered — on a Linux-only ' +
+      'installation that is never, which is the honest outcome rather than four failing sensors.',
     match: { kind: ['windows'] },
     sensors: [
       { type: 'icmp.ping', name: 'Ping', master: true },
@@ -157,7 +157,7 @@ export const BUILT_IN_DEVICE_TEMPLATES: readonly DeviceTemplate[] = [
     id: 'ms.hypervisor',
     name: 'Hypervisor',
     description:
-      'ESXi and Proxmox hosts. The guest-level detail is `D-05`’s VMware transport in v2; what ' +
+      'ESXi and Proxmox hosts. The guest-level detail waits for a VMware transport in v2; what ' +
       'is here is the host itself, which is what takes the guests with it when it goes.',
     match: { kind: ['hypervisor'] },
     sensors: [

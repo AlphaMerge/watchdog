@@ -57,7 +57,7 @@ export function ChannelTable({
   const retiredNote = useId();
   if (channels.length === 0) {
     return (
-      <Empty because="A sensor type declares its channels, so they exist from the moment the sensor does (P-05).">
+      <Empty because="A sensor type declares its channels, so they exist from the moment the sensor does.">
         No channels.
       </Empty>
     );

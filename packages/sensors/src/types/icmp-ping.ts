@@ -55,7 +55,7 @@ export const icmpPing: SensorType = {
         description:
           'Ping’s own default is one second, which makes a four-packet check a three-second ' +
           'check — measured, that is 20 targets a second across 64 workers where 0.2 s gives ' +
-          '99, with identical reply counts (`P-07`). 0.2 is the floor: below it iputils needs ' +
+          '99, with identical reply counts. 0.2 is the floor: below it iputils needs ' +
           'CAP_NET_RAW and BSD needs the superuser. Windows has no such flag and ignores this.',
       },
       packetSize: {

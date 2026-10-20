@@ -20,8 +20,8 @@ describe('ErrorPanel', () => {
 
 describe('Empty', () => {
   it('explains why it is empty, so a blank panel does not read as a bug', () => {
-    render(<Empty because="P-08 adds the first sensor type.">No sensor types.</Empty>);
+    render(<Empty because="The core registers them when it starts.">No sensor types.</Empty>);
     expect(screen.getByText('No sensor types.')).toBeDefined();
-    expect(screen.getByText('P-08 adds the first sensor type.')).toBeDefined();
+    expect(screen.getByText('The core registers them when it starts.')).toBeDefined();
   });
 });

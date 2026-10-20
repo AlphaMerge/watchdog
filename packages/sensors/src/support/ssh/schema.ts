@@ -72,7 +72,7 @@ export const SSH_CREDENTIAL_SCHEMA: Readonly<Record<string, JsonSchema>> = {
     items: { title: 'Host key', type: 'string', minLength: 1, maxLength: 128 },
     title: 'Host keys',
     description:
-      'Every server this set may log in to, by its key, as `ssh-keygen -lf` prints it (`A-41b`). ' +
+      'Every server this set may log in to, by its key, as `ssh-keygen -lf` prints it. ' +
       'The fingerprint above is accepted as well. With any listed and checking strict, the set ' +
       'goes to a device whoever created it, if the device is inside the allowed targets or there ' +
       'are none, because a server whose key is not here is never sent the password. Adding a ' +

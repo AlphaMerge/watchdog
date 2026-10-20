@@ -64,7 +64,7 @@ cost: **medium**
 | `timeoutMs` | integer | `60000` | ≥ 1000, ≤ 300000 |  |
 
 - **Packets** (`count`) — Jitter is a property of the *gaps* between replies, so it needs a run of them — five packets give four gaps, which is not much of a sample. At the default spacing of one second, twenty packets take roughly twenty seconds; keep the scan interval well above that.
-- **Seconds between packets** (`intervalSeconds`) — One second here, unlike `icmp.ping`’s 0.2 (`P-07`), and the difference is deliberate: jitter is a measurement of the network *over time*, and twenty packets spaced 0.2 s apart sample four seconds of it rather than twenty. Congestion that comes and goes on a ten-second cycle is invisible in a four-second window. Lower it to make the check cheaper, knowing that is the trade.
+- **Seconds between packets** (`intervalSeconds`) — One second here, unlike `icmp.ping`’s 0.2, and the difference is deliberate: jitter is a measurement of the network *over time*, and twenty packets spaced 0.2 s apart sample four seconds of it rather than twenty. Congestion that comes and goes on a ten-second cycle is invisible in a four-second window. Lower it to make the check cheaper, knowing that is the trade.
 - **Timeout** (`timeoutMs`) — For the whole run, not per packet.
 
 ### `icmp.ping`
@@ -84,7 +84,7 @@ cost: **medium**
 | `timeoutMs` | integer | `5000` | ≥ 100, ≤ 60000 |  |
 
 - **Packets** (`count`) — ICMP echo requests per check. At the default spacing of 0.2 s, a count of 4 takes about six-tenths of a second.
-- **Seconds between packets** (`intervalSeconds`) — Ping’s own default is one second, which makes a four-packet check a three-second check — measured, that is 20 targets a second across 64 workers where 0.2 s gives 99, with identical reply counts (`P-07`). 0.2 is the floor: below it iputils needs CAP_NET_RAW and BSD needs the superuser. Windows has no such flag and ignores this.
+- **Seconds between packets** (`intervalSeconds`) — Ping’s own default is one second, which makes a four-packet check a three-second check — measured, that is 20 targets a second across 64 workers where 0.2 s gives 99, with identical reply counts. 0.2 is the floor: below it iputils needs CAP_NET_RAW and BSD needs the superuser. Windows has no such flag and ignores this.
 - **Payload size** (`packetSize`) — Bytes of payload per packet, before the ICMP and IP headers.
 - **Timeout** (`timeoutMs`) — Overall deadline for the whole run, in milliseconds.
 

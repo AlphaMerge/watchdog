@@ -89,7 +89,7 @@ export function Overview(): React.JSX.Element {
         <Stat
           label="Sensor types"
           value={types.status === 'ready' ? typeCount : '—'}
-          hint={typeCount === 0 ? 'none registered — P-08 adds the first' : 'registered'}
+          hint={typeCount === 0 ? 'none registered' : 'registered'}
         />
       </div>
 
@@ -148,7 +148,7 @@ export function Overview(): React.JSX.Element {
           <ReadState read={types} what="sensor types" />
           {types.status === 'ready' &&
             (typeCount === 0 ? (
-              <Empty because="P-05 shipped the contract and the registry; P-08 through P-11 are the first four types.">
+              <Empty because="The core registers its sensor types when it starts, and its log says when it found none.">
                 The catalogue is empty, so no sensor can be created.
               </Empty>
             ) : (

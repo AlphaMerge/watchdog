@@ -161,7 +161,7 @@ export function decodeNetflowV5(datagram: Buffer): NetflowV5Datagram {
   if (version !== NETFLOW_V5) {
     throw new FlowDecodeError(
       { kind: 'unsupported-version', version },
-      `NetFlow version ${String(version)} is not v5 — versions 9 and 10 arrive with B-03`,
+      `NetFlow version ${String(version)} is not v5, the only version this decoder reads`,
     );
   }
 

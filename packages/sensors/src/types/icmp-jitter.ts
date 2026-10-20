@@ -43,7 +43,7 @@ export const icmpJitter: SensorType = {
         default: 1,
         title: 'Seconds between packets',
         description:
-          'One second here, unlike `icmp.ping`’s 0.2 (`P-07`), and the difference is deliberate: ' +
+          'One second here, unlike `icmp.ping`’s 0.2, and the difference is deliberate: ' +
           'jitter is a measurement of the network *over time*, and twenty packets spaced 0.2 s ' +
           'apart sample four seconds of it rather than twenty. Congestion that comes and goes on ' +
           'a ten-second cycle is invisible in a four-second window. Lower it to make the check ' +

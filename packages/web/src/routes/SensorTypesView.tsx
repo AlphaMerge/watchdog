@@ -101,7 +101,7 @@ export function SensorTypesView(): React.JSX.Element {
       {types.status === 'ready' &&
         (catalogue.length === 0 ? (
           <Card>
-            <Empty because="P-05 shipped the contract and the registry. P-08 (Ping), P-09 (HTTP), P-10 (Port) and P-11 (DNS) are the first four types.">
+            <Empty because="The core registers its sensor types when it starts, and its log says when it found none.">
               No sensor types are registered, so no sensor can be created.
             </Empty>
           </Card>

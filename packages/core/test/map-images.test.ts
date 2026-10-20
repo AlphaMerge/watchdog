@@ -170,6 +170,8 @@ describe('what an uploaded file is', () => {
   it('refuses SVG by name, because people will try it', () => {
     const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>…</script></svg>');
     assert.match(refusal(svg), /SVG is not accepted/);
+    // Said to whoever uploaded it, who has no decision record to look up (`U-92`).
+    assert.doesNotMatch(refusal(svg), /\b(?:[A-Z]|V2|ADR)-\d+[a-z]?\b/u);
   });
 
   it('refuses a file that only claims to be an image', () => {

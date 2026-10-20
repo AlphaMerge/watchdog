@@ -183,7 +183,7 @@ export function readImage(bytes: Buffer): ImageFacts | { problem: string } {
       .startsWith('<');
     return {
       problem: looksLikeSvg
-        ? 'SVG is not accepted: it is a document rather than an image, and a background is drawn in the application’s own page (ADR-003)'
+        ? 'SVG is not accepted: it is a document rather than an image, and a background is drawn in the application’s own page'
         : 'the file is not a PNG, JPEG or WebP image — whatever it is called',
     };
   }

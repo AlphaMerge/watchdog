@@ -114,6 +114,8 @@ describe('NetFlow v5', () => {
         assert.equal(error.reason.version, 9);
         // An operator whose exporter is set to v9 needs to read that, not "malformed".
         assert.match(error.message, /version 9/);
+        // And not a ticket of this repository, which they cannot look up (`U-92`).
+        assert.doesNotMatch(error.message, /\b(?:[A-Z]|V2|ADR)-\d+[a-z]?\b/u);
         return true;
       },
     );

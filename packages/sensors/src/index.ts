@@ -272,7 +272,7 @@ const WINDOWS_IS_1_1 =
 export const WITHHELD_FROM_V1: ReadonlyMap<string, string> = new Map([
   // Never constructed by a shipped probe even in the full profile (`B-07`), so in v1 a flow
   // sensor could only fail for ever.
-  [flowCollector.id, 'flow monitoring is v2 (`V2-01`)'],
+  [flowCollector.id, 'flow monitoring is v2'],
   [windowsCpu.id, WINDOWS_IS_1_1],
   [windowsMemory.id, WINDOWS_IS_1_1],
   [windowsService.id, WINDOWS_IS_1_1],
