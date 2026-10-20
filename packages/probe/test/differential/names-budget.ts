@@ -10,6 +10,7 @@ import { DnsSimulator, dnsQuery, replies } from '@ms/simulators';
 import { buildNameResolution } from '../../src/resolver/name-resolution.js';
 import { RESOLVER_LANES } from '../../src/resolver/name-resolver.js';
 import { pollWithin, within } from '../support/within.js';
+import { BuildWatch } from './names-build.js';
 import {
   BUDGET_BOXES,
   BUDGET_FORWARD_MAX,
@@ -36,7 +37,8 @@ import {
  * the forwarder had open upstream at once. Each arm runs on a fresh simulator and forwarder (or
  * restarted resolved), and in a process of its own (`names-budget arm …`) with
  * `UV_THREADPOOL_SIZE` 16 as ms-probe's unit sets it, ended at the window's close, as an outage
- * still going would be. Prints the box's `BudgetRun` as JSON.
+ * still going would be. Prints the box's `BudgetRun` as JSON, with the build it loaded
+ * (`names-build.ts`), looked at again before each arm and at the end.
  */
 
 const run = promisify(execFile);
@@ -271,6 +273,7 @@ async function versionOf(forwarder: Forwarder): Promise<string> {
 }
 
 async function box(forwarder: Forwarder, image: string): Promise<void> {
+  const build = new BuildWatch();
   const setup: string[] = [];
   try {
     writeFileSync('/etc/hosts', '127.0.0.1 localhost\n');
@@ -286,6 +289,7 @@ async function box(forwarder: Forwarder, image: string): Promise<void> {
   }
   const arms: BudgetArm[] = [];
   for (const name of BUDGET_BOXES[forwarder]) {
+    build.look(`before the ${name} arm`);
     const started = performance.now();
     try {
       const measured = await measure(forwarder, name);
@@ -299,6 +303,7 @@ async function box(forwarder: Forwarder, image: string): Promise<void> {
       );
     }
   }
+  build.look('at the end');
   const result: BudgetRun = {
     kind: 'budget',
     forwarder,
@@ -309,6 +314,7 @@ async function box(forwarder: Forwarder, image: string): Promise<void> {
     windowMs: WINDOW_MS,
     arms,
     ...(setup.length > 0 ? { setup } : {}),
+    ...build.fields(),
   };
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

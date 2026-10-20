@@ -8,12 +8,12 @@ import {
   DnsSimulator,
   replies,
   type DnsBehaviour,
-  type DnsQueryRecord,
   type DnsReply,
   type DnsServerSpec,
 } from '@ms/simulators';
 import { GlibcNamePolicy } from '../../src/resolver/system-names.js';
 import { within } from '../support/within.js';
+import { BuildWatch } from './names-build.js';
 import { startCapture } from './names-capture.js';
 import {
   ANSWER_PLAN,
@@ -21,6 +21,7 @@ import {
   ANSWER_WORLD,
   NAMESERVER,
   STUB,
+  answerRowsDigest,
   digestOf,
   expectationIn,
   listenerOf,
@@ -35,16 +36,15 @@ import {
   type Expectation,
   type ImageRun,
   type InImage,
-  type ModesRun,
   type Plan,
   type PlanRun,
   type Reply,
   type Row,
   type RowRun,
   type RowsFile,
-  type WalkRun,
 } from './names-differential.js';
 import type { ModesReply, ModesRequest } from './names-modes.js';
+import { askedOf, walkAndModes, type ModesChannel, type StubSteps } from './names-walk.js';
 
 /**
  * The differential's replay in one image (`P-432` S8, D30): run as root in a box from
@@ -69,12 +69,12 @@ import type { ModesReply, ModesRequest } from './names-modes.js';
  *    simulator caches nothing, and systemd-resolved runs with `Cache=no`. Each question's OPT
  *    record is kept with the wire.
  * 4. **The same plan, the walk's wire (B), and the regression** (`P-460`), in a run of their own
- *    after glibc's: the row's `names-modes` process, forked with the row's environment, proves a
- *    name check of its own by its canary, the plan's answers are set and the log cleared, and the
- *    check routes the name alone (`DnsCheck.route`: no lanes, no helper), its questions read off
- *    the simulator's log (and the capture, through resolved). Then the same lookup through the
- *    probe's resolver in `system` and in `gate` mode, in the helper's child, and on the probe's own
- *    lanes.
+ *    after glibc's (`names-walk.ts`): every server is set back to NXDOMAIN, the row's
+ *    `names-modes` process, forked with the row's environment, proves a name check of its own by
+ *    its canary, then the plan's answers are set and the log cleared, and the check routes the
+ *    name alone (`DnsCheck.route`: no lanes, no helper), its questions read off the simulator's
+ *    log (and the capture, through resolved). Then the same lookup through the probe's resolver in
+ *    `system` and in `gate` mode, in the helper's child, and on the probe's own lanes.
  *
  * Then each answer row (`ANSWER_ROWS`), with a simulator of its own whose servers' TCP may be
  * closed, played the same way.
@@ -87,8 +87,11 @@ import type { ModesReply, ModesRequest } from './names-modes.js';
  * a host. The run says resolved served the stub only where it saw it: every plan that asked the
  * stub had resolved ask the simulator (`resolvedObserved`).
  *
- * The run carries the sha256 of the rows file and of the policy's build it loaded
- * (`dist/src/resolver/system-names.js`), which the verdict holds to the files it judges by.
+ * The run carries the sha256 of the rows file, of the answer rows, of the policy's build it loaded
+ * (`dist/src/resolver/system-names.js`) and of every build the boxes load (`names-build.ts`),
+ * which the verdict holds to the files it judges by. It looks at that build again before each row
+ * and at its end, and says where it saw it change (`rebuilt`): the processes it starts load it
+ * afresh, so a run across a rebuild is of no one build.
  */
 
 const run = promisify(execFile);
@@ -414,24 +417,19 @@ async function captureStub(): Promise<StubCapture> {
   };
 }
 
-/** The questions the servers saw, resolved's own upstream ones aside. */
-function askedOf(log: readonly DnsQueryRecord[]): Asked[] {
-  return log
-    .filter((entry) => !entry.server.startsWith('upstream:'))
-    .map((entry) => ({
-      server: entry.server,
-      qname: entry.qname,
-      qtype: entry.qtype,
-      transport: entry.transport,
-      opt: entry.opt,
-    }));
-}
+/** Through systemd-resolved, the walk's steps: resolved's cache flushed, and the stub captured. */
+const STUB_STEPS: StubSteps = {
+  async flush(): Promise<void> {
+    await run('resolvectl', ['flush-caches']);
+  },
+  capture: captureStub,
+};
 
 /**
  * A row's `names-modes` process: the walk's check and the regression's resolvers, plan by plan,
  * each step bounded here as well as in it.
  */
-class Modes {
+class Modes implements ModesChannel {
   readonly #child: ChildProcess;
   #said = '';
   #ended: string | undefined;
@@ -494,42 +492,6 @@ class Modes {
   }
 }
 
-interface Recorded {
-  readonly walk: WalkRun;
-  readonly modes: ModesRun;
-  readonly setup: string[];
-}
-
-/**
- * Recording (B) of a plan, and its regression lookups, after glibc's (`P-460`): the checks proven
- * first, then the plan's answers set and the log cleared, so the wire is the walk's alone.
- */
-async function walkAndModes(
-  modes: Modes,
-  sim: DnsSimulator,
-  setPlan: () => Promise<void>,
-  throughStub: boolean,
-): Promise<Recorded> {
-  const setup: string[] = [];
-  const prepared = await modes.request({ op: 'prepare' }, 'prepared');
-  if (!prepared.walkProven) setup.push('the walk’s check was not proven by its canary');
-  if (!prepared.gateProven) setup.push('gate mode’s check was not proven by its canary');
-  await setPlan();
-  await sim.clearLog();
-  if (throughStub) await run('resolvectl', ['flush-caches']);
-  const capture = throughStub ? await captureStub() : undefined;
-  const walked = await modes.request({ op: 'walk' }, 'walked');
-  const stub = capture === undefined ? [] : await capture.stop();
-  const asked = [...stub, ...askedOf(await sim.log())];
-  const answered = await modes.request({ op: 'answers' }, 'answered');
-  await modes.request({ op: 'release' }, 'released');
-  return {
-    walk: { route: walked.route, wire: wireOf(asked), opt: optOf(asked), ms: walked.ms },
-    modes: answered.modes,
-    setup,
-  };
-}
-
 async function playRow(
   rows: RowsFile,
   row: Row,
@@ -571,8 +533,9 @@ async function playRow(
       const recorded = await walkAndModes(
         modes,
         sim,
+        servers.specs.map((spec) => spec.name),
         () => answerAsPlanned(sim, servers, plan),
-        servers.throughStub,
+        servers.throughStub ? STUB_STEPS : undefined,
       );
       for (const why of recorded.setup) setup.push(`${plan.plan}: ${why}`);
       plans.push({
@@ -649,7 +612,13 @@ async function playAnswerRow(
     const looked = await lookUp(name, family, env);
     await sleep(SETTLE_MS);
     const asked = askedOf(await sim.log());
-    const recorded = await walkAndModes(modes, sim, setPlan, false);
+    const recorded = await walkAndModes(
+      modes,
+      sim,
+      specs.map((spec) => spec.name),
+      setPlan,
+      undefined,
+    );
     setup.push(...recorded.setup);
     const played: RowRun = {
       id: row.id,
@@ -683,6 +652,7 @@ async function main(): Promise<void> {
   const rowsBytes = readFileSync(a.rows);
   const rows = JSON.parse(rowsBytes.toString('utf8')) as RowsFile;
   if (!Object.hasOwn(rows.images, a.image)) throw new Error(`${a.image} is no image of the rows`);
+  const build = new BuildWatch();
   const ipv6 = enableIpv6();
   const runs: RowRun[] = [];
   let glibc: string | undefined;
@@ -690,6 +660,7 @@ async function main(): Promise<void> {
     if (a.only !== undefined && !a.only.includes(row.id)) continue;
     const e = expectationIn(row, a.image);
     if (e === null) continue;
+    build.look(`before row ${row.id}`);
     const started = performance.now();
     const played = await playRow(rows, row, e, a.viaResolved, ipv6);
     glibc ??= played.glibc;
@@ -702,6 +673,7 @@ async function main(): Promise<void> {
   const answers: RowRun[] = [];
   for (const row of ANSWER_ROWS) {
     if (a.only !== undefined && !a.only.includes(row.id)) continue;
+    build.look(`before answer row ${row.id}`);
     const started = performance.now();
     const played = await playAnswerRow(row, ipv6);
     glibc ??= played.glibc;
@@ -711,6 +683,7 @@ async function main(): Promise<void> {
         `(${String(Math.round(performance.now() - started))} ms)`,
     );
   }
+  build.look('at the end');
   const image: ImageRun = {
     image: a.image,
     glibc,
@@ -719,6 +692,8 @@ async function main(): Promise<void> {
     digest: process.env['MS_DIFF_DIGEST'] ?? 'unknown',
     rowsDigest: digestOf(rowsBytes),
     policyDigest: digestOf(readFileSync(POLICY)),
+    answerRowsDigest: answerRowsDigest(ANSWER_ROWS),
+    ...build.fields(),
     resolved: a.viaResolved && resolvedObserved(runs),
     rows: runs,
     answers,

@@ -4,7 +4,8 @@
 the whole run three times: first on S4's policy as it landed, then on the policy narrowed by what
 the first run found, and then after the review's fixes (run 3). Run 4, on `feat/p432-s8-walk`,
 adds the walk's wire, the regressions, the answer rows, the budget boxes and the boxes with the
-check off (`P-460`, `P-461`). Built first, then:
+check off (`P-460`, `P-461`). Runs 5 and 6 follow the review of run 4, and run 6's recordings are
+the committed ones. Built first, then:
 
 ```
 MS_DIFF_WRITE=1 ./scripts/smoke/name-gate-differential.sh
@@ -133,17 +134,21 @@ recordings, made on S8's build (`b3aaf3cf…`), were stale by that digest.
 
 **What it adds.** After glibc's wire (A), each plan is played again with the same answers for the
 walk alone (B): `DnsCheck.route` in a process of the row's own (`names-modes.ts`), with a budget
-and c-ares of its own and no lanes or helper, proven by its canary before the answers are set.
-The same process then makes §7.5's regression lookups at once: through the probe's resolver in
+and c-ares of its own and no lanes or helper, proven by its canary. In run 4 the canary was
+asked with the plan's answers already set, and was answered only because the S5 simulator answers
+`localhost` itself, whatever the plan says; run 5 has every server answer NXDOMAIN until the
+checks are proven. The same process then makes §7.5's regression lookups at once: through the probe's resolver in
 `system` mode and in `gate` mode, in the helper's child, and on the probe's lanes. Every
 resolver is new for each plan, so every cache is cold. Then six answer rows in every image, two
 budget boxes and five boxes with the check off.
 
 **Run 4 passed.** 260 rows in each image (251 on Rocky 8), **2,966 plans, each walk agreeing with
 glibc's wire and every regression holding**, the 6 answer rows in every image (42 recordings),
-both budget boxes and the five boxes with the check off. Each image's rows took 303–494 s (run 3:
-107–127 s, with no walk or regression), and the whole run about 50 minutes, from 00:33 to 01:22
-UTC. Every image's run named the same rows file (`44aa6cb3…`) and policy build, and Ubuntu 24.04's
+both budget boxes and the five boxes with the check off. Each image's box took 303–494 s from its
+start (run 3: 107–127 s, with no walk or regression), and the whole run about 50 minutes, from
+00:33 to 01:22 UTC. Those times are the script's per-image lines, which counted the six answer rows
+as rows ("266 rows", "257" on Rocky 8) and, for Ubuntu 24.04, held the resolved budget box's 72 s:
+its replay took about 317 s. Run 5's lines count each kind and stop before the budget box. Every image's run named the same rows file (`44aa6cb3…`) and policy build, and Ubuntu 24.04's
 saw resolved serve the stub. The recordings are rewritten, schema 3: 2,966 recordings and 42
 answer recordings, each with glibc's OPT flags.
 
@@ -211,7 +216,68 @@ said its table was full.
 | /etc/ld.so.preload | Debian 12 | libresolv named in the file | `env` |
 
 In each, the check routed `sw1.example.test` `unvouched:off` with nothing asked. The hosts:
-lines are the packages' own.
+lines are the packages' own. Run 4's box never started the check, so its canary could not have
+gone, and "nothing asked" held of the route alone; run 5 starts it as the probe does, and holds it
+to having asked nothing from its start to its stop.
+
+## Runs 5 and 6: after the review of run 4
+
+2026-10-20, on `feat/p432-s8-walk` after `P-460`'s fix round 1, on the bases run 4 pinned and the
+same policy build (`e19f270b…`). Built first, then the whole run each time, as above.
+
+**What the fix round changed in what a run holds.**
+- Under `rotate` the plan decides whether the walk is heard. Where one of the row's servers is
+  silent to a type asked, the walk must be silent, whatever glibc's time. Where every server
+  answers, heard if and only if glibc returned within 1 s. The walk's types are glibc's too: none
+  that glibc did not ask of a name, and each one glibc asked of a name the walk went past or was
+  heard at, of every server.
+- Each answer row claims what `getaddrinfo` returns, and the run is held to it.
+- The off boxes start the check as the probe does, and nothing may be asked from its start to its
+  stop, its canary included.
+- Each image's run names the answer rows it played (`answerRowsDigest`). Every run, an image's or
+  a box's, names the build it loaded (`buildDigest`, every `.js` the boxes load), and fails if
+  that build's files moved under it: each looks again before each row and at its end.
+- Every server answers NXDOMAIN while the checks are proven, and the plan's answers are set after.
+- The script's per-image line counts rows and answer rows apart, and stops before the resolved
+  budget box, which has a line of its own.
+
+Run 4's own runs, judged again by the fix round's verdict with the digests they could not carry
+filled in, have 0 problems: the stricter checks hold of what glibc and the walk did then.
+
+**Run 5 failed on one plan** (02:17 to 03:05 UTC). In Ubuntu 24.04, row `26f320fa4e698d6f` (two
+silent servers at `timeout:1 attempts:2`), plan `last-answers-after-silent`: the walk was routed
+`unvouched:stall`, 577 ms after it was asked, against its 250 ms routing wait. The check's
+deadline timer fired about 330 ms late, as when the event loop is starved, and D31 then routes a
+lookup unvouched rather than take silence from it. The same plan's walk took 250–258 ms in every
+other image and in run 4. A walk with no verdict leaves its plan unverified, so the run failed,
+as it should. Everything else held, and run 6 was the whole run again.
+
+**Run 6 passed** (03:06 to 03:54 UTC), in all seven images: 260 rows in each (251 on Rocky 8),
+2,966 plans, 2,128 heard, 70 silent and 768 local, as in run 4. Every image's run and every box's
+named the same build (`51c80c25…`), none saw it change, and every image's run named the same rows
+file (`44aa6cb3…`), answer rows (`0384c163…`) and policy build. The recordings are rewritten
+from it: 2,966 recordings and 42 answer recordings, each image with its answer rows' digest.
+- Each image's replay took 350–459 s from its box's start.
+- A heard walk took a median of 2.1 ms, 13.1 ms at the 99th percentile and at most 45.6 ms. A
+  silent one took 250–261 ms.
+- Under `rotate`, 7 plans had a silent walk beside a glibc that returned within 1 s, each a
+  `last-answers-after-silent` plan, which has a server silent. No plan that every server answers
+  had a silent walk.
+- Every answer row in every image returned what it claims: `answer:2` with and without `edns0`
+  for TC with TCP/53 refused, `ENOTFOUND` for FORMERR, `answer:1` for A answered with AAAA
+  SERVFAIL, `ENOTFOUND` for FORMERR to OPT, and `EAI_AGAIN` after 1,009–1,015 ms for the
+  EDNS-deaf server.
+- The budget boxes: dnsmasq held 6, 8 and 10 distinct questions at once (`system`, gate, gate
+  after a helper SIGKILL), its table never full, as in run 4. systemd-resolved held 10 in
+  `system` and 9 in gate mode, against a bound of 22 (run 4: 8 and 9).
+- The five off boxes: each off by its rule, the check started and routing `unvouched:off`, and 0
+  questions asked.
+
+**The fix round's mutants in the boxes**, in one narrowed run before run 5, each its own
+`DISAGREES` line: the canary allowed to ask with the check off (all five off boxes said the check
+asked `localhost.` of the box's server), the replay naming answer rows it did not play, and a
+built file written again with its own bytes while Debian 12 replayed ("its build changed while
+it ran").
 
 ## Through systemd-resolved
 

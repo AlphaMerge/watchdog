@@ -1,19 +1,22 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { pino } from 'pino';
 import { DnsCheck, type DnsAsker } from '../../src/resolver/dns-check.js';
 import { ForwardBudget } from '../../src/resolver/forward-budget.js';
 import { GlibcNamePolicy, SYSTEM_FILES } from '../../src/resolver/system-names.js';
 import { pollWithin } from '../support/within.js';
+import { BuildWatch } from './names-build.js';
 import { OFF_CASES, type OffCase, type OffRun } from './names-differential.js';
 
 /**
  * A box with the name check off (`P-461`): the policy loaded in situ, against the box as the
  * distribution or the operator left it, must say the check is off by the rule the case names, and
- * the check must then route a name unvouched with nothing asked. `names-off --case <case> --image
- * <image>` sets the case up as an operator would and runs itself again (`--in-situ`) in a process
- * started after it, so ld.so, the environment and nscd are what that process meets:
+ * the check, started as the probe starts it, must route a name unvouched and ask nothing from its
+ * start to its stop: not its canary, which `start` sends, nor a walk. `names-off --case <case>
+ * --image <image>` sets the case up as an operator would and runs itself again (`--in-situ`) in a
+ * process started after it, so ld.so, the environment and nscd are what that process meets:
  *
  * - `nscd`: nscd started, its socket waited for.
  * - `resolve`, `mdns4_minimal`: nothing; the box's image has the module installed, and its
@@ -21,7 +24,7 @@ import { OFF_CASES, type OffCase, type OffRun } from './names-differential.js';
  * - `ld-preload`: `LD_PRELOAD` set to libresolv, which ld.so loads harmlessly.
  * - `ld-so-preload`: /etc/ld.so.preload naming libresolv.
  *
- * Prints the case's `OffRun` as JSON.
+ * Prints the case's `OffRun` as JSON, with the build it loaded (`names-build.ts`).
  */
 
 const SELF = fileURLToPath(import.meta.url);
@@ -54,8 +57,14 @@ function readOr(path: string): string | undefined {
   }
 }
 
+/**
+ * Past the canary's send: `start` sends it at once, and asks again only every `CANARY_EVERY_MS`
+ * (60 s), so a check that would ask has asked by then.
+ */
+const STARTED_MS = 300;
+
 /** The policy in this process, against the box as it is, and the check's route for one name. */
-async function inSitu(which: OffCase, image: string): Promise<OffRun> {
+async function inSitu(which: OffCase, image: string): Promise<Omit<OffRun, 'buildDigest'>> {
   const logger = pino({ level: 'silent' });
   const policy = new GlibcNamePolicy({ logger });
   await policy.load();
@@ -75,6 +84,9 @@ async function inSitu(which: OffCase, image: string): Promise<OffRun> {
   };
   const now = (): number => performance.now();
   const check = new DnsCheck({ logger, policy, budget: new ForwardBudget({ now }), asker, now });
+  // As the probe starts it: its canary would go now.
+  check.start();
+  await sleep(STARTED_MS);
   const route = await Promise.resolve(
     check.route({
       host: 'sw1.example.test',
@@ -86,6 +98,7 @@ async function inSitu(which: OffCase, image: string): Promise<OffRun> {
       ref: {},
     }),
   );
+  check.stop();
   const said = route.route === 'unvouched' ? `unvouched:${route.why}` : route.route;
   return {
     kind: 'off',
@@ -99,11 +112,16 @@ async function inSitu(which: OffCase, image: string): Promise<OffRun> {
     nscdSocket: existsSync(SYSTEM_FILES.nscdSocket),
     ldPreload: process.env['LD_PRELOAD'],
     ldSoPreload: readOr(SYSTEM_FILES.ldSoPreload),
-    route: asked.length > 0 ? `${said}, asking ${asked.join('; ')}` : said,
+    route: said,
+    asked,
   };
 }
 
-function again(which: OffCase, image: string, env: Record<string, string>): Promise<OffRun> {
+function again(
+  which: OffCase,
+  image: string,
+  env: Record<string, string>,
+): Promise<Omit<OffRun, 'buildDigest'>> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [SELF, '--case', which, '--image', image, '--in-situ'], {
       env,
@@ -121,7 +139,7 @@ function again(which: OffCase, image: string, env: Record<string, string>): Prom
     child.on('close', (code) => {
       clearTimeout(timer);
       try {
-        resolve(JSON.parse(out) as OffRun);
+        resolve(JSON.parse(out) as Omit<OffRun, 'buildDigest'>);
       } catch {
         reject(
           new Error(
@@ -173,11 +191,16 @@ if (!Object.hasOwn(OFF_CASES, which)) {
 if (argv.includes('--in-situ')) {
   process.stdout.write(`${JSON.stringify(await inSitu(which, image))}\n`);
 } else {
+  const build = new BuildWatch();
   const { env, setup } = await setUp(which);
   const found = await again(which, image, env);
-  process.stdout.write(
-    `${JSON.stringify(setup.length > 0 ? { ...found, setup: [...(found.setup ?? []), ...setup] } : found)}\n`,
-  );
+  build.look('at the end');
+  const run: OffRun = {
+    ...found,
+    ...(setup.length > 0 ? { setup: [...(found.setup ?? []), ...setup] } : {}),
+    ...build.fields(),
+  };
+  process.stdout.write(`${JSON.stringify(run)}\n`);
   // nscd forked itself away; the box is thrown away with it.
   process.exit(0);
 }

@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { DnsSimulator, dnsQuery, replies } from '@ms/simulators';
+import { DnsSimulator, dnsQuery, replies, type DnsQueryRecord } from '@ms/simulators';
+import { BUILT_TREES, BuildWatch, buildDigest } from './differential/names-build.js';
 import { startCapture, type CaptureOptions } from './differential/names-capture.js';
 import {
   ANSWER_PLAN,
@@ -21,6 +22,7 @@ import {
   WITHIN_MS,
   answerExpectation,
   answerProblems,
+  answerRowsDigest,
   budgetProblems,
   canonicalAddress,
   classificationProblem,
@@ -40,7 +42,7 @@ import {
   resolvedObserved,
   unplayable,
   verify as verifyAt,
-  verifyBoxes,
+  verifyBoxes as verifyBoxesAt,
   walkProblems,
   wireOf,
   type AnswerRow,
@@ -63,6 +65,13 @@ import {
   type WalkRun,
   type Wire,
 } from './differential/names-differential.js';
+import type { ModesReply, ModesRequest } from './differential/names-modes.js';
+import {
+  NEUTRAL,
+  walkAndModes,
+  type ModesChannel,
+  type WalkSimulator,
+} from './differential/names-walk.js';
 import { within } from './support/within.js';
 
 /**
@@ -171,8 +180,13 @@ function classified(e: Expectation): InImage {
   };
 }
 
-/** The rows file and the policy's build every run below replayed, unless it says otherwise. */
-const CURRENT: Current = { rowsDigest: 'r0', policyDigest: 'p0' };
+/** The rows file, the policy's build, the answer rows and the build every run below ran. */
+const CURRENT: Current = {
+  rowsDigest: 'r0',
+  policyDigest: 'p0',
+  answerRowsDigest: 'a0',
+  buildDigest: 'b0',
+};
 const verify = (rows: RowsFile, runs: readonly ImageRun[]): ReturnType<typeof verifyAt> =>
   verifyAt(rows, runs, CURRENT);
 
@@ -249,7 +263,7 @@ function faithfulAnswer(row: AnswerRow): RowRun {
         plan: ANSWER_PLAN,
         wire: row.wire,
         opt: optFor(row.glibcOpt, row.wire),
-        outcome: ANSWERED,
+        outcome: row.outcome,
         ms: row.fast ? 3 : 1_500,
         walk: { route: row.walk, wire: walked, opt: walked.map(() => false), ms: 2 },
         modes: modesFor(row.walk),
@@ -292,6 +306,8 @@ function faithful(rows: RowsFile, image: string, glibc = rows.images[image]): Im
     digest: 'sha256:0',
     rowsDigest: CURRENT.rowsDigest,
     policyDigest: CURRENT.policyDigest,
+    answerRowsDigest: CURRENT.answerRowsDigest,
+    buildDigest: CURRENT.buildDigest,
     resolved: rows.resolved.includes(image),
     rows: out,
     answers: ANSWER_ROWS.map(faithfulAnswer),
@@ -442,6 +458,7 @@ describe('the differential: every image’s run against the rows', () => {
       resolved: true,
       rowsDigest: 'r0',
       policyDigest: 'p0',
+      answerRowsDigest: 'a0',
     });
   });
 
@@ -472,6 +489,21 @@ describe('the differential: every image’s run against the rows', () => {
       'debian12: loaded the policy build p0, the build is p1',
       'ubuntu2404: loaded the policy build p0, the build is p1',
     ]);
+    // Other answer rows, another build of what the boxes load, or a build that changed under it.
+    assert.deepEqual(verifyAt(RESOLV_ROWS, runs, { ...CURRENT, answerRowsDigest: 'a1' }).problems, [
+      'debian12: played answer rows a0, the answer rows are a1',
+      'ubuntu2404: played answer rows a0, the answer rows are a1',
+    ]);
+    assert.deepEqual(verifyAt(RESOLV_ROWS, runs, { ...CURRENT, buildDigest: 'b1' }).problems, [
+      'debian12: ran the build b0, the build is b1',
+      'ubuntu2404: ran the build b0, the build is b1',
+    ]);
+    const [debian, ubuntu] = runs;
+    assert.ok(debian !== undefined && ubuntu !== undefined);
+    assert.deepEqual(
+      verify(RESOLV_ROWS, [{ ...debian, rebuilt: 'before row bbbbbbbbbbbbbbbb' }, ubuntu]).problems,
+      ['debian12: its build changed while it ran (before row bbbbbbbbbbbbbbbb)'],
+    );
     // A run from before runs said what they ran.
     const [first, second] = runs;
     assert.ok(first !== undefined && second !== undefined);
@@ -836,21 +868,24 @@ describe('the differential: the verdict over the files the runs left', () => {
       const current: Current = {
         rowsDigest: digestOf(readFileSync(rowsPath)),
         policyDigest: digestOf(readFileSync(POLICY)),
+        answerRowsDigest: answerRowsDigest(),
+        buildDigest: buildDigest(),
       };
       const runOf = (image: string): ImageRun => ({ ...faithful(RESOLV_ROWS, image), ...current });
       const debian = join(dir, 'debian12.json');
       const ubuntu = join(dir, 'ubuntu2404.json');
       writeFileSync(debian, JSON.stringify(runOf('debian12')));
-      // Every box beside the images, each as it should be.
+      // Every box beside the images, each as it should be, of the build as it is.
+      const built = { buildDigest: current.buildDigest };
       const boxes = [
         ...(['dnsmasq', 'resolved'] as const).map((forwarder) => {
           const path = join(dir, `budget-${forwarder}.json`);
-          writeFileSync(path, JSON.stringify(budgetRun(forwarder)));
+          writeFileSync(path, JSON.stringify({ ...budgetRun(forwarder), ...built }));
           return path;
         }),
         ...(Object.keys(OFF_CASES) as OffCase[]).map((name) => {
           const path = join(dir, `off-${name}.json`);
-          writeFileSync(path, JSON.stringify(offRun(name)));
+          writeFileSync(path, JSON.stringify(offRun(name, built)));
           return path;
         }),
       ];
@@ -872,18 +907,25 @@ describe('the differential: the verdict over the files the runs left', () => {
       assert.equal(passed.status, 0, String(passed.stderr));
       const file = JSON.parse(String(passed.stdout)) as {
         schema: number;
-        images: Record<string, { rowsDigest: string; policyDigest: string }>;
+        images: Record<
+          string,
+          { rowsDigest: string; policyDigest: string; answerRowsDigest: string }
+        >;
       };
       assert.equal(file.schema, 3);
       assert.match(
         String(passed.stderr),
         /^budget dnsmasq gate-kill: \d+ distinct questions held at once at most/mu,
       );
-      assert.match(String(passed.stderr), /^off nscd in debian12: check off by nscd/mu);
+      assert.match(
+        String(passed.stderr),
+        /^off nscd in debian12: check off by nscd .*, route unvouched:off, 0 questions asked$/mu,
+      );
       const recorded = file.images['debian12'];
       assert.ok(recorded !== undefined);
       assert.equal(recorded.rowsDigest, current.rowsDigest);
       assert.equal(recorded.policyDigest, current.policyDigest);
+      assert.equal(recorded.answerRowsDigest, current.answerRowsDigest);
       // A run of the rows as they were before a change.
       writeFileSync(ubuntu, JSON.stringify({ ...runOf('ubuntu2404'), rowsDigest: 'f'.repeat(64) }));
       const stale = verdict(debian, ubuntu);
@@ -891,6 +933,20 @@ describe('the differential: the verdict over the files the runs left', () => {
       assert.match(
         String(stale.stderr),
         /^DISAGREES ubuntu2404: replayed rows f{64}, the rows file is /mu,
+      );
+      // A box of another build, as one left from before a rebuild would be.
+      writeFileSync(ubuntu, JSON.stringify(runOf('ubuntu2404')));
+      const [first] = boxes;
+      assert.ok(first !== undefined);
+      writeFileSync(
+        first,
+        JSON.stringify({ ...budgetRun('dnsmasq'), buildDigest: 'e'.repeat(64) }),
+      );
+      const old = verdict(debian, ubuntu);
+      assert.equal(old.status, 1);
+      assert.match(
+        String(old.stderr),
+        /^DISAGREES budget box dnsmasq: ran the build e{64}, the build is [0-9a-f]{64}$/mu,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1197,7 +1253,7 @@ describe('P-460: the walk’s wire held to glibc’s', () => {
     assert.deepEqual(walkProblems(TWO, without), ['p: the walk was not recorded']);
   });
 
-  it('under rotate asks every server at once, glibc’s names in order, and heard means glibc was quick', () => {
+  it('under rotate asks every server at once, glibc’s names in order, of no server the row does not name', () => {
     const rotating: Classification = { ...TWO, rotate: true, types: ['A'] };
     const glibc = [W(S2, 'sw1.corp.example', 'A'), W(S1, 'sw1', 'A')];
     const every = [
@@ -1209,7 +1265,7 @@ describe('P-460: the walk’s wire held to glibc’s', () => {
     assert.deepEqual(walkProblems(rotating, played(glibc, 4, { route: 'heard', wire: every })), []);
     assert.match(
       walkProblems(rotating, played(glibc, 4, { route: 'heard', wire: every.slice(1) })).join(''),
-      /asked sw1\.corp\.example of 1 of 2 servers under rotate, not of 10\.0\.0\.53/u,
+      /asked sw1\.corp\.example A of 1 of 2 servers under rotate, not of 10\.0\.0\.53/u,
     );
     assert.match(
       walkProblems(
@@ -1228,11 +1284,6 @@ describe('P-460: the walk’s wire held to glibc’s', () => {
       ).join(''),
       /of a server the row does not name/u,
     );
-    // glibc may start at the one server that answers: a silent walk and a quick glibc agree.
-    assert.deepEqual(
-      walkProblems(rotating, played(glibc, 4, { route: 'silent', wire: every.slice(0, 2) })),
-      [],
-    );
     // Heard, its names are all of glibc's: heard after the first name is not how glibc ended.
     assert.match(
       walkProblems(rotating, played(glibc, 4, { route: 'heard', wire: every.slice(0, 2) })).join(
@@ -1240,21 +1291,202 @@ describe('P-460: the walk’s wire held to glibc’s', () => {
       ),
       /asked the names \["sw1\.corp\.example"\], where glibc asked \["sw1\.corp\.example","sw1"\]/u,
     );
-    assert.match(
-      walkProblems(rotating, played(glibc, 5_000, { route: 'heard', wire: every })).join(''),
-      /heard, and glibc returned in 5000 ms/u,
-    );
+  });
+
+  describe('under rotate, the plan decides whether the walk is heard', () => {
+    const rotating: Classification = { ...TWO, rotate: true, types: ['A'] };
+    const glibc = [W(S2, 'sw1.corp.example', 'A'), W(S1, 'sw1', 'A')];
+    const every = [
+      W(S1, 'sw1.corp.example', 'A'),
+      W(S2, 'sw1.corp.example', 'A'),
+      W(S2, 'sw1', 'A'),
+      W(S1, 'sw1', 'A'),
+    ];
+    const answering: Pick<Plan, 'answers'> = {
+      answers: { [S1]: { A: 'nxdomain' }, [S2]: { A: 'nxdomain' } },
+    };
+    const oneSilent: Pick<Plan, 'answers'> = {
+      answers: { [S1]: { A: 'silent' }, [S2]: { A: 'address' } },
+    };
+    const walk = (
+      route: 'heard' | 'silent',
+      ms: number,
+      plan: Pick<Plan, 'answers'> | undefined,
+    ): string[] =>
+      walkProblems(
+        rotating,
+        played(ms < WITHIN_MS ? glibc : glibc.slice(0, 1), ms, {
+          route,
+          wire:
+            route === 'heard' ? (ms < WITHIN_MS ? every : every.slice(0, 2)) : every.slice(0, 2),
+        }),
+        { plan },
+      );
+
+    it('with every server answering, heard if and only if glibc returned within 1 s', () => {
+      assert.deepEqual(walk('heard', 4, answering), []);
+      // A walk routed silent though every server answered, glibc back in 4 ms: no exception.
+      assert.deepEqual(walk('silent', 4, answering), [
+        'p, the walk: silent, and glibc returned in 4 ms (answer:1)',
+      ]);
+      assert.match(
+        walk('heard', 5_000, answering).join(''),
+        /heard, and glibc returned in 5000 ms/u,
+      );
+      assert.deepEqual(walk('silent', 5_000, answering), []);
+    });
+
+    it('with a server silent, the walk is silent, and glibc’s time says nothing', () => {
+      // glibc may start at the one server that answers: a silent walk and a quick glibc agree.
+      assert.deepEqual(walk('silent', 4, oneSilent), []);
+      assert.deepEqual(walk('silent', 5_000, oneSilent), []);
+      for (const ms of [4, 5_000]) {
+        assert.match(
+          walk('heard', ms, oneSilent).join(''),
+          /^p, the walk: heard under rotate, and the plan has 10\.0\.0\.53 A silent/u,
+          String(ms),
+        );
+      }
+    });
+
+    it('takes no server for silent that the row does not name, nor to a type glibc does not ask', () => {
+      const elsewhere: Pick<Plan, 'answers'> = {
+        answers: { [S1]: { A: 'nxdomain', AAAA: 'silent' }, '10.0.0.99': { A: 'silent' } },
+      };
+      assert.deepEqual(walk('silent', 4, elsewhere), [
+        'p, the walk: silent, and glibc returned in 4 ms (answer:1)',
+      ]);
+    });
+
+    it('without the plan, holds the walk both ways', () => {
+      assert.deepEqual(walk('silent', 4, undefined), [
+        'p, the walk: silent, and glibc returned in 4 ms (answer:1)',
+      ]);
+    });
+
+    it('an all-NXDOMAIN plan of a committed rotating row, walked silent with glibc quick, fails', () => {
+      const row = ROWS.rows.find((each) => each.expect.rotate && each.expect.servers.length === 3);
+      assert.ok(row !== undefined);
+      const plan = row.expect.plans.find((each) => each.plan === 'nxdomain');
+      assert.ok(plan !== undefined && plan.wireByOffset !== undefined);
+      const wire = plan.wireByOffset[0] ?? [];
+      const asked = row.expect.servers.map((server): Wire => [server, 'sw1.corp.example', 'A', 1]);
+      const said = walkProblems(
+        row.expect,
+        played(wire, 4, { route: 'silent', wire: asked }, { outcome: 'ENOTFOUND' }),
+        { plan },
+      );
+      assert.deepEqual(said, ['p, the walk: silent, and glibc returned in 4 ms (ENOTFOUND)']);
+    });
+  });
+
+  describe('under rotate, the walk’s types are glibc’s', () => {
+    const rotating: Classification = { ...TWO, servers: [S1, S2], rotate: true };
+    // glibc's nxdomain: server 2 for the first name, server 1 for the second, A and AAAA each.
+    const glibc = [
+      W(S2, 'sw1.corp.example', 'A'),
+      W(S2, 'sw1.corp.example', 'AAAA'),
+      W(S1, 'sw1', 'A'),
+      W(S1, 'sw1', 'AAAA'),
+    ];
+    const of = (name: string, types: readonly string[]): Wire[] =>
+      types.flatMap((type) => [S1, S2].map((server) => W(server, name, type)));
+    const both = ['A', 'AAAA'];
+    const all = [...of('sw1.corp.example', both), ...of('sw1', both)];
+    const heard = (wire: Wire[]): string[] =>
+      walkProblems(rotating, played(glibc, 4, { route: 'heard', wire }));
+    const silentPlan: Pick<Plan, 'answers'> = {
+      answers: { [S1]: { A: 'silent', AAAA: 'silent' }, [S2]: { A: 'address', AAAA: 'address' } },
+    };
+    const silent = (wire: Wire[], at: readonly Wire[] = glibc): string[] =>
+      walkProblems(rotating, played(at, 4, { route: 'silent', wire }), { plan: silentPlan });
+
+    it('a heard walk asked each name of every server with every type glibc asked of it', () => {
+      assert.deepEqual(heard(all), []);
+      // The AAAA asks dropped, for every name and server.
+      assert.match(
+        heard(all.filter(([, , type]) => type === 'A')).join(''),
+        /^p, the walk: asked sw1\.corp\.example AAAA of 0 of 2 servers under rotate, not of 10\.0\.0\.53, 10\.0\.0\.54$/u,
+      );
+      // One server's AAAA for the second name dropped.
+      assert.match(
+        heard(
+          all.filter(
+            ([server, name, type]) => !(server === S2 && name === 'sw1' && type === 'AAAA'),
+          ),
+        ).join(''),
+        /asked sw1 AAAA of 1 of 2 servers under rotate, not of 10\.0\.0\.54/u,
+      );
+    });
+
+    it('no walk asks a type glibc did not ask of a name', () => {
+      assert.match(
+        heard([...all, W(S1, 'sw1', 'TXT')]).join(''),
+        /^p, the walk: asked 10\.0\.0\.53 sw1 TXT, and glibc asked sw1 \["A","AAAA"\] only$/u,
+      );
+      assert.match(
+        heard([...all, W(S2, 'sw1', 'TYPE255')]).join(''),
+        /asked 10\.0\.0\.54 sw1 TYPE255/u,
+      );
+      const familyFour: Classification = { ...rotating, types: ['A'] };
+      const fourGlibc = glibc.filter(([, , type]) => type === 'A');
+      const fourWalk = all.filter(([, , type]) => type === 'A');
+      assert.deepEqual(
+        walkProblems(familyFour, played(fourGlibc, 4, { route: 'heard', wire: fourWalk })),
+        [],
+      );
+      assert.match(
+        walkProblems(
+          familyFour,
+          played(fourGlibc, 4, { route: 'heard', wire: [...fourWalk, W(S1, 'sw1', 'AAAA')] }),
+        ).join(''),
+        /asked 10\.0\.0\.53 sw1 AAAA, and glibc asked sw1 \["A"\] only/u,
+      );
+      assert.match(
+        silent([...of('sw1.corp.example', ['A']), W(S2, 'sw1.corp.example', 'TXT')]).join(''),
+        /asked 10\.0\.0\.54 sw1\.corp\.example TXT, and glibc asked/u,
+      );
+    });
+
+    it('a silent walk asked the name it stopped at of every server, glibc’s first type at least', () => {
+      const firstName = glibc.slice(0, 2);
+      // Run 4's silent walks: A of every server, AAAA only of the one that answered A.
+      assert.deepEqual(
+        silent([...of('sw1.corp.example', ['A']), W(S2, 'sw1.corp.example', 'AAAA')], firstName),
+        [],
+      );
+      assert.deepEqual(silent(of('sw1.corp.example', ['A']), firstName), []);
+      assert.match(
+        silent([W(S2, 'sw1.corp.example', 'A'), W(S2, 'sw1.corp.example', 'AAAA')], firstName).join(
+          '',
+        ),
+        /asked sw1\.corp\.example A of 1 of 2 servers under rotate, not of 10\.0\.0\.53/u,
+      );
+    });
+
+    it('a silent walk asked each name it went past of every server with every type', () => {
+      assert.deepEqual(silent([...of('sw1.corp.example', both), ...of('sw1', ['A'])]), []);
+      assert.match(
+        silent([...of('sw1.corp.example', ['A']), ...of('sw1', ['A'])]).join(''),
+        /asked sw1\.corp\.example AAAA of 0 of 2 servers under rotate/u,
+      );
+    });
   });
 
   it('P-454’s known limit is asserted as it is: heard, and glibc not within 1 s', () => {
     const wire = [W(S1, 'sw1', 'A'), W(S1, 'sw1', 'AAAA')];
-    assert.deepEqual(walkProblems(TWO, played(wire, 1_200, { route: 'heard', wire }), 'P-454'), []);
+    assert.deepEqual(
+      walkProblems(TWO, played(wire, 1_200, { route: 'heard', wire }), { divergence: 'P-454' }),
+      [],
+    );
     for (const [route, ms] of [
       ['heard', 4],
       ['silent', 1_200],
     ] as const) {
       assert.match(
-        walkProblems(TWO, played(wire, ms, { route, wire: wire.slice(0, 1) }), 'P-454').join(''),
+        walkProblems(TWO, played(wire, ms, { route, wire: wire.slice(0, 1) }), {
+          divergence: 'P-454',
+        }).join(''),
         /P-454's known limit has moved/u,
       );
     }
@@ -1354,7 +1586,18 @@ describe('P-460: the answer rows', () => {
       assert.ok(row.divergence !== undefined || (row.walk === 'heard') === row.fast, row.id);
       assert.equal(row.glibcOpt !== 'none', /\bedns0\b/u.test(row.resolvConf), row.id);
       assert.deepEqual(firstAsks(row.wire).length > 0, true, row.id);
+      // What getaddrinfo returns, as names-lookup says it: an answer's count, or an error's code.
+      assert.match(row.outcome, /^(answer:[1-9]\d*|E[A-Z_]+)$/u, row.id);
     }
+    // As run 4 recorded them, and the findings and P-460 state them.
+    assert.deepEqual(Object.fromEntries(ANSWER_ROWS.map((row) => [row.id, row.outcome])), {
+      'answer-tc-tcp-refused': 'answer:2',
+      'answer-tc-tcp-refused-edns0': 'answer:2',
+      'answer-formerr': 'ENOTFOUND',
+      'answer-aaaa-servfail-second-silent': 'answer:1',
+      'answer-edns-formerr-edns0': 'ENOTFOUND',
+      'answer-edns-deaf-edns0': 'EAI_AGAIN',
+    });
   });
 
   it('holds when glibc and the walk did what the row says', () => {
@@ -1380,6 +1623,19 @@ describe('P-460: the answer rows', () => {
     assert.match(
       changed({ ms: 2_000 }).join('\n'),
       /glibc returned in 2000 ms .* the row says it returns within 1000 ms/u,
+    );
+    // The same wire and as quick, and getaddrinfo returned otherwise than the row says.
+    assert.deepEqual(changed({ outcome: 'EAI_AGAIN' }), [
+      'plan: getaddrinfo returned EAI_AGAIN, and the row says ENOTFOUND',
+    ]);
+    const lone = ANSWER_ROWS.find((each) => each.id === 'answer-aaaa-servfail-second-silent');
+    assert.ok(lone !== undefined);
+    const loneRun = faithfulAnswer(lone);
+    const lonePlan = loneRun.plans[0];
+    assert.ok(lonePlan !== undefined);
+    assert.deepEqual(
+      answerProblems(lone, { ...loneRun, plans: [{ ...lonePlan, outcome: 'EAI_AGAIN', ms: 10 }] }),
+      ['plan: getaddrinfo returned EAI_AGAIN, and the row says answer:1'],
     );
     assert.match(
       changed({ walk: { ...plan.walk, route: 'silent', wire: plan.walk.wire.slice(0, 1) } }).join(
@@ -1508,11 +1764,59 @@ describe('P-460: every plan of S4’s rows is held to its walk, its OPT records 
   });
 });
 
+describe('P-460: a rotating row’s plans, judged with their answers', () => {
+  it('lets a silent walk stand beside a quick glibc only where the plan has a server silent', () => {
+    const rotating = new Set(ROWS.rows.filter((row) => row.expect.rotate).map((row) => row.id));
+    let quickened = 0;
+    // As run 4 saw in some images: glibc started at a server that answered, and was back in 8 ms.
+    const quick = (image: string, route: string): ImageRun => {
+      const run = faithful(ROWS, image);
+      return {
+        ...run,
+        rows: run.rows.map((row) =>
+          !rotating.has(row.id)
+            ? row
+            : {
+                ...row,
+                plans: row.plans.map((plan) => {
+                  if (plan.walk?.route !== route) return plan;
+                  quickened += 1;
+                  return { ...plan, ms: 8, walk: { ...plan.walk, route: 'silent' } };
+                }),
+              },
+        ),
+      };
+    };
+    const images = Object.keys(ROWS.images);
+    assert.deepEqual(
+      verify(
+        ROWS,
+        images.map((image) => quick(image, 'silent')),
+      ).problems,
+      [],
+    );
+    assert.ok(quickened >= images.length, String(quickened));
+    // A plan every server answers, walked silent and glibc as quick: each one a problem.
+    quickened = 0;
+    const problems = verify(
+      ROWS,
+      images.map((image) => quick(image, 'heard')),
+    ).problems;
+    assert.ok(quickened > 0);
+    assert.equal(
+      problems.filter((problem) => /, the walk: silent, and glibc returned in 8 ms/u.test(problem))
+        .length,
+      quickened,
+    );
+  });
+});
+
 /** A budget box's run that holds: system's peak, gate's within 12 of it, the killed one within 28. */
 function budgetRun(
   forwarder: 'dnsmasq' | 'resolved',
   arms: Partial<Record<string, Partial<BudgetRun['arms'][number]>>> = {},
 ): BudgetRun {
+  const built = { buildDigest: CURRENT.buildDigest };
   const names =
     forwarder === 'dnsmasq'
       ? (['system', 'gate', 'gate-kill'] as const)
@@ -1536,6 +1840,7 @@ function budgetRun(
         : { checkState: 1, helperLosses: arm === 'gate-kill' ? 1 : 0, questionsPeak: 10 }),
       ...arms[arm],
     })),
+    ...built,
   };
 }
 
@@ -1629,6 +1934,8 @@ function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
     ldSoPreload:
       name === 'ld-so-preload' ? '/usr/lib/aarch64-linux-gnu/libresolv.so.2\n' : undefined,
     route: 'unvouched:off',
+    asked: [],
+    buildDigest: CURRENT.buildDigest,
     ...change,
   };
 }
@@ -1673,6 +1980,14 @@ describe('P-461: the boxes with the check off in situ', () => {
     assert.deepEqual(offProblems(offRun('nscd', { route: 'heard' })), [
       'off box nscd: the check routed a name heard, not unvouched:off',
     ]);
+    // Its canary, or any question, from its start to its stop: the check is off and asks nothing.
+    assert.deepEqual(offProblems(offRun('nscd', { asked: ['127.0.0.1 localhost. A'] })), [
+      'off box nscd: the check asked 127.0.0.1 localhost. A, with the check off',
+    ]);
+    const { asked: _asked, ...unrecorded } = offRun('ld-preload');
+    assert.deepEqual(offProblems(unrecorded as OffRun), [
+      'off box ld-preload: what the check asked was not recorded',
+    ]);
     assert.deepEqual(offProblems(offRun('nscd', { image: 'rocky9' })), [
       'off box nscd: ran in rocky9, not debian12',
     ]);
@@ -1684,6 +1999,8 @@ describe('P-461: the boxes with the check off in situ', () => {
   it('every box is run once, and none other', () => {
     const budget = [budgetRun('dnsmasq'), budgetRun('resolved')];
     const off = (Object.keys(OFF_CASES) as OffCase[]).map((name) => offRun(name));
+    const verifyBoxes = (b: readonly BudgetRun[], o: readonly OffRun[]): string[] =>
+      verifyBoxesAt(b, o, CURRENT);
     assert.deepEqual(verifyBoxes(budget, off), []);
     assert.deepEqual(verifyBoxes(budget.slice(1), off.slice(1)), [
       'budget box dnsmasq: not run',
@@ -1703,6 +2020,19 @@ describe('P-461: the boxes with the check off in situ', () => {
     assert.deepEqual(
       verifyBoxes(budget, [...off, { ...offRun('nscd'), case: 'sss' as OffCase }]).slice(-1),
       ['off box sss: no such box'],
+    );
+    // Each box of the build the verdict judges by, and unchanged while it ran.
+    assert.deepEqual(
+      verifyBoxesAt(budget, off, { buildDigest: 'b1' }).length,
+      budget.length + off.length,
+    );
+    assert.deepEqual(
+      verifyBoxes([{ ...budgetRun('dnsmasq'), buildDigest: 'b9' }, budgetRun('resolved')], off),
+      ['budget box dnsmasq: ran the build b9, the build is b0'],
+    );
+    assert.deepEqual(
+      verifyBoxes(budget, [offRun('nscd', { rebuilt: 'at the end' }), ...off.slice(1)]),
+      ['off box nscd: its build changed while it ran (at the end)'],
     );
   });
 });
@@ -1760,7 +2090,11 @@ describe('P-460: the committed recordings are of the committed rows', () => {
     const images = Object.keys(ROWS.images).sort();
     assert.deepEqual(Object.keys(recorded.images).sort(), images);
     for (const image of images) {
-      assert.equal(recorded.images[image]?.rowsDigest, digestOf(rowsBytes), image);
+      const made = recorded.images[image];
+      assert.ok(made !== undefined, image);
+      assert.equal(made.rowsDigest, digestOf(rowsBytes), image);
+      // The answer rows as they are committed: a row edited since was not what was recorded.
+      assert.equal(made.answerRowsDigest, answerRowsDigest(), image);
     }
     for (const image of images) {
       for (const row of ANSWER_ROWS) {
@@ -1770,8 +2104,253 @@ describe('P-460: the committed recordings are of the committed rows', () => {
         assert.ok(one !== undefined, `${row.id} in ${image}`);
         assert.deepEqual(one.wire, row.wire, `${row.id} in ${image}`);
         assert.equal(one.opt.length, row.wire.length, `${row.id} in ${image}`);
+        assert.equal(one.outcome, row.outcome, `${row.id} in ${image}`);
       }
     }
     assert.equal(recorded.answerRecordings.length, images.length * ANSWER_ROWS.length);
+  });
+});
+
+describe('P-460: the walk’s steps, the checks proven before the plan’s answers are set', () => {
+  /** A question as the simulator logs it. */
+  const logged = (server: string, qname: string, qtype: string): DnsQueryRecord => ({
+    seq: 1,
+    at: 0,
+    server,
+    family: 4,
+    transport: 'udp',
+    client: { address: '127.0.0.1', port: 40_000 },
+    portClass: undefined,
+    id: 1,
+    qname,
+    qtype,
+    opt: false,
+    ednsOptions: [],
+    outcome: 'forwarded',
+    reply: undefined,
+    fault: undefined,
+  });
+
+  /** The simulator and the modes process, each saying what was done to it, in one order. */
+  function fakes(): { steps: string[]; sim: WalkSimulator; modes: ModesChannel } {
+    const steps: string[] = [];
+    const sim: WalkSimulator = {
+      set(target, behaviour, server) {
+        steps.push(`set ${String(server)} ${JSON.stringify(target)} ${JSON.stringify(behaviour)}`);
+        return Promise.resolve();
+      },
+      clearLog() {
+        steps.push('clearLog');
+        return Promise.resolve();
+      },
+      log() {
+        steps.push('log');
+        return Promise.resolve([logged(S1, 'sw1', 'A'), logged('upstream:127.0.0.2', 'sw1', 'A')]);
+      },
+    };
+    const said: Record<ModesRequest['op'], ModesReply> = {
+      prepare: { op: 'prepared', walkProven: true, gateProven: false },
+      walk: { op: 'walked', route: 'heard', ms: 2 },
+      answers: { op: 'answered', modes: modesFor('heard') },
+      release: { op: 'released' },
+      exit: { op: 'released' },
+    };
+    const modes: ModesChannel = {
+      request<K extends ModesReply['op']>(
+        message: ModesRequest,
+        op: K,
+      ): Promise<Extract<ModesReply, { op: K }>> {
+        steps.push(`request ${message.op}`);
+        const reply = said[message.op];
+        assert.equal(reply.op, op);
+        return Promise.resolve(reply as Extract<ModesReply, { op: K }>);
+      },
+    };
+    return { steps, sim, modes };
+  }
+
+  it('sets every server back to NXDOMAIN, proves the checks, then sets the plan and clears the log', async () => {
+    const { steps, sim, modes } = fakes();
+    const recorded = await walkAndModes(
+      modes,
+      sim,
+      [S1, S2],
+      () => {
+        steps.push('the plan’s answers');
+        return Promise.resolve();
+      },
+      undefined,
+    );
+    const neutral = JSON.stringify(NEUTRAL);
+    assert.deepEqual(NEUTRAL, { reply: replies.nxdomain });
+    assert.deepEqual(steps, [
+      `set ${S1} {"fallback":true} ${neutral}`,
+      `set ${S2} {"fallback":true} ${neutral}`,
+      'request prepare',
+      'the plan’s answers',
+      'clearLog',
+      'request walk',
+      'log',
+      'request answers',
+      'request release',
+    ]);
+    // The wire is what the servers saw after the log was cleared, resolved's upstream aside.
+    assert.deepEqual(recorded.walk, {
+      route: 'heard',
+      wire: [[S1, 'sw1', 'A', 1]],
+      opt: [false],
+      ms: 2,
+    });
+    assert.deepEqual(recorded.setup, ['gate mode’s check was not proven by its canary']);
+  });
+
+  it('through systemd-resolved, flushes its cache and captures the stub after the plan is set', async () => {
+    const { steps, sim, modes } = fakes();
+    const recorded = await walkAndModes(
+      modes,
+      sim,
+      [S1],
+      () => {
+        steps.push('the plan’s answers');
+        return Promise.resolve();
+      },
+      {
+        flush() {
+          steps.push('flush');
+          return Promise.resolve();
+        },
+        capture() {
+          steps.push('capture');
+          return Promise.resolve({
+            stop() {
+              steps.push('capture stop');
+              return Promise.resolve([
+                { server: STUB, qname: 'sw1', qtype: 'A', transport: 'udp', opt: true } as const,
+              ]);
+            },
+          });
+        },
+      },
+    );
+    assert.deepEqual(steps.slice(1), [
+      'request prepare',
+      'the plan’s answers',
+      'clearLog',
+      'flush',
+      'capture',
+      'request walk',
+      'capture stop',
+      'log',
+      'request answers',
+      'request release',
+    ]);
+    assert.deepEqual(recorded.walk.wire, [
+      [STUB, 'sw1', 'A', 1],
+      [S1, 'sw1', 'A', 1],
+    ]);
+    assert.deepEqual(recorded.walk.opt, [true, false]);
+  });
+});
+
+describe('P-460: the build the boxes load', () => {
+  const write = (root: string, path: string, text: string): void => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  };
+
+  it('is every tree the script lists as built', () => {
+    const listed = bash('printf "%s\\n" "$MS_NAMES_DIFF_BUILT"');
+    assert.equal(listed.status, 0);
+    const built = listed.stdout
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/u)[1])
+      .filter((tree) => tree !== undefined);
+    assert.deepEqual(built, [...BUILT_TREES]);
+  });
+
+  it('is named by every .js file’s path and bytes, and nothing else', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ms-names-build-'));
+    try {
+      for (const tree of BUILT_TREES) write(root, `${tree}/a/one.js`, 'one');
+      write(root, `${BUILT_TREES[0]}/two.js`, 'two');
+      const first = buildDigest(root);
+      assert.match(first, /^[0-9a-f]{64}$/u);
+      assert.equal(buildDigest(root), first);
+      // A map, a declaration, or a file outside the trees is no part of it.
+      write(root, `${BUILT_TREES[0]}/two.js.map`, '{}');
+      write(root, `${BUILT_TREES[0]}/two.d.ts`, 'x');
+      write(root, 'packages/probe/dist/other.js', 'x');
+      assert.equal(buildDigest(root), first);
+      write(root, `${BUILT_TREES[3]}/a/one.js`, 'one, changed');
+      const changed = buildDigest(root);
+      assert.notEqual(changed, first);
+      write(root, `${BUILT_TREES[3]}/a/one.js`, 'one');
+      assert.equal(buildDigest(root), first);
+      write(root, `${BUILT_TREES[5]}/three.js`, '');
+      assert.notEqual(buildDigest(root), first);
+      rmSync(join(root, BUILT_TREES[5]), { recursive: true });
+      assert.notEqual(buildDigest(root), first);
+      // A tree with no build at all is not one built empty: a package not built is named so.
+      const missing = buildDigest(root);
+      mkdirSync(join(root, BUILT_TREES[5]), { recursive: true });
+      assert.notEqual(buildDigest(root), missing);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('sees a rebuild while a run goes on, though its bytes come back as they were', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ms-names-build-'));
+    try {
+      for (const tree of BUILT_TREES) write(root, `${tree}/one.js`, 'one');
+      const watch = new BuildWatch(root);
+      assert.equal(watch.digest, buildDigest(root));
+      watch.look('before row a');
+      assert.equal(watch.rebuilt(), undefined);
+      assert.deepEqual(watch.fields(), { buildDigest: watch.digest });
+      await sleep(50);
+      // A mutant built and restored: the same bytes, written again.
+      write(root, `${BUILT_TREES[0]}/one.js`, 'one');
+      assert.equal(buildDigest(root), watch.digest);
+      watch.look('before row b');
+      watch.look('at the end');
+      assert.equal(watch.rebuilt(), 'before row b');
+      assert.deepEqual(watch.fields(), { buildDigest: watch.digest, rebuilt: 'before row b' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('is found from its own build, at the root the boxes mount', () => {
+    const watch = new BuildWatch();
+    assert.equal(watch.digest, buildDigest());
+    assert.equal(watch.rebuilt(), undefined);
+  });
+});
+
+describe('the differential’s script: what each image played', () => {
+  it('counts S4’s rows and the answer rows by their own lines, and nothing else the replay said', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ms-names-counts-'));
+    try {
+      const log = join(dir, 'debian12.log');
+      writeFileSync(
+        log,
+        [
+          'debian12 aaaaaaaaaaaaaaaa a walked name: nxdomain 4q, walk heard 4q, answer 2q, walk heard 2q (40 ms)',
+          'debian12 0123456789abcdef rotate: last-answers-after-silent 4q, walk silent 3q (5050 ms)',
+          'debian12 answer-formerr FORMERR from server 1, server 2 answering: plan 2q, walk heard 2q (30 ms)',
+          '(node:12) Warning: something the replay did not say of a row',
+          'rocky8 aaaaaaaaaaaaaaaa a walked name: nxdomain 4q (40 ms)',
+          'debian12 aaaaaaaaaaaaaaa a short id (1 ms)',
+          '',
+        ].join('\n'),
+      );
+      assert.deepEqual(bash('ms_names_diff_counts debian12 "$1"', log), {
+        status: 0,
+        stdout: '2 rows and 1 answer rows\n',
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

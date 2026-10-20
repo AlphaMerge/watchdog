@@ -14444,13 +14444,17 @@ because each is a decision rather than a defect:
       **P-460 outcome.** `name-gate-differential.sh` plays each plan twice, in separate runs:
       glibc's wire (A), and then the walk's alone (B). The walk is `DnsCheck.route` in a
       `names-modes` process of the row's own, with a `ForwardBudget` and c-ares of its own, no
-      lanes and no helper, proven by its canary before the plan's answers are set. The same
-      process then makes §7.5's regression lookups. **Run 4 passed in all seven images on this
-      build**: 260 rows in each image (251 on Rocky 8) and 2,966 plans, every walk agreeing with
-      glibc's (2,128 heard, 70 silent and 768 local), every regression holding, the 6 answer rows
-      in every image, both budget boxes and the five boxes with the check off. Each image's rows
-      took 303–494 s and the whole run about 50 minutes
-      (`docs/findings/2026-10-20-name-gate-differential.md`, run 4).
+      lanes and no helper, proven by its canary. In run 4 the canary was asked with the plan's
+      answers already set, and was answered only because the S5 simulator answers `localhost`
+      itself; since fix round 1 every server answers NXDOMAIN until the checks are proven. The
+      same process then makes §7.5's regression lookups. **Run 4 passed in all seven images on
+      this build**: 260 rows in each image (251 on Rocky 8) and 2,966 plans, every walk agreeing
+      with glibc's (2,128 heard, 70 silent and 768 local), every regression holding, the 6 answer
+      rows in every image, both budget boxes and the five boxes with the check off. Each image's
+      box took 303–494 s from its start, and the whole run about 50 minutes
+      (`docs/findings/2026-10-20-name-gate-differential.md`, run 4). Those per-image times are
+      the script's lines, which counted the answer rows as rows (266, and 257 on Rocky 8) and, for
+      Ubuntu 24.04, held about 72 s of the resolved budget box: its replay took about 317 s.
       - **The walk is held to glibc's first asks** (`walkProblems`): each (server, name, type)
         once, at its first question, the transport and the try aside, the name in lower case.
         - A heard walk asked exactly glibc's first asks, in order. A silent one asked a
@@ -14460,7 +14464,8 @@ because each is a decision rather than a defect:
         - A `local` row is routed `local` with nothing asked.
         - Under `rotate` the walk asks every server at once while glibc starts at one: the
           names are glibc's in order, each asked of every server, and heard means glibc was
-          quick, but not the other way round.
+          quick, but not the other way round. Fix round 1 holds the types too, and has the plan
+          decide where the one-way rule applies (below).
       - **The OPT record is asserted as it is** (`optProblems`, `P-454`): glibc's questions carry
         one under `options edns0` and none without, and the check's never do. No row fails on
         the difference alone, so the run says if either side moves.
@@ -14506,6 +14511,7 @@ because each is a decision rather than a defect:
         - **Under `rotate`, heard-if-and-only-if holds one way.** glibc may start at the one
           server that answers while the walk, asking every server, waits on a silent one: a
           silent walk and a quick glibc agree there. A heard walk with a slow glibc still fails.
+          Narrowed in fix round 1 to the plans that have a server silent.
         - **The EDNS-deaf row is P-454's listed divergence**, asserted exactly: heard, and
           glibc not within 1 s. The run fails if either side changes.
         - **"TCP dropped" is TCP/53 refused.** The boxes have no network and no firewall to drop
@@ -14554,6 +14560,119 @@ because each is a decision rather than a defect:
         - In the boxes, all three in one narrowed run: the modes process saying gate mode ran a
           silent name on the lanes, the budget box not killing the helper, and the nscd box not
           starting nscd. Each showed as its own `DISAGREES` line.
+      - **Fix round 1** (the review of `c87aa235`, ten items). Run 5 failed on one stalled walk,
+        and run 6 passed after it (below).
+        - **Under `rotate`, the plan decides whether the walk is heard** (`walkProblems` takes
+          the plan, `silentServer`). Where one of the row's servers is silent to a type glibc
+          asks, the walk must be silent, whatever glibc's time. Where none is, heard if and only
+          if glibc returned within 1 s, as without `rotate`. Before, the one-way rule covered
+          every rotating plan, so a walk wrongly silent on the 6 all-answering plans of the two
+          rotating rows passed in every image.
+        - **Under `rotate`, the walk's types are glibc's** (`rotateDiffers`). It asks no type of
+          a name glibc did not ask of it. Each name it went past, or was heard at, it asked of
+          every server with every type glibc asked of that name. The name a silent walk stopped
+          at, it asked of every server with glibc's first type at least. Before, only the first
+          type was looked at, so a walk that dropped AAAA or added TXT passed.
+        - **The answer rows claim what `getaddrinfo` returns** (`AnswerRow.outcome`, as run 4
+          recorded it: `answer:2` twice, `ENOTFOUND`, `answer:1`, `ENOTFOUND`, `EAI_AGAIN`), and
+          `answerProblems` holds the run to it. The committed-recordings test holds each answer
+          recording's outcome to its row's.
+        - **The off box starts the check** as the probe does, waits 300 ms past the canary's send,
+          routes the name and stops it. `OffRun.asked` holds every question the check put to its
+          asker from start to stop, and `offProblems` requires none. Before, `start()` was never
+          called, so the canary could not go, and "nothing asked" could not fail.
+        - **The answer rows are tied to their recordings** (`answerRowsDigest`, the sha256 of
+          `ANSWER_ROWS` as JSON): each image's run carries it, the verdict holds it to the rows
+          as they are, the recordings file keeps it for each image, and the committed-recordings
+          test holds every image's to the committed rows.
+        - **Every run is tied to the build it loaded** (`names-build.ts`). `buildDigest` is the
+          sha256 of every `.js` under the builds `MS_NAMES_DIFF_BUILT` lists, carried by each
+          image's run, budget box and off box, and held by `names-verify` to the build as it is
+          then. `BuildWatch` also looks at every file's size, mtime and ctime before each row and
+          answer row, before each budget arm, and at the end, and a run that saw them move says
+          where (`rebuilt`) and fails. Before, only `system-names.js` was digested, and only by
+          the image runs.
+        - **The script's per-image line** counts S4's rows and the answer rows by their own lines
+          (`ms_names_diff_counts`), and its time stops when the replay's run is kept, before the
+          resolved budget box, which is timed on its own line.
+        - **The checks are proven before the plan's answers are set** (`names-walk.ts`, kept apart
+          from the replay so its order is unit-tested). Every server is set back to NXDOMAIN
+          first, then `prepare`, then the plan's answers. Before, the plan's answers from (A)
+          were still set when both canaries ran, and the canary was answered only because the
+          simulator answers `localhost` itself.
+        - **The script's header** says what the resolved budget box runs: both modes, with no
+          SIGKILL arm.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **A rotating plan with a server silent fails a heard walk, whatever glibc's time.**
+            The review asked to keep the one-way rule for those plans. §1.4 says every server
+            must reply under `rotate`, and the walk asks every server the first name's first
+            type, so a heard walk with a server silent is wrong even when glibc started at a
+            server that answered. Only the server's silence is looked at, not which name, since
+            a plan's answers are the same for every name. This narrows the earlier decision on
+            `rotate`, which was mine.
+          - **A name a silent walk went past must be whole.** The review asked for every type
+            only when the walk was heard. A step ends `next` only when every server replied to
+            every type (`#chain`, `#ask`), so a name passed was asked whole. Only the name the
+            walk stopped at may lack its second type, as the second goes to a server only after
+            its first is answered there.
+          - **The code was made to do what the four places said** (every server neutral before
+            the canary), rather than the words made to fit the code. A later answer row whose
+            behaviour reaches `localhost` would otherwise fail its setup with no change to the
+            check. The reset is of each server's fallback, the only behaviour the replay sets.
+          - **The answer rows' digest covers their claims as well as their worlds.** A
+            recording verified against other claims did not verify these. So this round's
+            `outcome` field moved the digest, and run 6 re-recorded the answer rows. The
+            recordings file stays schema 3: the field is added, and nothing that reads it
+            changes.
+          - **A rebuild is seen by stat, not only by digest.** A mutant built and then restored
+            and built again leaves the bytes as they were, so a digest taken at the start and
+            the end agrees with the verdict's. Every rebuild writes the files anew, which moves
+            their mtime and ctime. The committed recordings keep only `policyDigest`, as the
+            review suggested: a whole-build digest would go stale with any rebuild of anything.
+          - **The resolved budget box keeps no SIGKILL arm.** `P-460`'s Done-when asks for the
+            SIGKILL at dnsmasq only, and resolved's distinct upstream questions in both modes.
+        - **Run 5 failed on one plan, and run 6 passed**
+          (`docs/findings/2026-10-20-name-gate-differential.md`, runs 5 and 6). In run 5, Ubuntu
+          24.04's `last-answers-after-silent` plan of row
+          `26f320fa4e698d6f` had its walk routed `unvouched:stall` at 577 ms against its 250 ms
+          wait, its timer late as when the event loop is starved, and the run failed on that one
+          unverified plan; every other check held. Run 6, the whole run again, passed in all seven
+          images with every box: 2,966 plans (2,128 heard, 70 silent, 768 local), the 42 answer
+          recordings each with its row's outcome, dnsmasq at 6, 8 and 10 and resolved at 10 and 9,
+          the five off boxes with 0 questions asked, and every run of one build (`51c80c25…`) that
+          none saw change. Its recordings are the committed ones, each image with its answer
+          rows' digest (`0384c163…`). Run 4's own runs, judged again by the fix round's verdict
+          with the digests they could not carry filled in, have 0 problems.
+        - **Tests**, each run after the last change: `names-differential.test.ts` 73 (17 new: the
+          plan deciding under `rotate`, with every server answering, a server silent, a server
+          or type the row does not ask, no plan, and a committed rotating row's all-NXDOMAIN
+          plan; glibc's types under `rotate`, dropped, extra, the stopped name and the names
+          passed; verify passing each plan to the walk; the walk's steps in order, and through
+          resolved; the build's trees, digest and watch; and the script's counts; and existing
+          ones extended: outcomes, the answer rows' digest, the build in each run and box, the
+          off box's asks), and `system-names.test.ts` 441.
+        - **Mutants: 36 on the toolchain and 3 in the boxes, all killed.** Each was restored with
+          `shutil.copy` and `os.utime`, checked with `filecmp`, and no marker was left in `dist`
+          after the last rebuild.
+          - The toolchain's: the one-way rule everywhere, a heard walk with a server silent let
+            through when glibc was quick, a server or a type the row does not ask taken for
+            silent, verify not passing the plan; under `rotate` an unasked type let through, the
+            first type only, a name passed held to its first type, the types taken from the
+            policy; an answer row's outcome not judged, and one moved; the off box's asks not
+            judged or not recorded; the answer rows' digest not checked, not recorded, of the ids
+            alone, and two answer rows edited with their wire left alone (the review's
+            `timeout:2` and FORMERR to NOTIMP); the build's digest and its change not checked,
+            not on an image, a budget box or an off box; the digest of paths alone, of every
+            file, a missing tree unnamed; the watch never seeing a change, by size alone, keeping
+            the last change; a tree dropped from the list; the counts of every line and of no
+            answer row; and the walk's steps with no reset, the plan set first, the reset to
+            silence, and resolved's cache flushed after the capture.
+          - One survived the first pass and is killed by a test added for it: a tree that is not
+            there named as one built empty. Four did not compile as first written and were
+            rewritten.
+          - In the boxes, all three in one narrowed run: the canary allowed to ask with the check
+            off (each off box said the check asked `localhost.`), the replay naming answer rows it
+            did not play, and a built file written again with its own bytes mid-replay.
 - [x] **P-461 — the differential shows the check off in no box** · XS · P-432 · Filed 2026-10-20
       by `P-432` S8. Every box S8 replays in has the check on, because a row the check is off for
       claims no wire. Rules 3 to 5 are unit-tested against fixtures, but nothing shows the policy
@@ -14618,7 +14737,10 @@ because each is a decision rather than a defect:
       policy in a process started after that, with its defaults, and asks the check to route
       `sw1.example.test` through an asker that records what it is asked. The run fails unless the
       box is as its case says, the policy reports the check off by the case's rule, and the check
-      routes the name `unvouched:off` with nothing asked. In run 4:
+      routes the name `unvouched:off` with nothing asked. Since `P-460`'s fix round 1 the box
+      starts the check as the probe does and stops it after the route, and nothing may be asked
+      from start to stop (`OffRun.asked`), the canary included: run 4's box never started it, so
+      its canary could not go. In run 4:
       - **nscd** (Debian 12, `nscd` started, its socket waited for): off by `nscd`, "nscd is
         running (/var/run/nscd/socket)".
       - **libnss-resolve** (Ubuntu 24.04): the package wrote `files resolve [!UNAVAIL=return] dns

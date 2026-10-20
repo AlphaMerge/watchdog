@@ -31,11 +31,13 @@
 # glibc's; then the same lookup through the probe's resolver in `system` and `gate` mode, in the
 # helper's child and on the probe's lanes (§7.5's regressions). Beside the rows: the answer rows
 # (TC with TCP/53 refused, FORMERR, A with AAAA SERVFAIL, EDNS-intolerant servers) in every image;
-# the budget boxes, dnsmasq at `dns-forward-max=30` (a box of Debian 12 with `dnsmasq-base`) and
-# systemd-resolved (in Ubuntu 24.04's box, after its rows), each in front of a 150-name silent
-# zone in both modes and after a helper SIGKILL; and the boxes with the check off in situ
-# (`P-461`): nscd running, libnss-resolve's and libnss-mdns's hosts: lines, LD_PRELOAD and
-# /etc/ld.so.preload. Every one must hold for the run to pass.
+# the budget boxes in front of a 150-name silent zone: dnsmasq at `dns-forward-max=30` (a box of
+# Debian 12 with `dnsmasq-base`) in both modes and in gate mode after a helper SIGKILL, and
+# systemd-resolved (in Ubuntu 24.04's box, after its rows) in both modes, with no SIGKILL arm; and
+# the boxes with the check off in situ (`P-461`): nscd running, libnss-resolve's and
+# libnss-mdns's hosts: lines, LD_PRELOAD and /etc/ld.so.preload. Every one must hold for the run
+# to pass. Every image's run and every box's carries the build it loaded, and says if it changed
+# while it ran: the verdict takes only runs of the build as it is then.
 #
 #   MS_DIFF_IMAGES="debian12 ubuntu2404"   only these (default: all of them)
 #   MS_DIFF_ONLY=<id,id>                   only these rows (a partial run never verifies)
@@ -127,6 +129,12 @@ build_box() {
 keep_run() {
   mv "${out}/$1.partial" "${out}/$1"
   runs+=("/out/$1")
+}
+
+# `say_played <image> <started>`: the rows the image's replay played, by its own line for each,
+# and how long the replay took from the box's start, before any budget box after it.
+say_played() {
+  echo "    $(ms_names_diff_counts "$1" "${out}/$1.log") in $(($(date +%s) - $2)) s"
 }
 
 if ! stale="$(ms_names_diff_stale "${repo_root}")"; then
@@ -227,6 +235,7 @@ systemctl restart systemd-resolved'
       continue
     fi
     keep_run "${name}.json"
+    say_played "${name}" "${started}"
     if [ "$(docker exec "${container}" timeout 10 systemctl is-active systemd-resolved || true)" != active ]; then
       echo "    FAILED: systemd-resolved stopped during the run in ${name}" >&2
       failed=1
@@ -234,11 +243,13 @@ systemctl restart systemd-resolved'
     # §7.5's resolved budget row, in this box after its rows: resolved in front of a silent zone.
     if want_box budget; then
       echo "==> budget box resolved, in ${name}"
+      budget_started="$(date +%s)"
       if docker exec "${container}" timeout 900 node "/ms/${dist}/names-budget.js" \
         --forwarder resolved --image "${name}" >"${out}/budget-resolved.json.partial" \
         2>"${out}/budget-resolved.log"; then
         keep_run budget-resolved.json
         sed 's/^/    /' "${out}/budget-resolved.log"
+        echo "    the resolved budget box in $(($(date +%s) - budget_started)) s"
       else
         mv "${out}/budget-resolved.json.partial" "${out}/budget-resolved.json.failed"
         echo "    FAILED: the resolved budget box stopped:" >&2
@@ -258,9 +269,9 @@ systemctl restart systemd-resolved'
       continue
     fi
     keep_run "${name}.json"
+    say_played "${name}" "${started}"
   fi
   docker rm -f "${container}" >/dev/null 2>&1 || true
-  echo "    $(wc -l <"${out}/${name}.log" | tr -d ' ') rows in $(($(date +%s) - started)) s"
 done <<<"${IMAGES}"
 
 # `run_box <name> <tag> <command…>`: a box of its own, privileged with no network, its stdout the

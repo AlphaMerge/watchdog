@@ -28,7 +28,8 @@ import type { ModesRun } from './names-differential.js';
  * 1. `prepare`: a name check of its own (`DnsCheck`, with a budget and c-ares of its own: no lanes
  *    and no helper), and the probe's resolver in `system` mode and in `gate` mode, each new, so
  *    every cache is cold. Each check is proven by its canary before the plan's answers are set, as
- *    the canary is no question of the plan's.
+ *    the canary is no question of the plan's: the replay has every server answer NXDOMAIN until it
+ *    has (`names-walk.ts`).
  * 2. `walk`: `DnsCheck.route` for the row's name, alone: the walk's wire is what the servers see
  *    now, and the route is said back.
  * 3. `answers`: the regression's four lookups at once: through the resolver in each mode, in the
