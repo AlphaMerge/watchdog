@@ -130,6 +130,82 @@ describe('the overview’s totals', () => {
     expect(screen.queryByText(/Truncated/)).toBeNull();
   });
 
+  describe('the sensor types tile', () => {
+    /** Answers as `stubFetch` does, but `/sensor-types` as this says: never, or with this status. */
+    const stubTypes = (answer: 'never' | number): void => {
+      vi.stubGlobal('fetch', (url: string) => {
+        if (url === '/api/v1/sensor-types') {
+          if (answer === 'never') return new Promise<Response>(() => undefined);
+          return Promise.resolve(
+            new Response(JSON.stringify({ code: 'INTERNAL', message: 'it broke' }), {
+              status: answer,
+              headers: { 'content-type': 'application/json' },
+            }),
+          );
+        }
+        const body = (ROUTES as Record<string, unknown>)[url];
+        if (body === undefined) return Promise.resolve(new Response('{}', { status: 404 }));
+        return Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      });
+    };
+    const tile = (): HTMLElement => {
+      const card = screen.getByText('Sensor types').parentElement;
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    };
+    const overview = (): void => {
+      render(
+        <MemoryRouter>
+          <Overview />
+        </MemoryRouter>,
+      );
+    };
+
+    it('says nothing about what is registered while the catalogue is being read', async () => {
+      // "—" over "none registered" stated what the page did not know, on an installation with
+      // forty types, for as long as the read was out.
+      stubTypes('never');
+      overview();
+
+      await expectTile('Sensors', '5,051');
+      expect(within(tile()).getByText('—')).toBeDefined();
+      expect(within(tile()).queryByText(/registered/)).toBeNull();
+      expect(screen.getByText('Loading sensor types…')).toBeDefined();
+    });
+
+    it('nor once the read has failed, where the card below says why', async () => {
+      stubTypes(500);
+      overview();
+
+      expect(screen.getByText('Loading sensor types…')).toBeDefined();
+      await waitFor(() => {
+        expect(screen.queryByText('Loading sensor types…')).toBeNull();
+      });
+      await expectTile('Sensors', '5,051');
+      expect(within(tile()).getByText('—')).toBeDefined();
+      expect(within(tile()).queryByText(/registered/)).toBeNull();
+    });
+
+    it('says none are registered of a catalogue it read empty', async () => {
+      stubFetch({ ...ROUTES, '/api/v1/sensor-types': { items: [] } });
+      overview();
+      await expectTile('Sensor types', '0');
+      expect(within(tile()).getByText('none registered')).toBeDefined();
+    });
+
+    it('says the types it counted are registered', async () => {
+      stubFetch(ROUTES);
+      overview();
+      await expectTile('Sensor types', '1');
+      expect(within(tile()).getByText('registered')).toBeDefined();
+    });
+  });
+
   describe('the starred maps (`G-09`)', () => {
     const mapOf = (id: number, priority: number, name: string) => ({
       id,

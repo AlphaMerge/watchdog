@@ -63,6 +63,10 @@ export function Overview(): React.JSX.Element {
   const states = counts.status === 'ready' ? counts.data.sensorStates : null;
   const sensorCount = objects?.sensor ?? 0;
   const typeCount = types.status === 'ready' ? types.data.items.length : 0;
+  // Only once the read is answered: while it is out, or after it failed, the page does not know
+  // whether any type is registered, and the card below says why it does not.
+  const typesHint =
+    types.status !== 'ready' ? undefined : typeCount === 0 ? 'none registered' : 'registered';
 
   return (
     <div className="space-y-6">
@@ -89,7 +93,7 @@ export function Overview(): React.JSX.Element {
         <Stat
           label="Sensor types"
           value={types.status === 'ready' ? typeCount : '—'}
-          hint={typeCount === 0 ? 'none registered' : 'registered'}
+          hint={typesHint}
         />
       </div>
 
