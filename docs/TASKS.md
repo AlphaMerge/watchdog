@@ -33679,8 +33679,9 @@ because each is a decision rather than a defect:
         the first four because they had gone stale:
         - `POST /reports/{id}/runs`: "The rendered document is not kept — `E-09` decides where a
           report goes", stale since `E-09` landed. It is kept, mailed, or mailed and kept until it
-          has been sent, as the report's `delivery` says, and `outputs` lists what the run still
-          holds; the description says so now.
+          has been sent, as the report's `outputs.delivery` says, and the run's `outputs` lists
+          what the run still holds; the description says so now. **Corrected by review round 1**:
+          this said the report's `delivery`, as the description first did.
         - A probe branch's `gid`: "R-01 replaces setting it by hand with an enrolment flow; until
           then it is how a probe is told which subtree it owns", stale since `R-01`. Approving the
           probe with `POST /probes/{gid}/approve` sets it and is the usual way; setting it by hand
@@ -33774,6 +33775,62 @@ because each is a decision rather than a defect:
         both references `--check` current; prettier and eslint clean on every changed file.
         **Mutants 12, 12 killed**, each restored byte for byte, and the tree rebuilt with no
         marker left in `dist` before the run above.
+
+      **Review round 1, 2026-10-20: one medium and three low, all closed** (core, two commits;
+      the four are two defects, each found twice).
+      1. **The run route's new sentence named a field the report does not have** (medium, and low
+         as the third). "Where the rendered document goes is the report’s `delivery`": a
+         report's mode is `outputs.delivery`, `store` · `store-and-email` · `email`, and the
+         `delivery` in the 201 table under the sentence is the run's, whether it was sent, so a
+         client's author reading the two together would look for the modes in the run. The
+         sentence names both where they live and explains each mode by its value: `store` keeps
+         the document for download, `store-and-email` keeps it and emails it, `email` emails it
+         and keeps it only until it has been sent; the run's `delivery` says whether it has been
+         sent, and the run's `outputs` lists the files it still holds. The outcome above said
+         the same wrong thing and is corrected.
+      2. **Nothing read the page itself** (low, and low as the fourth). The walks held the
+         document and the source, and two kinds of text reach `docs/api-reference.md` past both:
+         the renderer's own prose, written in `scripts/docs/api-reference-render.mjs` (the lead,
+         the conventions, how to read a field table, the schemas' lead), and the stream's
+         WebSocket, in no document, whose description the source walk reads with a spaced
+         double dash to the end of its line taken out as a SQL comment. `--check` says the page
+         is current, not what is on it. A new test reads every line of the committed page,
+         asserts it holds the lead, a convention, a field-table rule, the schemas' lead and the
+         stream route's heading and description, and fails on a ticket in any line. It found
+         none.
+      - **Tests** (2 new, `operator-text.test.ts`, core, 6 to 8): the page, read whole; and the
+        run route's description read from the document: every field it gives to "the report’s"
+        or "the run’s" must be a field of that body, one of each at least, and every value the
+        report's `outputs.delivery` takes must be named. The document is built once for the two
+        tests that read it. **Mutants (10), each failing that test and no other:** the first
+        rewrite put back (M1); `outputs.delivery` back to `delivery`, the modes still named
+        (M2); `store-and-email` not named (M3); a fourth mode, `archive`, that the description
+        does not explain (M4); the run's `delivery` misnamed (M5), each failing the
+        description's test; a ticket written in the renderer, in a convention (M6), the page's
+        lead (M8) and the schemas' lead (M9), and one after a spaced double dash in the stream
+        route's description (M7), each with the page regenerated and `--check` passing, failing
+        the page's test, the two walks passing M7 as the finding said they would, the
+        document's because the route is in none and the source's because it takes the clause
+        for a SQL comment; and the stream route not rendered (M10), failing the page's test on
+        its presence assertion.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the page is read as it is
+        committed, not rendered a second time in the test. `build-hygiene.test.ts` runs the
+        generator's `--check`, which fails unless the committed file is what the generator
+        renders now from the document and the routes it hides, so the two tests together hold
+        the rendering, and this one reads exactly what a reader is given, with no second process
+        and no second rendering to disagree with the first. The two recorded walks stay as they
+        are: each names where a ticket was written, the document's by its path and the source's
+        by file and line, where the page gives only a line of the page; and the document is
+        served to client generators as well as rendered.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the description's test
+        holds the sentence to the schemas, not to its words. A field it gives an owner must be
+        that owner's, and each mode the report's field takes must be named, so a rewording
+        passes and a renamed field, or a mode added without a word for it (M4), fails.
+      - **Together, 2026-10-20** (three commits, this note the third): the same eight core files
+        as above, 231 tests green and none skipped, PostgreSQL reached; both references
+        `--check` current; prettier and eslint clean on every changed file. **Mutants 10, 10
+        killed**, each restored byte for byte and confirmed by comparison, and the tree rebuilt
+        with no marker left in `dist` before the run above.
 
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
