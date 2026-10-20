@@ -1,5 +1,5 @@
 import { SAMPLED_PER_KEY } from '../../src/resolver/dns-check.js';
-import { WALK_BURST, WALK_RATE } from '../../src/resolver/forward-budget.js';
+import { FORWARD_HOLD_MS, WALK_BURST, WALK_RATE } from '../../src/resolver/forward-budget.js';
 import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
 
 /**
@@ -10,13 +10,18 @@ import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
  * **In every arm, in both modes:**
  * - the forwarder's most slots held at once for the probe, the background's aside: `system` at
  *   most q × 6, P-426's six lanes; gate at most q × 6 + 12, the walk's heard and discovery pools
- *   beside the six tokens (D16), plus the transient 8 × q in the arms with a helper loss (P1, P2);
+ *   beside the six tokens (D16). In the arms with a helper loss (P1, P2) the peak is read in
+ *   windows cut at each loss and `LOSS_WINDOW_MS` after it: those windows may hold the transient
+ *   8 × q more, and every other one is held to q × 6 + 12, as the design's bound table says;
  * - no question dropped at the forwarder for want of a slot;
  * - the walk's questions to each server within D19's bucket: 20 at once, refilled at 10 a second
  *   (one more for the time between a token taken and its datagram sent). Check now's walk is cut
  *   (S6), so every question the check sends counts. In `system` mode the check sends none.
  *
- * Each arm adds its own (`ARM_RULES`), from the design's table.
+ * Each arm adds its own (`ARM_RULES`), from the design's table. Where one says a group's checks are
+ * not given up, it means every one of them answered: a check that failed in any other way (the
+ * gate's own refusals, `RESOLVER_FAULT` at a helper loss, `ENODATA`) fails the arm as one given up
+ * does, since `GIVEN_UP`'s words are only the resolver's for a name it did not hear.
  */
 
 export type GateMode = 'system' | 'gate';
@@ -33,6 +38,24 @@ export interface Losses {
   readonly memory: number;
 }
 
+/** The forwarder's peak for the probe over one stretch of an arm, in ms from the forwarder's start. */
+export interface PeakWindow {
+  readonly fromMs: number;
+  readonly toMs: number;
+  readonly peak: number;
+  /** Opened at a helper loss: D16's transient is allowed in it, and in no other. */
+  readonly transient: boolean;
+}
+
+/**
+ * How long after a loss its window runs (D16, "for at most 10 s after a loss"): a lost child's
+ * questions were all sent by the loss and are let go `FORWARD_HOLD_MS` after, and half a second
+ * more is the gauge's round trip and the timer's own rounding.
+ */
+export const LOSS_WINDOW_MS = FORWARD_HOLD_MS + 500;
+/** How late a loss window's end may be read: a timer behind a busy event loop (P1's runs: 519 ms). */
+const LOSS_WINDOW_LATE_MS = 1_000;
+
 export interface WorldFacts {
   readonly arm: string;
   readonly mode: GateMode;
@@ -44,12 +67,19 @@ export interface WorldFacts {
   readonly peakHeld: number;
   /** The transient this arm allows past the bound, at a helper loss (D16). */
   readonly transient: number;
+  /**
+   * The arms with a helper loss: the same peak, read in windows cut at each loss and
+   * `LOSS_WINDOW_MS` after it, from the forwarder's start to the arm's end.
+   */
+  readonly peakWindows?: readonly PeakWindow[];
   /** Questions the forwarder dropped with every slot held. */
   readonly dropped: number;
   /** The walk's questions, by server: when each was sent, in ms. */
   readonly walkSends: ReadonlyMap<string, readonly number[]>;
   /** Checks given up (failed naming the resolver), by group. */
   readonly givenUp: Readonly<Partial<Record<Group, number>>>;
+  /** Checks that failed any other way, by group: the gate's refusals and a helper loss among them. */
+  readonly failedOtherwise: Readonly<Partial<Record<Group, number>>>;
   readonly refused: number;
   /** `getaddrinfo` calls on the probe's own lanes, by group. */
   readonly probeLanes: Readonly<Partial<Record<Group, number>>>;
@@ -82,8 +112,12 @@ export interface WorldFacts {
   /** P3: the stall, and what the probe's lanes said of it. */
   readonly stall?: {
     readonly ms: number;
-    /** A probe-lane lookup of an answering name was in flight when it began. */
-    readonly lookupInFlight: boolean;
+    /**
+     * The reply to the question the stall began on (a probe-lane lookup of an answering name) was
+     * sent before the stall ended, by the simulator's log: so it waited in the probe's socket,
+     * unread, while its lookup's stuck timer came due, the case D25's marks must survive.
+     */
+    readonly replyWaited: boolean;
     readonly unsafeMarks: number;
     readonly passedStuck: number;
   };
@@ -153,10 +187,14 @@ const HELPER_RSS_MAX = 128 * 1024 * 1024;
 
 type Rule = (facts: WorldFacts, said: (violation: string) => void) => void;
 
-function noneGivenUp(facts: WorldFacts, said: (violation: string) => void, groups: Group[]): void {
+/** Every check of each group answered: none given up, and none failed any other way. */
+function allAnswered(facts: WorldFacts, said: (violation: string) => void, groups: Group[]): void {
   for (const group of groups) {
     if (count(facts.givenUp, group) > 0) {
       said(`${String(count(facts.givenUp, group))} ${group} checks given up`);
+    }
+    if (count(facts.failedOtherwise, group) > 0) {
+      said(`${String(count(facts.failedOtherwise, group))} ${group} checks failed otherwise`);
     }
   }
 }
@@ -214,7 +252,7 @@ function untroubled(facts: WorldFacts, said: (violation: string) => void): void 
 
 /** P5 and P5b (§7.6): fork to `ready`, the main thread's block at each fork, the child's size. */
 function respawned(facts: WorldFacts, said: (violation: string) => void, gated: boolean): void {
-  noneGivenUp(facts, said, ['answering']);
+  allAnswered(facts, said, ['answering']);
   const respawn = facts.respawn;
   if (respawn === undefined) {
     said('the respawns were not measured');
@@ -243,14 +281,53 @@ function respawned(facts: WorldFacts, said: (violation: string) => void, gated: 
   }
 }
 
+const stretch = (w: PeakWindow): string =>
+  `${(w.fromMs / 1_000).toFixed(1)}–${(w.toMs / 1_000).toFixed(1)} s`;
+
+/**
+ * The forwarder's bound for the probe (D16): the whole run's peak, or in the arms with a helper
+ * loss each window's, the windows opened at a loss with the transient and every other without.
+ */
+function peaksHeld(facts: WorldFacts, said: (violation: string) => void): void {
+  const strict = heldBound({ ...facts, transient: 0 });
+  const windows = facts.peakWindows;
+  if (windows === undefined) {
+    if (facts.transient > 0) said('the forwarder’s peak was not read across each loss');
+    else if (facts.peakHeld > strict) {
+      said(
+        `the forwarder held ${String(facts.peakHeld)} slots for the probe, past ${String(strict)}`,
+      );
+    }
+    return;
+  }
+  if (windows.length === 0) said('no window of the forwarder’s peak was read');
+  let from = 0;
+  for (const w of windows) {
+    if (w.fromMs !== from)
+      said(`the forwarder’s peak was not read from ${String(from)} to ${String(w.fromMs)} ms`);
+    from = w.toMs;
+    const bound = strict + (w.transient ? facts.transient : 0);
+    if (w.peak > bound) {
+      said(
+        `the forwarder held ${String(w.peak)} slots for the probe at ${stretch(w)}, past ${String(bound)} ${w.transient ? 'with the transient after a loss' : 'outside a loss'}`,
+      );
+    }
+    if (w.transient && w.toMs - w.fromMs > LOSS_WINDOW_MS + LOSS_WINDOW_LATE_MS) {
+      said(
+        `the transient was allowed at ${stretch(w)}, past the ${String(LOSS_WINDOW_MS)} ms after a loss it lasts`,
+      );
+    }
+  }
+}
+
 /** Each arm's own assertions, from the design's table; `system` and gate as each says. */
 const ARM_RULES: Readonly<Record<string, Rule>> = {
   slow(facts, said) {
-    noneGivenUp(facts, said, ['answering']);
+    allAnswered(facts, said, ['answering']);
     if (facts.refused > 0) said(`${String(facts.refused)} checks refused`);
   },
   warmzone(facts, said) {
-    noneGivenUp(facts, said, ['answering']);
+    allAnswered(facts, said, ['answering']);
     if (facts.mode === 'system') return;
     const after = facts.afterSilence;
     if (after === undefined) {
@@ -272,29 +349,31 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
   },
   zone(facts, said) {
     if (facts.mode === 'system') return;
-    noneGivenUp(facts, said, ['answering']);
+    // The design's "answering 31,500 of 31,500": every answering check ran and answered.
+    allAnswered(facts, said, ['answering']);
+    if (facts.refused > 0) said(`${String(facts.refused)} checks refused`);
     silentOffProbeLanes(facts, said);
     silentHelperCapped(facts, said);
     for (const name of facts.keptLate ?? []) said(`an answering name kept late: ${name}`);
   },
   partial(facts, said) {
     if (facts.mode === 'system') return;
-    noneGivenUp(facts, said, ['answering', 'cached']);
+    allAnswered(facts, said, ['answering', 'cached']);
     silentOffProbeLanes(facts, said);
     if (facts.checkOn) silentHelperCapped(facts, said);
   },
   steady(facts, said) {
-    noneGivenUp(facts, said, ['answering']);
+    allAnswered(facts, said, ['answering']);
     if (facts.mode === 'gate') steadyWalks(facts, said);
   },
   P1(facts, said) {
-    noneGivenUp(facts, said, ['answering']);
+    allAnswered(facts, said, ['answering']);
     silentOffProbeLanes(facts, said);
     lossesWere(facts, said, { exit: 2 });
     untroubled(facts, said);
   },
   P2(facts, said) {
-    noneGivenUp(facts, said, ['answering']);
+    allAnswered(facts, said, ['answering']);
     silentOffProbeLanes(facts, said);
     lossesWere(facts, said, { hung: 1 });
     untroubled(facts, said);
@@ -320,9 +399,14 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
       said(`the helper was judged not answering for ${String(facts.helper?.unresponsiveMs)} ms`);
     }
     const stall = facts.stall;
-    if (stall === undefined || !stall.lookupInFlight) {
-      said('no probe-lane lookup was in flight when the stall began');
+    if (stall === undefined) {
+      said('the stall was not begun: no probe-lane lookup of an answering name sent its question');
       return;
+    }
+    if (!stall.replyWaited) {
+      said(
+        'the stall’s own lookup had no reply waiting through it: the case D25 must survive was not set up',
+      );
     }
     if (stall.unsafeMarks > 0)
       said(`${String(stall.unsafeMarks)} zones marked unsafe by the stall`);
@@ -332,7 +416,7 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
   },
   forwarder(facts, said) {
     // `system`'s bound is P-426's lanes, and its drops are judged with every arm's.
-    if (facts.mode === 'gate') noneGivenUp(facts, said, ['answering']);
+    if (facts.mode === 'gate') allAnswered(facts, said, ['answering']);
   },
   P5(facts, said) {
     respawned(facts, said, false);
@@ -341,7 +425,7 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
     respawned(facts, said, true);
   },
   P6(facts, said) {
-    noneGivenUp(facts, said, ['answering']);
+    allAnswered(facts, said, ['answering']);
     lossesWere(facts, said, { exit: 3 });
     if ((facts.helper?.poisoned ?? 0) !== 1) {
       said(`${String(facts.helper?.poisoned)} names poisoned, where one crashes the helper`);
@@ -358,10 +442,7 @@ export function judgeWorld(facts: WorldFacts): string[] {
   const said = (violation: string): void => {
     violations.push(violation);
   };
-  const bound = heldBound(facts);
-  if (facts.peakHeld > bound) {
-    said(`the forwarder held ${String(facts.peakHeld)} slots for the probe, past ${String(bound)}`);
-  }
+  peaksHeld(facts, said);
   if (facts.dropped > 0) said(`the forwarder dropped ${String(facts.dropped)} questions`);
   for (const [server, sends] of facts.walkSends) {
     if (facts.mode === 'system' && sends.length > 0) {

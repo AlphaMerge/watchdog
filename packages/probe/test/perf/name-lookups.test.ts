@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { fork } from 'node:child_process';
+import { createSocket } from 'node:dgram';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { availableParallelism, tmpdir } from 'node:os';
@@ -39,13 +40,18 @@ import {
 } from '../../src/measured.js';
 import {
   GLIBC_QUESTIONS,
+  glibcCoverageGaps,
   glibcDisagreements,
   glibcLookup,
   glibcSchedule,
+  glibcWire,
+  PARTIAL_CODE,
   WORLD_ENV,
   type ChildWorld,
+  type GlibcModel,
   type GlibcTable,
   type ModelAddress,
+  type ModelFamily,
   type RecordedRows,
   type Recording,
 } from '../support/glibc-model.js';
@@ -55,12 +61,21 @@ import {
   heldBound,
   JUDGED_ARMS,
   judgeWorld,
+  LOSS_WINDOW_MS,
   overBucket,
   type GateMode,
   type Group,
+  type PeakWindow,
   type WorldFacts,
 } from '../support/name-gate-judge.js';
 import { pollWithin, within } from '../support/within.js';
+import {
+  byGroup,
+  openFds,
+  readsLines,
+  teardownLine,
+  type WorldReads,
+} from '../support/world-reads.js';
 
 /**
  * What a name lookup a scan costs once the probe's resolver keeps answers (`A-66`, `P-426`), and
@@ -154,7 +169,8 @@ import { pollWithin, within } from '../support/within.js';
  *
  * Every assertion is `support/name-gate-judge.ts`'s, a pure function of what the arm measured, and
  * each is shown failing on a run made to break it in the third block, which runs in every
- * `test:perf` with the model's table held to the recordings. The arms: `slow`, `warmzone`, `zone`,
+ * `test:perf` with the model's table held to the recordings and the model's code to its table.
+ * Each arm also asserts that nothing is left asking on the probe's lanes once it is torn down. The arms: `slow`, `warmzone`, `zone`,
  * `partial`, `steady` and `forwarder` in both modes; `P1` to `P3`, `P5`, `P5b` and `P6`, the
  * helper's, in gate mode.
  * `MS_DNS_ARMS` takes `world/<name>` and `lanes/<name>` where the blocks' names overlap.
@@ -1107,13 +1123,19 @@ interface WorldEvents {
   readonly probe: ProbeSide;
   readonly tap: HelperTap;
   readonly record: WorldRecord;
+  /** The arms with a helper loss: the forwarder's peak, cut at each loss (D16's transient). */
+  readonly peaks: PeakWindows | undefined;
 }
 
 /** What the events found, for the facts. */
 interface WorldRecord {
   silencedAt?: number;
   stopped?: { downAt?: number; hungAt?: number; upAt?: number; at: number };
-  stall?: { ms: number; lookupInFlight: boolean };
+  /**
+   * P3: the stall, the name whose question began it, and when it began and ended on the
+   * simulator's clock (the wall's, as its log has it), with the replies it sent meanwhile.
+   */
+  stall?: { ms: number; host: string; from: number; to: number; repliesDuring: number };
   kills: { at: number; heldBack: boolean; probeRss: number }[];
   helperRssAt60s?: number | undefined;
 }
@@ -1186,10 +1208,12 @@ const WORLD_ARMS: readonly WorldArm[] = [
     perClient: true,
     transient: true,
     runMs: () => 130_000,
-    events: async ({ at, names }) => {
+    events: async ({ at, names, peaks }) => {
       for (const ms of [5_000, 95_000]) {
         await at(ms);
         killChild(names, 'SIGKILL');
+        // The loss: its lookups are asked again by the next child, from another port.
+        await peaks?.loss();
       }
     },
   },
@@ -1201,7 +1225,7 @@ const WORLD_ARMS: readonly WorldArm[] = [
     perClient: true,
     transient: true,
     runMs: () => 60_000,
-    events: async ({ at, names, record }) => {
+    events: async ({ at, names, record, peaks }) => {
       await at(10_000);
       const helper = names.gate?.helper;
       if (helper === undefined) return;
@@ -1215,8 +1239,16 @@ const WORLD_ARMS: readonly WorldArm[] = [
         () => {
           const now = performance.now();
           const stats = helper.stats();
-          if (stopped.downAt === undefined && stats.route !== 'up') stopped.downAt = now;
-          if (stopped.hungAt === undefined && stats.lossesByReason.hung > 0) stopped.hungAt = now;
+          // Its losses: the lookups detached as it goes quiet, then the child replaced (D26). The
+          // SIGSTOP itself asks nothing again.
+          if (stopped.downAt === undefined && stats.route !== 'up') {
+            stopped.downAt = now;
+            void peaks?.loss();
+          }
+          if (stopped.hungAt === undefined && stats.lossesByReason.hung > 0) {
+            stopped.hungAt = now;
+            void peaks?.loss();
+          }
           if (stopped.hungAt !== undefined && stopped.upAt === undefined && stats.state === 'up') {
             stopped.upAt = now;
           }
@@ -1232,21 +1264,30 @@ const WORLD_ARMS: readonly WorldArm[] = [
     modes: ['gate'],
     group: oneInTenSilent,
     runMs: () => 70_000,
-    events: async ({ at, probe, record }) => {
+    events: async ({ at, probe, record, sim }) => {
       await at(40_000);
       // Held from the moment a probe-lane lookup of an answering name has sent its question, so
       // that its reply is in the socket, and its stuck timer due, all through the stall. None in
-      // the next 10 s is a run the judge fails.
+      // the next 10 s is a run the judge fails, and so is one whose reply did not come meanwhile:
+      // the simulator answers in its own thread, so its log says when.
       const triggered = new Promise<void>((resolve) => {
-        probe.onSent = (group) => {
+        probe.onSent = (group, host) => {
           if (group !== 'answering' || record.stall !== undefined) return;
           probe.onSent = undefined;
-          const lookupInFlight = probe.inFlight() > 0;
+          const repliesBefore = sim.repliesSent;
           const from = performance.now();
           while (performance.now() - from < STALL_MS) {
             // The probe's main thread, busy: nothing else in this process runs.
           }
-          record.stall = { ms: performance.now() - from, lookupInFlight };
+          const to = performance.now();
+          // On the simulator's clock, as its worker reads it: the wall's, from each thread's origin.
+          record.stall = {
+            ms: to - from,
+            host,
+            from: performance.timeOrigin + from,
+            to: performance.timeOrigin + to,
+            repliesDuring: sim.repliesSent - repliesBefore,
+          };
           resolve();
         };
       });
@@ -1338,8 +1379,9 @@ class ProbeSide {
   /** When each name was answered with addresses. */
   readonly answeredAt = new Map<string, number[]>();
   crashes = 0;
-  onSent: ((group: Group) => void) | undefined;
-  readonly #model: (host: string, family: Family) => Promise<readonly ModelAddress[]>;
+  /** Told as a lookup's try is with the kernel, with its name's group and the name. */
+  onSent: ((group: Group, host: string) => void) | undefined;
+  readonly #model: GlibcModel;
   readonly #groupOf: (host: string) => Group;
 
   constructor(port: number, groupOf: (host: string) => Group) {
@@ -1348,12 +1390,20 @@ class ProbeSide {
       server: { address: WORLD_ADDRESS, port },
       localAddress: PROBE_SOURCE,
       schedule: WORLD_SCHEDULE,
-      onSent: (host) => this.onSent?.(this.#groupOf(host)),
+      onSent: (host) => this.onSent?.(this.#groupOf(host), host),
     });
   }
 
   inFlight(): number {
     return Object.values(this.#running).reduce((sum, n) => sum + n, 0);
+  }
+
+  /**
+   * Ends every lookup on the probe's lanes now, and every one asked from here on at once: the
+   * resolver's `stop` lets its lane lookups run, and starts the next it has queued as each ends.
+   */
+  stop(): void {
+    this.#model.close();
   }
 
   readonly lookup = async (host: string, family: Family): Promise<readonly ResolvedAddress[]> => {
@@ -1367,7 +1417,7 @@ class ProbeSide {
     this.#running[group] = (this.#running[group] ?? 0) + 1;
     this.peak[group] = Math.max(this.peak[group] ?? 0, this.#running[group]);
     try {
-      const found = await this.#model(host, family);
+      const found = await this.#model.lookup(host, family);
       const times = this.answeredAt.get(host) ?? [];
       times.push(performance.now());
       this.answeredAt.set(host, times);
@@ -1388,6 +1438,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  */
 class HelperTap {
   readonly peak: Partial<Record<Group, number>> = {};
+  /** The lookups each child was asked, by group, in fork order. */
+  readonly byChild: Partial<Record<Group, number>>[] = [];
   readonly answeredAt = new Map<string, number[]>();
   readonly children: { readonly forkedAt: number; readyAt?: number }[] = [];
   stuck = 0;
@@ -1414,6 +1466,8 @@ class HelperTap {
       forkedAt: performance.now(),
     };
     this.children.push(record);
+    const asked: Partial<Record<Group, number>> = {};
+    this.byChild.push(asked);
     child.on('message', (raw: unknown) => {
       if (!isRecord(raw)) return;
       if (raw['t'] === 'ready') record.readyAt ??= performance.now();
@@ -1438,6 +1492,7 @@ class HelperTap {
       channel: child.channel,
       send: (message, callback) => {
         const group = this.#groupOf(message.host);
+        asked[group] = (asked[group] ?? 0) + 1;
         this.#flights.set(message.id, { host: message.host, child: index });
         this.#running[group] = (this.#running[group] ?? 0) + 1;
         this.peak[group] = Math.max(this.peak[group] ?? 0, this.#running[group]);
@@ -1456,13 +1511,16 @@ class HelperTap {
   };
 }
 
-/** Every question the name check sends, by server, with when it was sent. */
+/** Every question the name check sends, by server, with when it was sent; and its channels. */
 class WalkCounter {
   readonly sends = new Map<string, number[]>();
+  /** When each channel was opened. */
+  readonly channels: number[] = [];
 
   wrap(inner: DnsAsker): DnsAsker {
     return {
       channel: (server) => {
+        this.channels.push(performance.now());
         const channel = inner.channel(server);
         return {
           ask: (name, type) => {
@@ -1481,6 +1539,109 @@ class WalkCounter {
 
   all(): number[] {
     return [...this.sends.values()].flat();
+  }
+}
+
+/** What `PeakWindows` runs on: a clock in ms, and a timer it can cancel. */
+interface PeakClock {
+  now(): number;
+  after(ms: number, run: () => void): { cancel(): void };
+}
+
+const realClock: PeakClock = {
+  now: () => performance.now(),
+  after: (ms, run) => {
+    const timer = setTimeout(run, ms);
+    return {
+      cancel: () => {
+        clearTimeout(timer);
+      },
+    };
+  },
+};
+
+/**
+ * The forwarder's most slots held for the probe, in windows (D16): cut at each helper loss and
+ * `LOSS_WINDOW_MS` after it, each read with the peak started again (`gauge` with `resetPeak`), so
+ * that the stretches a loss's transient may fill are judged apart from the rest. The arms with a
+ * helper loss (P1, P2). A loss's window is its own until its end, wherever the timer that ends it
+ * fires: the next window takes the transient only from another loss whose window ends later.
+ */
+class PeakWindows {
+  readonly windows: PeakWindow[] = [];
+  /** Why a read failed, if one did: the judge then has a gap to name. */
+  failed: string | undefined;
+  readonly #read: () => Promise<number>;
+  readonly #clock: PeakClock;
+  readonly #windowMs: number;
+  readonly #origin: number;
+  #from = 0;
+  #transient = false;
+  /** Where the latest-ending loss's window ends. */
+  #transientUntil = Number.NEGATIVE_INFINITY;
+  #reads: Promise<void> = Promise.resolve();
+  readonly #timers = new Set<{ cancel(): void }>();
+
+  /**
+   * From now: the forwarder has been started, and nothing has asked it yet. `read` gives the peak
+   * since the last read and starts it again.
+   */
+  constructor(
+    read: () => Promise<number>,
+    options: { readonly clock?: PeakClock; readonly windowMs?: number } = {},
+  ) {
+    this.#read = read;
+    this.#clock = options.clock ?? realClock;
+    this.#windowMs = options.windowMs ?? LOSS_WINDOW_MS;
+    this.#origin = this.#clock.now();
+  }
+
+  /** The simulator's `ns1`, the probe's slots (untagged ports, `other`). */
+  static of(sim: DnsSimulator): PeakWindows {
+    return new PeakWindows(
+      async () => (await sim.gauge('ns1', { resetPeak: true }))[0]?.peakHeldByClass['other'] ?? 0,
+    );
+  }
+
+  #now(): number {
+    return this.#clock.now() - this.#origin;
+  }
+
+  /** A loss now: the window before it ends, and one with the transient runs `windowMs`. */
+  loss(): Promise<void> {
+    const at = this.#now();
+    const until = at + this.#windowMs;
+    this.#transientUntil = Math.max(this.#transientUntil, until);
+    const timer = this.#clock.after(this.#windowMs, () => {
+      this.#timers.delete(timer);
+      // A timer may fire a little early on the clock: this window was this loss's to its end.
+      void this.#cut(this.#now(), this.#transientUntil > until);
+    });
+    this.#timers.add(timer);
+    return this.#cut(at, true);
+  }
+
+  /** The last window, to now, once the arm is over; the windows, in order. */
+  async finish(): Promise<readonly PeakWindow[]> {
+    for (const timer of this.#timers) timer.cancel();
+    this.#timers.clear();
+    await this.#cut(this.#now(), false);
+    return this.windows;
+  }
+
+  /** Ends the open window at `at`, read as the gauge has it, and opens the next. */
+  #cut(at: number, nextTransient: boolean): Promise<void> {
+    this.#reads = this.#reads.then(async () => {
+      try {
+        const peak = await this.#read();
+        this.windows.push({ fromMs: this.#from, toMs: at, peak, transient: this.#transient });
+      } catch (error) {
+        this.failed ??= String(error);
+      }
+      this.#from = at;
+      this.#transient = nextTransient;
+    });
+    return this.#reads;
   }
 }
 
@@ -1539,8 +1700,19 @@ interface WorldRun {
   /** Check results, every group. */
   readonly results: number;
   readonly facts: WorldFacts;
-  readonly lines: readonly string[];
+  /** What is printed: the teardown's line is added once the world is torn down. */
+  readonly lines: string[];
+  /** Filled in once the world is torn down. */
+  readonly teardown: WorldTeardown;
 }
+
+interface WorldTeardown {
+  /** Lookups still open on the probe's lanes once everything had stopped: none, or a leak. */
+  laneLookupsLeft: number | undefined;
+}
+
+/** How long the probe's lanes may take to let go of their lookups once the world stops. */
+const TEARDOWN_BOUND_MS = 2_000;
 
 /** `monitorEventLoopDelay`'s resolution: what it records is each timer's delta, this included. */
 const DELAY_RESOLUTION_MS = 10;
@@ -1549,6 +1721,7 @@ const lagMs = (nanoseconds: number): string =>
   `${Math.max(0, nanoseconds / 1e6 - DELAY_RESOLUTION_MS).toFixed(1)} ms`;
 
 async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
+  const fdsBefore = openFds();
   const devices = Math.ceil(SENSORS / SENSORS_PER_DEVICE);
   const deviceOf = (sensorId: number): number =>
     Math.floor((sensorId - 1) / SENSORS_PER_DEVICE) % devices;
@@ -1578,6 +1751,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
     ipv6: false,
     logLimit: 2_000_000,
   });
+  const peaks = arm.transient === true ? PeakWindows.of(sim) : undefined;
   const dir = await mkdtemp(join(tmpdir(), 'ms-perf-gate-'));
   const tallies: Record<Group | 'all', WorldTally> = {
     all: { results: 0, answered: 0, givenUp: 0, other: 0 },
@@ -1599,9 +1773,14 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
   let names: NameResolution | undefined;
   let pool: CheckPool | undefined;
   let wheel: TimingWheel | undefined;
+  let probe: ProbeSide | undefined;
   let sampler: NodeJS.Timeout | undefined;
   let lagSampler: NodeJS.Timeout | undefined;
   let inFlightMax = 0;
+  let rssPeak = 0;
+  const resolverPeak = { running: 0, queued: 0 };
+  let lines: string[] | undefined;
+  const teardown: WorldTeardown = { laneLookupsLeft: undefined };
   try {
     await sim.occupy(BACKGROUND_SLOTS, 'ns1');
     const { port } = sim.server('ns1');
@@ -1626,7 +1805,8 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       `nameserver ${WORLD_ADDRESS}\noptions timeout:${String(WORLD_TIMEOUT_S)} attempts:${String(WORLD_ATTEMPTS)}\n`,
     );
     await writeFile(files.nsswitchConf, 'hosts: files dns\n');
-    const probe = new ProbeSide(port, groupOf);
+    const lanes = new ProbeSide(port, groupOf);
+    probe = lanes;
     const world: ChildWorld = {
       server: { address: WORLD_ADDRESS, port },
       localAddress: HELPER_SOURCE,
@@ -1646,7 +1826,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       policy: { files, platform: 'linux', env: CHECK_OFF ? { RES_OPTIONS: 'ndots:1' } : {} },
       check: { asker: walks.wrap(caresAsker({ port })) },
       resolver: {
-        lookup: probe.lookup,
+        lookup: lanes.lookup,
         watch: {
           files: [
             files.hosts,
@@ -1755,8 +1935,14 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
         stop: () => undefined,
       },
     });
+    const rssStart = process.memoryUsage().rss;
+    rssPeak = rssStart;
     sampler = setInterval(() => {
       inFlightMax = Math.max(inFlightMax, health.report().lookupsInFlight ?? 0);
+      rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
+      const resolverStats = built.resolver.stats();
+      resolverPeak.running = Math.max(resolverPeak.running, resolverStats.running);
+      resolverPeak.queued = Math.max(resolverPeak.queued, resolverStats.queued);
     }, 1_000);
     if (arm.respawn === true) {
       // How late a 10 ms timer is, every 10 ms: the main thread's block at each fork (P5, P5b).
@@ -1780,7 +1966,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       await sim.silence('zone-b.test');
       record.silencedAt = performance.now();
     }
-    await arm.events?.({ at, names: built, sim, pool: checks, probe, tap, record });
+    await arm.events?.({ at, names: built, sim, pool: checks, probe: lanes, tap, record, peaks });
     await at(arm.runMs());
     ticking.stop();
     delay.disable();
@@ -1794,6 +1980,9 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       50,
     );
     const drainMs = performance.now() - drainStarted;
+    const rssEnd = process.memoryUsage().rss;
+    rssPeak = Math.max(rssPeak, rssEnd);
+    const peakWindows = await peaks?.finish();
     const report = health.report();
     const stats = checks.stats();
     const wheelStats = ticking.stats();
@@ -1806,7 +1995,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
 
     // --- The facts ---------------------------------------------------------------------------
     const answers = (host: string): number[] =>
-      [...(probe.answeredAt.get(host) ?? []), ...(tap.answeredAt.get(host) ?? [])].sort(
+      [...(lanes.answeredAt.get(host) ?? []), ...(tap.answeredAt.get(host) ?? [])].sort(
         (a, b) => a - b,
       );
     const longestAskGap = (device: number): number => {
@@ -1915,13 +2104,19 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
           }
         : undefined;
     const stopped = record.stopped;
+    const stall = record.stall;
     const facts: WorldFacts = {
       arm: arm.name,
       mode,
       checkOn: !CHECK_OFF,
       q: Q,
-      peakHeld: gauge?.peakHeldByClass['other'] ?? 0,
+      // With windows, the gauge's own peak is the last window's: the run's is theirs.
+      peakHeld:
+        peakWindows === undefined
+          ? (gauge?.peakHeldByClass['other'] ?? 0)
+          : Math.max(0, ...peakWindows.map(({ peak }) => peak)),
       transient: arm.transient === true ? 8 * Q : 0,
+      ...(peakWindows === undefined ? {} : { peakWindows }),
       dropped: gauge?.dropped ?? 0,
       walkSends: walks.sends,
       givenUp: {
@@ -1930,8 +2125,14 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
         cached: tallies.cached.givenUp,
         crash: tallies.crash.givenUp,
       },
+      failedOtherwise: {
+        answering: tallies.answering.other,
+        silent: tallies.silent.other,
+        cached: tallies.cached.other,
+        crash: tallies.crash.other,
+      },
       refused: stats.refused,
-      probeLanes: probe.calls,
+      probeLanes: lanes.calls,
       helperPeak: tap.peak,
       ...(afterSilence === undefined ? {} : { afterSilence }),
       ...(gapsOver === undefined ? {} : { gapsOver }),
@@ -1956,17 +2157,25 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
               upAfterMs: stopped.upAt === undefined ? undefined : stopped.upAt - stopped.at,
             },
           }),
-      ...(record.stall === undefined
+      ...(stall === undefined
         ? {}
         : {
             stall: {
-              ...record.stall,
+              ms: stall.ms,
+              replyWaited: queries.some(
+                (query) =>
+                  query.client.address === PROBE_SOURCE &&
+                  query.qname.toLowerCase() === stall.host.toLowerCase() &&
+                  query.at >= stall.from - 1_000 &&
+                  query.reply !== undefined &&
+                  query.reply.at <= stall.to,
+              ),
               unsafeMarks: log.unsafe,
               passedStuck: log.passedStuck.filter((host) => groupOf(host) === 'answering').length,
             },
           }),
       ...(respawn === undefined ? {} : { respawn }),
-      ...(arm.name === 'P6' ? { probeCrashes: probe.crashes } : {}),
+      ...(arm.name === 'P6' ? { probeCrashes: lanes.crashes } : {}),
     };
 
     // --- What is printed ---------------------------------------------------------------------
@@ -1985,15 +2194,20 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       if (routed.route === 'silent') silentKeys.add(routed.key);
     }
     const mixed = [...heardKeys].filter((key) => silentKeys.has(key)).length;
-    const groups = (of: Partial<Record<Group, number>>): string =>
-      (['answering', 'silent', 'cached', 'crash'] as const)
-        .filter((group) => (of[group] ?? 0) > 0)
-        .map((group) => `${group} ${String(of[group])}`)
-        .join(', ') || 'none';
     const walkSends = walks.all();
+    const reads: WorldReads = {
+      rss: { start: rssStart, peak: rssPeak, end: rssEnd },
+      resolverPeak,
+      channels: { opened: walks.channels.length, busiestSecond: busiestSecond(walks.channels) },
+      ...(mode === 'gate' ? { children: tap.byChild } : {}),
+    };
+    const windowsRead =
+      peakWindows === undefined
+        ? ''
+        : `; by window, ${peakWindows.map((w) => `${(w.fromMs / 1_000).toFixed(1)}–${(w.toMs / 1_000).toFixed(1)} s ${String(w.peak)}${w.transient ? ' (after a loss)' : ''}`).join(', ')}${peaks?.failed === undefined ? '' : `; a read failed: ${peaks.failed}`}`;
     const tally = (label: string, t: WorldTally): string =>
       `${label} ${String(t.answered)} of ${String(t.results)} answered, ${String(t.givenUp)} given up, ${String(t.other)} failed otherwise`;
-    const lines = [
+    lines = [
       `${arm.label}: ${mode}${mode === 'gate' && CHECK_OFF ? ' (check off)' : ''}`,
       `${String(wheelStats.dispatched)} dispatched; ${tally('all', tallies.all)}; refused ${String(stats.refused)}, deferred ${String(stats.deferred)}, timed out ${String(stats.timedOut)}`,
       (['answering', 'silent', 'cached', 'crash'] as const)
@@ -2003,12 +2217,13 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       `jitter p50 ${ms(percentile(ordered, 0.5))}, p95 ${ms(percentile(ordered, 0.95))}, max ${ms(ordered.at(-1) ?? 0)}; check run p95 ${ms(percentile(sorted(run), 0.95))}; drained in ${ms(drainMs)}`,
       `event loop: p50 ${lagMs(delay.percentile(50))}, p99 ${lagMs(delay.percentile(99))}, max ${lagMs(delay.max)}`,
       `Probe Health: lookupsInFlight max ${String(Math.max(inFlightMax, report.lookupsInFlight ?? 0))}, last ${String(report.lookupsInFlight)}; lookupsGivenUp ${String(report.lookupsGivenUp)}`,
-      `forwarder: the probe's most slots held at once ${String(facts.peakHeld)}, bound ${String(heldBound(facts))}; dropped ${String(facts.dropped)}; questions by source: walk ${String(sources.get(WORLD_ADDRESS) ?? 0)}, probe lanes ${String(sources.get(PROBE_SOURCE) ?? 0)}, helper ${String(sources.get(HELPER_SOURCE) ?? 0)}${budgetPeak === undefined ? '' : `; the budget's questionsOpen peak ${String(budgetPeak)}`}`,
+      `forwarder: the probe's most slots held at once ${String(facts.peakHeld)}, bound ${String(heldBound(facts))}${windowsRead}; dropped ${String(facts.dropped)}; questions by source: walk ${String(sources.get(WORLD_ADDRESS) ?? 0)}, probe lanes ${String(sources.get(PROBE_SOURCE) ?? 0)}, helper ${String(sources.get(HELPER_SOURCE) ?? 0)}${budgetPeak === undefined ? '' : `; the budget's questionsOpen peak ${String(budgetPeak)}`}`,
       `walk: ${String(walkSends.length)} questions, busiest second ${String(busiestSecond(walkSends))}, past D19's bucket ${String(overBucket(walkSends))}${facts.steady === undefined ? '' : 'notReached' in facts.steady ? `; steady state not reached (${facts.steady.notReached})` : `; steady state ${facts.steady.perSecond.toFixed(2)} a second`}`,
       mode === 'gate'
         ? `routes: ${[...routes].map(([kind, n]) => `${kind} ${String(n)}`).join(', ') || 'none'}; sampled ${String(routes.get('sampled/probe') ?? 0)}; keys routed both heard and silent ${String(mixed)}`
         : 'routes: every lookup on the probe’s lanes (system)',
-      `getaddrinfo on the probe's lanes: ${groups(probe.calls)} (most at once ${groups(probe.peak)}); in the helper's child, most at once: ${groups(tap.peak)}`,
+      `getaddrinfo on the probe's lanes: ${byGroup(lanes.calls)} (most at once ${byGroup(lanes.peak)}); in the helper's child, most at once: ${byGroup(tap.peak)}`,
+      ...readsLines(reads),
       ...(gateHealth === undefined
         ? []
         : [
@@ -2037,7 +2252,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       ...(facts.stall === undefined
         ? []
         : [
-            `the stall: ${ms(facts.stall.ms)}, a probe-lane lookup in flight ${String(facts.stall.lookupInFlight)}; unsafe marks ${String(facts.stall.unsafeMarks)}, answering names said passed-stuck ${String(facts.stall.passedStuck)}`,
+            `the stall: ${ms(facts.stall.ms)}, its lookup's reply waiting through it ${String(facts.stall.replyWaited)}, ${String(record.stall?.repliesDuring)} replies sent meanwhile; unsafe marks ${String(facts.stall.unsafeMarks)}, answering names said passed-stuck ${String(facts.stall.passedStuck)}`,
           ]),
       ...(respawn === undefined
         ? []
@@ -2053,16 +2268,33 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
             `errors logged: ${String(log.errors.length)}, the first: ${log.errors.slice(0, 3).join(' | ')}`,
           ]),
     ];
-    return { arm, mode, results: tallies.all.results, facts, lines };
+    return { arm, mode, results: tallies.all.results, facts, lines, teardown };
   } finally {
     wheel?.stop();
     delay.disable();
     clearInterval(sampler);
     clearInterval(lagSampler);
     await pool?.stop();
+    // Before the resolver: its lane lookups run on past its stop, and so do those it has queued.
+    probe?.stop();
     await names?.stop();
     await sim.stop();
     await rm(dir, { recursive: true, force: true });
+    const left = probe;
+    if (left !== undefined) {
+      await pollWithin(
+        TEARDOWN_BOUND_MS,
+        'the probe’s lanes let go',
+        () => left.inFlight() === 0,
+        10,
+      ).catch(() => undefined);
+      teardown.laneLookupsLeft = left.inFlight();
+    }
+    // Sockets and pipes close a turn or two after they are told to.
+    await new Promise((resolve) => setImmediate(resolve));
+    lines?.push(
+      teardownLine({ before: fdsBefore, after: openFds() }, teardown.laneLookupsLeft ?? 0),
+    );
   }
 }
 
@@ -2107,35 +2339,317 @@ describe('the name gate’s arms, on a DNS simulator and a getaddrinfo model (P-
         runs.push(one);
         assert.ok(one.results > 0, 'checks ran');
         assert.deepEqual(judgeWorld(one.facts), [], one.lines.join('\n'));
+        // Torn down: nothing left asking on the probe's lanes, to run on into the next arm.
+        assert.equal(one.teardown.laneLookupsLeft, 0, one.lines.join('\n'));
       });
     }
   }
 });
 
 // ---------------------------------------------------------------------------------------------
-// What the gate's arms rest on, shown to fail where it should: the model against glibc, and the
-// judge against runs made to break each assertion. Run in every `test:perf`, in no time.
+// What the gate's arms rest on, shown to fail where it should: the model's table against glibc's
+// recordings, the model's own code against its table at the simulator, and the judge against runs
+// made to break each assertion. Run in every `test:perf`, in about three seconds.
 // ---------------------------------------------------------------------------------------------
 
 describe('the gate arms’ model is glibc’s, and their judge fails what it should (P-432 S7)', () => {
   const rows = JSON.parse(readFileSync(FIXTURES('system-names-rows.json'), 'utf8')) as RecordedRows;
-  const recordings = (
-    JSON.parse(readFileSync(FIXTURES('system-names-recordings.json'), 'utf8')) as {
-      readonly recordings: readonly Recording[];
-    }
-  ).recordings;
+  const fixture = JSON.parse(readFileSync(FIXTURES('system-names-recordings.json'), 'utf8')) as {
+    readonly images: Readonly<Record<string, unknown>>;
+    readonly recordings: readonly Recording[];
+  };
+  const recordings = fixture.recordings;
+  /** Every image the fixture was recorded in: seven at S8's recording. */
+  const images = Object.keys(fixture.images).sort();
 
   it('GLIBC_QUESTIONS is the wire glibc sent, in every image a row was recorded in (D30’s recording A)', () => {
     const held = glibcDisagreements(rows, recordings);
     assert.deepEqual(held.disagreements, []);
-    // Never vacuous: every family, in every one of the seven images, and the silent plans' tries.
-    for (const family of [0, 4, 6] as const) {
-      assert.ok(
-        held.byFamily[family] >= 7,
-        `family ${String(family)}: ${String(held.byFamily[family])}`,
+    // Never vacuous: every family, and the silent plans' tries, compared in every one of the
+    // images, by name; one image's recordings alone would clear any count.
+    assert.ok(images.length >= 7, `the fixture's images: ${images.join(', ')}`);
+    assert.deepEqual(glibcCoverageGaps(held, images), []);
+  });
+
+  it('a fixture with an image’s rows left unplayed is told apart, though its counts clear any floor', () => {
+    const [first, last] = [images[0] ?? '', images.at(-1) ?? ''];
+    const without = recordings.filter((recording) => recording.image !== first);
+    const held = glibcDisagreements(rows, without);
+    assert.deepEqual(held.disagreements, []);
+    // What the old floor (7 a family, 14 silent) read as enough.
+    assert.ok(held.byFamily[0] >= 7 && held.byFamily[4] >= 7 && held.byFamily[6] >= 7);
+    assert.ok(held.silent >= 14);
+    assert.deepEqual(glibcCoverageGaps(held, images), [
+      `family 0 compared in no recording of ${first}`,
+      `family 4 compared in no recording of ${first}`,
+      `family 6 compared in no recording of ${first}`,
+      `no silent plan compared in ${first}`,
+    ]);
+    // An image's silent plans recorded under a name the model does not play.
+    const renamed = recordings.map((recording) =>
+      recording.image === last && recording.plan === 'all-silent'
+        ? { ...recording, plan: 'all-silent-again' }
+        : recording,
+    );
+    assert.deepEqual(glibcCoverageGaps(glibcDisagreements(rows, renamed), images), [
+      `no silent plan compared in ${last}`,
+    ]);
+  });
+
+  it('glibcLookup, the code the arms ask with, puts on the wire what glibcWire says try by try, and gives up when glibcSchedule says', async () => {
+    const sim = await DnsSimulator.start({
+      servers: [{ name: 'ns1', address: WORLD_ADDRESS }],
+      zones: {
+        'answer.test': { reply: replies.addresses('192.0.2.1', '2001:db8::1') },
+        'nxdomain.test': { reply: replies.nxdomain },
+        'silent.test': { reply: replies.silent },
+        // One type answered and the other not: glibc's single-request switch, not played.
+        'partial.test': { a: replies.addresses('192.0.2.1'), aaaa: replies.silent },
+      },
+      ipv6: false,
+    });
+    // `options timeout:1 attempts:2`: a silent lookup in two seconds.
+    const schedule = glibcSchedule(1, 2);
+    const model = glibcLookup({
+      server: { address: WORLD_ADDRESS, port: sim.server('ns1').port },
+      localAddress: WORLD_ADDRESS,
+      schedule,
+    });
+    type Ended = { readonly ms: number } & (
+      { readonly addresses: readonly ModelAddress[] } | { readonly code: string }
+    );
+    const ask = async (host: string, family: ModelFamily): Promise<Ended> => {
+      const from = performance.now();
+      try {
+        const addresses = await model.lookup(host, family);
+        return { ms: performance.now() - from, addresses };
+      } catch (error) {
+        const { code } = error as { readonly code?: unknown };
+        return { ms: performance.now() - from, code: String(code) };
+      }
+    };
+    const answers: Readonly<Record<ModelFamily, readonly ModelAddress[]>> = {
+      0: [
+        { address: '192.0.2.1', family: 4 },
+        { address: '2001:db8:0:0:0:0:0:1', family: 6 },
+      ],
+      4: [{ address: '192.0.2.1', family: 4 }],
+      6: [{ address: '2001:db8:0:0:0:0:0:1', family: 6 }],
+    };
+    try {
+      const plans = ['answer', 'nxdomain', 'silent'] as const;
+      const asked = ([0, 4, 6] as const).flatMap((family) =>
+        plans.map((plan) => ({ family, plan, host: `f${String(family)}.${plan}.test` })),
       );
+      const ended = await within(
+        10_000,
+        'the model’s lookups',
+        Promise.all([
+          ...asked.map(({ host, family }) => ask(host, family)),
+          ask('f0.partial.test', 0),
+        ]),
+      );
+      const log = await sim.log();
+      /** What reached the simulator for `host`, try by try: a try is the wait it was sent in. */
+      const wire = (host: string): (readonly [string, string, string, number])[] => {
+        const entries = log.filter((entry) => entry.qname === host).sort((a, b) => a.seq - b.seq);
+        const from = entries[0]?.at ?? 0;
+        return entries.map((entry) => [
+          entry.server,
+          entry.qname,
+          entry.qtype,
+          1 + Math.round((entry.at - from) / schedule.waitMs),
+        ]);
+      };
+      asked.forEach(({ family, plan, host }, index) => {
+        const said = `family ${String(family)}, ${plan}`;
+        const one = ended[index];
+        assert.ok(one !== undefined);
+        assert.deepEqual(
+          wire(host),
+          glibcWire('ns1', host, family, plan === 'silent' ? 'silent' : 'replied', schedule),
+          said,
+        );
+        if (plan === 'answer') {
+          const byFamily = (list: readonly ModelAddress[]): ModelAddress[] =>
+            [...list].sort((a, b) => a.family - b.family);
+          assert.deepEqual(
+            'addresses' in one ? byFamily(one.addresses) : one.code,
+            answers[family],
+            said,
+          );
+        } else if (plan === 'nxdomain') {
+          assert.deepEqual('code' in one ? one.code : one.addresses, 'ENOTFOUND', said);
+        } else {
+          // As the recordings hold glibc to it: every try's wait, and less than a second more.
+          assert.deepEqual('code' in one ? one.code : one.addresses, 'EAI_AGAIN', said);
+          const waited = schedule.tries * schedule.waitMs;
+          assert.ok(one.ms >= waited - 5 && one.ms < waited + 1_000, `${said}: ${ms(one.ms)}`);
+        }
+      });
+      // The partial reply: its one try, then the model's own code at that try's end.
+      const partial = ended.at(-1);
+      assert.ok(partial !== undefined && 'code' in partial, JSON.stringify(partial));
+      assert.equal(partial.code, PARTIAL_CODE);
+      assert.ok(
+        partial.ms >= schedule.waitMs - 5 && partial.ms < schedule.waitMs + 1_000,
+        ms(partial.ms),
+      );
+      assert.deepEqual(wire('f0.partial.test'), [
+        ['ns1', 'f0.partial.test', 'A', 1],
+        ['ns1', 'f0.partial.test', 'AAAA', 1],
+      ]);
+      assert.equal(model.inFlight(), 0);
+    } finally {
+      model.close();
+      await sim.stop();
     }
-    assert.ok(held.silent >= 14, `silent plans: ${String(held.silent)}`);
+  });
+
+  it('the model’s close ends its lookups at once, socket and timer with them, and fails every later one before it asks', async () => {
+    const sim = await DnsSimulator.start({
+      servers: [{ name: 'ns1', address: WORLD_ADDRESS }],
+      zones: { 'silent.test': { reply: replies.silent } },
+      ipv6: false,
+    });
+    const server = { address: WORLD_ADDRESS, port: sim.server('ns1').port };
+    let sent = 0;
+    const model = glibcLookup({
+      server,
+      localAddress: WORLD_ADDRESS,
+      schedule: WORLD_SCHEDULE,
+      onSent: () => {
+        sent += 1;
+      },
+    });
+    const binding = glibcLookup({ server, localAddress: WORLD_ADDRESS, schedule: WORLD_SCHEDULE });
+    const code = async (lookup: Promise<unknown>): Promise<string> => {
+      try {
+        await lookup;
+        return 'answered';
+      } catch (error) {
+        return String((error as { readonly code?: unknown }).code);
+      }
+    };
+    try {
+      // Asked, its question with the kernel, its next try 15 s off: then closed.
+      const asked = code(model.lookup('asked.silent.test', 4));
+      await pollWithin(5_000, 'the question sent', () => sent === 1, 5);
+      assert.equal(model.inFlight(), 1);
+      model.close();
+      assert.equal(model.inFlight(), 0);
+      assert.equal(await within(500, 'the closed lookup', asked), 'EAI_AGAIN');
+      // After the close: failed at once, and never asked.
+      assert.equal(
+        await within(500, 'a lookup after the close', code(model.lookup('after.silent.test', 4))),
+        'EAI_AGAIN',
+      );
+      // Closed while its socket binds: nothing is sent on the closed socket.
+      const early = code(binding.lookup('binding.silent.test', 4));
+      binding.close();
+      assert.equal(await within(500, 'a lookup closed as it binds', early), 'EAI_AGAIN');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const names = (await sim.log()).map((entry) => entry.qname);
+      assert.deepEqual(names, ['asked.silent.test']);
+    } finally {
+      model.close();
+      binding.close();
+      await sim.stop();
+    }
+  });
+
+  it('an arm prints what it read: its resident set, the resolver’s peaks, the walk’s channels, each child’s lookups, and its file descriptors', async () => {
+    const reads: WorldReads = {
+      rss: { start: 100 * MIB, peak: 150 * MIB, end: 120 * MIB },
+      resolverPeak: { running: 6, queued: 40 },
+      channels: { opened: 30, busiestSecond: 5 },
+      children: [{ silent: 10, answering: 1 }, { silent: 6 }],
+    };
+    const printed = readsLines(reads).join('\n');
+    assert.match(printed, /100 MiB at the start, 150 MiB at most, 120 MiB at the drain/u);
+    assert.match(printed, /the resolver's most running 6 and queued 40/u);
+    assert.match(printed, /the walk's channels 30, busiest second 5/u);
+    assert.match(printed, /children's lookups: #1 answering 1, silent 10; #2 silent 6/u);
+    const system = { rss: reads.rss, resolverPeak: reads.resolverPeak, channels: reads.channels };
+    assert.equal(readsLines(system).length, 1, 'no helper in system mode');
+    assert.match(
+      teardownLine({ before: 40, after: 43 }, 0),
+      /40 before, 43 after \(\+3\); lookups left on the probe's lanes 0/u,
+    );
+    assert.match(
+      teardownLine({ before: undefined, after: 12 }, 2),
+      /unread \(no \/proc\); lookups left on the probe's lanes 2/u,
+    );
+    // On Linux, where the arms run, /proc says; a socket open is one more.
+    const before = openFds();
+    if (process.platform === 'linux') assert.notEqual(before, undefined, '/proc/self/fd read');
+    if (before !== undefined) {
+      const socket = createSocket('udp4');
+      await new Promise<void>((resolve) => {
+        socket.bind({ address: WORLD_ADDRESS, port: 0 }, resolve);
+      });
+      assert.equal(openFds(), before + 1);
+      await new Promise<void>((resolve) => {
+        socket.close(resolve);
+      });
+    }
+  });
+
+  it('the forwarder’s peak windows: a loss’s window ends at its own end though its timer fires early, and an overlapping loss keeps the transient to the later end', async () => {
+    let now = 0;
+    const due: { readonly at: number; readonly run: () => void; cancelled: boolean }[] = [];
+    const clock: PeakClock = {
+      now: () => now,
+      after: (ms, run) => {
+        const timer = { at: now + ms, run, cancelled: false };
+        due.push(timer);
+        return {
+          cancel: () => {
+            timer.cancelled = true;
+          },
+        };
+      },
+    };
+    /** Fires the next timer due, half a millisecond early on the clock, as Node's may. */
+    const fireEarly = (): void => {
+      const next = due.filter((timer) => !timer.cancelled).sort((a, b) => a.at - b.at)[0];
+      assert.ok(next !== undefined, 'a timer due');
+      next.cancelled = true;
+      now = next.at - 0.5;
+      next.run();
+    };
+    let read = 0;
+    const peaks = new PeakWindows(
+      () => {
+        read += 1;
+        return Promise.resolve(read);
+      },
+      { clock, windowMs: 10_000 },
+    );
+    now = 2_000;
+    await peaks.loss();
+    fireEarly();
+    now = 20_000;
+    await peaks.loss();
+    now = 25_000;
+    await peaks.loss();
+    fireEarly();
+    fireEarly();
+    now = 50_000;
+    const windows = await peaks.finish();
+    assert.deepEqual(
+      windows.map(({ fromMs, toMs, transient }) => [fromMs, toMs, transient]),
+      [
+        [0, 2_000, false],
+        [2_000, 11_999.5, true],
+        [11_999.5, 20_000, false],
+        [20_000, 25_000, true],
+        [25_000, 29_999.5, true],
+        [29_999.5, 34_999.5, true],
+        [34_999.5, 50_000, false],
+      ],
+    );
+    assert.equal(peaks.failed, undefined);
   });
 
   it('a table glibc does not follow is told apart: a type too many, a try too many, no floor on the wait', () => {
@@ -2175,17 +2689,38 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     helperRssAt60s: 50 * MIB,
   };
 
+  /**
+   * The forwarder's peak in a clean P1 and P2, by window from its start: a loss's window holds the
+   * transient, every other one the bound. P1's kills at about 8 s and 98 s from the forwarder's
+   * start, P2's detach and `hung` loss at about 17 s and 34 s.
+   */
+  const lossWindows = (arm: string): PeakWindow[] => {
+    const [first, second] = arm === 'P1' ? [8_000, 98_000] : [17_000, 34_000];
+    return [
+      { fromMs: 0, toMs: first, peak: 18, transient: false },
+      { fromMs: first, toMs: first + LOSS_WINDOW_MS, peak: 26, transient: true },
+      { fromMs: first + LOSS_WINDOW_MS, toMs: second, peak: 18, transient: false },
+      { fromMs: second, toMs: second + LOSS_WINDOW_MS, peak: 26, transient: true },
+      { fromMs: second + LOSS_WINDOW_MS, toMs: 140_000, peak: 18, transient: false },
+    ];
+  };
+  const withLosses = (arm: string): boolean =>
+    WORLD_ARMS.find(({ name }) => name === arm)?.transient === true;
+
   /** A run of `arm` in `mode` that holds every assertion. */
   const clean = (arm: string, mode: GateMode): WorldFacts => ({
     arm,
     mode,
     checkOn: true,
     q: 1,
-    peakHeld: mode === 'system' ? 6 : 18,
-    transient: 0,
+    peakHeld: mode === 'system' ? 6 : withLosses(arm) ? 26 : 18,
+    transient: withLosses(arm) ? 8 : 0,
+    ...(withLosses(arm) ? { peakWindows: lossWindows(arm) } : {}),
     dropped: 0,
     walkSends: new Map([['127.0.0.1', mode === 'system' ? [] : [0, 100, 200]]]),
     givenUp: { answering: 0, silent: 40, cached: 0 },
+    // The silent zone failing otherwise is not judged: P2's while its child is stopped.
+    failedOtherwise: { answering: 0, silent: 9, cached: 0 },
     refused: 0,
     probeLanes: { answering: 100, silent: mode === 'system' ? 50 : 0 },
     helperPeak: { silent: 3 },
@@ -2195,7 +2730,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     keptLate: [],
     helper: cleanHelper(arm),
     stopped: { downAfterMs: 3_500, hungAfterMs: 21_000, upAfterMs: 21_500 },
-    stall: { ms: 15_000, lookupInFlight: true, unsafeMarks: 0, passedStuck: 0 },
+    stall: { ms: 15_000, replyWaited: true, unsafeMarks: 0, passedStuck: 0 },
     // P5's pool is at its full size, so its kills are never at the memory gate.
     respawn: arm === 'P5' ? { ...cleanRespawn, heldAtEveryKill: false } : cleanRespawn,
     probeCrashes: 0,
@@ -2206,6 +2741,8 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     readonly mode: GateMode;
     readonly breaks: string;
     readonly patch: Partial<WorldFacts>;
+    /** Facts the run did not measure at all. */
+    readonly omit?: readonly (keyof WorldFacts)[];
     readonly says: RegExp;
   }[] = [
     {
@@ -2225,9 +2762,56 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     {
       arm: 'P1',
       mode: 'gate',
-      breaks: 'past the transient',
-      patch: { peakHeld: 27, transient: 8 },
-      says: /held 27 slots for the probe, past 26/u,
+      breaks: 'past the transient after a loss',
+      patch: {
+        peakWindows: lossWindows('P1').map((w) => (w.fromMs === 8_000 ? { ...w, peak: 27 } : w)),
+      },
+      says: /held 27 slots for the probe at 8\.0–18\.5 s, past 26 with the transient after a loss/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'past six and twelve outside a loss',
+      patch: {
+        peakWindows: lossWindows('P1').map((w) => (w.fromMs === 18_500 ? { ...w, peak: 19 } : w)),
+      },
+      says: /held 19 slots for the probe at 18\.5–98\.0 s, past 18 outside a loss/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'twenty slots before its first loss',
+      patch: {
+        peakWindows: lossWindows('P2').map((w) => (w.fromMs === 0 ? { ...w, peak: 20 } : w)),
+      },
+      says: /held 20 slots for the probe at 0\.0–17\.0 s, past 18 outside a loss/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'its peak read once for the run',
+      patch: {},
+      omit: ['peakWindows'],
+      says: /peak was not read across each loss/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'a stretch of its peak not read',
+      patch: { peakWindows: lossWindows('P1').filter((w) => w.fromMs !== 18_500) },
+      says: /peak was not read from 18500 to 98000 ms/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'the transient allowed to its end',
+      patch: {
+        peakWindows: [
+          { fromMs: 0, toMs: 17_000, peak: 18, transient: false },
+          { fromMs: 17_000, toMs: 70_000, peak: 26, transient: true },
+        ],
+      },
+      says: /transient was allowed at 17\.0–70\.0 s, past the 10500 ms/u,
     },
     {
       arm: 'steady',
@@ -2263,6 +2847,48 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       breaks: 'an answering check given up',
       patch: { givenUp: { answering: 1 } },
       says: /1 answering checks given up/u,
+    },
+    {
+      arm: 'zone',
+      mode: 'gate',
+      breaks: 'an answering check failed otherwise (the gate refusing it)',
+      patch: { failedOtherwise: { answering: 1, silent: 9 } },
+      says: /1 answering checks failed otherwise/u,
+    },
+    {
+      arm: 'zone',
+      mode: 'gate',
+      breaks: 'a check refused at the pool',
+      patch: { refused: 1 },
+      says: /1 checks refused/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'answering checks failed at the helper’s loss',
+      patch: { failedOtherwise: { answering: 3, silent: 9 } },
+      says: /3 answering checks failed otherwise/u,
+    },
+    {
+      arm: 'partial',
+      mode: 'gate',
+      breaks: 'a cached name failed otherwise',
+      patch: { failedOtherwise: { cached: 1 } },
+      says: /1 cached checks failed otherwise/u,
+    },
+    {
+      arm: 'steady',
+      mode: 'system',
+      breaks: 'an answering check failed otherwise (no address)',
+      patch: { failedOtherwise: { answering: 2 } },
+      says: /2 answering checks failed otherwise/u,
+    },
+    {
+      arm: 'P6',
+      mode: 'gate',
+      breaks: 'an answering check failed otherwise',
+      patch: { failedOtherwise: { answering: 1, crash: 10 } },
+      says: /1 answering checks failed otherwise/u,
     },
     {
       arm: 'zone',
@@ -2371,15 +2997,30 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       arm: 'P3',
       mode: 'gate',
       breaks: 'a zone marked unsafe by the stall',
-      patch: { stall: { ms: 15_000, lookupInFlight: true, unsafeMarks: 1, passedStuck: 0 } },
+      patch: { stall: { ms: 15_000, replyWaited: true, unsafeMarks: 1, passedStuck: 0 } },
       says: /1 zones marked unsafe/u,
     },
     {
       arm: 'P3',
       mode: 'gate',
-      breaks: 'no lookup in flight at the stall',
-      patch: { stall: { ms: 15_000, lookupInFlight: false, unsafeMarks: 0, passedStuck: 0 } },
-      says: /no probe-lane lookup was in flight/u,
+      breaks: 'its lookup’s reply not waiting through the stall',
+      patch: { stall: { ms: 15_000, replyWaited: false, unsafeMarks: 0, passedStuck: 0 } },
+      says: /no reply waiting through it/u,
+    },
+    {
+      arm: 'P3',
+      mode: 'gate',
+      breaks: 'no stall begun',
+      patch: {},
+      omit: ['stall'],
+      says: /the stall was not begun/u,
+    },
+    {
+      arm: 'P3',
+      mode: 'gate',
+      breaks: 'an answering lookup said passed-stuck by the stall',
+      patch: { stall: { ms: 15_000, replyWaited: true, unsafeMarks: 0, passedStuck: 1 } },
+      says: /1 answering lookups said passed-stuck/u,
     },
     {
       arm: 'P3',
@@ -2438,6 +3079,22 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       says: /held 200 ms around a fork/u,
     },
     {
+      arm: 'P5b',
+      mode: 'gate',
+      breaks: 'a helper of 200 MiB at 60 s',
+      patch: { respawn: { ...cleanRespawn, helperRssAt60s: 200 * MIB } },
+      says: /resident set at 60 s was 209715200/u,
+    },
+    {
+      arm: 'P5',
+      mode: 'gate',
+      breaks: 'a child never ready after a kill',
+      patch: {
+        respawn: { ...cleanRespawn, heldAtEveryKill: false, forkToReadyMs: [200, 200, 200] },
+      },
+      says: /3 children ready after 4 kills/u,
+    },
+    {
       arm: 'P6',
       mode: 'gate',
       breaks: 'the crash name on the probe’s lanes',
@@ -2450,6 +3107,138 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       breaks: 'the crash name not poisoned',
       patch: { helper: { ...cleanHelper('P6'), poisoned: 0 } },
       says: /0 names poisoned/u,
+    },
+    // Each rule's own call of what it shares with others, so that none is seen only passing.
+    {
+      arm: 'warmzone',
+      mode: 'system',
+      breaks: 'an answering check failed otherwise',
+      patch: { failedOtherwise: { answering: 1 } },
+      says: /1 answering checks failed otherwise/u,
+    },
+    {
+      arm: 'warmzone',
+      mode: 'gate',
+      breaks: 'its silence not measured',
+      patch: {},
+      omit: ['afterSilence'],
+      says: /the silence was not measured/u,
+    },
+    {
+      arm: 'partial',
+      mode: 'gate',
+      breaks: 'the silent zone past 3 helper lanes with the check on',
+      patch: { helperPeak: { silent: 4 } },
+      says: /held 4 of the helper’s lanes/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'an answering check given up',
+      patch: { givenUp: { answering: 1, silent: 40 } },
+      says: /1 answering checks given up/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'a silent name on the probe’s lanes',
+      patch: { probeLanes: { answering: 100, silent: 1 } },
+      says: /1 getaddrinfo for the silent zone/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'no helper measured',
+      patch: {},
+      omit: ['helper'],
+      says: /no helper was measured/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'no window of its peak read',
+      patch: { peakWindows: [] },
+      says: /no window of the forwarder’s peak was read/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'a silent name on the probe’s lanes',
+      patch: { probeLanes: { answering: 100, silent: 2 } },
+      says: /2 getaddrinfo for the silent zone/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'no hung loss',
+      patch: {
+        helper: {
+          ...cleanHelper('P2'),
+          losses: { start: 0, skew: 0, exit: 0, hung: 0, memory: 0 },
+        },
+      },
+      says: /0 hung losses, where 1/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'the trouble latch set',
+      patch: { helper: { ...cleanHelper('P2'), trouble: 1 } },
+      says: /lookupHelperTrouble read 1/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'its SIGSTOP not measured',
+      patch: {},
+      omit: ['stopped'],
+      says: /the SIGSTOP was not measured/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'the hung loss late',
+      patch: { stopped: { downAfterMs: 3_000, hungAfterMs: 25_000, upAfterMs: 25_500 } },
+      says: /hung loss came 25000 ms after the SIGSTOP, past 22000/u,
+    },
+    {
+      arm: 'P3',
+      mode: 'gate',
+      breaks: 'a helper loss in the stall',
+      patch: {
+        helper: {
+          ...cleanHelper('P3'),
+          losses: { start: 0, skew: 0, exit: 1, hung: 0, memory: 0 },
+        },
+      },
+      says: /1 exit losses, where 0/u,
+    },
+    {
+      arm: 'P5',
+      mode: 'gate',
+      breaks: 'its respawns not measured',
+      patch: {},
+      omit: ['respawn'],
+      says: /the respawns were not measured/u,
+    },
+    {
+      arm: 'P6',
+      mode: 'gate',
+      breaks: 'two crashes where three find the name',
+      patch: {
+        helper: {
+          ...cleanHelper('P6'),
+          losses: { start: 0, skew: 0, exit: 2, hung: 0, memory: 0 },
+        },
+      },
+      says: /2 exit losses, where 3/u,
+    },
+    {
+      arm: 'walkrate',
+      mode: 'gate',
+      breaks: 'no rules of its own (an arm the judge does not know)',
+      patch: {},
+      says: /no rules for the arm walkrate/u,
     },
   ];
 
@@ -2464,11 +3253,20 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       WORLD_ARMS.map((arm) => arm.name).sort(),
       'the judge knows every arm',
     );
+    // The check off: the helper's 3 a key is the check's, so `partial` does not hold it to them.
+    assert.deepEqual(
+      judgeWorld({ ...clean('partial', 'gate'), checkOn: false, helperPeak: { silent: 5 } }),
+      [],
+    );
   });
 
   for (const one of cases) {
     it(`${one.arm}, ${one.mode}: a run with ${one.breaks} fails`, () => {
-      const said = judgeWorld({ ...clean(one.arm, one.mode), ...one.patch });
+      const patched: WorldFacts = { ...clean(one.arm, one.mode), ...one.patch };
+      const facts = Object.fromEntries(
+        Object.entries(patched).filter(([key]) => !(one.omit ?? []).some((left) => left === key)),
+      ) as unknown as WorldFacts;
+      const said = judgeWorld(facts);
       assert.ok(
         said.some((violation) => one.says.test(violation)),
         `judged ${JSON.stringify(said)}`,

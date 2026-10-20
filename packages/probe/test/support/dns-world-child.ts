@@ -28,7 +28,7 @@ const lookup: ChildLookup = (host, family) => {
     process.stderr.write(`perf crash: ${host}\n`);
     process.kill(process.pid, 'SIGABRT');
   }
-  return model(host, family);
+  return model.lookup(host, family);
 };
 
 runHelperChild(lookup);

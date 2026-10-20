@@ -8,10 +8,19 @@ import { createSocket } from 'node:dgram';
  * (`dns-world-child.ts`).
  *
  * **It is held to glibc, not to the name policy.** The table below is the model's own, never
- * `system-names.ts`, and `glibcDisagreements` holds it to every recording of glibc's wire (D30's
- * recording (A), `test/fixtures/system-names-recordings.json`) of a row it can play: one server,
- * one candidate, no `rotate`. So a model that asked what glibc does not would fail its own test,
- * whatever the policy says.
+ * `system-names.ts`, and it is held in two steps, so that a model that asked what glibc does not
+ * would fail its own test, whatever the policy says:
+ * - `glibcDisagreements` holds the table's wire (`glibcWire`, `glibcSchedule`) to every recording
+ *   of glibc's (D30's recording (A), `test/fixtures/system-names-recordings.json`) of a row it can
+ *   play: one server, one candidate, no `rotate`;
+ * - and `name-lookups.test.ts`'s third block plays `glibcLookup`, the code the arms ask with, at
+ *   the DNS simulator on loopback, and holds what reached it, try by try, and when it gave up, to
+ *   `glibcWire` and `glibcSchedule`.
+ *
+ * **What it does not play.** A try that ends with some of the family's types answered and not
+ * every one ends the lookup with `PARTIAL_CODE`: glibc would then send them one at a time on the
+ * same try (`single-request`, then `single-request-reopen`), and answer with what it got, which no
+ * recording has. No arm meets it: SNMP's family 4 asks one type.
  *
  * **It imports `node:dgram` and nothing of the repository**, so the helper's child that runs it
  * starts as fast as the production child does: the simulators' package root pulls in SSH and
@@ -149,6 +158,10 @@ export interface GlibcHeld {
   /** Recordings compared, by the row's family, and those of a silent plan. */
   readonly byFamily: Readonly<Record<ModelFamily, number>>;
   readonly silent: number;
+  /** The images a recording was compared in, by family, sorted. */
+  readonly images: Readonly<Record<ModelFamily, readonly string[]>>;
+  /** The images a silent plan's recording was compared in, sorted. */
+  readonly silentImages: readonly string[];
   /** Each recording the table does not predict, said in words. */
   readonly disagreements: readonly string[];
 }
@@ -166,6 +179,8 @@ export function glibcDisagreements(
 ): GlibcHeld {
   const byId = new Map(rows.rows.map((row) => [row.id, row]));
   const byFamily: Record<ModelFamily, number> = { 0: 0, 4: 0, 6: 0 };
+  const images: Record<ModelFamily, Set<string>> = { 0: new Set(), 4: new Set(), 6: new Set() };
+  const silentImages = new Set<string>();
   let silent = 0;
   const disagreements: string[] = [];
   for (const recording of recordings) {
@@ -184,6 +199,7 @@ export function glibcDisagreements(
     const schedule = glibcSchedule(timeout, attempts, table);
     const predicted = glibcWire(server, candidate, family, plan, schedule, table);
     byFamily[family] += 1;
+    images[family].add(recording.image);
     const where = `${row.title}, family ${String(family)}, ${recording.plan}, in ${recording.image}`;
     if (JSON.stringify(predicted) !== JSON.stringify(recording.wire)) {
       disagreements.push(
@@ -192,6 +208,7 @@ export function glibcDisagreements(
     }
     if (plan === 'silent') {
       silent += 1;
+      silentImages.add(recording.image);
       const waited = schedule.tries * schedule.waitMs;
       if (recording.ms < waited || recording.ms >= waited + 1_000) {
         disagreements.push(
@@ -200,7 +217,34 @@ export function glibcDisagreements(
       }
     }
   }
-  return { byFamily, silent, disagreements };
+  const sortedOf = (set: ReadonlySet<string>): string[] => [...set].sort();
+  return {
+    byFamily,
+    silent,
+    images: { 0: sortedOf(images[0]), 4: sortedOf(images[4]), 6: sortedOf(images[6]) },
+    silentImages: sortedOf(silentImages),
+    disagreements,
+  };
+}
+
+/**
+ * Where a hold falls short of every image the fixture was recorded in (`images`): a family, or
+ * the silent plans, compared in none of an image's recordings, said in words. A count would not
+ * do: one image's recordings alone clear any floor a count could set.
+ */
+export function glibcCoverageGaps(held: GlibcHeld, images: readonly string[]): string[] {
+  const gaps: string[] = [];
+  const missing = (seen: readonly string[]): string[] =>
+    images.filter((image) => !seen.includes(image));
+  for (const family of [0, 4, 6] as const) {
+    for (const image of missing(held.images[family])) {
+      gaps.push(`family ${String(family)} compared in no recording of ${image}`);
+    }
+  }
+  for (const image of missing(held.silentImages)) {
+    gaps.push(`no silent plan compared in ${image}`);
+  }
+  return gaps;
 }
 
 // --- The model on the wire -------------------------------------------------------------------
@@ -325,18 +369,45 @@ const NOERROR = 0;
 const NXDOMAIN = 3;
 
 /**
- * `getaddrinfo` as the model plays it: one socket a lookup, every type of the family's try sent
- * together, each with its own ID, which a try sends again; the lookup ends once every type has a
- * reply, or when the last try's wait runs out (`EAI_AGAIN`). A SERVFAIL or REFUSED ends the try
- * at once, as glibc moves to the next server and, with one, to the next try. Addresses answer;
- * NXDOMAIN is `ENOTFOUND` and NODATA `ENODATA`.
+ * The code a lookup ends with when a try ends with some of its types answered and not every one,
+ * where glibc would ask them again one at a time (see the file's docstring): never `EAI_AGAIN`,
+ * so that an arm meeting it reads a failure of its own, and never a code the resolver knows.
  */
-export function glibcLookup(
-  options: GlibcModelOptions,
-): (host: string, family: ModelFamily) => Promise<readonly ModelAddress[]> {
+export const PARTIAL_CODE = 'EMODELPARTIAL';
+
+/** The model, and its teardown. */
+export interface GlibcModel {
+  /** `getaddrinfo` as the model plays it (`glibcLookup`). */
+  readonly lookup: (host: string, family: ModelFamily) => Promise<readonly ModelAddress[]>;
+  /** Lookups open now, each with its socket and its timer. */
+  inFlight(): number;
+  /**
+   * Ends every open lookup now with `EAI_AGAIN`, its timer cleared and its socket closed, and
+   * fails every later one the same way before it opens a socket. A lookup holds its timer for up
+   * to `tries` × `waitMs`, and a resolver that has stopped still starts what it has queued, so a
+   * world that stops without it leaves sockets and timers running into the next arm.
+   */
+  close(): void;
+}
+
+/**
+ * `getaddrinfo` as the model plays it: one socket a lookup; every type of the family sent together
+ * at each try, each with its own ID, which every try sends again; the lookup ends once every type
+ * has a reply, or when the last try's wait runs out (`EAI_AGAIN`). A SERVFAIL or REFUSED ends the
+ * try at once, as glibc moves to the next server and, with one, to the next try. Addresses
+ * answer; NXDOMAIN is `ENOTFOUND` and NODATA `ENODATA`; a try that ends with only some types
+ * answered is `PARTIAL_CODE`.
+ */
+export function glibcLookup(options: GlibcModelOptions): GlibcModel {
   const table = options.table ?? GLIBC_QUESTIONS;
-  return (host, family) =>
+  const open = new Set<() => void>();
+  let closed = false;
+  const lookup = (host: string, family: ModelFamily): Promise<readonly ModelAddress[]> =>
     new Promise<readonly ModelAddress[]>((resolve, reject) => {
+      if (closed) {
+        reject(failure('EAI_AGAIN', host));
+        return;
+      }
       const name = host.length > 1 && host.endsWith('.') ? host.slice(0, -1) : host;
       const types = table.types[family];
       const first = Math.floor(Math.random() * 0x10000);
@@ -349,23 +420,32 @@ export function glibcLookup(
       const finish = (error: Error | undefined, addresses?: readonly ModelAddress[]): void => {
         if (done) return;
         done = true;
+        open.delete(end);
         clearTimeout(timer);
         socket.close();
         if (error === undefined) resolve(addresses ?? []);
         else reject(error);
       };
+      const end = (): void => {
+        finish(failure('EAI_AGAIN', host));
+      };
+      open.add(end);
+      // A lookup closed while its socket binds sends nothing: dgram drops the bind's callback for a
+      // socket closed before it is bound.
       const next = (): void => {
         clearTimeout(timer);
+        if (replies.size > 0) {
+          finish(failure(PARTIAL_CODE, host));
+          return;
+        }
         if (attempt >= options.schedule.tries) {
           finish(failure('EAI_AGAIN', host));
           return;
         }
         attempt += 1;
         const sending = attempt;
-        let left = 0;
+        let left = types.length;
         types.forEach((type, index) => {
-          if (replies.has(index)) return;
-          left += 1;
           socket.send(
             encodeQuery(ids[index] ?? 0, name, type),
             options.server.port,
@@ -408,6 +488,14 @@ export function glibcLookup(
       });
       socket.bind({ address: options.localAddress, port: 0 }, next);
     });
+  return {
+    lookup,
+    inFlight: () => open.size,
+    close: () => {
+      closed = true;
+      for (const end of [...open]) end();
+    },
+  };
 }
 
 // --- The world the helper's child is told of -------------------------------------------------
