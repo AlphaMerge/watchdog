@@ -420,13 +420,15 @@ describe('a name the resolver does not answer is held (P-426)', () => {
     const waiting = ask('slow.test', 4, { waitMs: 10_000 });
     await pastStuck();
     assert.equal(await isSettled(waiting), false, 'still waiting, past the bound for stuck');
-    const started = performance.now();
-    await assert.rejects(ask('slow.test'), (error: Error) => {
+    // At once: settled before the loop's next turn, so on no timer (`P-473`; this was under 20 ms
+    // of wall clock, which a loaded host can exceed).
+    const held = ask('slow.test');
+    assert.equal(await isSettled(held), true, 'a new check fails at once');
+    await assert.rejects(held, (error: Error) => {
       assert.equal(codeOf(error), RESOLVER_HELD);
       assert.match(error.message, /a lookup for slow\.test has run \d+ s without an answer/u);
       return true;
     });
-    assert.ok(performance.now() - started < 20, 'a new check fails at once');
     assert.equal(callsFor('slow.test').length, 1, 'held: not asked again');
     // The lookup answers at last, inside the first check's bound: it is answered, and the name is
     // no longer held.
@@ -549,17 +551,10 @@ describe('the resolver’s lanes (P-426)', () => {
     });
     await pastStuck();
     await within(1_000, 'the waiting check to fail once the lanes were stuck', failedEarly);
-    // Asked after: fails at once.
-    const started = performance.now();
-    await assert.rejects(
-      within(
-        1_000,
-        'a check behind stuck lanes to fail at once',
-        ask('late.zone-a.test', 4, { waitMs: 60_000 }),
-      ),
-      (error) => codeOf(error) === RESOLVER_STUCK,
-    );
-    assert.ok(performance.now() - started < 20, 'at once');
+    // Asked after: fails at once, settled before the loop's next turn (`P-473`).
+    const late = ask('late.zone-a.test', 4, { waitMs: 60_000 });
+    assert.equal(await isSettled(late), true, 'a check behind stuck lanes fails at once');
+    await assert.rejects(late, (error) => codeOf(error) === RESOLVER_STUCK);
     assert.equal(callsFor('early.zone-a.test').length, 0, 'not run yet');
     // A lane comes back: the queued lookup runs, and its answer is kept for the next check.
     last('s1.zone-b.test').answer();
@@ -1972,16 +1967,18 @@ describe('“Check now” (P-426)', () => {
     );
   });
 
-  /** "Check now" for a name, through a worker's request, and its reply. */
+  /** "Check now" for a name, through a worker's request, and its reply; `onReply` as it is posted. */
   async function checkNow(
     resolver: NameResolver,
     host: string,
     waitMs: number,
+    onReply?: () => void,
   ): Promise<ResolveReply> {
     const posted: (ResolveAck | ResolveReply)[] = [];
-    resolver.handle({ type: 'resolve', id: 9, host, family: 4, waitMs, fresh: true }, (message) =>
-      posted.push(message),
-    );
+    resolver.handle({ type: 'resolve', id: 9, host, family: 4, waitMs, fresh: true }, (message) => {
+      posted.push(message);
+      if (message.type === 'resolved') onReply?.();
+    });
     await pollWithin(waitMs + 1_000, 'the reply', () =>
       posted.some(({ type }) => type === 'resolved'),
     );
@@ -2020,9 +2017,19 @@ describe('“Check now” (P-426)', () => {
     clock.now = 3_000;
     // The one first lane, busy with a lookup that is slow but not stuck.
     void ask('busy.test', 4, { waitMs: 60_000 }).catch(() => undefined);
-    const started = performance.now();
-    const reply = await checkNow(resolver, 'a.test', 400);
-    assert.ok(performance.now() - started < 400, 'inside its bound, with time for the reply');
+    // Inside its bound: posted before a timer for the bound's last millisecond has fired. Timers
+    // fire in the order they fall due, and the reply is posted in the turn of the one that sends
+    // it. A loaded host can make the reply take over 400 ms, but cannot reorder them (`P-473`).
+    let boundPassed = false;
+    let inBound: boolean | undefined;
+    const bound = setTimeout(() => {
+      boundPassed = true;
+    }, 399);
+    const reply = await checkNow(resolver, 'a.test', 400, () => {
+      inBound = !boundPassed;
+    });
+    clearTimeout(bound);
+    assert.equal(inBound, true, 'inside its bound, with time for the reply');
     assert.ok(reply.ok, JSON.stringify(reply));
     assert.deepEqual(reply.addresses, A);
     assert.match(

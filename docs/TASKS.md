@@ -16193,6 +16193,48 @@ because each is a decision rather than a defect:
       still unvouched at the SIGSTOP could be detached. **Done when** P2 is run scaled down on
       `P-463`'s build. Either it holds, or its answering rule says how many such refusals it
       allows and why, by a recorded decision.
+- [x] **P-473 — `name-resolver`'s "at once" is under 20 ms of wall clock, which a loaded host
+      can exceed** · XS · P-426, P-438 · Found 2026-10-20 beside a `test:perf` run: 'fails a check
+      at once when every lane its lookup could use is stuck; the lookup stays queued' failed its
+      `performance.now() - started < 20`. Two more tests in the file bound wall-clock time from
+      above: 'when its lookup runs past the bound for stuck: new checks fail at once, and one
+      already waiting keeps its bound' (`< 20`), and 'gets the kept answer before its bound behind
+      lanes busy but not stuck' (`< 400` against a 300 ms timer). A unit test may not assert
+      wall-clock time. **Done when** each asserts the behaviour instead: settled before the loop's
+      next turn, or in order against a timer of its own. Each needs a mutant, and the file and
+      its resting twin (`name-resolver-resting.test.ts`) must pass twenty runs in a row at a load
+      near 20.
+
+      **P-473 outcome. "At once" is settled before the loop's next turn, and "before its bound"
+      is before a timer for the bound's last millisecond.** Built 2026-10-20 on `fix/flakes-r1`,
+      in `name-resolver.test.ts` only.
+      - **The two "at once" tests** use `isSettled`, the file's own idiom for "answers at once"
+        (one `setImmediate`): the check's promise is settled before the loop's next turn, so no
+        timer was waited on, however late the loop gets there. Under 20 ms said less: a failure
+        put on a 1 ms timer passed it.
+      - **"Before its bound"** sets a timer of 399 ms beside the 400 ms "Check now", and records
+        at the reply's posting whether it had fired. Node runs timers in the order they fall due,
+        and the reply is posted in the reactions of the early timer that sends it, before any
+        later timer runs. So a loaded host makes both late but cannot reorder them. The note's
+        "within 300 ms" already said which timer answered.
+      - **The lower bounds** ('took >= 200', '>= 150', '>= 100') are left. A loaded host only
+        makes a timer later, so it cannot fail them.
+      - **Not reproduced first.** On the base, the file passed 12 of 12 at loads of 19–20. The
+        ticket's failure was beside a `test:perf` run.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - "Before its bound" is kept as an order against a timer, not dropped. The note's 300 ms
+          names the timer that answered, but only the order kills a mutant whose early timer
+          fires at the bound and still says 300.
+        - The lower bounds stay: no loaded host can falsify them, so no timing claim moves to
+          `test:perf`.
+      - **Mutation: 4 of 4 killed, in the file and in its resting twin.** The mutants:
+        - every at-once outcome put on a 1 ms timer (the old file's two tests pass under it);
+        - the held name's at-once branch removed (removing only its `stuck` test is equivalent
+          here, since a lookup gone stuck also holds its name);
+        - the stuck lanes' branch removed;
+        - the early timer moved to the bound.
+      - **Runs.** The file and its twin together, 20 runs in a row at loads of 21–33 (median 26):
+        20 of 20, 198 tests each.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
