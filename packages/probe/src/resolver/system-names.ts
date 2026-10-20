@@ -1194,6 +1194,12 @@ export interface SystemNamePolicy {
   /** A read-once file now says otherwise than this process's glibc read: a new helper would differ. */
   skewed(): boolean;
   /**
+   * The read-once files that now say otherwise than this process's glibc read (D28), by path, in
+   * the order the policy reads its files: the files a helper started now would read otherwise,
+   * whichever look or load found them moved. Empty when `skewed()` is false.
+   */
+  skewedFiles(): readonly string[];
+  /**
    * The files the gate adds to the resolver's watch (§1.12): gai.conf and /etc/ld.so.preload,
    * beyond the hosts file, resolv.conf and nsswitch.conf it watches already
    * (`systemResolverFiles`, `P-438`). Only those, so that a change to any file reaches the policy
@@ -1642,9 +1648,13 @@ export class GlibcNamePolicy implements SystemNamePolicy {
   }
 
   skewed(): boolean {
-    return FILE_KEYS.some(
+    return this.skewedFiles().length > 0;
+  }
+
+  skewedFiles(): readonly string[] {
+    return FILE_KEYS.filter(
       (key) => this.#readOnce(key) && this.#latest[key] !== this.#atLoad[key].digest,
-    );
+    ).map((key) => this.#files[key]);
   }
 
   watchedFiles(): readonly string[] {

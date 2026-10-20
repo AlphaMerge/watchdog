@@ -1514,8 +1514,83 @@ describe('gate mode’s start, watch and health (P-432 S3)', () => {
       assert.deepEqual(helper.skewed, [], 'resolv.conf is read again by a new child');
       writeFileSync(gai, 'precedence ::ffff:0:0/96 100\n');
       policy.moved = [gai];
+      policy.skewedNow = [gai];
       await resolver.checkFiles();
       assert.deepEqual(helper.skewed, [gai]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('D28: marks the files the policy says are skewed, not the first file read once, when no look moved one', async () => {
+    // A move the watch read while the policy loaded is judged then, and is in no look's moves.
+    const { resolver, policy, helper } = make();
+    policy.readOnce = ['/etc/nsswitch.conf', '/etc/gai.conf', '/etc/ld.so.preload'];
+    await resolver.firstLook();
+    assert.deepEqual(helper.skewed, [], 'nothing skewed, nothing marked');
+    policy.skewedNow = ['/etc/ld.so.preload'];
+    await resolver.checkFiles();
+    assert.deepEqual(helper.skewed, ['/etc/ld.so.preload']);
+  });
+
+  it('D28: a look after the one that saw gai.conf move names no other file, at 2.31 where nsswitch.conf is read once too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ms-gate-'));
+    try {
+      const files = {
+        hosts: join(dir, 'hosts'),
+        resolvConf: join(dir, 'resolv.conf'),
+        nsswitchConf: join(dir, 'nsswitch.conf'),
+        gaiConf: join(dir, 'gai.conf'),
+        ldSoPreload: join(dir, 'ld.so.preload'),
+        nscdSocket: join(dir, 'nscd.socket'),
+      };
+      writeFileSync(files.hosts, '127.0.0.1 localhost\n');
+      writeFileSync(files.resolvConf, 'nameserver 192.0.2.53\n');
+      writeFileSync(files.nsswitchConf, 'hosts: files dns\n');
+      writeFileSync(files.gaiConf, '');
+      const policy = new GlibcNamePolicy({
+        logger: silent,
+        files,
+        platform: 'linux',
+        env: {},
+        glibcVersion: () => '2.31',
+        nodeVersion: 'v24.0.0-test',
+        hostname: () => 'probe-1',
+        socketExists: () => Promise.resolve(false),
+        moduleLook: () => Promise.resolve({ state: 'installed' }),
+      });
+      const helper = new FakeHelper();
+      const resolver = new NameResolver({
+        logger: silent,
+        lookup: () => Promise.reject(new Error('no lookup in this test')),
+        watch: {
+          files: [files.hosts, files.resolvConf, files.nsswitchConf, ...policy.watchedFiles()],
+          everyMs: 60_000,
+        },
+        gate: { helper, policy, tickMs: 3_600_000 },
+      });
+      await resolver.firstLook();
+      assert.deepEqual(policy.describe().readOnce, [
+        files.nsswitchConf,
+        files.gaiConf,
+        files.ldSoPreload,
+      ]);
+      assert.deepEqual(helper.skewed, []);
+      writeFileSync(files.gaiConf, 'precedence ::ffff:0:0/96 100\n');
+      await resolver.checkFiles();
+      assert.equal(helper.skewed[0], files.gaiConf, 'the helper rests naming gai.conf');
+      // The looks after it read nothing new: still gai.conf alone, never nsswitch.conf.
+      await resolver.checkFiles();
+      await resolver.checkFiles();
+      assert.deepEqual([...new Set(helper.skewed)], [files.gaiConf]);
+      // nsswitch.conf and /etc/ld.so.preload edited in their turn, in one look: each named then.
+      writeFileSync(files.nsswitchConf, 'hosts: files myhostname dns\n');
+      writeFileSync(files.ldSoPreload, '/usr/lib/libresolv-shim.so\n');
+      await resolver.checkFiles();
+      assert.deepEqual(
+        [...new Set(helper.skewed)],
+        [files.gaiConf, files.nsswitchConf, files.ldSoPreload],
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

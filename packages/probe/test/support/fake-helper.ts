@@ -377,7 +377,8 @@ export class StubPolicy implements SystemNamePolicy {
   off: CheckOff | undefined = { code: 'unloaded', why: 'the test’s policy vouches for nothing' };
   readOnce: string[] = [];
   moved: string[] = [];
-  isSkewed = false;
+  /** The read-once files the test says now read otherwise than at load (`skewedFiles`). */
+  skewedNow: string[] = [];
   readonly loads: ({ readonly hosts?: string } | undefined)[] = [];
   readonly looks: (readonly WatchedReading[])[] = [];
   watched: string[] = [];
@@ -417,7 +418,11 @@ export class StubPolicy implements SystemNamePolicy {
   }
 
   skewed(): boolean {
-    return this.isSkewed;
+    return this.skewedNow.length > 0;
+  }
+
+  skewedFiles(): readonly string[] {
+    return this.skewedNow;
   }
 
   watchedFiles(): readonly string[] {
@@ -444,7 +449,7 @@ export class StubPolicy implements SystemNamePolicy {
       nscd: false,
       modules: [],
       readOnce: this.readOnce,
-      skewed: this.isSkewed,
+      skewed: this.skewed(),
     };
   }
 }

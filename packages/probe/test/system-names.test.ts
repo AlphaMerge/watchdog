@@ -1864,6 +1864,43 @@ describe('rule 6: what moves after load turns the check off until restart', () =
     assert.equal(reloads.skewed(), false);
   });
 
+  it('names the read-once files skewed now, in the order it reads them, whichever moved first (D28)', async () => {
+    const policy = await loaded({ glibc: '2.31', gai: '' });
+    assert.deepEqual(policy.describe().readOnce, [
+      FILES.nsswitchConf,
+      FILES.gaiConf,
+      FILES.ldSoPreload,
+    ]);
+    assert.deepEqual(policy.skewedFiles(), []);
+    await policy.looked([reading(FILES.gaiConf, 'precedence ::ffff:0:0/96 100\n')]);
+    assert.deepEqual(policy.skewedFiles(), [FILES.gaiConf], 'gai.conf, not the first read once');
+    // A look that reads nothing new leaves it as it stands.
+    await policy.looked([]);
+    assert.deepEqual(policy.skewedFiles(), [FILES.gaiConf]);
+    await policy.looked([reading(FILES.nsswitchConf, 'hosts: files myhostname dns\n')]);
+    assert.deepEqual(policy.skewedFiles(), [FILES.nsswitchConf, FILES.gaiConf]);
+    await policy.looked([reading(FILES.gaiConf, '')]);
+    assert.deepEqual(policy.skewedFiles(), [FILES.nsswitchConf], 'gai.conf put back');
+    assert.equal(policy.skewed(), true);
+    // resolv.conf is read again by any process: a move, never a skew.
+    const resolv = await loaded({ glibc: '2.31' });
+    await resolv.looked([reading(FILES.resolvConf, 'nameserver 10.9.9.9\n')]);
+    assert.equal(offOf(resolv), 'skew');
+    assert.deepEqual(resolv.skewedFiles(), []);
+    assert.equal(resolv.skewed(), false);
+  });
+
+  it('names a read-once file a look before load found moved, which no look returns as moved (D28)', async () => {
+    const { policy } = policyFor({ glibc: '2.31', gai: '' });
+    const early = await policy.looked([reading(FILES.ldSoPreload, '/usr/lib/libresolv-shim.so\n')]);
+    assert.deepEqual(early.moved, []);
+    await policy.load();
+    assert.equal(offOf(policy), 'skew', 'judged when load had read');
+    assert.deepEqual(policy.skewedFiles(), [FILES.ldSoPreload]);
+    assert.deepEqual((await policy.looked([])).moved, [], 'and in no look’s moves after it');
+    assert.deepEqual(policy.skewedFiles(), [FILES.ldSoPreload]);
+  });
+
   it('the hostname’s domain moving, with no search line, is a change (PWH-2, T7)', async () => {
     let now = 'probe-1.lab.example';
     const policy = await loaded({ hostname: () => now });

@@ -59,12 +59,7 @@ import type {
   RouteState,
 } from './lookup-helper.js';
 import type { PoolResolver, ResolveAck, ResolveOutcome, ResolveReply } from './protocol.js';
-import {
-  digestOf,
-  digestOfError,
-  type PolicyChange,
-  type SystemNamePolicy,
-} from './system-names.js';
+import { digestOf, digestOfError, type SystemNamePolicy } from './system-names.js';
 import { afterPolls, LATE_MS } from './verdict-timer.js';
 
 /**
@@ -1300,7 +1295,8 @@ export class NameResolver implements PoolResolver {
     if (gate !== undefined) {
       try {
         this.#accrueCheckOn(gate, this.#now());
-        this.#policyMoved(gate, await gate.policy.looked(readings));
+        await gate.policy.looked(readings);
+        this.#policyMoved(gate);
       } catch (error: unknown) {
         this.#logger.error(
           { err: error, files: readings.map((reading) => reading.file) },
@@ -3648,21 +3644,16 @@ export class NameResolver implements PoolResolver {
   }
 
   /**
-   * What the policy makes of a look (§1.12, D28): a read-once file that moved marks the helper
-   * skewed, so its next loss rests it until the probe restarts.
+   * What the policy makes of a look (§1.12, D28): each read-once file that now says otherwise than
+   * this process's glibc read marks the helper skewed, so its next loss rests it until the probe
+   * restarts, and the helper says to restart for it, once. Asked of the policy at every look, by
+   * name, not taken from the look's moves: a move the watch read while the policy loaded is in no
+   * look's, and a look that moved nothing must name no file, least of all one that never changed
+   * (`P-462`'s review: a fallback to the first read-once file named nsswitch.conf at 2.31 when
+   * gai.conf was edited).
    */
-  #policyMoved(gate: Gate, change: PolicyChange): void {
-    if (change.moved.length === 0 && !gate.policy.skewed()) return;
-    const readOnce = gate.policy.describe().readOnce;
-    let marked = false;
-    for (const file of change.moved) {
-      if (!readOnce.includes(file)) continue;
-      gate.helper.markSkewed(file);
-      marked = true;
-    }
-    if (!marked && gate.policy.skewed()) {
-      gate.helper.markSkewed(readOnce[0] ?? 'a file glibc reads once');
-    }
+  #policyMoved(gate: Gate): void {
+    for (const file of gate.policy.skewedFiles()) gate.helper.markSkewed(file);
   }
 
   /** Starts gate mode's clock: the time with the check on, poison names due, the summary. */
