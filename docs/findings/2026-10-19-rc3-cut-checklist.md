@@ -296,21 +296,34 @@ Each of these is a yes, or the cut waits.
    "otherwise", each arm's event-loop p50, p99 and max, and its routes. **P2's answering checks have
    an allowance** (`P-472`). At full size D19 sends most first lookups to the helper unvouched, so
    its stopped child leaves two kinds of answering check with nowhere to be answered, and S7's first
-   full-size run (on `28b97a7c`) failed on both. **8 given up**: asked in the 3.3 s between the
-   SIGSTOP and the third quiet tick, they waited out their 2,500 ms bound on the one answering
-   lookup sent to the stopped child or in the queue behind it, as every build since S7 would have.
-   **4 failed otherwise**: D27's refusal (`P-463`) of the one answering name in flight at the
-   quiet, asked while the route read `down`, for about 17 s. The judge allows those two kinds and
-   nothing else, from the run's own facts. A check given up is allowed only if it was asked before
-   the route left `up`, for a name in flight in the stopped child at the quiet or held back behind
-   it, and was still waiting at the SIGSTOP. A check failed otherwise is allowed only with D27's
-   words, for a name in flight at the quiet, asked while the route read `down`. No name in flight
-   at the quiet may reach the probe's own lanes after it. P2's row prints what the allowance used
-   ("the hang's allowance"): what the stopped child held and held back, how many checks of each
-   kind it allowed and when they were asked, and how many fell outside it and why. A P2 that fails
-   on a check outside the allowance, or on a kept-off name on the probe's lanes, stops the cut as
-   any failed arm does, and goes to `P-472` with the arm's lines. Scaled down, the walk vouches
-   every answering name before 10 s, so the allowance has nothing to take: only a full-size run
+   full-size run (on `28b97a7c`) failed on both. **8 given up** at their own 2,500 ms bound, on the
+   one answering lookup sent to the stopped child or in the queue behind it (the root-cause report
+   puts them in the first 0.8 s after the SIGSTOP). **4 failed otherwise**: D27's refusal (`P-463`)
+   of the one answering name in flight at the quiet, asked while the route read `down`, for about
+   17 s. The judge allows those two kinds and nothing else, from the run's own facts. Each check is
+   placed by its own sensor's ask at the resolver; where its worker's run was not seen, by an ask of
+   its name within the main thread's lag of its start (the event loop's longest turn while the
+   wheel ran); failing both, its ask is not measured and it is outside. A check given up is allowed
+   only in the bound's own words (`did not resolve within N ms`), never the resolver's at-once ones
+   (`RESOLVER_HELD`, `RESOLVER_STUCK`, `RESOLVER_FULL`, `EAI_AGAIN`), asked before the route left
+   `up` and with its result read after the SIGSTOP, for a name in flight in the stopped child at
+   the quiet or held back behind it; for a held-back name, only with its ask and its 2,500 ms at
+   most the route's `down` and the lag as well, since at `down` the held-back lookups fall back to
+   the probe's lanes, which answer them. A check failed otherwise is allowed only with
+   D27's words, for a name in flight at the quiet, asked while the route read `down`. Beside the
+   allowance: no name in flight at the quiet may reach the probe's own lanes after it, and a
+   kept-off answering name with a check run since must have asked the resolver; the stopped child
+   may hold no more answering names than the helper's first-lookup and retry lanes (5 at its
+   `RESOLVER_LANES` of 6); the window must be the helper's own, handed to the resolver no later
+   than the poll read the route leave `up` and saw the `hung` loss; and a stopped child the tap did
+   not fork fails the arm, its kept-off names not measured. P2's row prints what the allowance used
+   ("the hang's allowance"): the window and the lag, what the stopped child held and held back, how
+   many checks of each kind it allowed and when they were asked, how many fell outside it and why,
+   and how many kept-off answering names were checked while the route read `down`. The probe's-lanes
+   rule is judged only on those, so a row with none says the run did not exercise it. A P2 that
+   fails on a check outside the allowance, or on any of the rules beside it, stops the cut as any
+   failed arm does, and goes to `P-472` with the arm's lines. Scaled down, the walk vouches every
+   answering name before 10 s, so the allowance has nothing to take: only a full-size run
    reaches it. A result on the other side
    of the design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
    loop's p99) stops the cut. That verdict also reads `spread10`'s event-loop p99 in each mode, with
