@@ -708,11 +708,12 @@ export class TemplateService {
   #parse(input: TemplateInput, before: StoredTemplate | null): TemplateWrite {
     const method = notificationMethods.get(input.method);
     // A secret the client did not resend is the one it was never shown. Merge before validating,
-    // so a required secret is not reported missing when it is sitting in the row.
-    const incoming =
-      before === null || before.method !== method.id
-        ? input.settings
-        : notificationMethods.mergeSecrets(method.id, { ...input.settings }, before.settings);
+    // so a required secret is not reported missing when it is sitting in the row. A create, a draft
+    // and a change of method merge over nothing: no secret is carried across, and an explicit
+    // `null` is the unset it is in an edit (`U-23` review round 2) — the editor's preview sends the
+    // draft a Clear left, and a client may send `null` on a create.
+    const stored = before === null || before.method !== method.id ? {} : before.settings;
+    const incoming = notificationMethods.mergeSecrets(method.id, { ...input.settings }, stored);
     const settings = notificationMethods.validate(method.id, incoming);
 
     const recipients = [...(input.recipients ?? before?.recipients ?? [])];

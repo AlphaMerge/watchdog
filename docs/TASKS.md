@@ -32895,6 +32895,47 @@ because each is a decision rather than a defect:
         refused `secretHeaders.<name>` is said in the form's alert but not at the field, since
         the template form passes no `serverProblems` to `SchemaForm`.
 
+      **Review round 2, 2026-10-20: one medium, closed** (core, with two comments in the web
+      corrected and one added to its test; one commit).
+      1. **Clearing a template's secret list or secret object could never be saved** (medium). The
+         editor's Clear sends `null`, which `PUT /templates/{id}` documents as the way to clear a
+         secret, and the core refused it every time: `mergeSecrets` kept the `null`, and the
+         method's schema then met a `null` where it takes a list (`secretArgs`, *Execute
+         program*) or an object (`secretHeaders`, *HTTP action*): 400, `/secretArgs must be
+         array`, with the field still reading *removed on save*. Nothing else in the UI clears
+         stored secret arguments, since a Replace left empty keeps them; the program's Clear was
+         new in round 1's fourth fix, the webhook's older. The editor's preview of the cleared
+         draft was refused the same way, and so was a create sent with a `null`. Now
+         `mergeSecrets` takes an explicit `null` out before validation, with nothing carried for
+         it, as the catalogue's `carryWriteOnly` does for a sensor's: the schema's default fills
+         it — `[]` or `{}`, which redaction reports as no secret — and a required one (a Slack
+         or Teams webhook URL) is refused as missing. A create, a draft and a change of method
+         merge over nothing stored, so a `null` there is the same unset. The UI is unchanged: its
+         two comments saying `null` is the API's unset are true now and say how.
+      - **Tests** (core, 6 new and one changed). `templates.test.ts`: the registry clears a
+        program's `secretArgs` and a webhook's `secretHeaders` sent as `null` over stored ones to
+        `[]` and `{}`, redacted as nothing; for each method, over HTTP, the editor's own PUT —
+        every field `templates-model.ts`'s `initial` rebuilds from the read, the secret `null` —
+        answers 200 with nothing redacted, stores the default, keeps every other setting, and
+        leaves the secret's value nowhere in the row; and a POST with the secret `null` creates a
+        template holding none. The registry test that a cleared Slack URL is not carried now also
+        asserts it is refused as required, where it asserted the `null` was kept.
+        `test-send.test.ts`: a program draft and a webhook draft with their secret `null` preview.
+        **Mutants 3, 3 killed**, each restored byte for byte (`shutil.copy`, `os.utime`,
+        `filecmp`): the `null` kept, as before, 7 failing; a create or a draft not merged, as
+        before, 3; a `null` read as absent, so the stored secret is carried and kept, 7. Core: the
+        two files, 84 tests, green against the dev PostgreSQL, none skipped, and `dist` checked
+        against the restored source. Web suite 95 files and 1,288 tests, green; Prettier, ESLint
+        and `tsc --noEmit` clean on what changed. Not walked in a browser: the editor's request is
+        the one the HTTP test sends.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the core honours `null`,
+        rather than the UI sending `[]` or `{}`. The API documents `null` as how any secret is
+        cleared (`PUT /templates/{id}`, and `api-reference.md`), so any client following it hit the
+        same refusal, and the sensor API already reads it so; the fix belongs where the contract
+        was broken. The form keeps one value for *removed on save* whatever the secret's type,
+        where an empty list or object in the form already means something else: a Replace left
+        empty keeps the stored secret.
+
 - [x] **U-87 — buttons beyond the Credentials tab are edged in the hairline, under 1.4.11's 3:1**
       · XS · U-23 · Found 2026-10-20 by `U-23`'s walk. `RediscoveryPanel.tsx` edges its buttons
       in `--ms-border`, as the Credentials tab did, and `DiscoveryView.tsx` a run's Cancel; 1.36:1

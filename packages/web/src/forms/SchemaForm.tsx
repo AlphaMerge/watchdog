@@ -326,7 +326,9 @@ function Control({
               markTouched(field.path);
             }}
             onClear={() => {
-              // `null` is the API's explicit unset. Omitting the key would instead keep the stored
+              // `null` is the API's explicit unset, whatever the secret's type: the core takes it
+              // out before validating, so a webhook's secret headers are stored as their default
+              // `{}` (`U-23` review round 2). Omitting the key would instead keep the stored
               // secret, which is the opposite of what "clear" means.
               set(null);
               markTouched(field.path);
@@ -1069,7 +1071,9 @@ function SecretList({ items, ...props }: FieldProps & { items: JsonSchema }): Re
         }}
         onKeep={keep}
         onClear={() => {
-          // `null` is the API's unset, as for a single secret; an absent key keeps the list.
+          // `null` is the API's unset, as for a single secret: the core takes it out before
+          // validating, so the list is stored as its default `[]` (`U-23` review round 2). An
+          // absent key keeps the list.
           onChange(writeAt(values, field.path, null));
         }}
       />

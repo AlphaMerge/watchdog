@@ -468,6 +468,12 @@ export class MethodRegistry {
    * read, the operator changes the subject line, and the PUT comes back with no webhook URL in
    * it. Absent means "unchanged" and an explicit `null` means "clear it" — two different
    * intentions that a merge collapsing them would make one.
+   *
+   * **A `null` comes out absent, with nothing carried for it** (`U-23` review round 2), so the
+   * schema decides whether the method may be without the secret: its default where it has one, a
+   * refusal where it is required. The catalogue's `carryWriteOnly` does the same for a sensor's.
+   * Left as `null`, it reached a schema that takes none — the program's `secretArgs` is a list and
+   * the webhook's `secretHeaders` an object — and every request clearing either was refused.
    */
   mergeSecrets(
     methodId: string,
@@ -477,7 +483,12 @@ export class MethodRegistry {
     const merged = structuredClone(incoming);
     for (const path of this.#entries.get(methodId)?.writeOnly ?? []) {
       const segments = path.split('.');
-      if (hasAtPath(merged, segments)) continue;
+      const given = readAtPath(merged, segments);
+      if (given === null) {
+        deleteAtPath(merged, segments);
+        continue;
+      }
+      if (given !== undefined) continue;
       const held = readAtPath(stored, segments);
       // Kept only where it was going (`A-40`): a secret whose destination this edit changes is
       // left behind, and the request has to send it again to keep it.

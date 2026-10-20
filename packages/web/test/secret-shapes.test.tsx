@@ -17,6 +17,11 @@ import { ParamsForm } from '../src/routes/detail/ParamsForm';
  * stored one read "Nothing here yet.", and an entry added there, typed in clear, replaced every
  * stored one on save. The schemas here are the core's (`notifications/methods.ts`), as
  * `GET /notification-methods` sends them.
+ *
+ * **Clear sends `null`**, the API's unset for a secret of any type. That the core saves it — as
+ * the schema's `[]` or `{}`, which is no secret — is the core's to hold, and its
+ * `templates.test.ts` does, over the editor's own PUT (`U-23` review round 2): it refused both
+ * before, the null meeting a schema that takes a list or an object there.
  */
 
 const WEBHOOK: JsonSchema = {

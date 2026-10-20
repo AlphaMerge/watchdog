@@ -13,7 +13,7 @@ import {
   SLACK_METHOD,
   WEBHOOK_METHOD,
 } from '../src/notifications/methods.js';
-import { TemplateService } from '../src/notifications/templates.js';
+import { TemplateService, type TemplateView } from '../src/notifications/templates.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { TriggerService } from '../src/triggers/service.js';
 import {
@@ -162,7 +162,41 @@ describe('notification methods', () => {
       { webhookUrl: null, timeoutMs: 5_000 },
       stored,
     );
-    assert.equal(cleared['webhookUrl'], null, 'an explicit null is an instruction, not an absence');
+    // An instruction, not an absence: nothing is carried for it, and it comes out absent, so the
+    // schema says whether the method may be without it (`U-23` review round 2). Slack may not.
+    assert.ok(!('webhookUrl' in cleared), 'the stored URL was carried, or the null was kept');
+    assert.throws(
+      () => notificationMethods.validate('slack', cleared),
+      (error: unknown) =>
+        error instanceof MethodError &&
+        error.details.problems.some((problem) => /required property 'webhookUrl'/u.test(problem)),
+    );
+  });
+
+  it('clears a secret list or object sent as null to its default, which is no secret (U-23 review round 2)', () => {
+    // The UI's Clear sends `null`, as the API says to. Kept as `null`, it met a schema that takes
+    // a list here and an object there, and the save was refused: `/secretArgs must be array`.
+    const program = notificationMethods.validate(
+      'program',
+      notificationMethods.mergeSecrets(
+        'program',
+        { path: 'page.sh', args: [], secretArgs: null },
+        { path: 'page.sh', args: [], secretArgs: ['--key', 'do-not-leak'], timeoutMs: 30_000 },
+      ),
+    );
+    assert.deepEqual(program['secretArgs'], []);
+    assert.deepEqual(notificationMethods.redact('program', program).redacted, []);
+
+    const webhook = notificationMethods.validate(
+      'webhook',
+      notificationMethods.mergeSecrets(
+        'webhook',
+        { url: 'https://hooks.example.test/pager', secretHeaders: null },
+        { url: 'https://hooks.example.test/pager', secretHeaders: { authorization: BEARER } },
+      ),
+    );
+    assert.deepEqual(webhook['secretHeaders'], {});
+    assert.deepEqual(notificationMethods.redact('webhook', webhook).redacted, []);
   });
 
   describe('a secret stays with where it is sent (A-40)', () => {
@@ -711,6 +745,96 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
     assert.ok(entry?.action === 'template.updated');
     assert.deepEqual(entry.secretsCleared, ['secretArgs'], 'the history names what went');
     assert.ok(!JSON.stringify(entry).includes('do-not-leak'), 'by name, never by value');
+  });
+
+  describe('a secret list or object cleared as the editor clears it (U-23 review round 2)', () => {
+    // The editor's PUT after Clear: the template as read, every field put back, and the secret
+    // sent as `null`, which is what the route's description says clears one. Refused before:
+    // `/secretArgs must be array`, `/secretHeaders must be object`, and nothing else in the UI
+    // could clear them, since a Replace left empty keeps them.
+    const cases = [
+      {
+        method: 'program',
+        secret: 'secretArgs',
+        settings: {
+          path: 'sms.sh',
+          args: ['--to', '%sensor'],
+          secretArgs: ['--key', 'do-not-leak'],
+        },
+        unset: [],
+      },
+      {
+        method: 'webhook',
+        secret: 'secretHeaders',
+        settings: {
+          url: 'https://hooks.example.test/pager',
+          secretHeaders: { authorization: BEARER },
+        },
+        unset: {},
+      },
+    ] as const;
+
+    for (const { method, secret, settings, unset } of cases) {
+      it(`saves a ${method} template with its ${secret} cleared, and stores none`, async () => {
+        const created = await app.inject({
+          method: 'POST',
+          url: '/api/v1/templates',
+          payload: { name: `Cleared ${method}`, method, settings },
+        });
+        assert.equal(created.statusCode, 201, created.body);
+        const read = created.json<TemplateView>();
+        assert.deepEqual(read.redactedSettings, [secret], 'stored, to begin with');
+
+        // The fields `templates-model.ts`'s `initial` rebuilds the draft from, as read.
+        const updated = await app.inject({
+          method: 'PUT',
+          url: `/api/v1/templates/${String(read.id)}`,
+          payload: {
+            name: read.name,
+            description: read.description,
+            method: read.method,
+            settings: { ...read.settings, [secret]: null },
+            subject: read.subject,
+            body: read.body,
+            recipients: read.recipients,
+            priority: read.priority,
+            enabled: read.enabled,
+            summarisation: read.summarisation,
+            summaryWindowSeconds: read.summaryWindowSeconds,
+            scheduleId: read.scheduleId,
+            whenInactive: read.whenInactive,
+          },
+        });
+        assert.equal(updated.statusCode, 200, updated.body);
+        assert.deepEqual(updated.json<TemplateView>().redactedSettings, [], 'shown as not set');
+
+        const rows = await db.query<{ settings: Record<string, unknown> }>(
+          'SELECT settings FROM notification_template WHERE id = $1',
+          [read.id],
+        );
+        const stored = rows[0]?.settings ?? {};
+        assert.deepEqual(stored[secret], unset, 'the schema’s default, which is no secret');
+        assert.ok(!JSON.stringify(stored).includes('do-not-leak'), 'gone from storage');
+        // And everything else as it was: a Clear is not an edit of the command line or the URL.
+        for (const [key, value] of Object.entries(settings)) {
+          if (key !== secret) assert.deepEqual(stored[key], value, key);
+        }
+      });
+
+      it(`creates a ${method} template sent with its ${secret} as null, as having none`, async () => {
+        const created = await app.inject({
+          method: 'POST',
+          url: '/api/v1/templates',
+          payload: {
+            name: `Never set ${method}`,
+            method,
+            settings: { ...settings, [secret]: null },
+          },
+        });
+        assert.equal(created.statusCode, 201, created.body);
+        assert.deepEqual(created.json<TemplateView>().redactedSettings, []);
+      });
+    }
   });
 
   it('refuses recipients on a method that has none', async () => {

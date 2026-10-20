@@ -699,6 +699,33 @@ describe(
         assert.ok(created.id > 0);
       });
 
+      it('previews a draft whose secret list or object was cleared (U-23 review round 2)', async () => {
+        // The editor previews the draft it holds, and after a Clear that holds the secret as
+        // `null`, the API's unset. Refused before, as the save was: the schemas take a list and
+        // an object there, and a draft merges over nothing stored.
+        const plain = await templates.previewDraft(draft, sensorId, Visibility.EVERYTHING);
+        const program = await templates.previewDraft(
+          {
+            ...draft,
+            method: 'program',
+            settings: { path: 'notify.sh', args: ['--to', '%device'], secretArgs: null },
+          },
+          sensorId,
+          Visibility.EVERYTHING,
+        );
+        assert.equal(program.subject, plain.subject);
+        const webhook = await templates.previewDraft(
+          {
+            ...draft,
+            method: 'webhook',
+            settings: { url: 'https://hooks.example.test/pager', secretHeaders: null },
+          },
+          sensorId,
+          Visibility.EVERYTHING,
+        );
+        assert.equal(webhook.subject, plain.subject);
+      });
+
       it('refuses a sensor that is not there', async () => {
         await assert.rejects(
           templates.previewDraft(draft, 999_999, Visibility.EVERYTHING),
