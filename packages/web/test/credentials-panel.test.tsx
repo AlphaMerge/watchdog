@@ -79,6 +79,29 @@ const KINDS: CredentialKindSummary[] = [
   },
 ];
 
+/** SNMP as a v3 set has it: three secrets in one form (`U-90`). */
+const SNMP_V3: CredentialKindSummary = {
+  id: 'snmp',
+  name: 'SNMP',
+  description: 'Used by every SNMP sensor on this object and everything below it.',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      version: { enum: ['v1', 'v2c', 'v3'], default: 'v2c', title: 'SNMP version' },
+      community: { type: 'string', maxLength: 255, writeOnly: true, title: 'Community string' },
+      authKey: { type: 'string', maxLength: 255, writeOnly: true, title: 'Authentication key' },
+      privKey: { type: 'string', maxLength: 255, writeOnly: true, title: 'Privacy key' },
+      allowedTargets: {
+        type: 'array',
+        maxItems: 64,
+        items: { title: 'Allowed target', type: 'string', minLength: 1, maxLength: 255 },
+        title: 'Allowed targets',
+      },
+    },
+  },
+};
+
 const GROUP = { id: 20, name: 'Rack A', kind: 'group' };
 /** The breadcrumb as the core trims it: the probe is visible, the root (#1) is not. */
 const ANCESTORS: ObjectRef[] = [{ id: 10, kind: 'probe', name: 'Local probe' }];
@@ -421,7 +444,7 @@ describe('the credentials tab', () => {
 
     it('is replaced by a value typed after Replace, sent in the body and never in the address', async () => {
       const { calls, form } = await editSnmp({ write: written() });
-      fireEvent.click(within(form).getByRole('button', { name: 'Replace' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace Community string' }));
       const box = within(form).getByLabelText('Community string');
       expect(box.getAttribute('type')).toBe('password');
       fireEvent.change(box, { target: { value: SECRET } });
@@ -444,11 +467,13 @@ describe('the credentials tab', () => {
 
     it('goes back to kept when Replace is abandoned', async () => {
       const { calls, form } = await editSnmp({ write: written() });
-      fireEvent.click(within(form).getByRole('button', { name: 'Replace' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace Community string' }));
       fireEvent.change(within(form).getByLabelText('Community string'), {
         target: { value: SECRET },
       });
-      fireEvent.click(within(form).getByRole('button', { name: 'Keep the current one' }));
+      fireEvent.click(
+        within(form).getByRole('button', { name: 'Keep the current one, Community string' }),
+      );
       expect(within(form).queryByText(/On save/u)).toBeNull();
 
       fireEvent.change(within(form).getByLabelText('SNMP version'), { target: { value: 'v1' } });
@@ -461,7 +486,7 @@ describe('the credentials tab', () => {
 
     it('is cleared by Clear: the request carries null, which is the unset', async () => {
       const { calls, form } = await editSnmp({ write: written() });
-      fireEvent.click(within(form).getByRole('button', { name: 'Clear' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Clear Community string' }));
       expect(within(form).getByText('On save: Community string will be removed.')).toBeDefined();
 
       fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
@@ -477,28 +502,34 @@ describe('the credentials tab', () => {
       // Walked with a keyboard (`U-23`): Replace left focus on the button that took its place,
       // which is the one that undoes it, with the box to type in behind it.
       const { form } = await editSnmp();
-      const replace = within(form).getByRole('button', { name: 'Replace' });
+      const replace = within(form).getByRole('button', { name: 'Replace Community string' });
       replace.focus();
       fireEvent.click(replace);
       expect(document.activeElement).toBe(within(form).getByLabelText('Community string'));
 
-      const keep = within(form).getByRole('button', { name: 'Keep the current one' });
+      const keep = within(form).getByRole('button', {
+        name: 'Keep the current one, Community string',
+      });
       keep.focus();
       fireEvent.click(keep);
-      expect(document.activeElement).toBe(within(form).getByRole('button', { name: 'Replace' }));
+      expect(document.activeElement).toBe(
+        within(form).getByRole('button', { name: 'Replace Community string' }),
+      );
     });
 
     it('says at the field that Clear removes the secret on save, and offers to keep it there', async () => {
       // Walked with a keyboard (`U-23`): Clear changed nothing at the control, which still read
       // "set, write-only" beside the same two buttons, and could be undone only through Replace.
       const { calls, form } = await editSnmp({ write: written() });
-      const clear = within(form).getByRole('button', { name: 'Clear' });
+      const clear = within(form).getByRole('button', { name: 'Clear Community string' });
       clear.focus();
       fireEvent.click(clear);
 
       expect(within(form).queryByText('set, write-only')).toBeNull();
-      expect(within(form).queryByRole('button', { name: 'Clear' })).toBeNull();
-      const keep = within(form).getByRole('button', { name: 'Keep the current one' });
+      expect(within(form).queryByRole('button', { name: 'Clear Community string' })).toBeNull();
+      const keep = within(form).getByRole('button', {
+        name: 'Keep the current one, Community string',
+      });
       expect(document.activeElement).toBe(keep);
       const said = document.getElementById(keep.getAttribute('aria-describedby') ?? '');
       expect(said?.textContent).toBe('removed on save');
@@ -506,7 +537,9 @@ describe('the credentials tab', () => {
 
       fireEvent.click(keep);
       expect(within(form).getByText('set, write-only')).toBeDefined();
-      expect(document.activeElement).toBe(within(form).getByRole('button', { name: 'Clear' }));
+      expect(document.activeElement).toBe(
+        within(form).getByRole('button', { name: 'Clear Community string' }),
+      );
       expect(within(form).queryByText(/On save/u)).toBeNull();
 
       // Kept: a save sends no word about it.
@@ -516,6 +549,36 @@ describe('the credentials tab', () => {
         expect(writes(calls)).toHaveLength(2);
       });
       expect('community' in (writes(calls)[1]?.body as { values: object }).values).toBe(false);
+    });
+
+    it('names each stored secret’s buttons for its field, so three secrets are not three Replaces (U-90)', async () => {
+      // Walked in a browser (`U-23`): by their text alone, an SNMP v3 set's three secrets gave a
+      // reader three buttons called "Replace" and three called "Clear".
+      const { form } = await editSnmp({
+        kinds: [SNMP_V3],
+        sets: [{ ...OWN_SNMP, secretsSet: ['community', 'authKey', 'privKey'] }],
+      });
+      expect(within(form).queryAllByRole('button', { name: 'Replace' })).toEqual([]);
+      expect(within(form).queryAllByRole('button', { name: 'Clear' })).toEqual([]);
+      for (const label of ['Community string', 'Authentication key', 'Privacy key']) {
+        // What is shown is unchanged, and the name starts with it (WCAG 2.5.3).
+        const replace = within(form).getByRole('button', { name: `Replace ${label}` });
+        const clear = within(form).getByRole('button', { name: `Clear ${label}` });
+        expect([replace.textContent, clear.textContent]).toEqual(['Replace', 'Clear']);
+      }
+
+      // Each Keep says which secret it keeps, in both of the places it stands.
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace Authentication key' }));
+      const keepTyped = within(form).getByRole('button', {
+        name: 'Keep the current one, Authentication key',
+      });
+      expect(keepTyped.textContent).toBe('Keep the current one');
+      fireEvent.click(within(form).getByRole('button', { name: 'Clear Privacy key' }));
+      const keepCleared = within(form).getByRole('button', {
+        name: 'Keep the current one, Privacy key',
+      });
+      expect(keepCleared.textContent).toBe('Keep the current one');
+      expect(within(form).getByRole('button', { name: 'Replace Community string' })).toBeDefined();
     });
 
     it('has nothing to save until something changes', async () => {
@@ -559,7 +622,7 @@ describe('the credentials tab', () => {
       expect(within(form).getByText('set, write-only')).toBeDefined();
 
       // Asked to replace it, the box opens empty.
-      fireEvent.click(within(form).getByRole('button', { name: 'Replace' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace Private key' }));
       const box = within(form).getByLabelText<HTMLTextAreaElement>('Private key');
       expect(box.tagName).toBe('TEXTAREA');
       expect(box.value).toBe('');
@@ -588,7 +651,7 @@ describe('the credentials tab', () => {
       fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
       const again = screen.getByRole('form', { name: 'Editing SSH credentials' });
       expect(again.querySelector('textarea')).toBeNull();
-      fireEvent.click(within(again).getByRole('button', { name: 'Replace' }));
+      fireEvent.click(within(again).getByRole('button', { name: 'Replace Private key' }));
       expect(within(again).getByLabelText<HTMLTextAreaElement>('Private key').value).toBe('');
     });
 
@@ -600,7 +663,7 @@ describe('the credentials tab', () => {
       await screen.findByRole('heading', { name: 'Credential sets' });
       fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
       const form = screen.getByRole('form', { name: 'Editing SSH credentials' });
-      fireEvent.click(within(form).getByRole('button', { name: 'Replace' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace Private key' }));
       fireEvent.change(within(form).getByLabelText('Private key'), {
         target: { value: 'typed-and-abandoned' },
       });
@@ -612,7 +675,7 @@ describe('the credentials tab', () => {
       expect(screen.queryByRole('form')).toBeNull();
       expect(document.body.innerHTML.includes('typed-and-abandoned')).toBe(false);
       fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Replace Private key' }));
       expect(screen.getByLabelText<HTMLTextAreaElement>('Private key').value).toBe('');
       expect(writes(api.calls)).toEqual([]);
     });

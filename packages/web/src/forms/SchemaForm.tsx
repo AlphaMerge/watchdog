@@ -676,6 +676,11 @@ const WRITE_ONLY_BUTTON = 'border border-control px-2 py-1 text-xs text-text-mut
  * control: it still read "set, write-only", with the same two buttons, and only a sentence at the
  * foot of the form said the secret would go. It now reads "removed on save", and offers to keep
  * the stored one instead, which is the only way back that does not go through Replace.
+ *
+ * **Each button is named for its field as well as what it does** (`U-90`). By their text alone,
+ * SNMP's three secrets gave three buttons called "Replace" and three called "Clear", which is all
+ * a list of buttons or a voice command has to go on. The name starts with the text shown, so the
+ * words a reader sees are the words that press it (WCAG 2.5.3), and the field's label follows.
  */
 function WriteOnly({
   id,
@@ -719,6 +724,7 @@ function WriteOnly({
     };
     parts[wanted]?.focus();
   });
+  const keepName = `Keep the current one, ${field.label}`;
 
   if (!isSet || replacing) {
     return (
@@ -762,6 +768,7 @@ function WriteOnly({
             ref={keepButton}
             type="button"
             disabled={disabled}
+            aria-label={keepName}
             onClick={() => {
               next.current = 'replace';
               onValue(undefined);
@@ -793,6 +800,7 @@ function WriteOnly({
         ref={replaceButton}
         type="button"
         disabled={disabled}
+        aria-label={`Replace ${field.label}`}
         onClick={() => {
           next.current = 'box';
           onReplace(field.path, true);
@@ -807,6 +815,7 @@ function WriteOnly({
           ref={keepButton}
           type="button"
           disabled={disabled}
+          aria-label={keepName}
           aria-describedby={id}
           onClick={() => {
             next.current = 'clear';
@@ -823,6 +832,7 @@ function WriteOnly({
             ref={clearButton}
             type="button"
             disabled={disabled}
+            aria-label={`Clear ${field.label}`}
             onClick={() => {
               next.current = 'keep';
               onClear();
