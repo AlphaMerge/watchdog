@@ -47,6 +47,16 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * `ROUTE_MS`, and fewer than `SAMPLED_PER_KEY` of its zone's sampled lookups started since the
  * zone's last answer are out. One stuck records NotHeard for its zone (`sampledStuck`).
  *
+ * **A refresh that may ride waits rather than walks** (`P-477`). The wheel hands each second's
+ * checks to the pool at once, so a zone's refreshes reach the check together, before any of their
+ * answers. One that finds the zone's riders taken waits on the zone, until its routing deadline,
+ * for an answer that frees a place. While the zone's window is closed, one walks as the zone's
+ * pilot and the rest wait on its verdict: heard, they ride; not heard, they walk by name as a mixed
+ * zone's names are walked, or route silent, and none rides. A wait that reaches its deadline, or
+ * whose pilot's verdict is dropped, routes `stall`, as a stall does (D31). The rule of 2 riders is
+ * D20's, unchanged, so a zone that goes silent still has at most 2 of its refreshes on the probe's
+ * lanes.
+ *
  * **The budgets** (§1.6, D19): every question is open in the budget's ledger, in one of three pools,
  * until its first reply or `FORWARD_HOLD_MS`; a step short of room waits in its pool's queue until
  * its deadline, then routes `budget`. Each server's bucket gives at most 10 questions a second;
@@ -324,7 +334,15 @@ interface KeyState {
   /** Its sampled lookups out, each with the key's answers when it was routed (D20). */
   readonly sampled: Map<object, number>;
   answers: number;
+  /**
+   * A refresh's walk of the key sent while its window was closed, until its verdict, taken or
+   * dropped: the key's other refreshes wait on it rather than walk (`P-477`).
+   */
+  pilotOut: boolean;
 }
+
+/** What a refresh that may ride its zone does now (`P-477`). */
+type Ride = 'sampled' | 'wait' | 'pilot' | 'walk';
 
 interface Question {
   readonly server: string;
@@ -508,7 +526,8 @@ export class DnsCheck {
 
   /**
    * Where a lookup runs (§1.3 rows 3 to 8): at once when the check need not walk, or once its walk
-   * has a verdict. Never rejects.
+   * has a verdict, or, for a refresh waiting to ride its zone, once it rides or may not (`P-477`).
+   * Never rejects.
    */
   route(ask: CheckAsk): CheckRoute | Promise<CheckRoute> {
     const now = this.#now();
@@ -550,32 +569,47 @@ export class DnsCheck {
       ask.boundMs === undefined ? this.#routeMs : Math.floor(ask.boundMs / 4),
     );
     if (waitMs < WALK_MIN_MS) return this.#unvouched(own, 'budget', true);
+    const deadline = this.#realNow() + waitMs;
+    const failed = (error: unknown): CheckRoute => {
+      this.#logger.error({ err: error, host: ask.host }, 'the DNS check failed on a walk');
+      return this.#unvouched(own, 'cannotVouch');
+    };
     const first = candidates[0];
+    let pilot = false;
     if (first !== undefined && !marked && ask.refresh && first === withoutDot(ask.host)) {
-      const sampled = this.#sample(keyOf(first), ask, now);
-      if (sampled !== undefined) return sampled;
+      const key = keyOf(first);
+      const ride = this.#ride(key, ask, now);
+      if (ride === 'sampled') return { route: 'sampled', key };
+      if (ride === 'wait') {
+        return this.#waitToRide(ask, candidates, types, keyOf, key, deadline, waitMs).catch(failed);
+      }
+      pilot = ride === 'pilot';
     }
-    return this.#walk(ask, candidates, types, keyOf, this.#realNow() + waitMs, waitMs).catch(
-      (error: unknown) => {
-        this.#logger.error({ err: error, host: ask.host }, 'the DNS check failed on a walk');
-        return this.#unvouched(own, 'cannotVouch');
-      },
-    );
+    return this.#walk(ask, candidates, types, keyOf, deadline, waitMs, pilot).catch(failed);
   }
 
   /** A probe-lane `getaddrinfo` answered with addresses (§1.5): within `ROUTE_MS`, its key is fresh. */
   answered(key: string, ranMs: number): void {
     const state = this.#keys.get(key);
     const now = this.#now();
-    if (state !== undefined) state.answers += 1;
+    if (state !== undefined) {
+      state.answers += 1;
+      // Its riders out count no more: refreshes waiting on the zone may ride (`P-477`).
+      this.#wake(state, now);
+    }
     if (ranMs > this.#routeMs) return;
     const fresh = state ?? this.#key(key, now);
     fresh.freshUntil = now + KEY_FRESH_MS;
   }
 
-  /** A sampled lookup has settled: it no longer counts against its key (D20). */
+  /**
+   * A sampled lookup has settled, or will not run as sampled: it no longer counts against its key
+   * (D20), and a refresh waiting on the key may take its place (`P-477`).
+   */
   sampledEnded(key: string, ref: object): void {
-    this.#keys.get(key)?.sampled.delete(ref);
+    const state = this.#keys.get(key);
+    if (state === undefined || !state.sampled.delete(ref)) return;
+    this.#wake(state, this.#now());
   }
 
   /**
@@ -662,18 +696,63 @@ export class DnsCheck {
     );
   }
 
-  #sample(key: string, ask: CheckAsk, now: number): CheckRoute | undefined {
+  /**
+   * What a refresh asked as it is first does about its zone (D20, `P-477`). It walks, as any
+   * lookup does, unless its zone is heard and its own last `getaddrinfo` answered within
+   * `ROUTE_MS`. Then:
+   * - **the window open** (a heard step of the zone sent within `KEY_SAMPLE_MS`): it rides, taking
+   *   a place, if fewer than `SAMPLED_PER_KEY` of the zone's riders routed since its last answer
+   *   are out; otherwise it waits for an answer that frees one;
+   * - **the window closed**: it walks as the zone's pilot, or waits on the pilot already out.
+   */
+  #ride(key: string, ask: CheckAsk, now: number): Ride {
     const state = this.#keys.get(key);
-    if (state === undefined || this.#phase(state, now) !== 'heard') return undefined;
-    if (now - state.lastHeardSentAt > KEY_SAMPLE_MS) return undefined;
-    if (ask.lastRanMs === undefined || ask.lastRanMs > this.#routeMs) return undefined;
+    if (state === undefined || this.#phase(state, now) !== 'heard') return 'walk';
+    if (ask.lastRanMs === undefined || ask.lastRanMs > this.#routeMs) return 'walk';
+    if (now - state.lastHeardSentAt > KEY_SAMPLE_MS) return state.pilotOut ? 'wait' : 'pilot';
     let out = 0;
     for (const answers of state.sampled.values()) if (answers === state.answers) out += 1;
-    if (out >= SAMPLED_PER_KEY) return undefined;
+    if (out >= SAMPLED_PER_KEY) return 'wait';
     state.sampled.set(ask.ref, state.answers);
     state.usedAt = now;
     this.#sampledCount += 1;
-    return { route: 'sampled', key };
+    return 'sampled';
+  }
+
+  /**
+   * A refresh waiting on its zone to ride it (`P-477`), until its routing deadline: judged again
+   * by `#ride` each time the zone is woken, by an answer, a rider's end or a verdict. A verdict
+   * not heard leaves the zone not heard, so the refresh walks as `#walk` walks a mixed or silent
+   * zone's name, and never rides. At its deadline, or woken by a dropped verdict, it routes
+   * `stall`, unvouched, as a scout's waiter does (D31); and so it does when what is left of its
+   * routing wait is under `WALK_MIN_MS`, too short to walk in (§1.3 row 6).
+   */
+  async #waitToRide(
+    ask: CheckAsk,
+    candidates: readonly string[],
+    types: readonly QType[],
+    keyOf: (candidate: string) => string,
+    key: string,
+    deadline: number,
+    waitMs: number,
+  ): Promise<CheckRoute> {
+    const until = this.#deadline(deadline);
+    const generation = this.#generation;
+    let ride: Ride = 'wait';
+    for (;;) {
+      const state = this.#keys.get(key);
+      // Let go while nothing waited on it (`#sweep`): nothing is known of the zone now.
+      if (state === undefined) break;
+      const woke = await this.#waitKey(state, until);
+      if (woke === 'timeout' || woke === 'dropped') return this.#unvouched(key, 'stall', true);
+      // Woken, then the check started again from nothing before it ran: as the reset's own wake.
+      if (generation !== this.#generation) return this.#unvouched(key, 'stall', true);
+      ride = this.#ride(key, ask, this.#now());
+      if (ride === 'sampled') return { route: 'sampled', key };
+      if (ride !== 'wait') break;
+    }
+    if (deadline - this.#realNow() < WALK_MIN_MS) return this.#unvouched(key, 'stall', true);
+    return this.#walk(ask, candidates, types, keyOf, deadline, waitMs, ride === 'pilot');
   }
 
   async #walk(
@@ -683,6 +762,7 @@ export class DnsCheck {
     keyOf: (candidate: string) => string,
     deadline: number,
     waitMs: number,
+    pilot = false,
   ): Promise<CheckRoute> {
     this.#walked += 1;
     const generation = this.#generation;
@@ -690,6 +770,10 @@ export class DnsCheck {
     const asked: string[] = [];
     let triedAsIs = false;
     let at = 0;
+    // One deadline timer for every wait on the key's scouts, however often the key is woken.
+    let until: Promise<boolean> | undefined;
+    // Its zone's pilot (`P-477`): its first step only, sent before anything else is awaited.
+    let piloting = pilot;
     while (at < candidates.length) {
       const candidate = candidates[at] ?? bare;
       const key = keyOf(candidate);
@@ -700,6 +784,7 @@ export class DnsCheck {
       let pool: WalkPool;
       let kind: 'key' | 'name';
       let scout = false;
+      let asPilot = false;
       if (phase === 'silent') {
         if (now < state.rewalkAt) {
           // Nothing asked for this name: its zone's silence is the evidence (finding 10).
@@ -716,9 +801,11 @@ export class DnsCheck {
         kind = 'name';
       } else if (phase === 'unknown') {
         if (state.scoutsOut >= KEY_SCOUTS) {
-          const woke = await this.#waitKey(state, deadline);
+          until ??= this.#deadline(deadline);
+          const woke = await this.#waitKey(state, until);
           if (woke === 'timeout') return this.#unvouched(key, 'scoutWait', true);
           if (woke === 'dropped') return this.#unvouched(key, 'stall', true);
+          piloting = false;
           continue;
         }
         state.scoutsOut += 1;
@@ -728,10 +815,26 @@ export class DnsCheck {
       } else {
         pool = state.freshUntil > now ? 'heard' : 'discovery';
         kind = 'name';
+        // Out until its verdict, taken or dropped: the zone's other refreshes wait on it.
+        if (piloting) {
+          state.pilotOut = true;
+          asPilot = true;
+        }
       }
+      piloting = false;
       if (!asked.includes(key)) asked.push(key);
       if (candidate === bare) triedAsIs = true;
-      const end = await this.#step(state, key, candidate, types, pool, kind, deadline, scout);
+      const end = await this.#step(
+        state,
+        key,
+        candidate,
+        types,
+        pool,
+        kind,
+        deadline,
+        scout,
+        asPilot,
+      );
       switch (end.kind) {
         case 'silent':
           return {
@@ -796,6 +899,7 @@ export class DnsCheck {
     kind: 'key' | 'name',
     deadline: number,
     scout: boolean,
+    pilot: boolean,
   ): Promise<StepEnd> {
     const sentAt = this.#now();
     let verdictAt = this.#realNow() + this.#routeMs;
@@ -805,8 +909,9 @@ export class DnsCheck {
     const questions: Question[] = [];
     const chain = this.#chain(candidate, types, pool, kind, verdictAt, questions);
     void chain.then((end) => {
-      // A scout never outlives its verdict, taken or dropped (D31).
+      // A scout, or a pilot, never outlives its verdict, taken or dropped (D31, `P-477`).
       if (scout) state.scoutsOut = Math.max(0, state.scoutsOut - 1);
+      if (pilot) state.pilotOut = false;
       if (generation !== this.#generation) return;
       switch (end.kind) {
         case 'answered':
@@ -818,8 +923,10 @@ export class DnsCheck {
           this.#notHeard(key, sentAt, candidate);
           return;
         default:
-          // Dropped (D31), deferred or unreadable: no verdict, and its waiters route unvouched.
-          for (const wake of [...state.waiting]) wake('dropped');
+          // Dropped (D31), deferred or unreadable: no verdict, and the waiters on it route
+          // unvouched. Only a scout's or a pilot's is waited on: another walk of a heard zone
+          // deferred says nothing to the refreshes waiting for a place to ride it.
+          if (scout || pilot) for (const wake of [...state.waiting]) wake('dropped');
       }
     });
     if (deadline >= verdictAt) return chain;
@@ -1060,8 +1167,12 @@ export class DnsCheck {
     }
   }
 
-  /** Waits on an unknown key's scouts until a deadline (§1.5): their verdict, or `timeout`. */
-  #waitKey(state: KeyState, deadline: number): Promise<Wake | 'timeout'> {
+  /**
+   * Waits on a key until a deadline (§1.5): an unknown key's scouts, or a heard key's place to ride
+   * or its pilot (`P-477`). Woken with its phase, or `dropped`, or `timeout` at `until`, the
+   * lookup's deadline, armed once for every wait of the lookup.
+   */
+  #waitKey(state: KeyState, until: Promise<boolean>): Promise<Wake | 'timeout'> {
     return new Promise((resolve) => {
       let done = false;
       const wake = (woke: Wake): void => {
@@ -1071,7 +1182,7 @@ export class DnsCheck {
         resolve(woke);
       };
       state.waiting.add(wake);
-      void this.#deadline(deadline).then((late) => {
+      void until.then((late) => {
         if (done) return;
         done = true;
         state.waiting.delete(wake);
@@ -1099,6 +1210,7 @@ export class DnsCheck {
         heardSentBy: new Map(),
         sampled: new Map(),
         answers: 0,
+        pilotOut: false,
       };
       this.#keys.set(key, state);
       this.#sweep(now);
@@ -1311,7 +1423,8 @@ export class DnsCheck {
 const DEFER_WORDS: Readonly<Record<DeferReason, string>> = {
   budget: 'the check had no room for its questions',
   rate: 'a server’s rate of questions was spent',
-  stall: 'a timer fired late, or a verdict was dropped',
+  stall:
+    'a timer fired late, a verdict was dropped, or a refresh found no place to ride its zone by its deadline',
   scoutWait: 'a zone’s scouts had no verdict by the lookup’s deadline',
 };
 

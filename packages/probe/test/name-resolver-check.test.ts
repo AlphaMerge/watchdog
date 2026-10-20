@@ -818,6 +818,60 @@ describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-4
     resolver.stop();
   });
 
+  for (const down of [false, true]) {
+    it(`a refresh that waited to ride its zone gives its place back when it may not run on the probe’s lanes: ${down ? 'failed, the helper down' : 'moved to the helper'} (D20, D27, P-477)`, async () => {
+      // Stuck far later than the case takes: the riders' lanes are busy, not stuck.
+      const { helper, asker, callsFor, clock, ask, resolver } = await make({ stuckMs: 5_000 });
+      const names = [40, 41, 42, 43, 44].map((device) => `dev-${String(device)}.zone-a.test`);
+      for (const name of names) {
+        const first = ask(name);
+        await pollWithin(1_000, `${name} on a lane`, () => callsFor(name).length === 1, 2);
+        callsFor(name)[0]?.answer();
+        await first;
+      }
+      clock.now += ANSWER_MS + 1;
+      // Zone A heard this second, by a new name on a first lane.
+      const fresh = ask('dev-45.zone-a.test');
+      await pollWithin(1_000, 'the new name', () => callsFor('dev-45.zone-a.test').length === 1, 2);
+      callsFor('dev-45.zone-a.test')[0]?.answer();
+      await fresh;
+      const [one, two, three, four, five] = names as [string, string, string, string, string];
+      // Two refreshes ride the zone's sample, its two, on refresh lanes at once.
+      for (const name of [one, two]) {
+        assert.deepEqual(await ask(name), A);
+        assert.equal(callsFor(name).length, 2, `${name} riding`);
+      }
+      // A third waits for a place, and becomes a name the probe may not ask while it waits.
+      assert.deepEqual(await ask(three), A);
+      assert.equal(callsFor(three).length, 1, 'waiting, on no lane');
+      assert.equal(resolver.stats().queued, 1, 'in flight while it waits');
+      helper.avoided.add(`4:${three}`);
+      if (down) helper.move('down');
+      // The first rider answers: the third takes its place, and may not run as sampled.
+      callsFor(one)[1]?.answer();
+      if (down) {
+        await pollWithin(1_000, 'the third failed', () => resolver.stats().queued === 0, 2);
+      } else {
+        await pollWithin(
+          1_000,
+          'the third in the helper',
+          () => helper.asksFor(three).length === 1,
+          2,
+        );
+      }
+      assert.equal(callsFor(three).length, 1, 'never on the probe’s lanes');
+      // Its place given back as it left: two more refreshes of the zone ride at once.
+      for (const name of [four, five]) {
+        assert.deepEqual(await ask(name), A);
+        assert.equal(callsFor(name).length, 2, `${name} riding at once`);
+        assert.equal(asker.askedFor(name).length, 1, `${name} not walked`);
+      }
+      for (const asked of helper.inFlight()) asked.answer(A);
+      for (const name of [two, four, five]) for (const call of callsFor(name)) call.answer();
+      resolver.stop();
+    });
+  }
+
   it('a name failed as it leaves the probe’s queues is counted in the hour’s summary as faulted', async () => {
     const { logger, lines } = captured();
     const { resolver, helper, calls, clock, ask } = await make({

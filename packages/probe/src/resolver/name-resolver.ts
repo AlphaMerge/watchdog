@@ -2159,16 +2159,22 @@ export class NameResolver implements PoolResolver {
         ? stopping(entry.host)
         : undefined
       : this.#gateRefusal(entry);
+    // A refresh that waited on its zone and then rode it (`P-477`) holds a place among the zone's
+    // riders from its route: given back here if it is not going on as sampled.
+    const unsample = (): void => {
+      if (walked.route === 'sampled') gate.check?.sampledEnded(walked.key, pending);
+    };
     if (refusal !== undefined) {
+      unsample();
       this.#refuse(gate, pending, refusal);
       return;
     }
-    // Avoided, and not refused: the helper can ask it, and alone may (D27). A walk's verdict is
-    // never `sampled`, which is routed at once, so no sample is out for it.
+    // Avoided, and not refused: the helper can ask it, and alone may (D27).
     const verdict: CheckRoute =
       this.#poolFor(gate, walked.route) === 'probe' && this.#avoided(gate, entry)
         ? { route: 'unvouched', key: walked.key, why: 'avoided' }
         : walked;
+    if (verdict !== walked) unsample();
     pending.pool = this.#poolFor(gate, verdict.route);
     this.#routed(gate, pending, verdict);
     if (this.#stopped && pending.pool === 'helper' && gate.helper.routeState() !== 'up') {

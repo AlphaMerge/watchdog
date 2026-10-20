@@ -10,6 +10,7 @@ import {
   KEY_SAMPLE_MS,
   KEY_SETTLE_MS,
   REWALK_MAX_MS,
+  SAMPLED_PER_KEY,
   SKIP_MS,
   STAND_DOWN_FIRST_MS,
   stepEndOf,
@@ -536,34 +537,368 @@ describe('the budgets: the pools and each server’s rate (§1.6, D19)', () => {
   });
 });
 
+/**
+ * A refresh as the resolver asks the check for one (§1.3): its last `getaddrinfo` answered in 3 ms,
+ * nobody waiting on it. Routed as the resolver routes it, so a route given at once is not a promise.
+ */
+function refresh(
+  check: DnsCheck,
+  host: string,
+  ref: object = {},
+): CheckRoute | Promise<CheckRoute> {
+  return check.route({
+    host,
+    family: 4,
+    refresh: true,
+    known: true,
+    lastRanMs: 3,
+    boundMs: undefined,
+    ref,
+  });
+}
+
+/** Each kind of route, counted: `unvouched` by why. */
+function kinds(routes: readonly CheckRoute[]): Record<string, number> {
+  const counted: Record<string, number> = {};
+  for (const one of routes) {
+    const kind = one.route === 'unvouched' ? `unvouched:${one.why}` : one.route;
+    counted[kind] = (counted[kind] ?? 0) + 1;
+  }
+  return counted;
+}
+
+const macrotask = (): Promise<void> =>
+  new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+
+/**
+ * The wheel's burst (`P-477`): a zone's refreshes routed in one turn, before any of their answers,
+ * as each second's due checks reach the pool together. Each one that runs on the probe's lanes,
+ * riding or walked, answers a macrotask after it is routed, as `getaddrinfo` does, and the check is
+ * told as the resolver's `#gateSettled` tells it: a rider's place given back, then the zone's
+ * answer. `atOnce` is how many were routed in the turn itself.
+ */
+function burst(check: DnsCheck, hosts: readonly string[]) {
+  const routed = hosts.map((host) => {
+    const ref = {};
+    return { ref, now: refresh(check, host, ref) };
+  });
+  const atOnce = routed.filter(({ now }) => !(now instanceof Promise)).length;
+  const settled = Promise.all(
+    routed.map(async ({ ref, now }) => {
+      const one = await now;
+      if (one.route === 'sampled' || one.route === 'heard') {
+        setImmediate(() => {
+          if (one.route === 'sampled') check.sampledEnded(one.key, ref);
+          check.answered(one.key, 2);
+        });
+      }
+      return one;
+    }),
+  );
+  return { atOnce, settled };
+}
+
 describe('refresh sampling (D20)', () => {
   const ref = (): object => ({});
 
-  it('lets a refresh ride its zone’s heard walk from the last second, at most two since its last answer', async () => {
+  it('lets a refresh ride its zone’s heard walk from the last second, at most two since its last answer: a third waits for the zone’s next answer, then rides', async () => {
     const { check, asker, route, clock, ready } = make();
     await ready;
     asker.rule = () => 'answer';
     await route('dev-1.zone-a.test');
     const asked = asker.asked.length;
-    const refs = [ref(), ref(), ref()];
-    const ride = (i: number) =>
-      route(`dev-${String(i + 2)}.zone-a.test`, {
-        refresh: true,
-        lastRanMs: 3,
-        ref: refs[i] ?? ref(),
-      });
-    assert.equal((await ride(0)).route, 'sampled');
-    assert.equal((await ride(1)).route, 'sampled');
-    assert.equal((await ride(2)).route, 'heard', 'a third is walked');
-    assert.equal(asker.asked.length, asked + 1);
-    // One answers: the zone's later sampled lookups count from there.
+    const [two, three, four, five, six] = [ref(), ref(), ref(), ref(), ref()] as const;
+    const atOnce = (routed: CheckRoute | Promise<CheckRoute>): CheckRoute => {
+      assert.ok(!(routed instanceof Promise), 'routed at once');
+      return routed;
+    };
+    assert.equal(atOnce(refresh(check, 'dev-2.zone-a.test', two)).route, 'sampled');
+    assert.equal(atOnce(refresh(check, 'dev-3.zone-a.test', three)).route, 'sampled');
+    // Each is told in the turn it is routed in: no timer can have fired between.
+    const third = refresh(check, 'dev-4.zone-a.test', four);
+    assert.ok(third instanceof Promise, 'a third waits');
+    assert.equal(asker.asked.length, asked, 'and walks nothing meanwhile');
+    // Another lookup of the zone answers on the probe's lanes: the two out count no more.
     check.answered('d:zone-a.test', 2);
-    assert.equal((await ride(2)).route, 'sampled');
-    // Past a second since the newest heard step, none rides.
+    assert.equal(
+      (await third).route,
+      'sampled',
+      'a third waits for the zone’s next answer, then rides',
+    );
+    // Counted from that answer: one more rides, and the next waits until one of the two is let go.
+    assert.equal(atOnce(refresh(check, 'dev-5.zone-a.test', five)).route, 'sampled');
+    const fifth = refresh(check, 'dev-6.zone-a.test', six);
+    assert.ok(fifth instanceof Promise, 'two out since the answer: the next waits');
+    check.sampledEnded('d:zone-a.test', four);
+    assert.equal((await fifth).route, 'sampled', 'a rider settled: its place is free');
+    assert.equal(asker.asked.length, asked, 'none of them walked');
+    // Past a second since the newest heard step, the window is closed: one walks, the zone's pilot.
     clock.now += KEY_SAMPLE_MS + 1;
     assert.equal(
       (await route('dev-9.zone-a.test', { refresh: true, lastRanMs: 3, ref: ref() })).route,
       'heard',
+    );
+    assert.equal(asker.asked.length, asked + 1);
+    check.stop();
+  });
+
+  it('holds a burst of a heard zone’s refreshes routed in one turn to the design’s count: none walked in an open window, one pilot in a closed one, the rest riding (P-477)', async () => {
+    // The routing wait 5 s: a wait is ended by the zone, never by a loaded host's pause.
+    const { check, asker, clock, route, ready } = make({ routeMs: 5_000 });
+    await ready;
+    asker.rule = () => 'answer';
+    assert.equal((await route('dev-1.zone-a.test')).route, 'heard');
+    const hosts = (from: number): string[] =>
+      Array.from({ length: 12 }, (_, i) => `dev-${String(from + i)}.zone-a.test`);
+    const asked = asker.names().length;
+    const open = burst(check, hosts(2));
+    assert.equal(open.atOnce, SAMPLED_PER_KEY, 'two ride at once, the rest wait');
+    assert.equal(asker.names().length, asked, 'nothing walked in the turn');
+    assert.deepEqual(kinds(await open.settled), { sampled: 12 });
+    assert.equal(asker.names().length, asked, 'the window open: no question');
+    await macrotask();
+    // A second on: no heard step of the zone sent within it.
+    clock.now += KEY_SAMPLE_MS + 1;
+    const closed = burst(check, hosts(20));
+    assert.equal(closed.atOnce, 0, 'none rides a closed window');
+    assert.equal(asker.names().length, asked + 1, 'one walks, as the zone’s pilot');
+    assert.deepEqual(kinds(await closed.settled), { heard: 1, sampled: 11 });
+    assert.equal(asker.names().length, asked + 1, 'the window closed: the pilot’s one question');
+    await macrotask();
+    // The next closed window has a pilot of its own: the last one's verdict let it go.
+    clock.now += KEY_SAMPLE_MS + 1;
+    const again = burst(check, hosts(40));
+    assert.deepEqual(kinds(await again.settled), { heard: 1, sampled: 11 });
+    assert.equal(asker.names().length, asked + 2);
+    check.stop();
+  });
+
+  it('walks at most 1 + keys × q questions a second over 90 simulated seconds of the wheel’s bursts, two zones refreshed (§7.6, P-477)', async (t) => {
+    // The check's clock is the test's: each simulated second moves it, and the routing wait of
+    // 5 s is never reached, so no real time passes but what the bursts take.
+    const { check, asker, clock, route, ready } = make({ routeMs: 5_000 });
+    await ready;
+    asker.rule = () => 'answer';
+    assert.equal((await route('dev-0.zone-a.test')).route, 'heard');
+    assert.equal((await route('dev-0.zone-b.test')).route, 'heard');
+    const before = asker.names().length;
+    const SECONDS = 90;
+    const keys = 2;
+    // Family 4: one question a walk.
+    const q = 1;
+    // Each tick some ms off a second from the last, as the wheel's are, so that a zone's window is
+    // closed at some of its bursts and open at others.
+    const jitter = (second: number): number => (second * 13) % 29;
+    // A zone of 120 names and one of 20, each name refreshed every 10 s.
+    const names = (zone: string, size: number, count: number, second: number): string[] =>
+      Array.from(
+        { length: count },
+        (_, i) => `dev-${String(((second * count + i) % size) + 1)}.${zone}.test`,
+      );
+    const routes: CheckRoute[] = [];
+    let closed = 0;
+    for (let second = 1; second <= SECONDS; second++) {
+      const step = 1_000 + jitter(second) - jitter(second - 1);
+      clock.now += step;
+      if (step > KEY_SAMPLE_MS) closed += 1;
+      const a = burst(check, names('zone-a', 120, 12, second));
+      const b = burst(check, names('zone-b', 20, 2, second));
+      routes.push(...(await a.settled), ...(await b.settled));
+      await macrotask();
+    }
+    assert.ok(closed > 0 && closed < SECONDS, 'some ticks past a second from the last, some short');
+    const walked = asker.names().length - before;
+    t.diagnostic(
+      `${String(walked)} questions in ${String(SECONDS)} s, ${String(closed)} ticks past a second from the last`,
+    );
+    assert.ok(
+      walked <= (1 + keys * q) * SECONDS,
+      `${String(walked)} questions in ${String(SECONDS)} s, past 1 + ${String(keys)} keys × q a second`,
+    );
+    assert.deepEqual(
+      Object.keys(kinds(routes)).sort(),
+      ['heard', 'sampled'],
+      'every refresh rode its zone or walked as its pilot',
+    );
+    assert.equal(kinds(routes)['heard'], walked, 'each walk a pilot’s');
+    check.stop();
+  });
+
+  it('holds a zone to two riders in an outage, and once a stuck rider makes it not heard, its waiting refreshes walk by name and none rides (D20, P-477)', async () => {
+    const riders: object[] = [];
+    let moved = 0;
+    const told: { check?: DnsCheck } = {};
+    const { check, asker, clock, route, ready } = make({
+      // As the resolver's `#keySilent`: the zone's sampled lookups still queued go to the helper,
+      // and give back their places. The first rider runs; the second is queued.
+      onKeySilent: (key) => {
+        for (const rider of riders.slice(1)) {
+          told.check?.sampledEnded(key, rider);
+          moved += 1;
+        }
+      },
+    });
+    told.check = check;
+    await ready;
+    asker.rule = () => 'answer';
+    await route('dev-1.zone-a.test');
+    // The zone stops answering, and its refreshes' getaddrinfo with it: no rider answers.
+    asker.rule = () => 'silent';
+    const walked = check.stats().walked;
+    const asked = asker.names().length;
+    const hosts = Array.from({ length: 12 }, (_, i) => `dev-${String(i + 2)}.zone-a.test`);
+    const routed = hosts.map((host) => {
+      const one = {};
+      return { one, now: refresh(check, host, one) };
+    });
+    const atOnce = routed.filter(({ now }) => !(now instanceof Promise));
+    assert.equal(atOnce.length, SAMPLED_PER_KEY, 'two ride, whatever the burst');
+    assert.equal(asker.names().length, asked, 'the rest wait, and walk nothing');
+    riders.push(...atOnce.map(({ one }) => one));
+    // In the same turn, the first rider passes stuck: NotHeard for its zone, as of its start.
+    check.sampledStuck('d:zone-a.test', clock.now, 'dev-2.zone-a.test');
+    assert.equal(moved, 1, 'the queued rider moved, its place given back');
+    const routes = await Promise.all(routed.map(({ now }) => Promise.resolve(now)));
+    assert.deepEqual(kinds(routes.slice(0, 2)), { sampled: 2 });
+    const waited = routes.slice(2);
+    assert.equal(kinds(waited)['sampled'], undefined, 'none rides a zone not heard');
+    assert.equal(
+      check.stats().walked,
+      walked + waited.length,
+      'each walked by its own name, as a mixed zone’s names are',
+    );
+    assert.equal(check.stats().mixedKeys, 1);
+    check.stop();
+  });
+
+  it('routes a refresh still waiting at its deadline unvouched, as a stall, counted, with nothing walked for it (D31, P-477)', async () => {
+    const { check, asker, budget, route, ready } = make();
+    await ready;
+    asker.rule = () => 'answer';
+    await route('dev-1.zone-a.test');
+    const asked = asker.names().length;
+    // Two riders that never answer, and a third waiting on them.
+    void refresh(check, 'dev-2.zone-a.test');
+    void refresh(check, 'dev-3.zone-a.test');
+    assert.deepEqual(await refresh(check, 'dev-4.zone-a.test'), {
+      route: 'unvouched',
+      key: 'd:zone-a.test',
+      why: 'stall',
+    });
+    assert.equal(budget.stats().deferred.stall, 1, 'counted with the walks deferred');
+    assert.equal(asker.names().length, asked, 'nothing walked for it');
+    check.stop();
+  });
+
+  it('routes a refresh woken to ride just before the check starts again from nothing as a stall, walking nothing (§1.12, P-477)', async () => {
+    const { check, asker, route, ready } = make();
+    await ready;
+    asker.rule = () => 'answer';
+    await route('dev-1.zone-a.test');
+    void refresh(check, 'dev-2.zone-a.test');
+    void refresh(check, 'dev-3.zone-a.test');
+    const third = refresh(check, 'dev-4.zone-a.test');
+    assert.ok(third instanceof Promise, 'waiting for a place');
+    // The zone answers, and in the same turn a watched file changes.
+    check.answered('d:zone-a.test', 2);
+    check.reset();
+    assert.deepEqual(await third, { route: 'unvouched', key: 'd:zone-a.test', why: 'stall' });
+    assert.equal(asker.askedFor('dev-4.zone-a.test').length, 0, 'nothing walked');
+    check.stop();
+  });
+
+  it('routes a waiting refresh released with under 50 ms of its routing wait left as a stall, with no walk (§1.3 row 6, P-477)', async () => {
+    // The check's real clock is the test's: what is left of a wait is set, not slept for.
+    const real = { now: 0 };
+    const { check, asker, budget, clock, route, ready } = make({
+      routeMs: 5_000,
+      realNow: () => real.now,
+    });
+    await ready;
+    asker.rule = () => 'answer';
+    await route('dev-1.zone-a.test');
+    asker.rule = () => 'silent';
+    void refresh(check, 'dev-2.zone-a.test');
+    void refresh(check, 'dev-3.zone-a.test');
+    const third = refresh(check, 'dev-4.zone-a.test');
+    assert.ok(third instanceof Promise, 'waiting for a place');
+    // 40 ms of its 5 s left when a stuck rider makes the zone not heard, and the wait ends.
+    real.now += 5_000 - 40;
+    check.sampledStuck('d:zone-a.test', clock.now, 'dev-2.zone-a.test');
+    assert.deepEqual(await third, { route: 'unvouched', key: 'd:zone-a.test', why: 'stall' });
+    assert.equal(asker.askedFor('dev-4.zone-a.test').length, 0, 'nothing walked');
+    assert.equal(budget.stats().deferred.stall, 1);
+    check.stop();
+  });
+
+  it('routes the refreshes waiting on a pilot whose walk was refused as stalls at once, and the next closed window has a pilot of its own (D31, P-477)', async () => {
+    const { check, asker, clock, route, ready } = make({ routeMs: 5_000 });
+    await ready;
+    asker.rule = () => 'answer';
+    await route('dev-1.zone-a.test');
+    await route('dev-1.zone-h.test');
+    clock.now += KEY_SAMPLE_MS + 1;
+    // Another zone's names spend the server's questions down to the 5 kept for key walks (D19).
+    let spent = false;
+    for (let device = 2; device < 40 && !spent; device++) {
+      const one = await route(`dev-${String(device)}.zone-h.test`);
+      spent = one.route === 'unvouched' && one.why === 'rate';
+    }
+    assert.ok(spent, 'the server’s rate spent');
+    const asked = asker.names().length;
+    const routed = ['dev-2', 'dev-3', 'dev-4'].map((device) =>
+      Promise.resolve(refresh(check, `${device}.zone-a.test`)),
+    );
+    let settled = 0;
+    for (const one of routed) {
+      void one.then(() => {
+        settled += 1;
+      });
+    }
+    // Before any timer: the pilot's verdict dropped wakes them, not their deadlines.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(settled, 3, 'every one routed before a timer fired');
+    assert.deepEqual(kinds(await Promise.all(routed)), {
+      'unvouched:rate': 1,
+      'unvouched:stall': 2,
+    });
+    assert.equal(asker.names().length, asked, 'nothing asked');
+    // A second on, the server has questions again, and the zone's window is still closed.
+    clock.now += KEY_SAMPLE_MS + 1;
+    assert.equal((await refresh(check, 'dev-5.zone-a.test')).route, 'heard', 'a pilot of its own');
+    check.stop();
+  });
+
+  it('keeps a refresh waiting for a place while another walk of its zone is deferred: only a scout’s or a pilot’s lost verdict is waited on (P-477)', async () => {
+    const { check, asker, route, ready } = make({ routeMs: 5_000 });
+    await ready;
+    asker.rule = () => 'answer';
+    await route('dev-1.zone-a.test');
+    await route('dev-1.zone-h.test');
+    // Down to the server's last 5 questions, with the zone's window still open.
+    let spent = false;
+    for (let device = 2; device < 40 && !spent; device++) {
+      const one = await route(`dev-${String(device)}.zone-h.test`);
+      spent = one.route === 'unvouched' && one.why === 'rate';
+    }
+    assert.ok(spent, 'the server’s rate spent');
+    void refresh(check, 'dev-2.zone-a.test');
+    void refresh(check, 'dev-3.zone-a.test');
+    const third = refresh(check, 'dev-4.zone-a.test');
+    assert.ok(third instanceof Promise, 'waiting for a place');
+    // A first lookup of the zone is walked by name, and the server's rate refuses it.
+    assert.deepEqual(await route('dev-5.zone-a.test'), {
+      route: 'unvouched',
+      key: 'd:zone-a.test',
+      why: 'rate',
+    });
+    check.answered('d:zone-a.test', 2);
+    assert.equal(
+      (await third).route,
+      'sampled',
+      'still waiting, and riding once the zone answered',
     );
     check.stop();
   });

@@ -1272,10 +1272,12 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   the probe's own lanes; one they do not, in the helper, and only there, so a check for it while
   the helper is down fails at once and the name stays queued for it. Two names of a zone not
   heard from yet are walked at a time and the rest wait for them; a refresh rides a walk of its
-  zone heard in the last second; a name heard that then sticks on the probe's lanes sends its
-  zone to the helper for five minutes. Each server is asked at most 10 questions a second, 20 at
-  once, and the check holds at most 8 questions open for zones it has heard and 4 for the rest;
-  a name past either goes to the helper. Check now goes to the helper without a walk.
+  zone heard in the last second, at most two between the zone's answers, and the rest wait for a
+  place rather than walk, or, when no walk of the zone was heard in that second, one refresh
+  walks it and the rest wait on that (`P-477`); a name heard that then sticks on the probe's lanes
+  sends its zone to the helper for five minutes. Each server is asked at most 10 questions a
+  second, 20 at once, and the check holds at most 8 questions open for zones it has heard and 4
+  for the rest; a name past either goes to the helper. Check now goes to the helper without a walk.
 - **When the check is off, every name not the hosts file's is asked in the helper, and while
   the system's name settings turn it off, the hosts file's too.** The settings turn it off when
   they say it cannot vouch for what glibc would do (`nscd`, an NSS module it does not model,
