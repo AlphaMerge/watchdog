@@ -112,21 +112,28 @@ Each of these is a yes, or the cut waits.
 
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
-   git worktree add --detach /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite origin/main || exit 1
-   cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite || exit 1
+   rm -f /tmp/rc3-suite-commit /tmp/rc3-diff-commit
+   suite=/Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite
+   if [ -e "${suite}" ]; then git worktree remove --force "${suite}" || exit 1; fi
+   git worktree add --detach "${suite}" origin/main || exit 1
+   cd "${suite}" || exit 1
    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && [ -z "$(git status --porcelain)" ] || exit 1
-   git rev-parse HEAD              # the commit this run passes or fails, for step 1
    perl -e 'alarm 1260; exec @ARGV' ./scripts/dev.sh "timeout 1200 npm ci"
-   MS_TEST_TIMEOUT=3600 perl -e 'alarm 7500; exec @ARGV' ./scripts/test-all.sh
+   MS_TEST_TIMEOUT=3600 perl -e 'alarm 7500; exec @ARGV' ./scripts/test-all.sh 2>&1 | tee /tmp/rc3-suite.out
+   tail -n 1 /tmp/rc3-suite.out | grep -q '^==> clean\. Full log: ' && git rev-parse HEAD > /tmp/rc3-suite-commit
+   cat /tmp/rc3-suite-commit       # the commit that passed, which step 1 compares with origin/main
    ```
 
-   The last line must be `==> clean. Full log: …`. Write down its `tests · pass · fail ·
-   cancelled · skipped` line and every `﹣` line it lists, and compare them with the last green
-   run's: `skipped 0`, `cancelled 0` and `fail 0`, and a `tests` total that fell names suites that
-   did not run. `clean, but N suite(s) never ran` is not a pass. Keep the worktree for steps 0.6
-   and 0.7, and remove it after them (`git worktree remove --force` on it, from the main
-   checkout). Nothing else lands from here until step 7 has pushed: the version commit's parent
-   must be the commit that passed, which step 1 checks.
+   The last line must be `==> clean. Full log: …`, and only then does the block write
+   `/tmp/rc3-suite-commit`. Write down its `tests · pass · fail · cancelled · skipped` line and
+   every `﹣` line it lists, and compare them with the last green run's: `skipped 0`,
+   `cancelled 0` and `fail 0`, and a `tests` total that fell names suites that did not run.
+   `clean, but N suite(s) never ran` is not a pass, and writes no file; nor is a total that
+   fell, so run `rm -f /tmp/rc3-suite-commit` then. A worktree an earlier attempt left is
+   removed first, with its logs. Keep this one for steps 0.6 and 0.7, and remove it after them
+   (`git worktree remove --force` on it, from the main checkout). Nothing else lands from here
+   until step 7 has pushed: the version commit's parent must be the commit that passed, which
+   step 1 checks against this file.
 5. **The VM has room.** Builds and smokes are heavy: start one only when fewer than two toolchain
    runs are going, counting the amd64 project's too, and run the smokes one at a time.
 
@@ -146,16 +153,23 @@ Each of these is a yes, or the cut waits.
    ```bash
    cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite || exit 1
    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && [ -z "$(git status --porcelain)" ] || exit 1
+   [ "$(cat /tmp/rc3-suite-commit 2>/dev/null)" = "$(git rev-parse HEAD)" ] || { echo "step 0.4 has not passed on this commit"; exit 1; }
+   rm -f /tmp/rc3-diff-commit
    perl -e 'alarm 660; exec @ARGV' ./scripts/dev.sh "timeout 600 npx tsc -b packages/probe"
    mkdir -p /tmp/rc3-diff
    MS_DIFF_OUT=/tmp/rc3-diff perl -e 'alarm 3600; exec @ARGV' ./scripts/smoke/name-gate-differential.sh 2>&1 | tee /tmp/rc3-diff/run.out
+   tail -n 1 /tmp/rc3-diff/run.out | grep -q '^==> NAME GATE DIFFERENTIAL PASSED' && git rev-parse HEAD > /tmp/rc3-diff-commit
+   cat /tmp/rc3-diff-commit        # the commit it passed on, which step 1 compares with origin/main
    ```
 
    It must end `==> NAME GATE DIFFERENTIAL PASSED (runs in /tmp/rc3-diff)`, with a `rows in …`
    line for each of the seven images and `systemd-resolved: active` for `ubuntu2404`. Any
    `FAILED` line, or `MS_DIFF_REFRESH` named because a recorded digest could no longer be pulled,
-   stops the cut: a moved image is a new recording, made on `main` and reviewed, not at the cut.
-   `git status --porcelain` in the worktree prints nothing afterwards.
+   stops the cut: a moved image is a new recording, made on `main` and reviewed, not at the cut,
+   and the cut starts again from step 0.3 on the commit that lands it. `git status --porcelain`
+   in the worktree prints nothing afterwards. The block writes `/tmp/rc3-diff-commit` only on the
+   `PASSED` line; a run that passes without step 0.6.1's line is not a pass either, so run
+   `rm -f /tmp/rc3-diff-commit` then.
 
    1. **`P-460`'s walk recording, as a step of its own.** With `P-460` landed, the same run also
       records the name check's own questions for every row and plan, from `DnsCheck.route` with
@@ -175,12 +189,19 @@ Each of these is a yes, or the cut waits.
    user's leave, asked each time. The conditions print at the top of the run (`P-192`), and go in
    the record with the numbers. The command is the one that findings file says it ran, at full
    size; the design's knobs (`p432-r2-final.md` §7.6) are below, and where S7's file differs, its
-   line is the one to run:
+   line is the one to run. The block stops `ms-server` itself, from the main checkout (`stop`
+   removes the container, so Docker does not start it again), and refuses to go on while it or
+   any toolchain run is up: the VM count in step 0.5 does not see `ms-server`, which is not a
+   toolchain run, and `perf-conditions.mjs` warns and never blocks.
 
    ```bash
+   cd /Users/admin/Desktop/Projects/MonitoringSystem && ./scripts/dev-services.sh stop
+   [ -z "$(docker ps -q --filter name='^ms-server$')" ] || { echo "ms-server is still up"; exit 1; }
+   [ "$(docker ps -q --filter name=toolchain-run | wc -l | tr -d ' ')" = 0 ] || { echo "a toolchain run is going"; exit 1; }
    cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-suite || exit 1
    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || exit 1
-   docker ps -q --filter name=toolchain-run | wc -l | tr -d ' '    # 0
+   [ "$(cat /tmp/rc3-suite-commit 2>/dev/null)" = "$(git rev-parse HEAD)" ] || { echo "step 0.4 has not passed on this commit"; exit 1; }
+   mkdir -p /tmp/rc3-diff
    perl -e 'alarm 660; exec @ARGV' ./scripts/dev.sh "timeout 600 npx tsc -b"
    perl -e 'alarm 7260; exec @ARGV' ./scripts/dev.sh "timeout 7200 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups.out
    ```
@@ -188,20 +209,39 @@ Each of these is a yes, or the cut waits.
    Every arm passes (`fail 0`, `cancelled 0`), and each number the findings file records is read
    against this run's: a result on the other side of a bound the findings state, or of the
    design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
-   loop's p99), stops the cut. Then `ms-server` is started and verified, and the paused
-   containers unpaused.
+   loop's p99), stops the cut. Then, **however the block above ended**, `ms-server` is started
+   from the main checkout and verified: it runs `origin/main`, both services name that commit at
+   start, the probe connects, the log has no error line, and the API answers 401 without a
+   credential. Unpause what was paused for the window (`docker unpause` on each).
+
+   ```bash
+   cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin && ./scripts/dev-services.sh start || exit 1
+   perl -e 'alarm 300; exec @ARGV' sh -c 'until docker logs ms-server 2>&1 | grep -qF "connected to core"; do sleep 5; done' || { echo "the probe did not connect"; exit 1; }
+   git rev-parse origin/main                                                      # the commit it runs
+   docker logs ms-server 2>&1 | grep -oE '"commit":"[0-9a-f]+"' | sort -u         # that one, once
+   docker logs ms-server 2>&1 | grep -c '"level":"error"'                         # 0
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/api/v1/objects/root   # 401
+   ```
 
 ## 1. The commit, and a clean worktree for it
 
 ```bash
 cd /Users/admin/Desktop/Projects/MonitoringSystem && git fetch -q origin
-git rev-parse origin/main       # the commit the suite passed on, or stop
+for passed in /tmp/rc3-suite-commit /tmp/rc3-diff-commit; do
+  [ "$(cat "${passed}" 2>/dev/null)" = "$(git rev-parse origin/main)" ] \
+    || { echo "origin/main is not the commit ${passed} names: cut again from step 0.3"; exit 1; }
+done
+git rev-parse origin/main       # the commit the suite (0.4), the differential (0.6) and S7 (0.7) ran on
 git worktree add -b release/rc3 /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut origin/main || exit 1
 cd /Users/admin/Desktop/Projects/MonitoringSystem/.claude/worktrees/rc3-cut && git status --porcelain    # prints nothing
 ```
 
-A second attempt stops at `worktree add`, which refuses while the first attempt's branch or
-worktree is there: clear them with step 3's block, then run this again.
+The loop stops the cut when `origin/main` is not the commit step 0.4's suite and step 0.6's
+differential passed on, which is what a fix landed on `main` since then does: those steps, and
+0.7, run again on the new commit first. S7's verdict is read from its numbers, not from a file,
+so the record names the commit 0.7 ran on beside the other two. A second attempt stops at
+`worktree add`, which refuses while the first attempt's branch or worktree is there: clear them
+with step 3's block, then run this again.
 
 ## 2. The version commit
 
@@ -243,23 +283,34 @@ git tag -a v1.0.0-rc.3 -m "v1.0.0-rc.3: the v1 release candidate, Linux only, fr
 [ "$(git rev-parse 'v1.0.0-rc.3^{commit}')" = "${commit}" ] && echo "tag is ${commit}"
 ```
 
-The tag stays local until step 7. **If anything fails before then**, fix on `main` and cut again
-from step 1: as rc.3 again only if nothing built from this tag has left the machine, and
-otherwise as rc.4. A pushed tag is never moved (rc.1 stands as a tag with no packages for that
-reason). Step 1 makes the branch `release/rc3` and the worktree `rc3-cut`, and git refuses to make
-either again, so clear the first attempt before it: the tag, both worktrees this page makes (their
-`release/` and `build/` go with them), and the branch.
+The tag stays local until step 7. **If anything fails before then**, fix it on `main`, then cut
+again from step 0.3: the markers, the suite (0.4, in a fresh `rc3-suite`), the differential
+(0.6) and S7 (0.7), all on the new commit, and then step 1, whose loop stops while `origin/main`
+is not the commit 0.4 and 0.6 passed on. Again as rc.3 only if nothing built from this tag has
+left the machine, and otherwise as rc.4. A failure that needs no change on `main`, such as a
+`DeadlineExceeded` from BuildKit (step 5), is the same command run again, and changes no commit.
+A pushed tag is never moved (rc.1 stands as a tag with no packages for that reason). Step 1
+makes the branch `release/rc3` and the worktree `rc3-cut`, and git refuses to make either again,
+so clear the first attempt before it: the tag, the three worktrees this page makes (their
+`release/`, `build/` and logs go with them), and the branch. The files steps 0.4 and 0.6 wrote
+stay: each names the commit it passed on, and step 1 compares them with `origin/main`.
 
 ```bash
 cd /Users/admin/Desktop/Projects/MonitoringSystem || exit 1
 git tag -d v1.0.0-rc.3
-for tree in rc3-cut rc3-amd64; do
+for tree in rc3-suite rc3-cut rc3-amd64; do
   if [ -e ".claude/worktrees/${tree}" ]; then git worktree remove --force ".claude/worktrees/${tree}"; fi
 done
 git worktree prune
 git branch -D release/rc3
-git worktree list | grep -E 'rc3-(cut|amd64)'; git branch --list release/rc3    # both print nothing
+git worktree list | grep -E 'rc3-(suite|cut|amd64)'; git branch --list release/rc3    # both print nothing
 ```
+
+**If anything fails after step 7 has pushed**, step 8's x86_64 build or its smokes for instance,
+the tag stays where it is, pushed, and so does the version commit on `main`. The fix lands on
+`main`, and the next candidate is rc.4, cut from step 0 by a copy of this page made for it (every
+`rc.3` read as `rc.4`, the version commit from `1.0.0-rc.3`); rc.3's record says what failed and
+which of its packages, if any, may be used.
 
 ## 4. The arm64 build, and its provenance
 

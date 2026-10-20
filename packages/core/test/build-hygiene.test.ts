@@ -1714,3 +1714,243 @@ describe('scripts/test-all.sh', () => {
     }
   });
 });
+
+/**
+ * The rc.3 cut checklist's guards are commands, and its redo path starts where the gates run
+ * (`H-50`).
+ *
+ * The suite, the differential and S7 run in step 0 on the commit to be cut, and the release notes'
+ * *Verified* line claims all three for the tag's parent. The redo path said "fix on `main` and cut
+ * again from step 1", whose only guard was a comment, so a fix tagged a commit none of them ran
+ * on; it cleared two of the page's three worktrees, so step 0.4 run again stopped at its
+ * `worktree add`; and step 0.7's quiet window left `ms-server` running, which no toolchain count
+ * sees. Each block is read from the page and its guards run here in bash, with `git` and `docker`
+ * stubbed, so nothing touches a repository or a container.
+ */
+describe('the rc.3 cut checklist', () => {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+  const read = (path: string): Promise<string> => readFile(join(repoRoot, path), 'utf8');
+  const page = (): Promise<string> => read('docs/findings/2026-10-19-rc3-cut-checklist.md');
+
+  /** Every fenced bash block on the page, with its list indentation taken off. */
+  const blocks = (text: string): string[] =>
+    [...text.matchAll(/^( *)```bash\n([\s\S]*?)^\1```$/gm)].map(([, indent = '', body = '']) =>
+      body
+        .split('\n')
+        .map((line) => (line.startsWith(indent) ? line.slice(indent.length) : line))
+        .join('\n'),
+    );
+  /** The one block that runs `marker`. */
+  const only = (all: readonly string[], marker: string): string => {
+    const found = all.filter((block) => block.includes(marker));
+    assert.equal(found.length, 1, `one block runs ${marker}, not ${String(found.length)}`);
+    return found[0] ?? '';
+  };
+  /** A line of `block` that `pattern` matches whole. */
+  const line = (block: string, pattern: RegExp): RegExpExecArray => {
+    const found = new RegExp(`^${pattern.source}$`, 'm').exec(block);
+    assert.ok(found, `no line ${pattern.source} in:\n${block}`);
+    return found;
+  };
+
+  /**
+   * Runs `script` in bash in a scratch directory standing for `/tmp`, with `git` printing
+   * `$STUB_HEAD` for anything it is asked and `docker` printing `$STUB_PS`.
+   */
+  const inScratch = (
+    script: string,
+    env: Record<string, string>,
+    files: Record<string, string> = {},
+  ): { status: number | null; out: string; file: (name: string) => string | undefined } => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc3-cut-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'rc3-diff'));
+      writeFileSync(join(dir, 'bin', 'git'), '#!/bin/sh\nprintf "%s\\n" "$STUB_HEAD"\n', {
+        mode: 0o755,
+      });
+      writeFileSync(join(dir, 'bin', 'docker'), '#!/bin/sh\nprintf "%s" "$STUB_PS"\n', {
+        mode: 0o755,
+      });
+      for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+      const result = spawnSync('bash', ['-c', script.replaceAll('/tmp/', `${dir}/`)], {
+        encoding: 'utf8',
+        env: { PATH: `${join(dir, 'bin')}:${process.env['PATH'] ?? '/usr/bin:/bin'}`, ...env },
+        timeout: 30_000,
+      });
+      const kept = new Map(
+        ['rc3-suite-commit', 'rc3-diff-commit']
+          .filter((name) => existsSync(join(dir, name)))
+          .map((name) => [name, readFileSync(join(dir, name), 'utf8')] as const),
+      );
+      return {
+        status: result.status,
+        out: `${result.stdout}${result.stderr}`,
+        file: (name) => kept.get(name),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('clears every worktree it makes before a second attempt', async () => {
+    const text = await page();
+    const made = [
+      ...new Set(
+        [...text.matchAll(/\.claude\/worktrees\/(rc3-[a-z0-9]+)/g)].map((m) => m[1] ?? ''),
+      ),
+    ].sort();
+    assert.deepEqual(made, ['rc3-amd64', 'rc3-cut', 'rc3-suite'], 'the worktrees the page makes');
+
+    const clear = only(blocks(text), 'git tag -d v1.0.0-rc.3');
+    const loop = line(clear, /for tree in ([a-z0-9 -]+); do/);
+    assert.deepEqual((loop[1] ?? '').split(' ').sort(), made, 'step 3 removes each worktree');
+    const check = line(clear, /git worktree list \| grep -E 'rc3-\(([a-z0-9|]+)\)'.*/);
+    assert.deepEqual(
+      (check[1] ?? '')
+        .split('|')
+        .map((name) => `rc3-${name}`)
+        .sort(),
+      made,
+      'step 3 checks each worktree is gone',
+    );
+
+    // Step 0.4, run again after a stop at 0.6 or 0.7, finds its worktree from the first attempt.
+    const suite = only(blocks(text), './scripts/test-all.sh');
+    const removed = suite.indexOf(
+      'if [ -e "${suite}" ]; then git worktree remove --force "${suite}"',
+    );
+    const added = suite.indexOf('git worktree add --detach "${suite}" origin/main || exit 1');
+    assert.ok(removed >= 0 && added > removed, 'step 0.4 removes a worktree left before adding');
+  });
+
+  it('cuts only the commit the suite and the differential passed on', async () => {
+    const text = await page();
+    const all = blocks(text);
+    const suite = only(all, './scripts/test-all.sh');
+    const differential = only(all, 'name-gate-differential.sh');
+
+    // Each records the commit it passed on, from the line its script prints last on a pass.
+    const marker = /tail -n 1 (\S+) \| grep -q '([^']+)' && git rev-parse HEAD > (\S+)/;
+    const passed = [line(suite, marker), line(differential, marker)];
+    const files = passed.map((found) => found[3] ?? '');
+    const testAll = await read('scripts/test-all.sh');
+    const gate = await read('scripts/smoke/name-gate-differential.sh');
+    for (const said of [
+      'echo "==> clean. Full log: ${log}"',
+      'echo "==> clean, but ${skipped_suites} suite(s) never ran. Full log: ${log}"',
+      'echo "==> not clean. Full log: ${log}"',
+    ]) {
+      assert.ok(testAll.includes(said), `test-all.sh says ${said}`);
+    }
+    for (const said of [
+      'echo "==> NAME GATE DIFFERENTIAL PASSED (runs in ${out})"',
+      'echo "==> NAME GATE DIFFERENTIAL FAILED (runs in ${out})" >&2',
+    ]) {
+      assert.ok(gate.includes(said), `the differential says ${said}`);
+    }
+    const cases: readonly (readonly [number, string, boolean])[] = [
+      [0, '==> clean. Full log: /x/1.log', true],
+      [0, '==> clean, but 2 suite(s) never ran. Full log: /x/1.log', false],
+      [0, '==> not clean. Full log: /x/1.log', false],
+      [1, '==> NAME GATE DIFFERENTIAL PASSED (runs in /tmp/rc3-diff)', true],
+      [1, '==> NAME GATE DIFFERENTIAL FAILED (runs in /tmp/rc3-diff)', false],
+    ];
+    for (const [which, last, writes] of cases) {
+      const found = passed[which];
+      const out = (found?.[1] ?? '').replace('/tmp/', '');
+      const name = (found?.[3] ?? '').replace('/tmp/', '');
+      const ran = inScratch(found?.[0] ?? '', { STUB_HEAD: 'c0ffee' }, { [out]: `…\n${last}\n` });
+      assert.equal(ran.file(name), writes ? 'c0ffee\n' : undefined, `after ${last}`);
+    }
+    for (const [block, file, run] of [
+      [suite, files[0] ?? '', './scripts/test-all.sh'],
+      [differential, files[1] ?? '', 'name-gate-differential.sh'],
+    ] as const) {
+      const cleared = new RegExp(`^rm -f .*${file.replaceAll('.', '\\.')}`, 'm').exec(block);
+      assert.ok(cleared && cleared.index < block.indexOf(run), `${file} is cleared before ${run}`);
+    }
+
+    // The differential and S7 start only on the commit the suite passed on.
+    const s7 = only(all, 'name-lookups.test.js');
+    for (const [block, run] of [
+      [differential, 'name-gate-differential.sh'],
+      [s7, 'name-lookups.test.js'],
+    ] as const) {
+      const guard = line(
+        block,
+        new RegExp(
+          `\\[ "\\$\\(cat ${(files[0] ?? '').replaceAll('.', '\\.')} 2>/dev/null\\)" = "\\$\\(git rev-parse HEAD\\)" \\] \\|\\| \\{ .*exit 1; \\}`,
+        ),
+      );
+      assert.ok(guard.index < block.indexOf(run), `the suite's commit is checked before ${run}`);
+      const suiteFile = (files[0] ?? '').replace('/tmp/', '');
+      assert.equal(
+        inScratch(guard[0], { STUB_HEAD: 'c0ffee' }, { [suiteFile]: 'c0ffee\n' }).status,
+        0,
+      );
+      assert.equal(
+        inScratch(guard[0], { STUB_HEAD: 'c0ffee' }, { [suiteFile]: 'feed\n' }).status,
+        1,
+      );
+      assert.equal(inScratch(guard[0], { STUB_HEAD: 'c0ffee' }).status, 1, 'no file, no pass');
+    }
+
+    // Step 1 compares both with origin/main before it makes the branch.
+    const step1 = only(all, 'git worktree add -b release/rc3');
+    const loop = /^for passed in ([^;]+); do\n[\s\S]*?^done$/m.exec(step1);
+    assert.ok(loop, 'step 1 compares nothing with origin/main');
+    assert.deepEqual((loop[1] ?? '').split(' ').sort(), [...files].sort(), 'what step 1 compares');
+    assert.ok(loop.index < step1.indexOf('git worktree add'), 'step 1 compares before it makes');
+    const [suiteName, diffName] = files.map((file) => file.replace('/tmp/', ''));
+    const both = { [suiteName ?? '']: 'c0ffee\n', [diffName ?? '']: 'c0ffee\n' };
+    assert.equal(inScratch(loop[0], { STUB_HEAD: 'c0ffee' }, both).status, 0, 'both passed here');
+    const moved = inScratch(loop[0], { STUB_HEAD: 'beef' }, both);
+    assert.equal(moved.status, 1, 'a fix landed since');
+    assert.match(moved.out, /cut again from step 0\.3/);
+    const stale = { ...both, [diffName ?? '']: 'feed\n' };
+    assert.equal(inScratch(loop[0], { STUB_HEAD: 'c0ffee' }, stale).status, 1, 'one is stale');
+    const none = { [diffName ?? '']: 'c0ffee\n' };
+    assert.equal(inScratch(loop[0], { STUB_HEAD: 'c0ffee' }, none).status, 1, 'no suite');
+
+    // And a failure goes back to the gates, not to step 1.
+    assert.match(
+      text.replace(/\s+/g, ' '),
+      /\*\*If anything fails before then\*\*, fix it on `main`, then cut again from step 0\.3/,
+    );
+  });
+
+  it('stops ms-server for S7’s quiet window, refuses to run beside it, and starts it after', async () => {
+    const all = blocks(await page());
+    const s7 = only(all, 'name-lookups.test.js');
+    const run = s7.indexOf('name-lookups.test.js');
+    const stop = s7.indexOf('./scripts/dev-services.sh stop');
+    const up = line(
+      s7,
+      /\[ -z "\$\(docker ps -q --filter name='\^ms-server\$'\)" \] \|\| \{ .*exit 1; \}/,
+    );
+    const busy = line(
+      s7,
+      /\[ "\$\(docker ps -q --filter name=toolchain-run \| wc -l \| tr -d ' '\)" = 0 \] \|\| \{ .*exit 1; \}/,
+    );
+    assert.ok(stop >= 0 && stop < up.index, 'S7’s block stops ms-server before it looks');
+    assert.ok(up.index < run && busy.index < run, 'S7’s block looks before it runs');
+    assert.equal(inScratch(up[0], { STUB_PS: '80a262488132\n' }).status, 1, 'ms-server up');
+    assert.equal(inScratch(up[0], { STUB_PS: '' }).status, 0, 'ms-server stopped');
+    assert.equal(inScratch(busy[0], { STUB_PS: 'a1\n' }).status, 1, 'a toolchain run');
+    assert.equal(inScratch(busy[0], { STUB_PS: '' }).status, 0, 'no toolchain run');
+    const made = s7.indexOf('mkdir -p /tmp/rc3-diff');
+    assert.ok(made >= 0 && made < s7.indexOf('tee /tmp/rc3-diff/'), 'S7 makes what it tees into');
+
+    // `stop` removes the container, so Docker does not start it again; `start` is checked.
+    const services = await read('scripts/dev-services.sh');
+    assert.match(services, /^name="ms-server"$/m);
+    assert.match(services, /^ {2}stop\)\n {4}docker rm -f "\$\{name\}"/m);
+    const after = only(all, './scripts/dev-services.sh start');
+    const client = await read('packages/probe/src/transport/core-client.ts');
+    assert.ok(client.includes("'connected to core'"), 'the probe logs connected to core');
+    for (const check of ['connected to core', '"level":"error"', '%{http_code}', '"commit":"']) {
+      assert.ok(after.includes(check), `ms-server's start is checked for ${check}`);
+    }
+  });
+});
