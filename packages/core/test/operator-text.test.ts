@@ -43,7 +43,9 @@ import { within } from './support/within.js';
  * It cited tickets 126 times — "(`A-49`)", "the answer `D-04` will act on" — to whoever writes a
  * client, who cannot look one up either. Every summary, description, title, name and pattern
  * sentence in it is read, and every example, default, enum value and constant, as the reference
- * shows them.
+ * shows them. **And the page itself**, read whole: the renderer writes prose of its own — the
+ * lead, the conventions, how to read a field table — and the stream's WebSocket reaches the page
+ * from its schema, which no document carries.
  *
  * **And what the core writes when it runs**, which nothing registers: the message its own sensors
  * carry — Core Health's, Probe Health's — and the one a state is written with when a probe is lost
@@ -289,6 +291,14 @@ function openApiDocument(): Promise<unknown> {
   return built;
 }
 
+/**
+ * The API reference page as it is committed, which is the rendering: `build-hygiene.test.ts` runs
+ * the generator's `--check`, which fails unless this file is what the generator renders now from
+ * the document and the routes the document hides. So reading it reads what a reader is given,
+ * with no second rendering here to disagree with the first.
+ */
+const PAGE = join(REPO, 'docs', 'api-reference.md');
+
 interface Operation {
   readonly description?: string;
   readonly responses?: Readonly<
@@ -344,7 +354,7 @@ const MIGRATIONS = `${join('db', 'migrations')}${sep}`;
  *
  * A route's `summary` and `description` are read, as everything else under `api/` is (`U-93`):
  * they are the API reference, and the one route the OpenAPI document cannot carry, the stream's
- * WebSocket, reaches the reference from its schema here and nowhere else.
+ * WebSocket, is read here as it is written and on the page as it is rendered.
  *
  * The other kind is a SQL comment, anywhere, which `textsIn` takes out of the string it is in.
  */
@@ -537,6 +547,34 @@ describe('the text the API serves an operator (U-92)', () => {
     );
   });
 
+  it('cites none on the API reference page: its own prose and the route no document carries (U-93)', () => {
+    const lines = readFileSync(PAGE, 'utf8').split('\n');
+    // Every line, which reaches what neither walk does: the renderer's lead, its conventions, how
+    // to read a field table and the schemas' lead, written in `scripts/docs`; and the stream's
+    // WebSocket, rendered from its schema, whose description the source walk reads with a SQL
+    // comment taken out, so a ticket after a spaced double dash would pass it.
+    assert.ok(lines.length > 1_000, String(lines.length));
+    for (const part of [
+      '**Generated from the OpenAPI document by ',
+      '- **Everything is under `/api/v1`.**',
+      '- **Every level is listed.**',
+      'The shapes routes share',
+      '### `GET /api/v1/stream`',
+      'A WebSocket. Send ',
+    ]) {
+      assert.ok(
+        lines.some((line) => line.startsWith(part)),
+        `the page holds a line starting "${part}"`,
+      );
+    }
+    assert.deepEqual(
+      lines.flatMap((line, index) =>
+        TICKET.test(line) ? [`docs/api-reference.md:${String(index + 1)}: …${around(line)}…`] : [],
+      ),
+      [],
+    );
+  });
+
   it('says where a report run’s document goes in the fields that hold it (U-93)', async () => {
     // Rewritten for `U-93`, and first written naming the report's `delivery`, which a report does
     // not have: its mode is `outputs.delivery`, and the `delivery` beside the description, in the
@@ -606,7 +644,8 @@ describe('the text the API serves an operator (U-92)', () => {
       [join('settings', 'registry.ts'), 'How often a sensor is scanned'],
       [join('objects', 'repository.ts'), 'AS has_children'],
       // A route's description and summary, which are the API reference: the stream's are in
-      // the reference and not in the OpenAPI document, so this is the walk that reads them.
+      // the reference and not in the OpenAPI document, so this walk reads them as they are
+      // written, and the page's test as they are rendered.
       [join('api', 'routes', 'access.ts'), 'it cannot be told from one that is not there'],
       [join('api', 'routes', 'stream.ts'), 'Live sensor state changes'],
       [join('api', 'routes', 'stream.ts'), 'A WebSocket. Send'],
