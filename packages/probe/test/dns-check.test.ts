@@ -18,6 +18,7 @@ import {
   type DnsCheckOptions,
 } from '../src/resolver/dns-check.js';
 import { ForwardBudget } from '../src/resolver/forward-budget.js';
+import { LATE_MS } from '../src/resolver/verdict-timer.js';
 import { CONF, ScriptedAsker, WalkPolicy } from './support/fake-dns.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -29,6 +30,13 @@ import { pollWithin, within } from './support/within.js';
 
 const silent = pino({ level: 'silent' });
 const ROUTE = 60;
+/**
+ * How late a deadline's timer may fire here before its verdict is dropped as a stall (D31): a
+ * minute. A loaded test host fires a timer over `LATE_MS` late now and then, which is not a stalled
+ * probe, and a test whose silence came back `stall` failed for it (`P-470`). The stall's own test
+ * sets `LATE_MS`.
+ */
+const LATE = 60_000;
 
 /** A log line, by the fields the test reads. */
 interface Line {
@@ -73,6 +81,7 @@ function make(options: Partial<DnsCheckOptions> = {}, setup: { proven?: boolean 
     random: () => 0.5,
     routeMs: ROUTE,
     missMs: 80,
+    lateMs: LATE,
     onKeySilent: (key) => {
       silentKeys.push(key);
     },
@@ -232,13 +241,17 @@ describe('the name check routes by the walk’s verdict (P-432 S6, §1.3)', () =
   });
 
   it('routes a name waiting on scouts that never answer unvouched at its deadline (scoutWait), counted', async () => {
-    const { check, asker, route, budget, ready } = make();
+    // The scouts' verdict at 5 s, their own lookups routed at a quarter of their 400 ms bound:
+    // only a verdict wakes the third, and none comes near its deadline. With the scouts' verdict
+    // 5 ms after it (60 ms against 55), a loaded host that paused 5 ms between the test's calls
+    // put the verdict first, and the third routed silent (`P-470`).
+    const { check, asker, route, budget, ready } = make({ routeMs: 5_000 });
     await ready;
     asker.rule = () => 'silent';
     const [, , third] = await Promise.all([
-      route('dev-1.zone-c.test'),
-      route('dev-2.zone-c.test'),
-      // A quarter of its bound, 55 ms, before the scouts' 60.
+      route('dev-1.zone-c.test', { boundMs: 400 }),
+      route('dev-2.zone-c.test', { boundMs: 400 }),
+      // A quarter of its bound, 55 ms.
       route('dev-3.zone-c.test', { boundMs: 220 }),
     ]);
     assert.deepEqual(third, { route: 'unvouched', key: 'd:zone-c.test', why: 'scoutWait' });
@@ -253,14 +266,23 @@ describe('a key’s phase comes from its verdict times (D18)', () => {
     await ready;
     const cached = (name: string): boolean => /dev-[13]\./u.test(name);
     asker.rule = (_server, name) => (cached(name) ? 'answer' : 'silent');
+    // A silent name's route can come before its key's NotHeard (`P-470`). The step takes the
+    // verdict at a deadline read from the clock as it is sent, and the lookup routes at one read
+    // as it was asked; the two are one only within `SAME_DEADLINE_MS`, which a loaded host's pause
+    // between the reads exceeds. Each NotHeard here, mixed, says `onKeySilent`: the test reads
+    // the verdicts once that many have been taken. A Heard comes with its route, its reply first.
+    const notHeards = (count: number): Promise<void> =>
+      pollWithin(1_000, `NotHeard verdict ${String(count)}`, () => silentKeys.length === count, 2);
     assert.equal((await route('dev-1.zone-b.test')).route, 'heard');
     assert.equal((await route('dev-2.zone-b.test')).route, 'silent');
+    await notHeards(1);
     assert.deepEqual(silentKeys, ['d:zone-b.test'], 'mixed: its sampled lookups would move');
     assert.equal(check.stats().mixedKeys, 1);
     const asked = asker.asked.length;
     assert.equal((await route('dev-3.zone-b.test', { known: true })).route, 'heard');
     clock.now += 1;
     assert.equal((await route('dev-4.zone-b.test')).route, 'silent');
+    await notHeards(2);
     assert.equal(asker.asked.length, asked + 2, 'each name walked, none keySilent');
     // A minute on, the heard verdict is past settling: only NotHeard is newer, and it is silent.
     clock.now += KEY_SETTLE_MS + 1;
@@ -284,7 +306,7 @@ describe('a key’s phase comes from its verdict times (D18)', () => {
   });
 
   it('releases a scout whose verdict is dropped by a stall, and its waiters route unvouched (D31)', async () => {
-    const { check, asker, route, ready } = make();
+    const { check, asker, route, ready } = make({ lateMs: LATE_MS });
     await ready;
     asker.rule = () => 'silent';
     const scouts = [route('dev-1.zone-e.test'), route('dev-2.zone-e.test')];
@@ -305,6 +327,27 @@ describe('a key’s phase comes from its verdict times (D18)', () => {
     // The next lookup scouts again: no scout outlived its verdict.
     asker.rule = () => 'answer';
     assert.equal((await route('dev-4.zone-e.test')).route, 'heard');
+    check.stop();
+  });
+
+  it('takes the verdict of a timer late by less than its `lateMs`, as these tests set it (`P-470`)', async () => {
+    const { check, asker, route, ready } = make();
+    await ready;
+    asker.rule = () => 'silent';
+    const scouts = [route('dev-1.zone-u.test'), route('dev-2.zone-u.test')];
+    // The same stall as above, against a minute.
+    await new Promise((resolve) => setImmediate(resolve));
+    const until = performance.now() + ROUTE + 250;
+    while (performance.now() < until) {
+      // A stall.
+    }
+    const routed = await Promise.all(scouts);
+    assert.deepEqual(
+      routed.map((one) => one.route),
+      ['silent', 'silent'],
+    );
+    // Its NotHeards, which can come after their routes, as the first test here says.
+    await pollWithin(1_000, 'the verdicts taken', () => check.stats().silentKeys === 1, 2);
     check.stop();
   });
 });
@@ -807,6 +850,7 @@ describe('c-ares as the check asks with it, against the DNS simulator (§1.4)', 
       budget: new ForwardBudget({ now: () => performance.now() }),
       asker: caresAsker({ port }),
       now: () => performance.now(),
+      lateMs: LATE,
     });
     check.start();
     await pollWithin(2_000, 'the canary', () => check.stats().proven, 5);

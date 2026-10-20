@@ -299,6 +299,8 @@ export interface DnsCheckOptions {
   readonly missMs?: number;
   /** `CANARY_EVERY_MS` unless a test says. */
   readonly canaryEveryMs?: number;
+  /** `LATE_MS` unless a test says: a timer later than this drops its verdict as a stall (D31). */
+  readonly lateMs?: number;
   /** A key went silent or mixed: its sampled lookups still queued move to the helper (D20). */
   readonly onKeySilent?: (key: string) => void;
 }
@@ -379,6 +381,7 @@ export class DnsCheck {
   readonly #routeMs: number;
   readonly #missMs: number;
   readonly #canaryEveryMs: number;
+  readonly #lateMs: number;
   readonly #onKeySilent: (key: string) => void;
   readonly #keys = new Map<string, KeyState>();
   /** Questions still open, by (server, name, type): a second asker listens (§1.4). */
@@ -418,6 +421,7 @@ export class DnsCheck {
     this.#routeMs = options.routeMs ?? ROUTE_MS;
     this.#missMs = options.missMs ?? MISS_MS;
     this.#canaryEveryMs = options.canaryEveryMs ?? CANARY_EVERY_MS;
+    this.#lateMs = options.lateMs ?? LATE_MS;
     this.#onKeySilent = options.onKeySilent ?? (() => undefined);
   }
 
@@ -1011,7 +1015,7 @@ export class DnsCheck {
       const armed = this.#realNow();
       const wait = Math.max(0, at - armed);
       const timer = setTimeout(() => {
-        const late = this.#realNow() - armed - wait > LATE_MS;
+        const late = this.#realNow() - armed - wait > this.#lateMs;
         afterPolls(() => {
           resolve(late);
         });

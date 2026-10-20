@@ -15996,7 +15996,7 @@ because each is a decision rather than a defect:
         - **A loss said before its exit is read names no sender.** That is a child that did not go
           at the kill, such as one in D state. The loss itself is filled when the exit comes, as
           its `signal` is.
-- [ ] **P-470 — `dns-check`'s "is mixed once both kinds of verdict are within a minute" failed
+- [x] **P-470 — `dns-check`'s "is mixed once both kinds of verdict are within a minute" failed
       once under load** · XS · P-432 · Found 2026-10-20 by `P-469`'s targeted run, beside another
       session's suite at a host load near 13. The test's last assertion read `silentKeys` 0 where
       it expects 1, a minute after the key was mixed. The same build passed the file three times
@@ -16007,6 +16007,80 @@ because each is a decision rather than a defect:
       found from a run that reproduces it under load, the test waits for every reply of the
       key's walks before it moves the clock (or reads the verdicts it means), with a mutant, and
       the file passes twenty runs in a row at a load near 20.
+
+      **P-470 outcome. The last silent name's NotHeard came after the test read the key, and the
+      file had two more tests that a loaded host could fail.** Built 2026-10-20 on
+      `fix/flakes-r1`, in `dns-check.test.ts`, with `lateMs` added to `dns-check.ts`.
+      - **Reproduced.** The test alone, 120 runs in a row beside busy loops in the toolchain
+        container, at loads of 11–23 on the VM's 8 CPUs, failed 2 times, both at loads of 21–23.
+        This used a build whose assertion message counted the NotHeards. Both failures read
+        "NotHeards when dev-4 routed 1, 200 ms later 2; silentKeys then 1". dev-4's NotHeard was
+        taken after the test had moved its clock a minute and read the key. Heard (dev-1 and dev-3)
+        and NotHeard (dev-2) were then all at the same time, so the key read heard. The ticket
+        guessed a late Heard, but the late verdict was a NotHeard.
+      - **Why.** The lookup routes at a deadline that `route` reads from the clock as the lookup
+        is asked, and `#step` reads the clock again for the key's verdict as the step is sent. The
+        code treats the two as one deadline when they are under `SAME_DEADLINE_MS` (2 ms) apart.
+        Only synchronous code runs between the two reads, but a loaded host can pause the thread
+        there. If they are 2 ms or more apart, the step races its chain against the lookup's own
+        deadline, the lookup routes silent first, and the verdict comes when the step's timer
+        fires. A `realNow` that steps 3 ms between the two reads gives the old test's failure on
+        a quiet host every time ("silentKeys read 0", then 1 once the verdict came).
+      - **The fix.** The test waits, under `pollWithin` (1 s), for each NotHeard to be taken
+        before it reads the key or moves the clock. It counts them by the `onKeySilent` that each
+        mixed NotHeard calls. A Heard needs no wait. Its reply settles the chain before the
+        lookup's deadline can, and the verdict is taken in the chain's first reaction, which is
+        registered before the route's.
+      - **The second case, found by the same reproduction.** 'routes a name waiting on scouts
+        that never answer unvouched at its deadline (scoutWait), counted' failed 1 of 12 at loads
+        of 12–19: the third name routed silent with the zone's evidence. Its deadline was 55 ms
+        and the scouts' verdict 60 ms, each read from the clock as its route was called. A pause
+        of over 5 ms between the test's synchronous calls put the verdict first, and its wake
+        routed the third. An 8 ms busy wait before the third route reproduces it on a quiet host.
+        Now the check's routing wait is 5 s. The scouts' own lookups route at a quarter of a
+        400 ms bound, and their verdict is 5 s off, so only a pause of nearly 5 s between the
+        test's calls could put it first.
+      - **A third case, found by the first twenty runs.** 'counts no miss when the walk's
+        question was answered after all, or the helper was slow' failed 1 of 20 at loads of
+        16–22: its second name did not route silent with a miss watch. A copy of the build that logged each late deadline ran 100 times at loads of 11–29.
+        It failed the same way once: the name routed `{"route":"unvouched","why":"stall"}` after
+        its deadline's timer fired 144 ms late. 10 of the 100 runs had such a timer outside the
+        D31 test, mostly in tests that pass either way. The
+        check drops a verdict as a stall when its timer fired over `LATE_MS` (100 ms) late (D31).
+        A loaded test host fires a timer that late now and then, and any test here that waits on
+        a real 60 ms silence can meet it. `DnsCheck` now takes `lateMs`, `LATE_MS` unless a test
+        says, as it already takes `routeMs` and `missMs`. The file's `make` sets a minute, and
+        so does the simulator test. The D31 test sets `LATE_MS`. A new test holds the thread
+        310 ms past two scouts' deadlines under the file's minute and takes their verdicts,
+        where D31's test, under `LATE_MS`, drops them.
+      - **Still open: the split itself.** S6 decided that a step sent as its lookup was asked takes
+        its key's verdict at the lookup's deadline, "so the two never disagree about the same
+        silence". The code tells "as it was asked" by the 2 ms gap between two clock reads, and a
+        loaded host breaks that. A reply landing between the two deadlines is then Heard for the
+        key while its lookup has gone to the helper. That is the safe side, but S6 ruled it out.
+        The fix belongs in `dns-check.ts`, the gate track's file: recognise the walk's first step,
+        sent with nothing awaited before it, without reading the clock. It needs a ticket of its
+        own, and the orchestrator numbers it.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - The tests wait for the verdicts, as the ticket says, and the split is not mended here.
+          The disagreement is on the safe side, the walk is the gate track's, and a test that
+          reads the verdicts it means holds whichever way the split is mended.
+        - The scoutWait and stall cases are fixed here rather than given tickets. They are in the
+          same file, and this ticket's twenty runs need them.
+        - `lateMs` is an option of the check, not a path only tests take. The check's other
+          timings are options already, and the default is `LATE_MS`, so the probe is unchanged.
+      - **Mutation: 6 of 6 killed, and the fix shown to be what the old test lacked.** With every
+        step's verdict taken after its route (`SAME_DEADLINE_MS` read as −1), the old test fails
+        on a quiet host ("mixed: its sampled lookups would move") and the new one passes. The new
+        'is mixed' test fails with a mixed key that never settles, with the older verdict
+        winning, and with a mixed NotHeard not said. The scoutWait test fails with the waiter's
+        deadline a minute later in `#waitKey`: woken by the scouts' verdict at 5 s, it routes
+        silent. An 8 ms pause before the third route, which made the old shape route silent,
+        leaves the new one `scoutWait`. The new stall test fails with `lateMs` ignored: its scouts
+        route `stall`.
+      - **Runs.** The file 20 runs in a row at loads of 15–29 (median 21), the load held near 21
+        beside the pool-resolve and stall loops: 20 of 20, 33 tests each. Before the stall fix,
+        the first twenty at loads of 16–22 had passed 19.
 - [x] **P-471 — S7's helper-killing arms were read only against the helper before the gate
       track's second round** · XS · P-432, P-453 · Filed 2026-10-20 by `P-465`. S7 built and ran
       P1, P2, P5, P5b and P6 on `a95c3302`. `1b6bd68a` adds D27's refusals. An avoided name now
