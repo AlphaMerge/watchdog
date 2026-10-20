@@ -43905,6 +43905,89 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
         - **The rc.3 checklist's step 9.3 now names the rc.3 record in the release notes as plain
           text**, as rc.2's is: the notes ship and `findings/` does not, so a link would fail the
           suite on `main` after the cut.
+      - **Review, fix round 1** (2026-10-20, on `fca125d6`): four findings, two of them the same
+        (the OpenAPI path), so three distinct. Each fixed in new commits on `fix/h51-docs`:
+        - **The API reference marks the 38 routes 1.0 does not register** (medium). It ships now,
+          and it is rendered from a server given every v2 subsystem, so it listed the 8 library,
+          17 map and 13 report routes as though 1.0 had them; a 1.0 core answers each with 404,
+          and its own `GET /api/v1/openapi.json` leaves them out. `scripts/docs/api-reference.mjs`
+          builds a second server the way `main.ts` builds one, with what `v2ApiOptions` makes of
+          `startV2Subsystems('v1', …)`, and every route of the page that server does not register
+          is marked: in the count (*170 routes. 38 of them are not in 1.0 — v2, in the full build
+          only: every route under **libraries**, **maps** and **reports**. A 1.0 core registers
+          the other 132.*), under the heading of a tag 1.0 has none of (the note says a 1.0 core
+          answers each `404` `ROUTE_NOT_FOUND` with a credential, that its own document does not
+          list them, and that `GET /api/v1/build` says what a core constructed), and under the
+          heading of a route when 1.0 has some of its tag, a case the renderer handles and no tag
+          has today. The lead paragraph says the live document lists what that installation
+          registers. The generator stops when the two routers cannot be compared, a route only
+          the release registers or a route of the document its own router did not register under
+          that spelling (`absentFromRelease`, in the renderer's module so it is tested), and the
+          renderer refuses a mark for a route the page does not list.
+        - **`index.md` and `README.md` name the OpenAPI document at `GET /api/v1/openapi.json`**
+          (low, found twice), readable by any session or API token, where both said
+          `/openapi.json`; each says the document lists what that core registers and that the
+          reference is rendered from the full build and marks the rest, where `index.md` said the
+          core serves "the document the API reference is rendered from".
+        - **Every design record but `ADR-001` is held kept** (low). The test named the
+          repository's own documents and left out `ADR-002` to `ADR-006`, which have no relative
+          links for the link test to catch.
+        - **Tests**: `api-reference-render` 36 (27 before; nine new: the count, a tag's note
+          before its description and not repeated on its routes, a route's mark in a tag 1.0
+          has the rest of, nothing in a tag it has whole, the lead paragraph, the page it always
+          made when nothing is absent, a mark for a route the page lacks refused, the comparison
+          from each router's registrations with the stream beside the document, and both ways of
+          the routers not matching refused). `candidate-surface` 10 (one new): every route the
+          reference lists is asked of a v1 core, and one that answers must be unmarked, one that
+          does not must be marked and must answer in the full build. `release-docs` 7 (one new,
+          one extended): every route a shipped document or `README.md` names in code is one the
+          reference lists, shortened (`GET /objects/:id/settings`) or in full, with its
+          parameter however spelled, and every `openapi.json` is `/api/v1/openapi.json`, after
+          checking that three named routes are found, `index.md`'s among them; and every
+          `ADR-*.md` in `docs/` but `ADR-001` kept, read from the directory, after checking that
+          six are found. `build-hygiene`'s generated-documentation check 2 of 2.
+        - **Mutants**, 15, all killed, each restored with `shutil.copy` and `os.utime` and compared
+          with `filecmp`, and `dist` rebuilt after the three in the tests' own readers and searched
+          for their markers: the release server given every v2 stub (the page goes out of step; with
+          the page regenerated from it, the candidate's surface fails); the renderer without the
+          tag's note, without the route's mark, with the count unchanged, and accepting a mark for a
+          route it does not list; the comparison accepting a route only the release registers, and a
+          document route its router did not register; `index.md` and `README.md` naming
+          `/openapi.json` again; `troubleshooting.md` naming `GET /api/v1/builds`; `ADR-003`
+          shipped, the reviewer's case; the maps note taken out of the page by hand; and the readers
+          with shortened routes not read under `/api/v1`, no design record found, and a tag's note
+          marking none of its routes. After the restore the three files 53 of 53 and `build-hygiene`
+          39 of 39. `prettier` and `eslint` on the changed scripts and tests.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (fix round 1):
+        - **The shipped page marks what 1.0 lacks, rather than being rendered from the v1
+          build.** One page for the repository and the release keeps every shipped file the
+          repository's file byte for byte (decided above), the sensor reference does the same for
+          `flow.netflow` (`H-52`), and a reader of 1.0 learns that the routes exist in the full
+          build, which is what `GET /api/v1/build`'s `subsystems` already tells a client.
+        - **What is marked is computed, and no list of tags is kept to check it against.** The
+          review asked that an unmarked v2 tag stop the generator; with nothing typed by hand
+          there is no unmarked state to stop on, and the comparison of the two routers is what
+          stops it instead. A hand-written note per tag, as `H-52` has per category, would say
+          nothing the generic note does not, and would be one more thing to keep in step.
+        - **The marks say "in the full build only", and the release is named `1.0` in the
+          generator** with the profile `package.sh` builds by default, as the sensor reference
+          names it.
+        - **The route check reads the API reference's headings**, which `build-hygiene` holds to
+          the code, rather than building a server in a documents test; and it checks the shipped
+          documents and `README.md`, whose sentence `index.md` was copied from.
+        - **A route the shipped hand-written documents name and 1.0 does not register is not
+          checked for a mark here** (below).
+      - **Open, for the coordinator** (fix round 1):
+        - **`administration.md` ships whole sections on stored reports and map tiles without
+          saying 1.0 has neither**: *A report renders through an account*, *Stored reports have
+          their own two horizons*, *Map tiles*, *What period a report covers* with its two
+          subsections, *When a report runs*, and *What happens to a report once it has run* with
+          its own. They name six report routes (`GET /reports/:id/runs` and the rest) that a 1.0
+          core answers 404. The
+          same defect as the API reference's, in a hand-written document; `web-ui.md` says it for
+          Maps and Reports and the flow collector's section says it for flow. The fix is a line
+          under each heading and an extension of the route check above to the v1 core's routes.
+          Not filed: it needs a ticket number.
 
 - [x] **H-52 — the shipped sensor reference lists `flow.netflow` as though 1.0 had it** · XS ·
       H-51, H-12 · Found 2026-10-20 in `H-51`, deciding to ship `sensor-reference.md`. The v1
