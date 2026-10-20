@@ -20,7 +20,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { renderApiReference } from './api-reference-render.mjs';
+import { absentFromRelease, renderApiReference, routeKeyOf } from './api-reference-render.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const target = join(root, 'docs', 'api-reference.md');
@@ -45,6 +45,7 @@ const { SessionService } = await import(join(core, 'auth/sessions.js'));
 const { TokenService } = await import(join(core, 'auth/tokens.js'));
 const { TotpService } = await import(join(core, 'auth/totp.js'));
 const { catalogueSensorTypeGate } = await import(join(core, 'objects/sensor-type-gate.js'));
+const { startV2Subsystems, v2ApiOptions } = await import(join(core, 'profile.js'));
 const { standardCatalogue } = await import(join(root, 'packages/sensors/dist/src/index.js'));
 
 const silent = { debug() {}, info() {}, warn() {}, error() {}, child: () => silent };
@@ -62,22 +63,6 @@ const unusable = new Proxy(
 const noAudit = { record: () => Promise.resolve() };
 
 const catalogue = standardCatalogue();
-const resolver = new InheritanceResolver({ db: unusable, logger: silent });
-const service = new ObjectService({
-  db: unusable,
-  repository: new ObjectRepository(),
-  resolver,
-  audit: { record: () => Promise.resolve() },
-  vault: new CredentialVault({
-    resolver,
-    sealer: new VaultSealer(VaultKeyring.fromKeys([{ id: 'docs', key: Buffer.alloc(32, 7) }])),
-    logger: silent,
-  }),
-  sensorTypes: catalogueSensorTypeGate(catalogue),
-  schedules: new ScheduleRepository(),
-  dependencies: new DependencyRepository(),
-  logger: silent,
-});
 
 // **Every optional service, because half of the routes are gated on one.** `queryRoutes`,
 // `scheduleRoutes`, `discoveryRoutes`, `probeRoutes`, `deviceTemplateRoutes`, `triggerRoutes`,
@@ -91,16 +76,11 @@ const service = new ObjectService({
 // are the only part that would touch these, and no handler runs here.
 const stub = {};
 
-const server = new ApiServer({
-  config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
-  logger: silent,
-  version: '0.0.0-docs',
-  service,
-  history: new HistoryService({ db: unusable, logger: silent }),
-  db: unusable,
-  audit: new AuditRepository(),
-  catalogue,
-  schedules: stub,
+/**
+ * Maps, libraries and reports, every one a stub, so that the page lists their routes too. What a
+ * release build is given of them instead is `profile.ts`'s answer; see `absentFromRelease` below.
+ */
+const STUBBED_V2 = {
   maps: stub,
   // Without one, `GET /maps/:id/view` is simply not registered — and a reference that
   // silently omits a route is exactly what this generator exists to prevent (`H-07`).
@@ -114,32 +94,70 @@ const server = new ApiServer({
     runs: stub,
     outputStore: stub,
   },
-  discovery: stub,
-  rediscovery: stub,
-  provision: () => Promise.resolve({}),
-  deviceTemplates: stub,
-  probeRegistry: stub,
-  queries: stub,
-  probeConfig: stub,
-  triggers: stub,
-  templates: stub,
-  tester: stub,
-  deliveryHealth: stub,
-  stream: stub,
-  coreHealth: () => undefined,
-  probeHealth: () => undefined,
-  metrics: () => undefined,
-  auth: {
-    accounts: new AccountService({ db: unusable, audit: noAudit, logger: silent }),
-    sessions: new SessionService({ db: unusable, logger: silent }),
-    throttle: new LoginThrottle({ db: unusable, logger: silent, sleep: () => Promise.resolve() }),
-    groups: new GroupService({ db: unusable, audit: noAudit, logger: silent }),
-    access: new AccessService({ db: unusable, audit: noAudit, logger: silent }),
-    tokens: new TokenService({ db: unusable, audit: noAudit, logger: silent }),
-    totp: new TotpService({ db: unusable, audit: noAudit, logger: silent }),
-    required: true,
-  },
-});
+};
+
+/**
+ * A core's API with every route registered and no handler able to run, given `v2` of the v2
+ * subsystems. Each call builds its own services, so two servers share nothing.
+ */
+function apiServer(v2) {
+  const resolver = new InheritanceResolver({ db: unusable, logger: silent });
+  const service = new ObjectService({
+    db: unusable,
+    repository: new ObjectRepository(),
+    resolver,
+    audit: { record: () => Promise.resolve() },
+    vault: new CredentialVault({
+      resolver,
+      sealer: new VaultSealer(VaultKeyring.fromKeys([{ id: 'docs', key: Buffer.alloc(32, 7) }])),
+      logger: silent,
+    }),
+    sensorTypes: catalogueSensorTypeGate(catalogue),
+    schedules: new ScheduleRepository(),
+    dependencies: new DependencyRepository(),
+    logger: silent,
+  });
+  const server = new ApiServer({
+    config: { host: '127.0.0.1', port: 0, webRoot: '', allowedOrigins: [] },
+    logger: silent,
+    version: '0.0.0-docs',
+    service,
+    history: new HistoryService({ db: unusable, logger: silent }),
+    db: unusable,
+    audit: new AuditRepository(),
+    catalogue,
+    schedules: stub,
+    ...v2,
+    discovery: stub,
+    rediscovery: stub,
+    provision: () => Promise.resolve({}),
+    deviceTemplates: stub,
+    probeRegistry: stub,
+    queries: stub,
+    probeConfig: stub,
+    triggers: stub,
+    templates: stub,
+    tester: stub,
+    deliveryHealth: stub,
+    stream: stub,
+    coreHealth: () => undefined,
+    probeHealth: () => undefined,
+    metrics: () => undefined,
+    auth: {
+      accounts: new AccountService({ db: unusable, audit: noAudit, logger: silent }),
+      sessions: new SessionService({ db: unusable, logger: silent }),
+      throttle: new LoginThrottle({ db: unusable, logger: silent, sleep: () => Promise.resolve() }),
+      groups: new GroupService({ db: unusable, audit: noAudit, logger: silent }),
+      access: new AccessService({ db: unusable, audit: noAudit, logger: silent }),
+      tokens: new TokenService({ db: unusable, audit: noAudit, logger: silent }),
+      totp: new TotpService({ db: unusable, audit: noAudit, logger: silent }),
+      required: true,
+    },
+  });
+  return { server, service };
+}
+
+const { server, service } = apiServer(STUBBED_V2);
 // **Routes the OpenAPI document cannot carry.** `@fastify/websocket` sets `schema.hide = true`
 // on every `websocket: true` route unconditionally (its `index.js`, in the `onRoute` hook), so
 // `/api/v1/stream` is invisible to `@fastify/swagger` no matter what order the plugins are
@@ -248,6 +266,51 @@ const extra = hidden.map((route) => {
   };
 });
 
+// ---------------------------------------------------------------------------------------------
+
+/** The release this page ships in, and the profile `package.sh` builds it as by default. */
+const RELEASE = { name: '1.0', profile: 'v1' };
+
+/**
+ * The routes on this page that a release core does not register (`H-51`).
+ *
+ * **Asked of `profile.ts`, never listed here.** The page is rendered from a server given every v2
+ * subsystem, so it lists maps, libraries and reports, which the v1 build does not construct: in
+ * 1.0 they answer 404 and the core's own document leaves them out. The reference shipped in
+ * `/opt/ms/docs` saying none of that. `main.ts` decides what a build constructs by calling
+ * `startV2Subsystems` with its profile and hands `ApiServer` what `v2ApiOptions` makes of the
+ * answer; this builds a second server the same way, with the release's profile, and every route
+ * of the page that server lacks is marked. A v2 route added later is marked without anybody
+ * remembering to, and a subsystem moved into 1.0 loses its marks the same way.
+ */
+async function releaseRoutes() {
+  // Not `full`, so it is answered without reading its options; one that read them would throw
+  // here, on the stub database, rather than construct a subsystem.
+  const v2 = v2ApiOptions(await startV2Subsystems(RELEASE.profile, unusable));
+  const { server: release, service: releaseService } = apiServer(v2);
+  const routes = [];
+  release.app.addHook('onRoute', (route) => {
+    if (route.method !== 'HEAD') routes.push(routeKeyOf(route.method, route.url));
+  });
+  await release.build('0.0.0-docs', releaseService);
+  await release.app.ready();
+  await release.app.close();
+  return routes;
+}
+
+const inRelease = await releaseRoutes();
+let absent;
+try {
+  absent = absentFromRelease(doc, extra, {
+    registered: registered.map((route) => routeKeyOf(route.method, route.url)),
+    release: inRelease,
+    name: RELEASE.name,
+  });
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(1);
+}
+
 // `--openapi` prints the document itself, for checks that walk its schemas rather than read the
 // page (`build-hygiene.test.ts`'s credential-shaped fields, `P-334`/`P-336`). Stdout only: Ajv's
 // strict-mode warnings go to stderr and must not corrupt the JSON.
@@ -257,7 +320,10 @@ if (process.argv.includes('--openapi')) {
   process.exit(0);
 }
 
-const generated = renderApiReference(doc, { extra });
+const generated = renderApiReference(doc, {
+  extra,
+  release: { name: RELEASE.name, absent },
+});
 
 if (process.argv.includes('--check')) {
   let current = '';

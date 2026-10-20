@@ -101,6 +101,31 @@ function readTable(runbook: string): Table {
   return { routes, sensorTypes };
 }
 
+/** What `docs/api-reference.md` starts a mark with, under a tag's heading or a route's (`H-51`). */
+const NOT_IN_RELEASE = '**Not in 1.0 — v2, in the full build only.**';
+
+/**
+ * Every route the API reference lists, and whether it is marked as not in 1.0: by the note under
+ * its tag's heading, or by one under its own. The shared schemas' headings are not routes.
+ */
+function referenceMarks(page: string): Map<RouteKey, boolean> {
+  const lines = page.split('\n');
+  /** The first line after `index` that is not blank. */
+  const next = (index: number): string =>
+    lines.slice(index + 1).find((line) => line.trim() !== '') ?? '';
+  const marks = new Map<RouteKey, boolean>();
+  let wholeTag = false;
+  lines.forEach((line, index) => {
+    if (line.startsWith('## ')) wholeTag = next(index).startsWith(NOT_IN_RELEASE);
+    const route = /^### `([A-Z]+) (\/[^`\s]*)`$/u.exec(line);
+    if (route === null) return;
+    const key: RouteKey = `${route[1] ?? ''} ${route[2] ?? ''}`;
+    assert.equal(marks.has(key), false, `the API reference lists ${key} twice`);
+    marks.set(key, wholeTag || next(index).startsWith(NOT_IN_RELEASE));
+  });
+  return marks;
+}
+
 /** A manifest in the shape `scripts/package.sh` writes, read the way a packaged core reads its own. */
 async function stampFrom(
   directory: string,
@@ -336,6 +361,36 @@ describe('the release candidate’s surface (`H-13`)', () => {
       reports: true,
       libraries: true,
     });
+  });
+
+  /**
+   * The API reference ships in `/opt/ms/docs` (`H-51`) and is rendered from a server given every
+   * v2 subsystem. It listed maps, libraries and reports as though 1.0 had them, and an operator
+   * scripting against one got a 404. So every route it lists is asked of this core: one that
+   * answers must be unmarked, one that does not must be marked, and that one must answer in the
+   * full build, or the page lists a route no build has.
+   */
+  it('is the API reference’s routes less those it marks as not in 1.0 (`H-51`)', async () => {
+    const marks = referenceMarks(
+      await readFile(join(repoRoot, 'docs', 'api-reference.md'), 'utf8'),
+    );
+    const marked = [...marks].filter(([, mark]) => mark).map(([key]) => key);
+    // Presence both ways, so that a reader that found no mark, or marked everything, cannot pass.
+    assert.ok(marked.length > 0, 'the API reference marks no route as not in 1.0');
+    assert.ok(marked.length < marks.size, 'the API reference marks every route as not in 1.0');
+    assert.ok(marked.includes('GET /api/v1/maps'), 'the maps routes are not marked');
+
+    const wrong: string[] = [];
+    for (const [key, mark] of marks) {
+      if ((await answers(open, key)) === mark) {
+        wrong.push(
+          `${key}: ${mark ? 'marked, and a v1 core answers it' : 'a v1 core does not answer it'}`,
+        );
+      } else if (mark && !(await answers(full, key))) {
+        wrong.push(`${key}: marked, and the full build does not answer it either`);
+      }
+    }
+    assert.deepEqual(wrong, [], 'what the API reference says 1.0 has, and what a v1 core answers');
   });
 
   it('refuses a manifest that does not name its profile, rather than building everything', async () => {

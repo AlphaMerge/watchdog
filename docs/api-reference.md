@@ -2,9 +2,9 @@
 
 **Generated from the OpenAPI document by `scripts/docs/api-reference.mjs`. Do not edit.** Every route is declared with a JSON Schema that Fastify validates against, so this is a rendering of what runs rather than a description of it, and `packages/core/test/build-hygiene.test.ts` fails when the two disagree.
 
-The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
+The live document is at `GET /api/v1/openapi.json` on any running installation, to any session or API token, and is the one to feed to a client generator: it lists the routes that installation registers. This page is rendered from the full build, marks the routes a 1.0 core does not have, and is for reading.
 
-170 routes.
+170 routes. 38 of them are not in 1.0 — v2, in the full build only: every route under **libraries**, **maps** and **reports**. A 1.0 core registers the other 132.
 
 ## Conventions
 
@@ -1561,6 +1561,8 @@ How one probe is doing, right now
 
 ## libraries
 
+**Not in 1.0 — v2, in the full build only.** The 1.0 build leaves out the subsystem these 8 routes belong to, so a 1.0 core registers none of them: with a credential each answers `404` `ROUTE_NOT_FOUND`, and the core's own `GET /api/v1/openapi.json` does not list them. `GET /api/v1/build` says which optional subsystems a core constructed.
+
 ### `GET /api/v1/libraries`
 
 The libraries this account may see
@@ -1721,6 +1723,8 @@ What each value maps to. `undefinedState` is what a value no entry covers become
 **200** is [ms:lookupDetail](#schema-ms-lookupdetail)
 
 ## maps
+
+**Not in 1.0 — v2, in the full build only.** The 1.0 build leaves out the subsystem these 17 routes belong to, so a 1.0 core registers none of them: with a credential each answers `404` `ROUTE_NOT_FOUND`, and the core's own `GET /api/v1/openapi.json` does not list them. `GET /api/v1/build` says which optional subsystems a core constructed.
 
 ### `GET /api/v1/maps`
 
@@ -2770,6 +2774,8 @@ Different from revoking: a forgotten probe that connects again enrols as a stran
 **204**
 
 ## reports
+
+**Not in 1.0 — v2, in the full build only.** The 1.0 build leaves out the subsystem these 13 routes belong to, so a 1.0 core registers none of them: with a credential each answers `404` `ROUTE_NOT_FOUND`, and the core's own `GET /api/v1/openapi.json` does not list them. `GET /api/v1/build` says which optional subsystems a core constructed.
 
 ### `GET /api/v1/reports`
 

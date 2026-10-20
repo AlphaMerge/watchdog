@@ -2,7 +2,8 @@
 //
 // Split from `api-reference.mjs` so that the rendering can be tested against a small fixture
 // without building a server: `api-reference.mjs` builds the real document and checks or writes
-// the file; this turns any document into the page, and nothing else.
+// the file; this turns any document into the page, and works out from two routers' registrations
+// which of its routes a release lacks (`H-51`), and nothing else.
 //
 // **Why it renders every level (`P-318`).** The first version listed a route's top-level fields
 // only. `GET /probes` declared `skew.kind` without `ahead`, a kind the core had been serving for
@@ -29,10 +30,60 @@ const MAX_DEPTH = 12;
  */
 export const byCodePoint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
+/** `get /api/v1/maps/{id}`: a route as the document spells it, and as `release.absent` takes it. */
+export const routeKeyOf = (method, url) =>
+  `${method.toLowerCase()} ${url.replace(/:([a-zA-Z]+)/gu, '{$1}')}`;
+
+/**
+ * The routes of the page that a release's router did not register (`H-51`), for `release.absent`.
+ *
+ * `registered` is what the router the document came from registered, and `release` what the
+ * release's did, both as `routeKeyOf` spells them. The two are compared before anything is
+ * marked, and either way of not matching is refused: a route only the release registers is one
+ * the page, rendered from the other, leaves out; a route of the document that its own router did
+ * not register under that spelling could not be looked up in the release at all.
+ *
+ * @param {object} doc the OpenAPI document
+ * @param {Array<{ path: string, method: string }>} extra routes the page lists beside it
+ * @param {{ registered: Iterable<string>, release: Iterable<string>, name: string }} routers
+ * @returns {string[]} the page's routes the release lacks, in the order the document lists them
+ */
+export function absentFromRelease(doc, extra, { registered, release, name }) {
+  const full = new Set(registered);
+  const released = new Set(release);
+  const documented = [
+    ...Object.entries(doc.paths ?? {}).flatMap(([path, item]) =>
+      METHODS.filter((method) => item[method] !== undefined).map((method) => `${method} ${path}`),
+    ),
+    ...extra.map((route) => `${route.method} ${route.path}`),
+  ];
+  const problems = [
+    ...[...released]
+      .filter((key) => !full.has(key))
+      .map((key) => `${name} registers ${key}, which the page's build does not`),
+    ...documented
+      .filter((key) => !full.has(key))
+      .map((key) => `the document lists ${key}, which its router did not register`),
+  ];
+  if (problems.length > 0) {
+    throw new Error(
+      `cannot tell which routes ${name} lacks:\n  ${problems.sort(byCodePoint).join('\n  ')}`,
+    );
+  }
+  return documented.filter((key) => !released.has(key));
+}
+
 /**
  * @param {object} doc the OpenAPI document, as `@fastify/swagger` produces it
- * @param {{ extra?: Array<{ path: string, method: string, operation: object }> }} [options]
- *   operations Fastify serves that the document does not carry (the WebSocket stream)
+ * @param {{
+ *   extra?: Array<{ path: string, method: string, operation: object }>,
+ *   release?: { name: string, absent: readonly string[] },
+ * }} [options]
+ *   `extra`: operations Fastify serves that the document does not carry (the WebSocket stream).
+ *   `release`: the routes a release's build does not register, each as `get /api/v1/maps` — the
+ *   method in lower case and the path as the document spells it — marked where a reader meets
+ *   them (`H-51`): in the route count, under a tag's heading when the release has none of the
+ *   tag's routes, and under a route's own heading when it has some of them.
  * @returns {string} the page, ending in one newline
  */
 export function renderApiReference(doc, options = {}) {
@@ -604,6 +655,30 @@ export function renderApiReference(doc, options = {}) {
   const groups = groupsOf();
   const total = groups.reduce((sum, [, routes]) => sum + routes.length, 0);
 
+  // ---- what a release lacks (`H-51`) ------------------------------------------------------
+
+  const routeKey = ({ method, path }) => `${method} ${path}`;
+  const release = options.release;
+  const absent = new Set(release?.absent ?? []);
+  {
+    // A mark for a route this page does not list is a release that cannot be described, and
+    // printing the page without it would say the release has everything.
+    const listed = new Set(groups.flatMap(([, routes]) => routes.map(routeKey)));
+    const unknown = [...absent].filter((key) => !listed.has(key)).sort(byCodePoint);
+    if (unknown.length > 0) {
+      throw new Error(
+        `the release is said to lack ${unknown.join(', ')}, which the document does not carry`,
+      );
+    }
+  }
+  /** `**Not in 1.0 — v2, in the full build only.**`: the words every mark starts with. */
+  const notIn = () => `**Not in ${String(release?.name)} — v2, in the full build only.**`;
+  /** Per tag: whether the release has none of its routes, some, or every one. */
+  const lacking = (routes) => {
+    const count = routes.filter((route) => absent.has(routeKey(route))).length;
+    return count === 0 ? 'none' : count === routes.length ? 'all' : 'some';
+  };
+
   say(`# ${doc.info?.title ?? 'API'} reference`, '');
   say(
     '**Generated from the OpenAPI document by `scripts/docs/api-reference.mjs`. Do not edit.** ' +
@@ -612,12 +687,42 @@ export function renderApiReference(doc, options = {}) {
       '`packages/core/test/build-hygiene.test.ts` fails when the two disagree.',
     '',
   );
-  say(
-    'The live document is at `GET /api/v1/openapi.json` on any running installation, and is the ' +
-      'one to feed to a client generator. This page is for reading.',
-    '',
-  );
-  say(`${String(total)} routes.`, '');
+  if (absent.size === 0) {
+    say(
+      'The live document is at `GET /api/v1/openapi.json` on any running installation, and is ' +
+        'the one to feed to a client generator. This page is for reading.',
+      '',
+    );
+    say(`${String(total)} routes.`, '');
+  } else {
+    const name = String(release?.name);
+    say(
+      'The live document is at `GET /api/v1/openapi.json` on any running installation, to any ' +
+        'session or API token, and is the one to feed to a client generator: it lists the routes ' +
+        'that installation registers. This page is rendered from the full build, marks the ' +
+        `routes a ${name} core does not have, and is for reading.`,
+      '',
+    );
+    const whole = groups.filter(([, routes]) => lacking(routes) === 'all').map(([tag]) => tag);
+    const partial = groups
+      .filter(([, routes]) => lacking(routes) === 'some')
+      .map(([tag, routes]) => {
+        const count = routes.filter((route) => absent.has(routeKey(route))).length;
+        return `${String(count)} of the ${String(routes.length)} under **${tag}**`;
+      });
+    const where = [
+      ...(whole.length === 0
+        ? []
+        : [`every route under ${andList(whole.map((tag) => `**${tag}**`))}`]),
+      ...partial,
+    ];
+    say(
+      `${String(total)} routes. ${String(absent.size)} of them are not in ${name} — v2, in the ` +
+        `full build only: ${andList(where)}. A ${name} core registers the other ` +
+        `${String(total - absent.size)}.`,
+      '',
+    );
+  }
 
   say('## Conventions', '');
   say(
@@ -654,11 +759,31 @@ export function renderApiReference(doc, options = {}) {
 
   for (const [tag, routes] of groups) {
     say(`## ${tag}`, '');
+    // First under the heading, before anything that reads as though the release had it.
+    const lacks = lacking(routes);
+    if (lacks === 'all') {
+      say(
+        `${notIn()} The ${String(release?.name)} build leaves out the subsystem these ` +
+          `${String(routes.length)} routes belong to, so a ${String(release?.name)} core ` +
+          'registers none of them: with a credential each answers `404` `ROUTE_NOT_FOUND`, and ' +
+          "the core's own `GET /api/v1/openapi.json` does not list them. `GET /api/v1/build` " +
+          'says which optional subsystems a core constructed.',
+        '',
+      );
+    }
     const described = doc.tags?.find((one) => one.name === tag)?.description;
     if (typeof described === 'string' && described !== '') say(collapse(described), '');
 
-    for (const { path, method, operation } of routes) {
+    for (const route of routes) {
+      const { path, method, operation } = route;
       say(`### \`${method.toUpperCase()} ${path}\``, '');
+      if (lacks === 'some' && absent.has(routeKey(route))) {
+        say(
+          `${notIn()} A ${String(release?.name)} core does not register this route: with a ` +
+            'credential it answers `404` `ROUTE_NOT_FOUND`.',
+          '',
+        );
+      }
       if (typeof operation.summary === 'string') say(collapse(operation.summary), '');
       if (typeof operation.description === 'string') say(collapse(operation.description), '');
 

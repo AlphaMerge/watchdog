@@ -18,9 +18,18 @@ import { pathToFileURL } from 'node:url';
  */
 
 interface Renderer {
+  readonly absentFromRelease: (
+    doc: unknown,
+    extra: readonly { path: string; method: string }[],
+    routers: { registered: Iterable<string>; release: Iterable<string>; name: string },
+  ) => string[];
+  readonly routeKeyOf: (method: string, url: string) => string;
   readonly renderApiReference: (
     doc: unknown,
-    options?: { extra?: readonly { path: string; method: string; operation: unknown }[] },
+    options?: {
+      extra?: readonly { path: string; method: string; operation: unknown }[];
+      release?: { name: string; absent: readonly string[] };
+    },
   ) => string;
 }
 
@@ -28,7 +37,9 @@ const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
 const rendererUrl = pathToFileURL(
   join(repoRoot, 'scripts', 'docs', 'api-reference-render.mjs'),
 ).href;
-const { renderApiReference } = (await import(rendererUrl)) as Renderer;
+const { absentFromRelease, renderApiReference, routeKeyOf } = (await import(
+  rendererUrl
+)) as Renderer;
 
 const thing = { $ref: '#/components/schemas/def-0' };
 
@@ -336,6 +347,66 @@ const collated = {
 
 const page = renderApiReference(fixture);
 
+const operation = (tag: string, summary: string): object => ({
+  tags: [tag],
+  summary,
+  responses: {},
+});
+
+/**
+ * A release that lacks one tag whole, one route of another, and nothing of a third, the way the
+ * v1 build lacks maps, libraries and reports (`H-51`). The live map is a route the document does
+ * not carry, as the WebSocket stream is.
+ */
+const released = {
+  openapi: '3.1.0',
+  info: { title: 'Release' },
+  tags: [{ name: 'maps', description: 'Maps, and what is on them.' }],
+  paths: {
+    '/api/v1/maps': { get: operation('maps', 'Every map'), post: operation('maps', 'A new map') },
+    '/api/v1/maps/{id}': { get: operation('maps', 'One map') },
+    '/api/v1/probes': { get: operation('probes', 'Every probe') },
+    '/api/v1/probes/{gid}': {
+      get: operation('probes', 'One probe'),
+      delete: operation('probes', 'Forget a probe'),
+    },
+    '/api/v1/state': { get: operation('state', 'Every state') },
+  },
+};
+const liveMap = {
+  path: '/api/v1/maps/{id}/live',
+  method: 'get',
+  operation: { tags: ['maps'], summary: 'A map as it changes', responses: {} },
+};
+const lacking = [
+  'get /api/v1/maps',
+  'post /api/v1/maps',
+  'get /api/v1/maps/{id}',
+  'get /api/v1/maps/{id}/live',
+  'delete /api/v1/probes/{gid}',
+];
+const releasePage = renderApiReference(released, {
+  extra: [liveMap],
+  release: { name: '1.0', absent: lacking },
+});
+const MARK = '**Not in 1.0 — v2, in the full build only.**';
+
+/** The lines of a `## tag` section of the release page, its heading first. */
+function sectionOf(tag: string): string[] {
+  const lines = releasePage.split('\n');
+  const start = lines.indexOf(`## ${tag}`);
+  assert.ok(start >= 0, `no ${tag} section in:\n${releasePage}`);
+  const end = lines.findIndex((line, index) => index > start && line.startsWith('## '));
+  return lines.slice(start, end < 0 ? undefined : end);
+}
+
+/** The first line after `heading` in `lines` that is not blank. */
+function after(lines: readonly string[], heading: string): string {
+  const index = lines.indexOf(heading);
+  assert.ok(index >= 0, `no ${heading} in:\n${lines.join('\n')}`);
+  return lines.slice(index + 1).find((line) => line !== '') ?? '';
+}
+
 /** The table row for a field path. Asserted present before anything is read off it. */
 function rowFor(path: string): string {
   const row = page.split('\n').find((line) => line.startsWith(`| \`${path}\` |`));
@@ -501,6 +572,150 @@ describe('the API reference renderer', () => {
 
     it('and a keyword it has no words for, raw rather than dropped', () => {
       assert.equal(typeOf('odd'), 'string, `contentEncoding`: `base64`');
+    });
+  });
+
+  describe('marks what a release lacks, where a reader meets it (`H-51`)', () => {
+    it('in the count: how many, and under which tags', () => {
+      assert.ok(
+        releasePage
+          .split('\n')
+          .includes(
+            '8 routes. 5 of them are not in 1.0 — v2, in the full build only: every route ' +
+              'under **maps** and 1 of the 3 under **probes**. A 1.0 core registers the other 3.',
+          ),
+        releasePage,
+      );
+    });
+
+    it('under the heading of a tag it has none of, before the tag’s own description', () => {
+      const section = sectionOf('maps');
+      const note = after(section, '## maps');
+      assert.ok(
+        note.startsWith(`${MARK} The 1.0 build leaves out the subsystem these 4 routes`),
+        note,
+      );
+      assert.ok(note.includes('`404` `ROUTE_NOT_FOUND`'), note);
+      assert.ok(
+        note.includes("the core's own `GET /api/v1/openapi.json` does not list them"),
+        note,
+      );
+      assert.equal(after(section, note), 'Maps, and what is on them.');
+      // Once for the tag, and not again on each of its routes, the live map among them.
+      assert.equal(section.filter((line) => line.includes(MARK)).length, 1, section.join('\n'));
+      assert.equal(after(section, '### `GET /api/v1/maps/{id}/live`'), 'A map as it changes');
+    });
+
+    it('under the heading of a route it lacks, in a tag it has the rest of', () => {
+      const section = sectionOf('probes');
+      assert.equal(after(section, '## probes').startsWith(MARK), false, 'the tag is marked');
+      assert.ok(
+        after(section, '### `DELETE /api/v1/probes/{gid}`').startsWith(
+          `${MARK} A 1.0 core does not register this route`,
+        ),
+        section.join('\n'),
+      );
+      assert.equal(after(section, '### `GET /api/v1/probes/{gid}`'), 'One probe');
+      assert.equal(after(section, '### `GET /api/v1/probes`'), 'Every probe');
+      assert.equal(section.filter((line) => line.includes(MARK)).length, 1, section.join('\n'));
+    });
+
+    it('nowhere in a tag it has all of', () => {
+      assert.equal(
+        sectionOf('state').some((line) => line.includes('Not in')),
+        false,
+        sectionOf('state').join('\n'),
+      );
+    });
+
+    it('in what it says the live document lists', () => {
+      assert.ok(
+        releasePage.includes(
+          'it lists the routes that installation registers. This page is rendered from the full ' +
+            'build, marks the routes a 1.0 core does not have, and is for reading.',
+        ),
+        releasePage,
+      );
+    });
+
+    it('and the page it always made when the release lacks nothing', () => {
+      const whole = renderApiReference(released, {
+        extra: [liveMap],
+        release: { name: '1.0', absent: [] },
+      });
+      assert.equal(whole, renderApiReference(released, { extra: [liveMap] }));
+      assert.ok(whole.split('\n').includes('8 routes.'), whole);
+      assert.equal(whole.includes('Not in'), false);
+    });
+
+    it('from what each router registered, the stream beside the document included', () => {
+      const registered = [
+        ['GET', '/api/v1/maps'],
+        ['POST', '/api/v1/maps'],
+        ['GET', '/api/v1/maps/:id'],
+        ['GET', '/api/v1/maps/:id/live'],
+        ['GET', '/api/v1/probes'],
+        ['GET', '/api/v1/probes/:gid'],
+        ['DELETE', '/api/v1/probes/:gid'],
+        ['GET', '/api/v1/state'],
+      ].map(([method = '', url = '']) => routeKeyOf(method, url));
+      assert.equal(registered[2], 'get /api/v1/maps/{id}', 'spelled as the document spells it');
+      const release = ['get /api/v1/probes', 'get /api/v1/probes/{gid}', 'get /api/v1/state'];
+      // In the order the document lists them, the routes beside it last.
+      assert.deepEqual(
+        absentFromRelease(released, [liveMap], { registered, release, name: '1.0' }),
+        [
+          'get /api/v1/maps',
+          'post /api/v1/maps',
+          'get /api/v1/maps/{id}',
+          'delete /api/v1/probes/{gid}',
+          'get /api/v1/maps/{id}/live',
+        ],
+      );
+      // A release with everything lacks nothing.
+      assert.deepEqual(
+        absentFromRelease(released, [liveMap], { registered, release: registered, name: '1.0' }),
+        [],
+      );
+    });
+
+    it('refuses to compare routers that do not match the document, either way', () => {
+      const registered = [
+        ...lacking,
+        'get /api/v1/probes',
+        'get /api/v1/probes/{gid}',
+        'get /api/v1/state',
+      ];
+      // Only the release registers it, so the page rendered from the other build leaves it out.
+      assert.throws(
+        () =>
+          absentFromRelease(released, [liveMap], {
+            registered,
+            release: ['get /api/v1/state', 'get /api/v1/alarms'],
+            name: '1.0',
+          }),
+        /1\.0 registers get \/api\/v1\/alarms, which the page's build does not/u,
+      );
+      // Spelled so that its own router's registration cannot be found, it cannot be looked up.
+      assert.throws(
+        () =>
+          absentFromRelease(released, [liveMap], {
+            registered: registered.filter((key) => key !== 'get /api/v1/maps/{id}'),
+            release: ['get /api/v1/state'],
+            name: '1.0',
+          }),
+        /the document lists get \/api\/v1\/maps\/\{id\}, which its router did not register/u,
+      );
+    });
+
+    it('refuses to mark a route the document does not carry', () => {
+      assert.throws(
+        () =>
+          renderApiReference(released, {
+            release: { name: '1.0', absent: ['get /api/v1/maps', 'get /api/v1/nowhere'] },
+          }),
+        /lack get \/api\/v1\/nowhere, which the document does not carry/u,
+      );
     });
   });
 
