@@ -159,3 +159,158 @@ describe('a create the core refused (U-52)', () => {
     expect(getComputedStyle(region).display).not.toBe('none');
   });
 });
+
+/**
+ * Focus through a create (`U-23` review).
+ *
+ * The name, the type, the generated form, *Create sensor* and *Cancel* were all `disabled` while
+ * the create was out, so whatever had focus lost it to the page, and a refusal came back to focus
+ * on nothing. Now nothing that can hold focus is disabled then: *Create sensor*, *Cancel* and the
+ * type say they are unavailable, and are.
+ */
+describe('focus through a create (U-23 review)', () => {
+  /** The core: reads answered, and every create waits for `answer` and is refused. */
+  function held(): { answer: () => void; creates: () => number } {
+    let creates = 0;
+    let answer: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const respond = (status: number, body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      const path = url.replace(/^.*\/api\/v1/u, '');
+      if ((init?.method ?? 'GET') === 'GET') {
+        if (path === '/sensor-types') return respond(200, { items: [TYPE] });
+        if (path === '/objects/4') return respond(200, DEVICE);
+        return respond(404, { error: { code: 'NOT_FOUND', message: 'no' } });
+      }
+      creates += 1;
+      await hold;
+      return respond(400, { error: { code: 'OBJECT_INVALID', message: REFUSED } });
+    });
+    return { answer, creates: () => creates };
+  }
+
+  it('keeps focus on Create sensor while it creates and when it is refused, with nothing else to press', async () => {
+    const { answer, creates } = held();
+    const create = (await open()) as HTMLButtonElement;
+    create.focus();
+    fireEvent.click(create);
+    await waitFor(() => {
+      expect(creates()).toBe(1);
+    });
+
+    expect(screen.getByRole('button', { name: 'Creating…' })).toBe(create);
+    expect(create.disabled).toBe(false);
+    expect(create.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(create);
+    // Pressed again, or the form submitted: nothing more is sent.
+    fireEvent.click(create);
+    const form = create.closest('form');
+    if (form === null) throw new Error('no form');
+    fireEvent.submit(form);
+    expect(creates()).toBe(1);
+    // Cancel and the type are unavailable, and are: nothing navigates, nothing is chosen.
+    const cancel = screen.getByRole<HTMLButtonElement>('button', { name: 'Cancel' });
+    expect(cancel.disabled).toBe(false);
+    expect(cancel.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(cancel);
+    expect(screen.queryByText('created')).toBeNull();
+    const type = screen.getByLabelText<HTMLSelectElement>('Sensor type');
+    expect(type.disabled).toBe(false);
+    expect(type.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.change(type, { target: { value: '' } });
+    expect(type.value).toBe('icmp.ping');
+
+    answer();
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe(REFUSED);
+    });
+    expect(document.activeElement).toBe(create);
+    await waitFor(() => {
+      expect(create.getAttribute('aria-disabled')).toBe('false');
+    });
+    expect(document.activeElement).toBe(create);
+    expect(type.getAttribute('aria-disabled')).toBe('false');
+  });
+
+  it('keeps focus in the name box Enter created from', async () => {
+    const { answer, creates } = held();
+    const create = (await open()) as HTMLButtonElement;
+    const name = screen.getByLabelText<HTMLInputElement>('Name');
+    name.focus();
+    const form = create.closest('form');
+    if (form === null) throw new Error('no form');
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(creates()).toBe(1);
+    });
+    expect(name.disabled).toBe(false);
+    expect(document.activeElement).toBe(name);
+
+    answer();
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe(REFUSED);
+    });
+    expect(document.activeElement).toBe(name);
+  });
+});
+
+describe('focus through a create from a parameter (U-23 review)', () => {
+  it('keeps focus in the parameter’s box Enter created from, which is not disabled while it is out', async () => {
+    let answer: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const respond = (status: number, body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    const port: SensorTypeSummary = {
+      ...TYPE,
+      id: 'tcp.port',
+      paramsSchema: { type: 'object', properties: { host: { type: 'string', title: 'Host' } } },
+    };
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      const path = url.replace(/^.*\/api\/v1/u, '');
+      if ((init?.method ?? 'GET') === 'GET') {
+        if (path === '/sensor-types') return respond(200, { items: [port] });
+        if (path === '/objects/4') return respond(200, DEVICE);
+        return respond(404, { error: { code: 'NOT_FOUND', message: 'no' } });
+      }
+      await hold;
+      return respond(400, { error: { code: 'OBJECT_INVALID', message: REFUSED } });
+    });
+    render(
+      <MemoryRouter initialEntries={['/objects/4/add-sensor']}>
+        <Routes>
+          <Route path="/objects/:id/add-sensor" element={<AddSensor />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.change(await screen.findByLabelText('Sensor type'), {
+      target: { value: 'tcp.port' },
+    });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Port' } });
+    const host = screen.getByRole<HTMLInputElement>('textbox', { name: 'Host' });
+    fireEvent.change(host, { target: { value: 'edge-1' } });
+    host.focus();
+    const form = host.closest('form');
+    if (form === null) throw new Error('no form');
+    fireEvent.submit(form);
+    await screen.findByRole('button', { name: 'Creating…' });
+    expect(host.disabled).toBe(false);
+    expect(document.activeElement).toBe(host);
+
+    answer();
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe(REFUSED);
+    });
+    expect(document.activeElement).toBe(host);
+  });
+});

@@ -137,6 +137,9 @@ export function AddSensor(): React.JSX.Element {
   const ready = name.trim() !== '' && typeId !== '' && problems.length === 0;
 
   const create = (): void => {
+    // Pressed again, or Enter in a field, while the create is out: *Create sensor* only says it
+    // is unavailable (below), so this is what keeps it to one request.
+    if (saving) return;
     setSaving(true);
     setFailed(null);
     setServerProblems([]);
@@ -189,10 +192,13 @@ export function AddSensor(): React.JSX.Element {
             <label htmlFor="sensor-name" className="text-sm font-medium text-text">
               Name
             </label>
+            {/* **Nothing in the form is disabled while the create is out** (`U-23` review, as
+                `U-78` decided for the template form): Enter in a box creates, and disabling the box
+                it was pressed in, or the button pressed, took the focus it held to the page, so a
+                refusal came back to focus on nothing. */}
             <input
               id="sensor-name"
               value={name}
-              disabled={saving}
               onChange={(event) => {
                 setName(event.target.value);
               }}
@@ -204,13 +210,17 @@ export function AddSensor(): React.JSX.Element {
             <label htmlFor="sensor-type" className="text-sm font-medium text-text">
               Sensor type
             </label>
+            {/* Unavailable while the create is out, and not `disabled`: Safari leaves focus where
+                it was when a button is clicked, which can be here. Not changed then, either:
+                another type replaces every parameter, and a refusal of the ones sent would be
+                shown against the new type's fields. */}
             <select
               id="sensor-type"
               value={typeId}
-              disabled={saving}
+              aria-disabled={saving}
               aria-describedby={listenerSays === null ? undefined : 'sensor-type-listener'}
               onChange={(event) => {
-                pickType(event.target.value);
+                if (!saving) pickType(event.target.value);
               }}
               className="w-full max-w-md border border-control bg-surface px-2 py-1 text-sm text-text"
             >
@@ -260,7 +270,6 @@ export function AddSensor(): React.JSX.Element {
                 onChange={setValues}
                 replacing={replacing}
                 onReplace={onReplace}
-                disabled={saving}
                 serverProblems={serverProblems}
               />
               {chosen.hasPreview && <MappingPreview typeId={chosen.id} params={values} />}
@@ -272,20 +281,26 @@ export function AddSensor(): React.JSX.Element {
               of its own it would put that margin under the buttons while it says nothing. */}
           <div>
             <div className="flex flex-wrap items-center gap-3">
+              {/* **Unavailable while the create is out, not `disabled`** (`U-23` review, as `U-73`
+                  made the template form's Save): it keeps focus, says *Creating…*, and a press
+                  sends nothing more. A form not yet ready is still `disabled`: focus is in the box
+                  that is not filled in then, not here. */}
               <button
                 type="submit"
-                disabled={saving || !ready}
-                className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+                disabled={!ready}
+                aria-disabled={saving}
+                className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 aria-disabled:opacity-50"
               >
                 {saving ? 'Creating…' : 'Create sensor'}
               </button>
+              {/* Unavailable the same way, so the page is not left under a create still out. */}
               <button
                 type="button"
-                disabled={saving}
+                aria-disabled={saving}
                 onClick={() => {
-                  void navigate(`/objects/${String(parent.data.id)}`);
+                  if (!saving) void navigate(`/objects/${String(parent.data.id)}`);
                 }}
-                className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+                className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text aria-disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -298,8 +313,9 @@ export function AddSensor(): React.JSX.Element {
             </div>
 
             {/* A refused create, said as `SettingsPanel`'s refused save is (`U-48`, `U-52`).
-                Focus is on the button when the core refuses, and nothing moves it, so this
-                region is what says the sensor was not created: an alert, since it answers the
+                Focus is where the create was made from when the core refuses — the button, or the
+                box Enter was pressed in, neither disabled while it is out — and nothing moves it,
+                so this region is what says the sensor was not created: an alert, since it answers the
                 operator's own action. Always in the tree and empty until a refusal, because a
                 region added with its text already in it is not reliably announced (`U-41`);
                 `create` empties it as the next attempt starts, so a second refusal in the same

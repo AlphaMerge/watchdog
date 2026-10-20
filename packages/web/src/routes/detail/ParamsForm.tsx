@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, problemPath, send } from '../../api/client';
 import type { ChannelRecord, ObjectDetail, SensorTypeSummary } from '../../api/types';
 import { CorrelationId } from '../../components/Panels';
@@ -46,7 +46,20 @@ export function ParamsForm({
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState<ApiError | null>(null);
   const [serverProblems, setServerProblems] = useState<readonly FieldProblem[]>([]);
-  const [saved, setSaved] = useState(false);
+  /**
+   * What the status line under the buttons says: an accepted save, or the changes discarded.
+   * Emptied by any change and by the next save.
+   */
+  const [said, setSaid] = useState<'saved' | 'discarded' | null>(null);
+  /**
+   * An accepted save, or a discard, owes focus to the status line once the form shows what the
+   * core holds (`U-23` review). The button pressed is disabled then, with nothing changed, and a
+   * browser drops the focus a disabled control held to the page.
+   */
+  const [owedFocus, setOwedFocus] = useState(false);
+  const status = useRef<HTMLDivElement>(null);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  const discardButton = useRef<HTMLButtonElement>(null);
   /** What the last accepted save's reply said it left alone (`U-36`). */
   const [lookupsKept, setLookupsKept] = useState<readonly string[]>([]);
 
@@ -84,6 +97,22 @@ export function ParamsForm({
   const keptFor = useKeptChannels(type?.id, schema, stored, values, channels);
   const dirty = JSON.stringify(values) !== JSON.stringify(stored) || replacing.size > 0;
 
+  // Only from the button that was pressed, or from the page it fell to: an operator who pressed
+  // Enter in a field, or moved on while the save was out, is left where they are. A change made
+  // before the form shows what is stored empties `said`, and the debt goes with it.
+  useEffect(() => {
+    if (!owedFocus) return;
+    if (said === null) {
+      setOwedFocus(false);
+      return;
+    }
+    if (dirty) return;
+    setOwedFocus(false);
+    const at = document.activeElement;
+    const pressed = at === saveButton.current || at === discardButton.current;
+    if (at === null || at === document.body || pressed) status.current?.focus();
+  }, [owedFocus, said, dirty]);
+
   const onReplace = useCallback((path: string, on: boolean) => {
     setReplacing((held) => {
       const next = new Set(held);
@@ -106,10 +135,14 @@ export function ParamsForm({
   const modeChanges = failed === null ? null : modeChangesOf(failed);
 
   const save = (): void => {
+    // Pressed again, or Enter in a field, while the save is out: *Save parameters* only says it is
+    // unavailable (below), so this is what keeps it to one request.
+    if (saving) return;
     setSaving(true);
     setFailed(null);
     setServerProblems([]);
-    setSaved(false);
+    setSaid(null);
+    setOwedFocus(false);
     setLookupsKept([]);
 
     // `If-Match` is required on PATCH, and it is required for a reason: two operators with this
@@ -124,7 +157,8 @@ export function ParamsForm({
       .then((reply) => {
         setReplacing(new Set());
         setLookupsKept(reply.lookupsKept ?? []);
-        setSaved(true);
+        setSaid('saved');
+        setOwedFocus(true);
         setReadingBack(true);
         onSaved();
       })
@@ -157,17 +191,19 @@ export function ParamsForm({
         save();
       }}
     >
+      {/* **Not disabled while saving** (`U-23` review), as the template form's settings are not
+          (`U-78`): Enter in a parameter's box saves, and disabling the box it was pressed in took
+          the focus it held to the page, with *Save* and *Discard* disabled beside it. */}
       <SchemaForm
         schema={schema}
         values={values}
         redacted={redacted}
         onChange={(next) => {
           setValues(next);
-          setSaved(false);
+          setSaid(null);
         }}
         replacing={replacing}
         onReplace={onReplace}
-        disabled={saving}
         serverProblems={serverProblems}
         existing={stored}
         keptFor={keptFor}
@@ -180,23 +216,38 @@ export function ParamsForm({
           of its own it would put that margin under the buttons while it says nothing (`U-52`). */}
       <div>
         <div className="flex flex-wrap items-center gap-3">
+          {/* **Unavailable while the save is out, not `disabled`** (`U-23` review, as `U-73` made
+              the template form's): a button disabled while it has focus loses it to the page, so
+              a refusal came back to focus on nothing. It keeps focus, says *Saving…*, and a press
+              sends nothing more. Nothing to save is still `disabled`: an accepted save is the one
+              time focus is on it then, and the status line takes it (above). */}
           <button
+            ref={saveButton}
             type="submit"
-            disabled={saving || !dirty || problems.length > 0}
-            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+            disabled={!dirty || problems.length > 0}
+            aria-disabled={saving}
+            className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 aria-disabled:opacity-50"
           >
             {saving ? 'Saving…' : 'Save parameters'}
           </button>
+          {/* Unavailable the same way while the save is out, so the form is not put back under
+              it. **Discarding moves focus to the status line, which says so**: the button has
+              nothing left to discard, and is disabled from the render that discards. */}
           <button
+            ref={discardButton}
             type="button"
-            disabled={saving || !dirty}
+            disabled={!dirty && !saving}
+            aria-disabled={saving}
             onClick={() => {
+              if (saving) return;
               setValues(stored);
               setReplacing(new Set());
               setServerProblems([]);
               setFailed(null);
+              setSaid('discarded');
+              setOwedFocus(true);
             }}
-            className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+            className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50 aria-disabled:opacity-50"
           >
             Discard changes
           </button>
@@ -210,9 +261,11 @@ export function ParamsForm({
         {/* **An accepted save, in a region always there and empty until one** (`U-36`), for the
           reason the refusal's is (`U-41`): the line used to be added with its text in it, which is
           not reliably said. Polite, since nothing went wrong; said whole, by the status role's own
-          atomicity. Emptied by the next save and by any change. */}
-        <div role="status" className="mt-2 text-xs empty:mt-0">
-          {saved && !dirty && (
+          atomicity. Emptied by the next save and by any change. **Focusable, and where focus goes
+          after an accepted save or a discard** (`U-23` review): the button pressed has nothing
+          left to do and is disabled, and this says what it did. */}
+        <div ref={status} role="status" tabIndex={-1} className="mt-2 text-xs empty:mt-0">
+          {said === 'saved' && !dirty && (
             <>
               <p className="text-up-fg">
                 Saved. The probe picks the change up on its next configuration push.
@@ -220,11 +273,18 @@ export function ParamsForm({
               {lookupsKept.length > 0 && <LookupsKept channels={lookupsKept} />}
             </>
           )}
+          {said === 'discarded' && !dirty && (
+            <p className="text-text">
+              Discarded. The form shows the parameters as they are stored.
+            </p>
+          )}
         </div>
 
         {/* **A refused save, in a region always there and empty until a refusal** (`U-54`, as
-          `U-48` and `U-52` did): focus is on Save when the core refuses, nothing moves it, and a
-          region added with its text already in it is not reliably announced (`U-41`). One region
+          `U-48` and `U-52` did): focus is where the save was made from when the core refuses —
+          *Save parameters*, or the box Enter was pressed in, neither of them disabled while it is
+          out — nothing moves it, and a region added with its text already in it is not reliably
+          announced (`U-41`). One region
           for both shapes of refusal, so the one that comes is said whichever it is. `save` and
           *Discard changes* empty it, so a second refusal in the same words is a change again.
           No space while it says nothing (`empty:mt-0`, `U-45`). */}
