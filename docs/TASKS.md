@@ -14953,6 +14953,102 @@ because each is a decision rather than a defect:
         `./scripts/dev.sh "timeout 600 npx tsc -b"`, then each of these:
         - `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-lookup-outage-scenario.test.js"`
         - `./scripts/dev.sh "timeout 900 node --test packages/probe/dist/test/name-resolution-process.test.js"`
+      - **Review, fix round 1** (2026-10-20, on `de12bac9`): six findings, three of them the same
+        (the criterion on the summaries' `changes`), so four distinct. Every one fixed, in a new
+        commit on `feat/p432-fields`:
+        - **Step 4 says what the summaries' `changes` list on a pass** (runbook). The first
+          summary after a start lists the helper's own start, `idle` → `starting` → `up`, with
+          no loss: the helper starts `idle`, `start()` sets `starting` and the ready `up`, and the
+          resolver is wired to its changes before it starts, so every probe's first line had
+          two changes the criterion did not name. Each loss is a move to `backoff` with its
+          `loss`, then back: `up` → `backoff` → `starting` → `up` for `exit` or `memory`, `up` →
+          `unresponsive` → `backoff` → `starting` → `up` for a child that stopped answering
+          first (a `hung` one always has), `starting` → `backoff` → `starting` → `up` for a
+          `start` loss, with a loss late in an hour finishing in the next summary. Anything else
+          is a finding: `up` → `unresponsive` → `up` with no loss (its warn line is in
+          `gate-events.jsonl`), a `starting` with no loss or start before it, and a `resting`.
+          The administration guide says the same of the start and a loss.
+        - **Step 4 reads each field by the object that holds it** (runbook). `lookupsHeard`,
+          `lookupsToHelper`, `misses`, `walksDeferred`, `passedStuck` and `helperStuck` are in
+          `hour` and again as totals, `misses` a third time in `check`, and `walksDeferred`'s
+          `total` comes before the losses', so `grep -o` on a key printed two or three numbers a
+          line. The step gives seven commands, each printing one match a line: `hour`, `check`'s
+          `state`, `off`, `rss`, `losses` and `changes`, and `grep -vF '"lost":[]'` for the hours
+          that list a loss, whole. It says the top-level keys of the same names are totals.
+        - **The drill's summary is gate-only and optional** (runbook). Under `"system"` there is
+          none; under `"gate"` the first comes an hour after step 2's restart, and step 4's
+          restart would stop the probe before it does (`NameResolver.stop` clears the gate's
+          tick, and nothing is logged at stop). To keep it, restore both zones, wait out the
+          hour, and run the same command again before step 4's restart.
+        - **The start line and the older core's warning carry `component: name-resolver`**
+          (`name-resolution.ts`, two child loggers, `lookup-helper.ts` untouched). The guide's
+          claim that every line has its component is true now, step 4's warnings file keeps the
+          older core's warning, and the drill's grep finds the start line. The guide's table of
+          the log's lines gains a row for the older core's warning.
+        - **Tests**: `gate-summary-reading.test.ts` (new, probe) 2 of 2. A gate probe built as
+          `main.ts` builds it, with the production logger and the real helper on the scripted
+          child, through four hours: the start, a crash (`crash-unless:`, one `exit` loss), a
+          child muted and unmuted (no loss), and a hang. The test pins each hour's `changes` and
+          `lost`, holds step 4's criterion to the chains (the start and both losses before
+          *Anything else*, the quiet spell after it) and the guide to the start and a loss's way
+          back. It runs step 4's collection block as written on the log (`journalctl` replaced
+          by `cat`): one line an hour, and every warn and error line kept, the older core's
+          among them, each with a row in the guide's table. It runs each reading command on
+          each hour's line alone: no stderr, at most one line printed, and every field a
+          criterion reads (the hour's six counts, `check`'s state and `off`, `rss`, `losses`,
+          `changes`) read as that hour's value, with the hour's count and the total differing
+          from the second hour. The second case pins no summary under `"system"`, the gate's
+          first not before an hour, and the drill's words. `name-resolution.test.ts` 4 of 4: the
+          start line's and the older core's warning's component.
+        - **Mutants: 18, 17 killed, one equivalent.** Each was restored with `shutil.copy` and
+          `os.utime` and checked with `filecmp`; each code mutant's marker was in `dist` while
+          it ran, and after the last rebuild none is left and every changed file's `dist` is
+          newer than its source.
+          - Documents (14): the old criterion; the start chain, the hang's chain, the quiet
+            chain each taken out; the old one-line reading; `hour` read as `"lookupsHeard"`;
+            `losses` read as `"total"`; the warnings file without `name-resolver`; `grep -vF`
+            made `grep -F`; the drill without *there is none* and with its old step 3; the
+            guide without the start chain and without the older core's row. All killed but
+            `"changes":\[[^]]*\]` for `"changes":\[[^]]*]`, which GNU grep 3.8 reads alike
+            without a warning: equivalent, and the runbook keeps the form with no backslash
+            before `]`, which a BRE does not need.
+          - Code (4): the start line and the older core's warning each on a logger without the
+            component; the first `idle` change not noted; the hour's helper count given as the
+            total. All killed.
+        - **Runs**, on the final build, beside other sessions' runs: `probe` 79 of 79 in
+          `gate-summary-reading`, `name-resolution`, `name-resolver-check` and `latch`, then
+          `name-resolution-process` 4 of 4 alone; `core` `build-hygiene` 39 of 39 (the runbook's
+          other step 4 tests). Prettier and eslint clean on the changed `.ts` files.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (review fix round 1):
+        - **A helper that stops answering and answers again with no loss is a finding.** The
+          criterion written before P-467 read `lookupHelperState` as `1` in every hour's `min`
+          and `max` but the loss hours, so a `3` (not answering) outside them failed it, and
+          P-467 was to carry the criteria into the log, not loosen them. Each spell detaches the
+          helper's lookups in flight and sends names elsewhere, and the helper logs it at warn.
+        - **The criterion names each chain, and the test reads them from the real helper.** A
+          rule in words ("moves to `backoff` and back") left the start out once already; a
+          chain is checkable, and a change to the helper's states now fails the test instead
+          of leaving the runbook wrong.
+        - **Option (a) for the two lines without a component**: the code, not the guide. Every
+          other gate line has its component, step 4's file and the drill find lines by it, and
+          the change is two child loggers. `name-resolver`, not `system-names`, for the start
+          line: it says which `probe.nameResolver` runs, and the drill's grep leaves
+          `system-names` out.
+        - **`grep` only, as recorded for P-467**: the suggested `hour` and `losses` commands,
+          and the same form for the other fields the criteria read. `"check":{"state":` rests on
+          `state` being `check`'s first key, which the test holds. `off` is flat (`code`, `why`,
+          `narrowing`, a string), so `{[^}]*}` takes all of it.
+        - **The drill keeps the summary as an option, with the restart's catch**, rather than
+          dropping it: it is the one place the hour's routes and changes are in a line, and it
+          is not part of the pass.
+        - **The runbook's commands are run by a probe test**, as `build-hygiene` runs the cut
+          checklist's blocks: core does not depend on the probe, and only the probe can write
+          the lines.
+        - **Quiet-machine runs: none.** Nothing here is measured.
+      - **Open, for the coordinator** (review fix round 1): the guide's table of the log's lines
+        has no row for the trouble latch's warning, `the lookup helper is in trouble: …`, which
+        step 4 reads each Warning by. Not added here: no case of the new test raises it (two
+        losses in ten minutes, not three), so a row would be untested.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the

@@ -133,6 +133,8 @@ describe('probe.nameResolver as main.ts builds it (P-432 S3)', () => {
         String(line['msg']).startsWith('probe.nameResolver is gate'),
       );
       assert.ok(described !== undefined, 'the policy is described at start');
+      // Found by its component, as the runbook's drill and the administration guide find it.
+      assert.equal(described['component'], 'name-resolver');
       assert.deepEqual(described['hostsLine'], 'files dns');
       // `gw.test` is the hosts file's: glibc answers it without the network, on the probe's lanes.
       assert.deepEqual(await names.resolver.resolve('gw.test', 4, {}), PROBE_LANES);
@@ -262,6 +264,8 @@ describe('a gate probe meeting a core below protocol 38 (P-432, S-F11)', () => {
     assert.deepEqual(warned(), [
       'this core is older than protocol 38: the lookup helper’s health does not reach it',
     ]);
+    // Under the resolver's component, so that step 4's warnings of the gate include it.
+    assert.equal(lines.find((line) => line['level'] === 40)?.['component'], 'name-resolver');
     gate.disconnected();
     gate.heartbeat(37);
     assert.equal(warned().length, 2, 'the next session says it again');

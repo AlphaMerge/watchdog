@@ -464,14 +464,30 @@ The numbers that decide the criterion:
   sudo journalctl -u ms-probe --since "$SINCE" --no-pager -o cat \
     | grep -F 'in gate mode, this hour' > gate-hours.jsonl
   wc -l gate-hours.jsonl                     # one an hour since the probe started, no gap
-  # Every warning and error of the helper, the check and the name settings.
+  # Every warning and error of the resolver, the helper, the check and the name settings.
   sudo journalctl -u ms-probe --since "$SINCE" --no-pager -o cat \
     | grep -E '"component":"(lookup-helper|dns-check|system-names|name-resolver)"' \
     | grep -E '"level":"(warn|error)"' > gate-events.jsonl
   ```
 
-  Each line is JSON. Read a field with `grep -o`, for example every hour's helper memory:
-  `grep -o '"rss":[0-9a-z]*' gate-hours.jsonl`.
+  Each line is JSON, and some keys are on it more than once. The hour's counts are in `hour`;
+  the `lookupsHeard`, `lookupsToHelper`, `misses`, `walksDeferred`, `passedStuck` and
+  `helperStuck` beside it are running totals since the probe started, `check` has its own
+  `misses`, and `walksDeferred` has a `total` before the helper's `losses` do. So read a field by
+  the object that holds it. Each `grep -o` below prints one match a line of the file, so one an
+  hour in order (`off` only in the hours the check is off), and the last prints, whole, the hours
+  that list a loss:
+
+  ```bash
+  grep -o '"hour":{[^}]*}' gate-hours.jsonl           # this hour's counts
+  grep -o '"check":{"state":[0-9]*' gate-hours.jsonl  # the check's state as the hour ended
+  grep -o '"off":{[^}]*}' gate-hours.jsonl            # why the check is off: code and why
+  grep -o '"rss":[0-9a-z]*' gate-hours.jsonl          # the helper's memory in bytes, or null
+  grep -o '"losses":{[^}]*}' gate-hours.jsonl         # its losses since the start, and total
+  grep -o '"changes":\[[^]]*]' gate-hours.jsonl       # this hour's changes of its state
+  grep -vF '"lost":[]' gate-hours.jsonl               # the hours that list a loss, whole
+  ```
+
   - `lookupHelperTrouble` is `0` throughout: every hour's `max` is `0`. Each Warning, and any
     time the probe's log says the lookup helper ran out of memory, is a finding, explained by the
     probe log's `lookup helper` lines.
@@ -485,10 +501,18 @@ The numbers that decide the criterion:
     `SIGKILL` with `reason` `exit` came from outside the probe (the kernel's OOM killer or a
     cgroup kill, which `journalctl -k` names, or a person), and `reason` `memory` is the
     helper's own 256 MiB bound, which the summaries' `rss` shows climbing to: neither is held
-    against a name, and each is still a finding with its reason. The summaries' `changes` list
-    nothing but those losses' moves to `backoff` and back to `up`; a `resting` in them, a
-    `the lookup helper is resting` line, or a `3` in `nameResolverMode`, is a rest, and a
-    finding.
+    against a name, and each is still a finding with its reason. **The summaries' `changes`
+    pass when they list these and nothing else.** The first summary after a start lists the
+    helper's own start, `idle` → `starting` → `up`, with no loss. Each loss listed is a move to
+    `backoff` with its `loss`, then back: `up` → `backoff` → `starting` → `up` for an `exit` or
+    `memory` loss, `up` → `unresponsive` → `backoff` → `starting` → `up` for a child that
+    stopped answering first, as a `hung` one always has, and `starting` → `backoff` →
+    `starting` → `up` for a `start` loss, a child that never came up. A loss late in an hour has
+    its moves back in the next hour's summary. Anything else in `changes` is a finding: `up` →
+    `unresponsive` → `up` with no loss, a helper that stopped answering and answered again,
+    which `gate-events.jsonl` has as `the lookup helper is not answering`; a `starting` with no
+    loss or start before it; and a `resting`, which, like a `the lookup helper is resting` line
+    or a `3` in `nameResolverMode`, is a rest.
   - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
     is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and is explained
     from the log line naming its host, or it is a finding.
@@ -565,12 +589,18 @@ and runs on the same installation once with `"gate"` and once with `"system"`:
    Probe Health's `answersLoaded` then reads `0`; anything else, and the restart kept something.
 3. Wait two scan intervals, then record every sensor state change since the zones went silent,
    from `GET /api/v1/state-log`, the gate's Probe Health channels above, and the probe's log
-   since the time you noted, with the next hourly summary once it is logged:
+   since the time you noted:
 
    ```bash
    sudo journalctl -u ms-probe --since '<the time noted at 1, as 2026-10-04 13:44:34 UTC>' \
      --no-pager -o cat | grep -E '"component":"(lookup-helper|dns-check|name-resolver)"'
    ```
+
+   The hourly summary is not part of the pass. Under `"system"` there is none. Under `"gate"`
+   the first, `the probe’s resolver in gate mode, this hour`, is logged an hour after step 2's
+   restart, and the restart at step 4 would stop the probe before it is: to keep it, restore
+   both zones, wait until an hour has passed since step 2, and run the same command again
+   before step 4's restart. That summary covers the restore too.
 4. Restore both zones, set the other mode in that probe's `probe.json`, and repeat from 1: step
    2's restart applies it.
 

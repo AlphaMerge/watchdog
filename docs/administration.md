@@ -1389,6 +1389,7 @@ line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`,
 | What happened | Level | `msg`, or how it starts |
 | --- | --- | --- |
 | The probe started in gate mode | info | `probe.nameResolver is gate: the name policy …`, with `check` (`on` or `off`) and, when off, `off`'s `code` and `why` |
+| A core older than protocol 38 | warn, once a connection | `this core is older than protocol 38: the lookup helper’s health does not reach it` |
 | The helper is up | info | `the lookup helper is ready`, with its `pid` |
 | It stopped answering, and again | warn, at most once a minute, with the count since / info | `the lookup helper is not answering: …` / `the lookup helper is answering again` |
 | It was lost | warn | `the lookup helper was lost`, with `reason` (`start`, `skew`, `exit`, `hung` or `memory`), `why` (for `memory`, its resident set), and `signal` or `exitCode` |
@@ -1418,7 +1419,9 @@ line. Each line is JSON, with its `component` (`name-resolver`, `lookup-helper`,
   `total`; and the hour's `changes` of state (`at`, `from`, `to`, and the `loss` that moved it)
   and `lost` children (`at`, `reason`, `pid`, `why`, `signal`, `exitCode`), the first 20 of each,
   with `changesNotListed` and `lostNotListed` counting the rest. `msInState` is the time in each
-  state since the start.
+  state since the start. The first summary after a start lists the helper's own start, `idle` →
+  `starting` → `up`; a loss is a move to `backoff` with its `loss`, then `backoff` → `starting`
+  → `up`, and a child that stopped answering first moves `up` → `unresponsive` before it.
 
 ```bash
 sudo journalctl -u ms-probe --no-pager -o cat | grep -F 'in gate mode, this hour'

@@ -119,7 +119,10 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
       await answerFile.load();
       if (parts !== undefined) {
         await built.firstLook();
-        logger.info(
+        // The resolver's component, as the gate's other lines have theirs: the field test finds
+        // the line by it (`P-467`).
+        const log = logger.child({ component: 'name-resolver' });
+        log.info(
           { nameResolver: 'gate', ...parts.policy.describe() },
           'probe.nameResolver is gate: the name policy the probe routes its lookups by',
         );
@@ -170,18 +173,20 @@ export function buildNameResolution(options: NameResolutionOptions): NameResolut
 /**
  * The warning a gate probe gives at each session with a core older than protocol 38 (`P-432`,
  * S-F11): the lookup helper's health does not reach that core, so its trouble cannot alarm. Once
- * a session, from its first heartbeat; `disconnected` starts the next.
+ * a session, from its first heartbeat; `disconnected` starts the next. Under the resolver's
+ * component, so that the field test's warnings of the gate include it (`P-467`).
  */
 export function olderCoreWarning(
   logger: Logger,
   mode: NameResolverMode,
 ): { heartbeat(peerVersion: number): void; disconnected(): void } {
+  const log = logger.child({ component: 'name-resolver' });
   let said = false;
   return {
     heartbeat(peerVersion) {
       if (mode !== 'gate' || said || capabilitiesFor(peerVersion).nameResolver) return;
       said = true;
-      logger.warn(
+      log.warn(
         { coreProtocol: peerVersion, needs: versionFor('nameResolver') },
         `this core is older than protocol ${String(versionFor('nameResolver'))}: the lookup helper’s health does not reach it`,
       );
