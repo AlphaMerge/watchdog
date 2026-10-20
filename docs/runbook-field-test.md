@@ -151,6 +151,12 @@ A probe left on `"system"` tests nothing of it, and step 4 records that it did n
   servers, so it cannot show what the gate's questions cost them. A probe on Debian or RHEL whose
   `resolv.conf` names the site's servers can. If there is none, the write-up says that the load
   on the site's resolver was not observed.
+- **Whether the site's DNS server limits each client's rate.** Ask the site, or read the server's
+  settings (Pi-hole's rate limit, dnsmasq, a firewall's DNS policy). The write-up names the limit
+  and whether any probe met it (refusals in the probe's warn lines, sensors failing together
+  while their devices answered). With no limit, or one never met, it says that the gate's cost
+  against a per-client limit close to the probe's own rate was not observed. With the load on the
+  site's resolver, that decides whether `gate` becomes the default after the field test.
 
 On each probe's host, add the key to the `probe` section of `/etc/ms/probe.json`, beside what is
 there:
@@ -566,11 +572,11 @@ The numbers that decide the criterion:
       such end by its start line's time, with the time it leaves uncounted, the
       `the lookup helper is not answering` lines in that time (each a quiet no summary holds, and
       its `alsoNotAnswering` more), and the sensors whose checks failed at once in it, found by
-      their messages as below. A line's `alsoNotAnswering` counts the quiets held back since the
-      line before it, up to a minute's: on the first line after a start's last summary it can
-      include quiets of the minute before that summary, which that summary's `quiets` holds already,
-      and the quiets held back after the last line are on no line. The write-up says both of the
-      count it names. The start running at the end reading is not an end: its counts are its
+      their messages as below. A line's `alsoNotAnswering` counts the quiets held back in the
+      minute after the line said before it: on the first line after a start's last summary it can
+      include quiets held back in the minute after the line said before that summary, which that
+      summary's `quiets` holds already if they came before it, and the quiets held back after the
+      last line are on no line. The write-up says both of the count it names. The start running at the end reading is not an end: its counts are its
       summaries before the end reading, and the `stopping` one the drill's stop says is not the
       week's. Its time from its last summary before the end reading to the end reading, up to an
       hour on every probe, is in no sum either: the write-up names it as uncounted, with the

@@ -447,7 +447,7 @@ describe('the field-test runbook’s ends that said nothing (P-463 fix round 3)'
     );
     assert.match(
       flat,
-      /on the first line after a start's last summary it can include quiets of the minute before that summary, which that summary's `quiets` holds already/,
+      /on the first line after a start's last summary it can include quiets held back in the minute after the line said before that summary, which that summary's `quiets` holds already if they came before it/,
       'a first line’s alsoNotAnswering can count quiets the summary holds',
     );
     assert.match(
