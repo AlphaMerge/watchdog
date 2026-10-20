@@ -770,11 +770,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
           'button pressed six times must not become six renders competing for the same pool. The ' +
           'constraint is a partial unique index, so two requests racing lose at the database ' +
           'rather than in a window between a check and an insert.\n\n' +
-          'Where the rendered document goes is the report’s `delivery`: kept for download, kept ' +
-          'and emailed, or emailed and kept only until it has been sent, and `outputs` lists ' +
-          'what the run still holds. The run records that it ran, what period it covered, how ' +
-          'large it was, and why it failed if it did, which is what tells an operator at 09:00 ' +
-          'whether last night worked.',
+          'Where the rendered document goes is the report’s `outputs.delivery`: `store` keeps it ' +
+          'for download, `store-and-email` keeps it and emails it, and `email` emails it and ' +
+          'keeps it only until it has been sent. The run’s `delivery` says whether it has been ' +
+          'sent, and the run’s `outputs` lists the files it still holds. The run records that ' +
+          'it ran, what period it covered, how large it was, and why it failed if it did, which ' +
+          'is what tells an operator at 09:00 whether last night worked.',
         response: { 201: runResponse },
       },
     },

@@ -262,7 +262,7 @@ const REPO = join(import.meta.dirname, '..', '..', '..', '..');
  * `build-hygiene.test.ts` builds it. A child process, so its wait has a bound of its own: the
  * child is killed at it, and `within` fails the wait if it is not.
  */
-async function openApiDocument(): Promise<unknown> {
+async function buildOpenApiDocument(): Promise<unknown> {
   const { stdout } = await within(
     90_000,
     'the OpenAPI document from scripts/docs/api-reference.mjs --openapi',
@@ -279,6 +279,40 @@ async function openApiDocument(): Promise<unknown> {
     ),
   );
   return JSON.parse(stdout) as unknown;
+}
+
+let built: Promise<unknown> | undefined;
+
+/** The document, built once for the tests that read it: each build is seconds of work. */
+function openApiDocument(): Promise<unknown> {
+  built ??= buildOpenApiDocument();
+  return built;
+}
+
+interface Operation {
+  readonly description?: string;
+  readonly responses?: Readonly<
+    Record<string, { readonly content?: Readonly<Record<string, { readonly schema?: Schema }>> }>
+  >;
+}
+
+interface OpenApi {
+  readonly paths?: Readonly<Record<string, Readonly<Record<string, Operation>>>>;
+}
+
+/** The JSON body a route answers with at a status. */
+function bodyOf(doc: OpenApi, path: string, method: string, status: string): Schema | undefined {
+  return doc.paths?.[path]?.[method]?.responses?.[status]?.content?.['application/json']?.schema;
+}
+
+/** A field of an object schema by its dotted path, `outputs.delivery`, if it has one. */
+function fieldOf(schema: Schema | undefined, path: string): Schema | undefined {
+  return path
+    .split('.')
+    .reduce<Schema | undefined>(
+      (at, key) => (at?.['properties'] as Readonly<Record<string, Schema>> | undefined)?.[key],
+      schema,
+    );
 }
 
 const SRC = join(import.meta.dirname, '..', '..', 'src');
@@ -501,6 +535,39 @@ describe('the text the API serves an operator (U-92)', () => {
         .map((one) => `${one.where}: ${around(one.text)}`),
       [],
     );
+  });
+
+  it('says where a report run’s document goes in the fields that hold it (U-93)', async () => {
+    // Rewritten for `U-93`, and first written naming the report's `delivery`, which a report does
+    // not have: its mode is `outputs.delivery`, and the `delivery` beside the description, in the
+    // run it answers, is whether the run's was sent.
+    const doc = (await openApiDocument()) as OpenApi;
+    const description = doc.paths?.['/api/v1/reports/{id}/runs']?.['post']?.description ?? '';
+    const owners: Readonly<Record<string, Schema | undefined>> = {
+      report: bodyOf(doc, '/api/v1/reports/{id}', 'get', '200'),
+      run: bodyOf(doc, '/api/v1/reports/{id}/runs', 'post', '201'),
+    };
+    const named = [...description.matchAll(/\b(report|run)’s `([\w.]+)`/gu)].map(
+      ([, owner = '', path = '']) => ({ owner, path }),
+    );
+    // A field of each, so the sentence cannot pass by naming none.
+    assert.ok(
+      named.some(({ owner }) => owner === 'report'),
+      description,
+    );
+    assert.ok(
+      named.some(({ owner }) => owner === 'run'),
+      description,
+    );
+    for (const { owner, path } of named) {
+      assert.notEqual(fieldOf(owners[owner], path), undefined, `the ${owner} has no \`${path}\``);
+    }
+    // And it explains every mode the report's field takes, as the report's schema lists them.
+    const modes = fieldOf(owners['report'], 'outputs.delivery')?.['enum'];
+    assert.ok(Array.isArray(modes) && modes.length > 0, JSON.stringify(modes));
+    for (const mode of modes as readonly unknown[]) {
+      assert.ok(description.includes(`\`${String(mode)}\``), `it explains \`${String(mode)}\``);
+    }
   });
 
   it('takes a SQL comment out of a string, and leaves a flag and the query', () => {
