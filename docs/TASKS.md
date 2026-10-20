@@ -14725,6 +14725,41 @@ because each is a decision rather than a defect:
       `files resolve [!UNAVAIL=return] dns`), `mdns4_minimal`, `LD_PRELOAD`. **Done when** the
       differential has a box for each, in which the policy loaded in situ reports the check off
       with the rule named, and the run fails if it does not.
+
+      **P-461 outcome.** Five boxes, each built on its image's recorded base with the package an
+      operator would install (`scripts/smoke/Dockerfile.names` takes `EXTRA`), and each left as
+      that package or the operator leaves it. `names-off.ts` sets the case up, then loads the
+      policy in a process started after that, with its defaults, and asks the check to route
+      `sw1.example.test` through an asker that records what it is asked. The run fails unless the
+      box is as its case says, the policy reports the check off by the case's rule, and the check
+      routes the name `unvouched:off` with nothing asked. Since `P-460`'s fix round 1 the box
+      starts the check as the probe does and stops it after the route, and nothing may be asked
+      from start to stop (`OffRun.asked`), the canary included: run 4's box never started it, so
+      its canary could not go. In run 4:
+      - **nscd** (Debian 12, `nscd` started, its socket waited for): off by `nscd`, "nscd is
+        running (/var/run/nscd/socket)".
+      - **libnss-resolve** (Ubuntu 24.04): the package wrote `files resolve [!UNAVAIL=return] dns
+        myhostname`, off by `nsswitch`, "hosts: line has an action group".
+      - **mdns4_minimal** (Debian 12, `libnss-mdns`): the package wrote `files myhostname
+        mdns4_minimal [NOTFOUND=return] dns`, off by `nsswitch`, for the same reason.
+      - **LD_PRELOAD** set to libresolv, which ld.so loads harmlessly: off by `env`.
+      - **/etc/ld.so.preload** naming libresolv: off by `env`.
+      - **Decided 2026-10-20 by Claude, under the user's delegation: the boxes take the policy's
+        own words.** Each case names the rule's code and a phrase of its reason, and the policy is
+        unchanged. The two hosts: line cases are off by the action group, which both packages
+        write: `readNsswitch` says so before it would name the source it does not take
+        (`resolve`, `mdns4_minimal`), and either reason is the rule's.
+      - **Tests and mutants**: in `P-460`'s.
+- [ ] **P-462 — the differential replays none of §7.5's other rows** · S · P-432 · Filed
+      2026-10-20 by `P-460`. §7.5 lists rows beyond those `P-460` asked for and S4's export
+      holds, and the differential plays none of them: `sss` or `mdns4_minimal` before `files`;
+      `files resolve dns`; the stub refused under `resolve` (`DNSStubListener=no`); a `%scope`
+      hosts line; a partial key, several lookups in one row; mid-run edits of gai.conf and
+      nsswitch.conf, then a helper SIGKILL (D28's skew rest); `_gateway` for family 6 on a
+      v4-only host; and `LOCALDOMAIN=""`. Those the check is off for claim no wire, so each
+      needs a box like `P-461`'s; the others need a row of their own, as the answer rows are.
+      Not decided: whether any of them goes in before the rc.3 cut. **Done when** each is a box
+      or a row of the differential, or a reason it is not is recorded here.
 - [ ] **P-463 — names in flight when the lookup helper goes quiet are not kept off the probe's
       lanes** · XS · P-432, P-453 · Filed 2026-10-20 by `P-453`. D27 keeps every name in flight
       at an `exit` or `memory` loss off the probe's own `getaddrinfo` until ten minutes after
@@ -14775,41 +14810,6 @@ because each is a decision rather than a defect:
       as the cases "skipped outright", so a green run reads as a claim about the gate that it is
       not. CLAUDE.md is the user's to edit. **Done when** its list names `MS_DNS_RESOLVER` and the
       findings file the command is in.
-
-      **P-461 outcome.** Five boxes, each built on its image's recorded base with the package an
-      operator would install (`scripts/smoke/Dockerfile.names` takes `EXTRA`), and each left as
-      that package or the operator leaves it. `names-off.ts` sets the case up, then loads the
-      policy in a process started after that, with its defaults, and asks the check to route
-      `sw1.example.test` through an asker that records what it is asked. The run fails unless the
-      box is as its case says, the policy reports the check off by the case's rule, and the check
-      routes the name `unvouched:off` with nothing asked. Since `P-460`'s fix round 1 the box
-      starts the check as the probe does and stops it after the route, and nothing may be asked
-      from start to stop (`OffRun.asked`), the canary included: run 4's box never started it, so
-      its canary could not go. In run 4:
-      - **nscd** (Debian 12, `nscd` started, its socket waited for): off by `nscd`, "nscd is
-        running (/var/run/nscd/socket)".
-      - **libnss-resolve** (Ubuntu 24.04): the package wrote `files resolve [!UNAVAIL=return] dns
-        myhostname`, off by `nsswitch`, "hosts: line has an action group".
-      - **mdns4_minimal** (Debian 12, `libnss-mdns`): the package wrote `files myhostname
-        mdns4_minimal [NOTFOUND=return] dns`, off by `nsswitch`, for the same reason.
-      - **LD_PRELOAD** set to libresolv, which ld.so loads harmlessly: off by `env`.
-      - **/etc/ld.so.preload** naming libresolv: off by `env`.
-      - **Decided 2026-10-20 by Claude, under the user's delegation: the boxes take the policy's
-        own words.** Each case names the rule's code and a phrase of its reason, and the policy is
-        unchanged. The two hosts: line cases are off by the action group, which both packages
-        write: `readNsswitch` says so before it would name the source it does not take
-        (`resolve`, `mdns4_minimal`), and either reason is the rule's.
-      - **Tests and mutants**: in `P-460`'s.
-- [ ] **P-462 — the differential replays none of §7.5's other rows** · S · P-432 · Filed
-      2026-10-20 by `P-460`. §7.5 lists rows beyond those `P-460` asked for and S4's export
-      holds, and the differential plays none of them: `sss` or `mdns4_minimal` before `files`;
-      `files resolve dns`; the stub refused under `resolve` (`DNSStubListener=no`); a `%scope`
-      hosts line; a partial key, several lookups in one row; mid-run edits of gai.conf and
-      nsswitch.conf, then a helper SIGKILL (D28's skew rest); `_gateway` for family 6 on a
-      v4-only host; and `LOCALDOMAIN=""`. Those the check is off for claim no wire, so each
-      needs a box like `P-461`'s; the others need a row of their own, as the answer rows are.
-      Not decided: whether any of them goes in before the rc.3 cut. **Done when** each is a box
-      or a row of the differential, or a reason it is not is recorded here.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
