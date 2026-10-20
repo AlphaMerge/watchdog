@@ -13974,6 +13974,55 @@ because each is a decision rather than a defect:
             the read before that look 10.6 s long, the peak at most 3 in and out of its windows;
             P1's as before; both reached their end. P3's stall held its own lookup's reply
             unread: open as the stall began, its reply sent before it ended, answered 66 ms after.
+        - **S7 review round 3, fixed** 2026-10-20, on `feat/p432-s7-perf` (one finding, N3: since
+          round 2's 50 ms windows the judge's bound on the transient's length could not fire), in
+          commits after round 2's: test code and docs only, no production code.
+          - **What changed.** The judge reads the transient a run at a time. The windows that meet
+            with it are merged (`stretches`, which the print used, is now the judge's), and each run
+            must lie inside the stretch its losses allow: from the loss, or a second before a poll
+            saw it, to 10.5 s and a late timer's second after it, the stretches of losses that meet
+            taken together. The judge fails a run past that stretch, a run with no loss to open it,
+            and windows with no loss times (`lossesAt`). The times are the arm's stamps, not
+            `PeakWindows`': P1 stamps each kill before its cut (`killedAt`), P2's are its look's
+            `downAt` and `hungAt` (`lossTimes`), and `peakFacts` carries them onto the windows'
+            clock (`PeakWindows.since`). The per-window length check is gone, since the run's
+            covers one window or many. The printed windows name the losses.
+          - **Decided 2026-10-20 by Claude, under the user's delegation:**
+            - **N3 by the losses' times, not a fixed length per run.** A run bounded by a length
+              alone (10.5 s, the late timer's second, and a poll and a read's round trip) would
+              fail two losses whose windows meet, which D16 allows (10 s after each loss, at most 5
+              losses in 10 minutes), and would pass a transient of the right length where no loss
+              was. The times are the arm's own, so a fault in what cuts the windows (the finding's:
+              `lossSeen` at every look) is judged against something the windows did not say.
+            - **A loss a poll saw may open its transient a second early; one the arm made, not at
+              all.** P2's look stamps a loss after the read before it. The window that read closed
+              began a poll's 50 ms and two reads' round trips before the stamp: a second, behind a
+              busy event loop, as the late timer's. P1's kill is stamped before its cut, so its
+              transient starts at the kill.
+          - **Tests**, each run after the last change: `name-lookups.test.ts`'s third block, 91 of
+            91 in about three seconds (85 before). Four judge cases: the finding's own (the
+            transient kept on from the detach through the `hung` loss's window in 50 ms windows),
+            one where no loss was, one from before its kill, and the losses' times not measured.
+            Two cases on their own: P2's 50 ms windows judged clean inside their losses' stretches,
+            the kept-on run named once as a run, and a seen loss's second tried either side of the
+            bound; and the losses on the windows' clock through `lossTimes` and `peakFacts`.
+            `PeakWindows`' overlapping losses are judged clean too, and fail without the later
+            loss. P1 and P2 scaled down again, both held (202 s). Prettier and eslint on the
+            changed files.
+          - **Mutants: 14, on the toolchain**, each restored with `shutil.copy` and `os.utime`,
+            checked with `filecmp`, its marker seen in `dist` before its run and none left after
+            the last rebuild:
+            - the judge, 8, each killed: the runs not merged; a run's end not bounded; a run with
+              no loss passed; a made loss given a seen one's second; a seen loss given none; the
+              stretches of losses that meet not merged; the losses' times not required; a seen
+              loss's second widened to 1.2 s;
+            - the losses' plumbing, 4, each killed: `since` without the windows' origin; the kills
+              as seen; the `hung` loss dropped; `peakFacts` without the losses;
+            - through their arms, 2, in one build since each changes only its own arm: P2's look
+              taking every look as the detach's loss, the finding's own fault, failed P2 with the
+              transient at 18.0–45.6 s, past 10.5 s after a loss, across 736 windows each too short
+              for round 1's check; P1's kill stamped after its cut's read failed both its runs with
+              no loss to open them.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

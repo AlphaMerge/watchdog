@@ -60,14 +60,14 @@ probe lanes' and the helper's. So the gate's arms run each arm in each mode
 ## Asserted in every arm, and why
 
 All of it is `test/support/name-gate-judge.ts`, a pure function of what the arm measured, so that
-each assertion is shown failing on a run made to break it (the third block, 65 such cases, one for
+each assertion is shown failing on a run made to break it (the third block, 75 such cases, one for
 each assertion and for each rule's call of the ones rules share), and is not only ever seen
 passing.
 
 | Assertion | Why |
 | --- | --- |
 | `system`: the forwarder's most slots held at once for the probe ≤ q × 6 | P-426's six lanes are its bound (§1.6). q is 1: SNMP's family 4 asks one question. |
-| gate: ≤ q × 6 + 12 = 18; in P1 and P2, 8q more only in each loss's window | D16: six tokens, the walk's heard 8 and discovery 4; the transient for at most 10 s after a loss, at a forwarder that merges per client. P1 and P2 read the forwarder's peak in windows cut at each loss and 10.5 s after it (`gauge` with `resetPeak`), the half second being the read's own round trip and timer: the windows after a loss are held to 26 and every other stretch, the cold start included, to 18. The windows must reach the arm's end, and a read that failed fails the arm, since the stretch it ends was held to nothing. P2's losses are seen by a poll that reads the peak before each look, so the window that read closed is the loss's too: its transient can form before the look. |
+| gate: ≤ q × 6 + 12 = 18; in P1 and P2, 8q more only in each loss's window | D16: six tokens, the walk's heard 8 and discovery 4; the transient for at most 10 s after a loss, at a forwarder that merges per client. P1 and P2 read the forwarder's peak in windows cut at each loss and 10.5 s after it (`gauge` with `resetPeak`), the half second being the read's own round trip and timer: the windows after a loss are held to 26 and every other stretch, the cold start included, to 18. The windows must reach the arm's end, and a read that failed fails the arm, since the stretch it ends was held to nothing. P2's losses are seen by a poll that reads the peak before each look, so the window that read closed is the loss's too: its transient can form before the look. Each run of windows with the transient is judged as one, since P2 cuts one at every look until its `hung` loss, and must lie where the losses' own times put it: from the loss, or a second before a poll saw it, to 10.5 s and a late timer's second after it, the stretches of losses that meet taken together. The times are the arm's stamps (P1's kills, P2's look), not the windows'. |
 | No question dropped at the forwarder | 30 slots are left for the probe: a bound broken by more than 12 shows as drops, not only as a peak. |
 | `system` asks no walk question | `system` is P-426 with P-438 exactly (N9). |
 | gate: the walk's questions to each server within D19's bucket | 20 at once, refilled at 10 a second, with one more for the time between a token and its datagram. Check now's walk is cut (S6), so every question the check sends counts. |
@@ -92,7 +92,7 @@ wheel's start, its most at a 1 s sample and at the drain, and its file descripto
 and once it is torn down (`/proc/self/fd`); the resolver's most running and queued at a 1 s sample;
 the walk's channels and their busiest second; the lookups each of the helper's children was asked,
 by group; in P1 and P2 the forwarder's peak by window (runs of windows of one kind merged, with the
-number read and the arm's end); in P3 the replies the simulator sent to every client while the main
+number read, the arm's end and the losses' times); in P3 the replies the simulator sent to every client while the main
 thread was held, and its own lookup's three facts with how long after the stall it was answered.
 Not printed, by decision (below): the helper's at-risk peak, first looks, overshoot and class caps
 hit.
@@ -279,6 +279,33 @@ Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.m
   the end, an end not measured, and any failed read: a stretch held to no bound is not a stretch
   that held one.
 
+### The review's third round (2026-10-20)
+
+Decided 2026-10-20 by Claude, under the user's delegation (also in `docs/TASKS.md`, under S7):
+
+- **The transient is judged a run at a time, and placed by the losses' own times.** Round 1's
+  bound on its length was read one window at a time, and since round 2 P2 cuts a window at every
+  50 ms look until its `hung` loss: every window with the transient in a real P2 run is a few tens
+  of ms long, and the bound could never fire. A fault that kept the transient on from the detach
+  through the `hung` loss's window (`lossSeen` at every look, say) allowed 26 across 27.5–34 s,
+  where 18 is the bound, and passed. The judge now merges the windows that meet with the transient
+  (`stretches`, which the print already used), and each run must lie inside the stretch its losses
+  allow: from the loss to `LOSS_WINDOW_MS` (10.5 s) and a late timer's second after it, a poll's
+  losses from a second before it was seen, the stretches of losses that meet taken together. A
+  run past it fails, and so does one with no loss to open it.
+- **By the losses' times, not a fixed length per run.** A run bounded by a length alone (10.5 s,
+  the late timer's second, and a poll and a read's round trip) would fail two losses whose windows
+  meet, which D16 allows (10 s after each loss, at most 5 losses in 10 minutes), and would pass a
+  transient of the right length where no loss was. The times are the arm's own stamps, not
+  `PeakWindows`': P1 stamps each kill before its cut, and P2's are its look's `downAt` and
+  `hungAt`, carried onto the windows' clock (`PeakWindows.since`). So a fault in what cuts the
+  windows is judged against something the windows did not say. Windows with no loss times fail.
+- **A loss a poll saw may open its transient a second early; one the arm made, not at all.** P2's
+  look stamps a loss after the read before it, and the window that read closed began a poll's
+  50 ms and two reads' round trips before the stamp: a second, behind a busy event loop, as the
+  late timer's. P1's kill is stamped before its cut, so its transient starts at the kill, and a
+  run that starts before it fails.
+
 ## How each arm was shown to run
 
 Scaled down to 500 sensors on 50 devices, a pool of 16 and a minute an arm, on the VM with other
@@ -357,6 +384,21 @@ MS_DNS_ARMS=P1,P2,P3`, the same scale, not on a quiet machine, so not a measurem
   settled (the probe having read the reply first) failed with that lookup settled before the
   stall began and never answered after it, while its reply was still sent before the stall
   ended: round 1's fact alone passed it.
+
+The review's third round ran P1 and P2 again after its change, in one run of 202 s, both held
+(`MS_DNS_SENSORS=500 MS_DNS_POOL=16 MS_DNS_MINUTES=1 MS_DNS_RESOLVER=gate MS_DNS_ARMS=P1,P2`, the
+same scale, not on a quiet machine, so not a measurement):
+
+- **The transient's runs lay where their losses put them.** P1's kills came at 10.4 s and
+  100.4 s on the forwarder's clock, and its runs with the transient were 10.4–20.9 s and
+  100.4–110.9 s. P2 read its peak 402 times, and its losses were seen at 18.1 s and 35.1 s. Its
+  runs were 18.1–28.6 s and 35.0–45.6 s, the second from the read before the look that saw it.
+- **The round's own case fails the arm.** In a P2 whose look took every look as the detach's
+  loss, the finding's own fault, the transient ran on from 18.0 s through the `hung` loss's
+  window to 45.6 s, across 736 windows each too short for round 1's check. It failed as past the
+  10.5 s after a loss. A P1 that stamped each kill after its cut's read, not before, failed both
+  its runs as having no loss to open them. Each mutant changed only its own arm, so the two were
+  run in one build.
 
 ## The quiet-window command
 
