@@ -818,23 +818,38 @@ describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-4
     resolver.stop();
   });
 
+  /** Each of a zone's names asked once and answered, then stale, and the zone heard this second. */
+  async function zoneRidden(
+    made: Awaited<ReturnType<typeof make>>,
+    devices: readonly number[],
+    fresh: number,
+  ): Promise<string[]> {
+    const { callsFor, clock, ask } = made;
+    const names = devices.map((device) => `dev-${String(device)}.zone-a.test`);
+    for (const name of names) {
+      const first = ask(name);
+      await pollWithin(1_000, `${name} on a lane`, () => callsFor(name).length === 1, 2);
+      callsFor(name)[0]?.answer();
+      await first;
+    }
+    clock.now += ANSWER_MS + 1;
+    // Zone A heard this second, by a new name on a first lane.
+    const heard = `dev-${String(fresh)}.zone-a.test`;
+    const asked = ask(heard);
+    await pollWithin(1_000, 'the new name', () => callsFor(heard).length === 1, 2);
+    callsFor(heard)[0]?.answer();
+    await asked;
+    return names;
+  }
+
   for (const down of [false, true]) {
     it(`a refresh that waited to ride its zone gives its place back when it may not run on the probe’s lanes: ${down ? 'failed, the helper down' : 'moved to the helper'} (D20, D27, P-477)`, async () => {
-      // Stuck far later than the case takes: the riders' lanes are busy, not stuck.
-      const { helper, asker, callsFor, clock, ask, resolver } = await make({ stuckMs: 5_000 });
-      const names = [40, 41, 42, 43, 44].map((device) => `dev-${String(device)}.zone-a.test`);
-      for (const name of names) {
-        const first = ask(name);
-        await pollWithin(1_000, `${name} on a lane`, () => callsFor(name).length === 1, 2);
-        callsFor(name)[0]?.answer();
-        await first;
-      }
-      clock.now += ANSWER_MS + 1;
-      // Zone A heard this second, by a new name on a first lane.
-      const fresh = ask('dev-45.zone-a.test');
-      await pollWithin(1_000, 'the new name', () => callsFor('dev-45.zone-a.test').length === 1, 2);
-      callsFor('dev-45.zone-a.test')[0]?.answer();
-      await fresh;
+      // Stuck far later than the case takes: the riders' lanes are busy, not stuck. The routing
+      // wait 5 s: the third's wait is ended by a rider's answer, never by the clock (fix round 1).
+      const { logger, lines } = captured();
+      const made = await make({ stuckMs: 5_000, routeMs: 5_000, tickMs: 5, logger });
+      const { helper, asker, callsFor, clock, ask, resolver } = made;
+      const names = await zoneRidden(made, [40, 41, 42, 43, 44], 45);
       const [one, two, three, four, five] = names as [string, string, string, string, string];
       // Two refreshes ride the zone's sample, its two, on refresh lanes at once.
       for (const name of [one, two]) {
@@ -860,17 +875,50 @@ describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-4
         );
       }
       assert.equal(callsFor(three).length, 1, 'never on the probe’s lanes');
-      // Its place given back as it left: two more refreshes of the zone ride at once.
-      for (const name of [four, five]) {
-        assert.deepEqual(await ask(name), A);
-        assert.equal(callsFor(name).length, 2, `${name} riding at once`);
-        assert.equal(asker.askedFor(name).length, 1, `${name} not walked`);
-      }
+      // Its place given back as it left: the next refresh of the zone rides at once, beside two.
+      assert.deepEqual(await ask(four), A);
+      assert.equal(callsFor(four).length, 2, 'the fourth riding at once');
+      assert.equal(asker.askedFor(four).length, 1, 'the fourth not walked');
+      // Two out, the second and the fourth: the fifth waits until one of them settles (held per
+      // outage), and rides then.
+      assert.deepEqual(await ask(five), A);
+      assert.equal(callsFor(five).length, 1, 'the fifth waiting, on no lane');
+      callsFor(two)[1]?.answer();
+      await pollWithin(1_000, 'the fifth riding', () => callsFor(five).length === 2, 2);
+      assert.equal(asker.askedFor(five).length, 1, 'the fifth not walked');
       for (const asked of helper.inFlight()) asked.answer(A);
-      for (const name of [two, four, five]) for (const call of callsFor(name)) call.answer();
+      for (const name of [four, five]) for (const call of callsFor(name)) call.answer();
+      // Every one of the five rode, the third included: none of them waited out its routing wait.
+      const said = (await summaryAfter(lines, clock, 0))['check'] as
+        { readonly sampled?: unknown; readonly waited?: unknown } | undefined;
+      assert.deepEqual(
+        { sampled: said?.sampled, waited: said?.waited },
+        { sampled: 5, waited: 0 },
+        'the third rode, then left the probe’s lanes',
+      );
       resolver.stop();
     });
   }
+
+  it('a rider that settles slower than ROUTE_MS still gives its place to a refresh waiting on its zone: only a rider’s own end frees one, at any speed (D20, P-477 fix round 1)', async () => {
+    const made = await make({ stuckMs: 5_000, routeMs: 5_000 });
+    const { asker, callsFor, clock, ask, resolver } = made;
+    const names = await zoneRidden(made, [50, 51, 52], 53);
+    const [one, two, three] = names as [string, string, string];
+    for (const name of [one, two]) {
+      assert.deepEqual(await ask(name), A);
+      assert.equal(callsFor(name).length, 2, `${name} riding`);
+    }
+    assert.deepEqual(await ask(three), A);
+    assert.equal(callsFor(three).length, 1, 'the third waiting, on no lane');
+    // The first rider answers 400 ms on, by the resolver's clock: past ROUTE_MS, inside the window.
+    clock.now += 400;
+    callsFor(one)[1]?.answer();
+    await pollWithin(1_000, 'the third riding', () => callsFor(three).length === 2, 2);
+    assert.equal(asker.askedFor(three).length, 1, 'the third not walked');
+    for (const name of [two, three]) for (const call of callsFor(name)) call.answer();
+    resolver.stop();
+  });
 
   it('a name failed as it leaves the probe’s queues is counted in the hour’s summary as faulted', async () => {
     const { logger, lines } = captured();

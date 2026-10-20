@@ -1272,12 +1272,16 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   the probe's own lanes; one they do not, in the helper, and only there, so a check for it while
   the helper is down fails at once and the name stays queued for it. Two names of a zone not
   heard from yet are walked at a time and the rest wait for them; a refresh rides a walk of its
-  zone heard in the last second, at most two between the zone's answers, and the rest wait for a
-  place rather than walk, or, when no walk of the zone was heard in that second, one refresh
-  walks it and the rest wait on that (`P-477`); a name heard that then sticks on the probe's lanes
-  sends its zone to the helper for five minutes. Each server is asked at most 10 questions a
-  second, 20 at once, and the check holds at most 8 questions open for zones it has heard and 4
-  for the rest; a name past either goes to the helper. Check now goes to the helper without a walk.
+  zone heard in the last second, at most two of a zone's at once, each holding its place until
+  its own lookup ends, so a zone that stops answering has at most two of its refreshes on the
+  probe's lanes at once, however many of its names still answer from a cache. The rest wait for a
+  place rather than walk, or, when no walk of the zone was heard in that second, one refresh walks
+  it and the rest wait on that; a refresh still waiting when its 250 ms are up goes to the helper,
+  counted as `waited` in the hourly summary's `check` (`P-477`). A name heard that then sticks on
+  the probe's lanes sends its zone to the helper for five minutes. Each server is asked at most 10
+  questions a second, 20 at once, and the check holds at most 8 questions open for zones it has
+  heard and 4 for the rest; a name past either goes to the helper. Check now goes to the helper
+  without a walk.
 - **When the check is off, every name not the hosts file's is asked in the helper, and while
   the system's name settings turn it off, the hosts file's too.** The settings turn it off when
   they say it cannot vouch for what glibc would do (`nscd`, an NSS module it does not model,
@@ -1444,7 +1448,9 @@ once more as the probe stops, with `stopping: true`, for the part of the hour si
 - `check`: its `state` (0 the helper resting, 1 on, 2 off for the system's name settings or
   platform, or while they are slow to read, 3 not proven, 4 stood down), `said` in words, and
   while it is off, `off` with the `code` and `why` of the rule that turned it off; with its
-  totals (`misses`, `standDowns`) and the zones it keeps (`keys`, `silentKeys`, `mixedKeys`).
+  totals (`misses`, `standDowns`, the refreshes that rode a zone's walk, `sampled`, and those
+  that waited to and went to the helper, `waited`) and the zones it keeps (`keys`, `silentKeys`,
+  `mixedKeys`).
 - `helper`: its `state` now; `rss`, its resident memory in bytes at the child's last beat (`null`
   with no child), and `rssPeak`; its `losses` since the probe started, by reason, with their
   `total`; and the hour's `changes` of state (`at`, `from`, `to`, and the `loss` that moved it) and

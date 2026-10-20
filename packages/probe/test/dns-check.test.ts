@@ -18,7 +18,7 @@ import {
   type CheckRoute,
   type DnsCheckOptions,
 } from '../src/resolver/dns-check.js';
-import { ForwardBudget } from '../src/resolver/forward-budget.js';
+import { FORWARD_HOLD_MS, ForwardBudget } from '../src/resolver/forward-budget.js';
 import { CONF, ScriptedAsker, WalkPolicy } from './support/fake-dns.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -113,6 +113,8 @@ function make(
   const ready = setup.proven === false ? Promise.resolve() : prove();
   return { check, asker, policy, budget, clock, route, silentKeys, ready };
 }
+
+type Made = ReturnType<typeof make>;
 
 const zoneA = (host: string): boolean => host.endsWith('zone-a.test');
 
@@ -572,6 +574,12 @@ const macrotask = (): Promise<void> =>
     setImmediate(resolve);
   });
 
+/** A route given in the turn it was asked in: not a promise. */
+function atOnce(routed: CheckRoute | Promise<CheckRoute>): CheckRoute {
+  assert.ok(!(routed instanceof Promise), 'routed at once');
+  return routed;
+}
+
 /**
  * The wheel's burst (`P-477`): a zone's refreshes routed in one turn, before any of their answers,
  * as each second's due checks reach the pool together. Each one that runs on the probe's lanes,
@@ -603,41 +611,43 @@ function burst(check: DnsCheck, hosts: readonly string[]) {
 describe('refresh sampling (D20)', () => {
   const ref = (): object => ({});
 
-  it('lets a refresh ride its zone’s heard walk from the last second, at most two since its last answer: a third waits for the zone’s next answer, then rides', async () => {
-    const { check, asker, route, clock, ready } = make();
+  it('lets a refresh ride its zone’s heard walk from the last second, at most two out at once: a third waits for a rider to settle, and no other answer of the zone, quick or slow, frees a place (P-477 fix round 1)', async () => {
+    // The routing wait 5 s: a wait is ended by the zone, never by a loaded host's pause.
+    const { check, asker, route, clock, ready } = make({ routeMs: 5_000 });
     await ready;
     asker.rule = () => 'answer';
     await route('dev-1.zone-a.test');
     const asked = asker.asked.length;
     const [two, three, four, five, six] = [ref(), ref(), ref(), ref(), ref()] as const;
-    const atOnce = (routed: CheckRoute | Promise<CheckRoute>): CheckRoute => {
-      assert.ok(!(routed instanceof Promise), 'routed at once');
-      return routed;
-    };
     assert.equal(atOnce(refresh(check, 'dev-2.zone-a.test', two)).route, 'sampled');
     assert.equal(atOnce(refresh(check, 'dev-3.zone-a.test', three)).route, 'sampled');
     // Each is told in the turn it is routed in: no timer can have fired between.
     const third = refresh(check, 'dev-4.zone-a.test', four);
     assert.ok(third instanceof Promise, 'a third waits');
+    let rode = false;
+    void third.then(() => {
+      rode = true;
+    });
     assert.equal(asker.asked.length, asked, 'and walks nothing meanwhile');
-    // Another lookup of the zone answers on the probe's lanes: the two out count no more.
+    // Other names of the zone answer on the probe's lanes, one at once and one slower than the
+    // routing wait: neither is a rider's end, so neither frees a place (held per outage).
     check.answered('d:zone-a.test', 2);
-    assert.equal(
-      (await third).route,
-      'sampled',
-      'a third waits for the zone’s next answer, then rides',
-    );
-    // Counted from that answer: one more rides, and the next waits until one of the two is let go.
-    assert.equal(atOnce(refresh(check, 'dev-5.zone-a.test', five)).route, 'sampled');
-    const fifth = refresh(check, 'dev-6.zone-a.test', six);
-    assert.ok(fifth instanceof Promise, 'two out since the answer: the next waits');
-    check.sampledEnded('d:zone-a.test', four);
-    assert.equal((await fifth).route, 'sampled', 'a rider settled: its place is free');
+    check.answered('d:zone-a.test', 6_000);
+    await macrotask();
+    assert.equal(rode, false, 'still waiting: no other answer of the zone frees a place');
+    check.sampledEnded('d:zone-a.test', two);
+    assert.equal((await third).route, 'sampled', 'a rider settled: the third takes its place');
+    // Two out again, the second's and the third's: the next waits until one of them settles.
+    const fourth = refresh(check, 'dev-5.zone-a.test', five);
+    assert.ok(fourth instanceof Promise, 'two out: the next waits');
+    check.answered('d:zone-a.test', 2);
+    check.sampledEnded('d:zone-a.test', three);
+    assert.equal((await fourth).route, 'sampled', 'a rider settled: its place is free');
     assert.equal(asker.asked.length, asked, 'none of them walked');
     // Past a second since the newest heard step, the window is closed: one walks, the zone's pilot.
     clock.now += KEY_SAMPLE_MS + 1;
     assert.equal(
-      (await route('dev-9.zone-a.test', { refresh: true, lastRanMs: 3, ref: ref() })).route,
+      (await route('dev-9.zone-a.test', { refresh: true, lastRanMs: 3, ref: six })).route,
       'heard',
     );
     assert.equal(asker.asked.length, asked + 1);
@@ -731,6 +741,8 @@ describe('refresh sampling (D20)', () => {
     let moved = 0;
     const told: { check?: DnsCheck } = {};
     const { check, asker, clock, route, ready } = make({
+      // The routing wait 5 s: the waiters are let go by the zone's NotHeard, never by the clock.
+      routeMs: 5_000,
       // As the resolver's `#keySilent`: the zone's sampled lookups still queued go to the helper,
       // and give back their places. The first rider runs; the second is queued.
       onKeySilent: (key) => {
@@ -760,56 +772,84 @@ describe('refresh sampling (D20)', () => {
     // In the same turn, the first rider passes stuck: NotHeard for its zone, as of its start.
     check.sampledStuck('d:zone-a.test', clock.now, 'dev-2.zone-a.test');
     assert.equal(moved, 1, 'the queued rider moved, its place given back');
-    const routes = await Promise.all(routed.map(({ now }) => Promise.resolve(now)));
-    assert.deepEqual(kinds(routes.slice(0, 2)), { sampled: 2 });
-    const waited = routes.slice(2);
-    assert.equal(kinds(waited)['sampled'], undefined, 'none rides a zone not heard');
+    await macrotask();
+    const waited = hosts.slice(2);
     assert.equal(
       check.stats().walked,
       walked + waited.length,
-      'each walked by its own name, as a mixed zone’s names are',
+      'each waiter walked by its own name, as a mixed zone’s names are',
+    );
+    // The servers answer them after all, as they are asked: each routes by its own walk.
+    await pollWithin(
+      1_000,
+      'every waiter’s own question',
+      () => {
+        for (const question of asker.asked)
+          if (question.replied === undefined) question.release('answer');
+        return waited.every((host) => asker.askedFor(host).length === 1);
+      },
+      2,
+    );
+    const routes = await Promise.all(routed.map(({ now }) => Promise.resolve(now)));
+    assert.deepEqual(kinds(routes.slice(0, 2)), { sampled: 2 });
+    assert.deepEqual(
+      kinds(routes.slice(2)),
+      { heard: waited.length },
+      'none rides a zone not heard',
     );
     assert.equal(check.stats().mixedKeys, 1);
     check.stop();
   });
 
-  it('routes a refresh still waiting at its deadline unvouched, as a stall, counted, with nothing walked for it (D31, P-477)', async () => {
-    const { check, asker, budget, route, ready } = make();
+  it('routes a refresh still waiting at its deadline unvouched as `wait`, counted for the hourly summary, never as a stall nor warned, with nothing walked for it (P-477 fix round 1)', async () => {
+    const { logger, lines } = captured();
+    const { check, asker, budget, route, ready } = make({ logger });
     await ready;
     asker.rule = () => 'answer';
     await route('dev-1.zone-a.test');
     const asked = asker.names().length;
-    // Two riders that never answer, and a third waiting on them.
+    // Two riders that never answer, and a third waiting on them: its 60 ms routing wait runs out.
     void refresh(check, 'dev-2.zone-a.test');
     void refresh(check, 'dev-3.zone-a.test');
     assert.deepEqual(await refresh(check, 'dev-4.zone-a.test'), {
       route: 'unvouched',
       key: 'd:zone-a.test',
-      why: 'stall',
+      why: 'wait',
     });
-    assert.equal(budget.stats().deferred.stall, 1, 'counted with the walks deferred');
+    assert.equal(check.stats().waited, 1, 'counted in the check’s block of the hourly summary');
+    assert.deepEqual(budget.stats().deferred, { budget: 0, rate: 0, stall: 0, scoutWait: 0 });
+    assert.deepEqual(
+      warns(lines, 'why'),
+      [],
+      'never warned: a zone slow to free a place, no fault',
+    );
     assert.equal(asker.names().length, asked, 'nothing walked for it');
     check.stop();
   });
 
-  it('routes a refresh woken to ride just before the check starts again from nothing as a stall, walking nothing (§1.12, P-477)', async () => {
-    const { check, asker, route, ready } = make();
+  it('routes a refresh woken to ride just before the check starts again from nothing as a fresh refresh is routed then, unproven, walking nothing (§1.12, P-477 fix round 1)', async () => {
+    const { check, asker, route, ready } = make({ routeMs: 5_000 });
     await ready;
     asker.rule = () => 'answer';
     await route('dev-1.zone-a.test');
-    void refresh(check, 'dev-2.zone-a.test');
+    const two = ref();
+    void refresh(check, 'dev-2.zone-a.test', two);
     void refresh(check, 'dev-3.zone-a.test');
     const third = refresh(check, 'dev-4.zone-a.test');
     assert.ok(third instanceof Promise, 'waiting for a place');
-    // The zone answers, and in the same turn a watched file changes.
-    check.answered('d:zone-a.test', 2);
+    // The canary unanswered, so that the check is still unproven when the waiter runs.
+    asker.rule = (_server, name) => (name === 'localhost.' ? 'silent' : 'answer');
+    // A rider settles, and in the same turn a watched file changes.
+    check.sampledEnded('d:zone-a.test', two);
     check.reset();
-    assert.deepEqual(await third, { route: 'unvouched', key: 'd:zone-a.test', why: 'stall' });
+    const woken = await third;
+    assert.deepEqual(woken, { route: 'unvouched', key: 'd:zone-a.test', why: 'unproven' });
+    assert.deepEqual(woken, await refresh(check, 'dev-4.zone-a.test'), 'as a fresh refresh');
     assert.equal(asker.askedFor('dev-4.zone-a.test').length, 0, 'nothing walked');
     check.stop();
   });
 
-  it('routes a waiting refresh released with under 50 ms of its routing wait left as a stall, with no walk (§1.3 row 6, P-477)', async () => {
+  it('routes a waiting refresh released with under 50 ms of its routing wait left as `wait`, with no walk (§1.3 row 6, P-477 fix round 1)', async () => {
     // The check's real clock is the test's: what is left of a wait is set, not slept for.
     const real = { now: 0 };
     const { check, asker, budget, clock, route, ready } = make({
@@ -827,9 +867,10 @@ describe('refresh sampling (D20)', () => {
     // 40 ms of its 5 s left when a stuck rider makes the zone not heard, and the wait ends.
     real.now += 5_000 - 40;
     check.sampledStuck('d:zone-a.test', clock.now, 'dev-2.zone-a.test');
-    assert.deepEqual(await third, { route: 'unvouched', key: 'd:zone-a.test', why: 'stall' });
+    assert.deepEqual(await third, { route: 'unvouched', key: 'd:zone-a.test', why: 'wait' });
     assert.equal(asker.askedFor('dev-4.zone-a.test').length, 0, 'nothing walked');
-    assert.equal(budget.stats().deferred.stall, 1);
+    assert.equal(check.stats().waited, 1);
+    assert.equal(budget.stats().deferred.stall, 0, 'not a stall');
     check.stop();
   });
 
@@ -884,7 +925,8 @@ describe('refresh sampling (D20)', () => {
       spent = one.route === 'unvouched' && one.why === 'rate';
     }
     assert.ok(spent, 'the server’s rate spent');
-    void refresh(check, 'dev-2.zone-a.test');
+    const two = ref();
+    void refresh(check, 'dev-2.zone-a.test', two);
     void refresh(check, 'dev-3.zone-a.test');
     const third = refresh(check, 'dev-4.zone-a.test');
     assert.ok(third instanceof Promise, 'waiting for a place');
@@ -894,14 +936,175 @@ describe('refresh sampling (D20)', () => {
       key: 'd:zone-a.test',
       why: 'rate',
     });
-    check.answered('d:zone-a.test', 2);
+    check.sampledEnded('d:zone-a.test', two);
+    assert.equal((await third).route, 'sampled', 'still waiting, and riding once a rider settled');
+    check.stop();
+  });
+
+  it('lets a refresh woken into a closed window with its whole routing wait left walk as the zone’s pilot, and the rest ride its verdict: one question (P-477 fix round 1)', async () => {
+    // The check's real clock is the test's: a waiter's routing wait is whole when it is woken.
+    const real = { now: 0 };
+    const { check, asker, clock, route, ready } = make({
+      routeMs: 5_000,
+      realNow: () => real.now,
+    });
+    await ready;
+    asker.rule = () => 'answer';
+    assert.equal((await route('dev-1.zone-a.test')).route, 'heard');
+    const asked = asker.names().length;
+    const hosts = Array.from({ length: 12 }, (_, i) => `dev-${String(i + 2)}.zone-a.test`);
+    const wave = burst(check, hosts);
+    assert.equal(wave.atOnce, SAMPLED_PER_KEY, 'two ride, the rest wait');
+    // The zone's window closes while they wait, before either rider settles.
+    clock.now += KEY_SAMPLE_MS + 1;
+    assert.deepEqual(kinds(await wave.settled), { heard: 1, sampled: 11 });
     assert.equal(
-      (await third).route,
-      'sampled',
-      'still waiting, and riding once the zone answered',
+      asker.names().length,
+      asked + 1,
+      'the first woken walked as the zone’s pilot, the rest waited on it: one question',
     );
     check.stop();
   });
+
+  it('routes a refresh woken into a closed window with part of its routing wait gone as `wait`, never a pilot whose verdict is cut short, and leaves the pilot to the zone’s next refresh (P-477 fix round 1)', async () => {
+    const real = { now: 0 };
+    const { check, asker, clock, route, ready } = make({ routeMs: 250, realNow: () => real.now });
+    await ready;
+    asker.rule = () => 'answer';
+    assert.equal((await route('dev-1.zone-a.test')).route, 'heard');
+    // The zone's servers answer, in 150 ms.
+    asker.rule = () => ({ reply: 'answer', delayMs: 150 });
+    const asked = asker.names().length;
+    const two = ref();
+    void refresh(check, 'dev-2.zone-a.test', two);
+    void refresh(check, 'dev-3.zone-a.test');
+    const third = refresh(check, 'dev-4.zone-a.test');
+    assert.ok(third instanceof Promise, 'waiting for a place');
+    // 150 ms of its 250 gone, then the window closes and a rider settles: 100 ms left.
+    real.now += 150;
+    clock.now += KEY_SAMPLE_MS + 1;
+    check.sampledEnded('d:zone-a.test', two);
+    assert.deepEqual(await third, { route: 'unvouched', key: 'd:zone-a.test', why: 'wait' });
+    assert.equal(asker.names().length, asked, 'no walk sent on 100 ms, for a server of 150');
+    assert.equal(check.stats().waited, 1);
+    // The zone as it was: its next refresh is its pilot, on a whole routing wait, and heard.
+    const next = refresh(check, 'dev-5.zone-a.test');
+    assert.equal(asker.names().length, asked + 1, 'the zone’s pilot, walked at once');
+    assert.equal((await next).route, 'heard');
+    check.stop();
+  });
+
+  /** A zone's name heard, then three more of its names missed (§1.10), each a 50 ms walk. */
+  async function missed(made: Made, zone: string, devices: readonly number[]): Promise<void> {
+    const { check, route } = made;
+    if (devices.includes(1)) assert.equal((await route(`x0.${zone}`)).route, 'heard', zone);
+    const misses = check.stats().misses;
+    const routed = await Promise.all(
+      devices.map((device) => route(`x${String(device)}.${zone}`, { boundMs: 200 })),
+    );
+    for (const one of routed) {
+      assert.ok(one.route === 'silent' && one.miss !== undefined, `${zone} walked, silent`);
+      check.helperAnswered(one.miss, 5);
+    }
+    await pollWithin(
+      1_000,
+      `${zone} missed`,
+      () => check.stats().misses === misses + devices.length,
+      5,
+    );
+  }
+
+  /**
+   * Every gate a fresh route applies, met by a refresh while it waits to ride its zone (`P-477`
+   * fix round 1): `before` sets up what the gate needs, short of it; `change` closes it during the
+   * wait. Woken with a place free, the waiter routes as a fresh refresh of its name routes then.
+   */
+  const gates: readonly {
+    readonly gate: string;
+    readonly expect: CheckRoute;
+    readonly before?: (made: Made) => Promise<void>;
+    readonly change: (made: Made) => void | Promise<void>;
+  }[] = [
+    {
+      gate: 'the hosts file names it',
+      expect: { route: 'local', key: 'd:zone-a.test' },
+      change: ({ policy }) => {
+        policy.local = (host) => host === 'dev-4.zone-a.test';
+      },
+    },
+    {
+      gate: 'the system’s name settings turn the check off',
+      expect: { route: 'unvouched', key: 'd:zone-a.test', why: 'off' },
+      change: ({ policy }) => {
+        policy.off = { code: 'nsswitch', why: 'a test' };
+      },
+    },
+    {
+      gate: 'the check stands down',
+      expect: { route: 'unvouched', key: 'd:zone-a.test', why: 'standDown' },
+      before: async (made) => {
+        await missed(made, 'zone-m.test', [1, 2, 3]);
+        await missed(made, 'zone-n.test', [1, 2, 3]);
+        await missed(made, 'zone-o.test', [1, 2]);
+        // Their questions out of the ledger, and the server's bucket full again (§1.6).
+        made.clock.now += FORWARD_HOLD_MS + 1;
+      },
+      change: async (made) => {
+        await missed(made, 'zone-o.test', [3]);
+        assert.equal(made.check.state(), 4, 'stood down: three zones missed');
+      },
+    },
+    {
+      gate: 'a watched file changes and the check is not proven again',
+      expect: { route: 'unvouched', key: 'd:zone-a.test', why: 'unproven' },
+      change: ({ asker, check }) => {
+        asker.rule = (_server, name) => (name === 'localhost.' ? 'silent' : 'answer');
+        check.reset();
+      },
+    },
+    {
+      gate: 'a zone among its candidates skips the check',
+      expect: { route: 'unvouched', key: 'd:zone-a.test', why: 'skip' },
+      before: async (made) => {
+        // Its second candidate, under the search list, is in zone-a.test.b.corp.
+        made.policy.conf = { ...CONF, search: ['b.corp'], searchFrom: 'search' };
+        await missed(made, 'zone-a.test.b.corp', [1, 2]);
+      },
+      change: (made) => missed(made, 'zone-a.test.b.corp', [3]),
+    },
+    {
+      gate: 'its zone is marked unsafe',
+      expect: { route: 'unvouched', key: 'd:zone-a.test', why: 'unsafe' },
+      change: ({ check }) => {
+        check.markUnsafe(['d:zone-a.test']);
+      },
+    },
+  ];
+
+  for (const { gate, expect, before, change } of gates) {
+    it(`routes a refresh woken from its wait to ride as a fresh refresh is routed once ${gate}, never riding past it (D20, P-477 fix round 1)`, async () => {
+      const made = make({ routeMs: 5_000 });
+      const { check, asker, ready } = made;
+      await ready;
+      // The names a gate's misses are made of never answer; every other does.
+      asker.rule = (_server, name) => (/^x[1-9]\./u.test(name) ? 'silent' : 'answer');
+      await before?.(made);
+      assert.equal((await made.route('dev-1.zone-a.test')).route, 'heard', 'its zone heard');
+      const two = ref();
+      assert.equal(atOnce(refresh(check, 'dev-2.zone-a.test', two)).route, 'sampled');
+      assert.equal(atOnce(refresh(check, 'dev-3.zone-a.test')).route, 'sampled');
+      const third = refresh(check, 'dev-4.zone-a.test');
+      assert.ok(third instanceof Promise, 'waiting for a place');
+      await change(made);
+      // A rider settles: the waiter is woken with a place free.
+      check.sampledEnded('d:zone-a.test', two);
+      const woken = await third;
+      assert.deepEqual(woken, expect, 'the gate, met by the waiter');
+      assert.deepEqual(woken, await refresh(check, 'dev-4.zone-a.test'), 'as a fresh refresh');
+      assert.equal(asker.askedFor('dev-4.zone-a.test').length, 0, 'nothing walked for it');
+      check.stop();
+    });
+  }
 
   it('never samples a first lookup, a slow name, a single label or an unsafe zone', async () => {
     const { check, asker, policy, route, ready } = make();
