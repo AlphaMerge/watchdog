@@ -526,17 +526,30 @@ The numbers that decide the criterion:
     lookup helper is stopping: the times it was not answering since it last said so`
     (`alsoNotAnswering`, with what they detached and kept off, `alsoDetached` and
     `alsoKeptOff`).
-  - **What a quiet helper cost is in the hourly summary**, `the probe’s resolver in gate mode,
-    this hour`, said every hour whatever the lines said. `routed.faulted` is the checks the gate
-    failed at once that hour, each for a name kept off the probe's lanes while the helper was
-    not answering or rested, for a poison name, which its crash line names, or as the probe
-    stopped. Under `helper`, `quiets` and `msInState.unresponsive` count the quiets and the time
-    not answering since the probe started, and `keptOffPeak` is the most names kept off at once.
-    Record the week's sum of `routed.faulted`, its quiets and its highest `keptOffPeak`: they are
-    the measure of what keeping names off costs (`P-463`'s decision). Each hour with
-    `routed.faulted` above `0` is a finding, with the sensors whose checks failed at once, whose
-    messages say the probe `does not ask its own getaddrinfo` for the name. A sum of the lines'
-    `keptOff` is not the measure: a lookup in flight across two quiets is counted at each.
+  - **What a quiet helper cost is in the gate's summary**, `the probe’s resolver in gate mode,
+    this hour`, said every hour whatever the lines said, and once more as the probe stops, for
+    the part of the hour since the last, with `stopping: true`. `checksFaulted` is the checks the
+    gate failed at once since the summary before, each for a name kept off the probe's lanes
+    while the helper was not answering or rested, or for a poison name, which its crash line
+    names; a "Check now" served its kept answer is not one. `routed.faulted` counts lookups, not
+    checks: one for each lookup the gate refused, however many checks waited for it, so a
+    refresh nobody waited for is one, and it can be above `0` in an hour no check failed. What
+    the stop itself fails, after the check pool has drained, comes after the stop's summary and
+    is in none. Under `helper`, `quiets` and `msInState.unresponsive` count the quiets and the
+    time not answering since that probe started, and `keptOffPeak` is the most names kept off at
+    once since then: each start of `ms-probe` begins them at `0` again.
+    - Record the week's sum of `checksFaulted` over every summary, the stops' included; its
+      quiets, as the sum over each start of the last summary that start said; and the highest
+      `keptOffPeak` of any summary. They are the measure of what keeping names off costs
+      (`P-463`'s decision).
+    - A start whose last summary has no `stopping` ended without stopping (killed, crashed, or
+      the host lost power): up to an hour of its counts was never said. The write-up names each
+      such end and the hour it leaves uncounted.
+    - Each summary with `checksFaulted` above `0` is a finding, with the sensors whose checks
+      failed at once, whose messages say the probe `does not ask its own getaddrinfo` for the
+      name.
+    - Neither `routed.faulted` nor a sum of the lines' `keptOff` is the measure: a refresh
+      refused is not a check failed, and a lookup in flight across two quiets is counted at each.
   - `namePassedStuck` (lookups a second) is `0` throughout: every hour's `max` is `0`. Each one
     is a lookup the gate sent to the probe's own lanes that then ran past 1 s, and is explained
     from the log line naming its host, or it is a finding.

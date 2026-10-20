@@ -1361,8 +1361,11 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   `keptOff`, the lookups in flight at that quiet, and `keptOffNow`, every name kept off then,
   with the quiets since the last warning (`alsoNotAnswering`) and what they detached and kept
   off (`alsoDetached`, `alsoKeptOff`); those still unsaid as the probe stops are said then. The
-  hourly summary, `the probe’s resolver in gate mode, this hour`, has the checks failed at once
-  that hour (`routed.faulted`), the quiets since the probe started (`helper.quiets`), the most
+  hourly summary, `the probe’s resolver in gate mode, this hour`, is said again as the probe
+  stops, for the part of the hour since the last (`stopping: true`). It has the checks failed
+  at once since the last (`checksFaulted`) and the lookups refused (`routed.faulted`: one
+  however many checks waited for it, so a refresh nobody waited for is one, and two checks on
+  one lookup are one). Since the probe started, it has the quiets (`helper.quiets`), the most
   names kept off at once (`helper.keptOffPeak`) and the time not answering
   (`helper.msInState.unresponsive`). The probe's
   `the lookup helper was lost` line says who sent a SIGKILL the child ended by (`killedBy`,

@@ -847,6 +847,7 @@ describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-4
       (line) => line['msg'] === 'the probe’s resolver in gate mode, this hour',
     );
     assert.equal((summary?.['routed'] as { faulted?: unknown } | undefined)?.faulted, 1);
+    assert.equal(summary?.['checksFaulted'], 1, 'and its one check');
     for (const call of calls) call.answer();
     await Promise.all(held);
     resolver.stop();

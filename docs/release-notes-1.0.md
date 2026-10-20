@@ -523,9 +523,10 @@ ms-probe`: the setting is read only at start
   is next up, since any of them may be what ended it; so is every name a helper was asking when
   it stopped answering (`P-463`). While the helper is not answering, the check of such a name
   fails at once unless an answer is kept for it, and a helper that keeps going quiet and coming
-  back never rests, so the names it keeps off add up; the hourly summary counts the checks
-  failed at once (`routed.faulted`). Its loss line says whether a SIGKILL was the probe's own, the
-  helper's, or one from outside such as the OOM killer (`killedBy`, `P-469`). `"system"` is the
+  back never rests, so the names it keeps off add up; the hourly summary, said again as the
+  probe stops, counts the checks failed at once (`checksFaulted`). Its loss line says whether a
+  SIGKILL was the probe's own, the helper's, or one from outside such as the OOM killer
+  (`killedBy`, `P-469`). `"system"` is the
   resolver rc.3
   has without the gate: `P-426`'s, with `P-438`'s kept answers. Probe Health says which mode
   each probe ran and what the gate routed where (the upgrade item above). And in either mode it

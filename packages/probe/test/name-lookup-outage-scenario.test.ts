@@ -1779,14 +1779,24 @@ describe('the gate with its name check off: one zone stops answering (P-432 S3)'
       0,
       'every quiet said before the stop',
     );
-    // And the hour's summary: the nine checks failed at once, four quiets, nine kept off at most,
-    // and the nine seconds not answering (2 s for each of the burst's, 3 s for the last).
-    const summary = logged.find(
+    // And the hour's summary: the nine checks failed at once, each its own lookup, four quiets,
+    // nine kept off at most, and the nine seconds not answering (2 s for each of the burst's, 3 s
+    // for the last).
+    const summaries = logged.filter(
       (line) => line['msg'] === 'the probe’s resolver in gate mode, this hour',
     );
+    const summary = summaries[0];
     const routed = summary?.['routed'] as { readonly faulted?: unknown } | undefined;
     assert.equal(routed?.faulted, 9, JSON.stringify(summary));
-    const helperSaid = summary?.['helper'] as
+    assert.equal(summary?.['checksFaulted'], 9);
+    // Then the stop's (`P-463` fix round 2): nothing refused since, and the start's quiets.
+    assert.equal(summaries.length, 2, 'the hour’s, then the stop’s');
+    const stopped = summaries[1];
+    assert.equal(stopped?.['stopping'], true, JSON.stringify(stopped));
+    assert.equal((stopped['routed'] as { readonly faulted?: unknown }).faulted, 0);
+    assert.equal(stopped['checksFaulted'], 0);
+    assert.equal((stopped['helper'] as { readonly quiets?: unknown }).quiets, 4);
+    const helperSaid = summary['helper'] as
       | {
           readonly quiets?: unknown;
           readonly keptOffPeak?: unknown;

@@ -14869,9 +14869,10 @@ because each is a decision rather than a defect:
             each is asked in the helper rather than walked.
           - What it costs is how often a starved host's child goes quiet, and which of the names
             kept off are then checked with no answer kept. Only the field test shows that, and
-            the hourly summary measures it there: `routed.faulted`, `helper.quiets` and
-            `helper.keptOffPeak` (fix round 1). Each `not answering` line says the names kept off
-            then (`keptOffNow`).
+            the hourly summary measures it there: `checksFaulted` (fix round 2; fix round 1 named
+            `routed.faulted`, which counts lookups), `helper.quiets` and `helper.keptOffPeak`
+            (fix round 1). Each `not answering` line says the names kept off then
+            (`keptOffNow`).
           - Against that cost: a name that quiets the child through its process would quiet the
             probe if asked on the probe's lanes. D27 is on the design's never-cut list. An
             `exit` loss's names already cost the same (`P-453`'s decision).
@@ -14900,11 +14901,13 @@ because each is a decision rather than a defect:
           answering since it last said so`, a warning as the line it stands for.
         - **The hourly summary carries the cost.** `helper.quiets`, every quiet since the start,
           and `helper.keptOffPeak`, the most names kept off at once, beside `routed.faulted` and
-          `helper.msInState.unresponsive`. `LookupHelperStats` has both.
+          `helper.msInState.unresponsive`. `LookupHelperStats` has both. (Corrected in fix round
+          2, below: `routed.faulted` counts lookups, and `checksFaulted` beside it the checks.)
         - **The runbook takes the measure from the hourly summary**, not from a sum of
           `keptOff`: the week's `routed.faulted`, its quiets and its highest `keptOffPeak`, with
           each line's `keptOffNow`. An hour with `routed.faulted` above 0 is a finding. The
-          release notes say the names add up.
+          release notes say the names add up. (Fix round 2 reads `checksFaulted` instead, and
+          each start's counts.)
         - **Tests.**
           - `lookup-helper.test.ts`, P-463's describe: 2 new tests and 1 extended.
             - Six quiets a minute apart, each with two new names that answer once the child is
@@ -14964,7 +14967,8 @@ because each is a decision rather than a defect:
         - **The measure is the hourly summary, not the lines.** The lines are rate-limited, and
           once the quiets stop no line comes until the next quiet or the stop. The summary is
           said every hour whatever the lines said, and already had `routed.faulted`, the checks
-          refused, which is the cost itself, and `msInState.unresponsive`. So `quiets` and
+          refused, which is the cost itself (wrong, fix round 2 below: it counts lookups, and
+          `checksFaulted` the checks), and `msInState.unresponsive`. So `quiets` and
           `keptOffPeak` go there too, rather than only on the lines.
         - **`keptOff` keeps its meaning**: every lookup in flight at the quiet, one carried
           across quiets counted at each, as item 4's test pins. `keptOffNow` counts names, so a
@@ -14977,6 +14981,119 @@ because each is a decision rather than a defect:
           A domain not known to answer holds at most 3 of the helper's lanes, so all three of a
           group are in flight at its quiet whatever order the pool's workers ask in, and the
           counts are exact.
+      - **Fix round 2** (the review of `1b99ef4c`, two items; built 2026-10-20 on
+        `feat/p432-helper-r3`). The decision to keep the names off stands. What changed is what
+        the field test reads as the cost, and that a stop no longer loses the hour so far. No
+        protocol change and no migration.
+        - **The cost is counted in checks** (item 6). `routed.faulted` counts lookups, as every
+          field of `routed` does. It adds one for each lookup the gate refused, however many
+          checks waited for it: at a walk's verdict (`#scouted`), as it left the probe's queues
+          (`#offProbe`) and as the helper's queue fell back (`#fallBack`). It also adds one for
+          each check refused as it asked, which starts no lookup. So two checks on one kept-off
+          lookup counted 1. A refresh nobody waited for, refused at the quiet, counted 1 with no
+          check failed, and the runbook's finding for that hour could name no sensor. Fix round 1
+          had called it the checks refused.
+          - The summary has `checksFaulted` beside it: each check those refusals failed, counted
+            once as it is told. `#refuse` marks the settle for `#settle` to count its waiters,
+            and `#refusedNow` counts a check refused as it asks. A "Check now" served its kept
+            answer is not counted.
+          - A check that joins a lookup `#offProbe` refused in its own pump is no waiter. It is
+            counted as a check, and not as a lookup again: the D27 round's rule for
+            `routed.faulted` stands.
+          - The runbook, `administration.md` and the release notes read `checksFaulted`, and say
+            what `routed.faulted` counts.
+        - **The stop says the hour so far** (item 7). `NameResolver.stop` says the summary once
+          more, with `stopping: true`, when the gate's tick was running. A restart no longer loses
+          up to an hour of `routed` and `checksFaulted`, nor the helper's last `quiets`.
+          - It is said before the helper stops, since `buildNameResolution` stops the resolver
+            first. What the stop itself fails, after the check pool has drained, is in no summary.
+          - A second stop, or one without a start, says none. A summary that throws is logged as
+            an error, and the stop goes on.
+          - The runbook says that `quiets`, `keptOffPeak` and `msInState` begin at 0 at each
+            start. The week's quiets is the sum of each start's last summary, and its
+            `keptOffPeak` the highest of any. A start whose last summary has no `stopping` ended
+            without stopping, and up to an hour of its counts was never said. The write-up names
+            each such end.
+        - **Tests.**
+          - `name-resolver-gate.test.ts`, a new describe, 'what the gate's refusals cost, as its
+            summary counts it (P-463 fix round 2)', 6 tests:
+            - two checks of one kept-off name waiting on its lookup, queued behind the helper's
+              four first lanes and refused at the quiet: `routed.faulted` 1, `checksFaulted` 2;
+            - a refresh nobody waits for, queued behind the fifth lane and refused at the quiet:
+              1 and 0, and the next check is served the kept answer, asking nothing;
+            - a check refused as it asks is one of each, and a "Check now" served its kept answer
+              as it asks is a lookup and no check;
+            - a "Check now" waiting in the rejoin window, refused as the window ends and served
+              its kept answer: 1 and 0;
+            - a stop whose summary throws still stops, saying so, and a second stop tries nothing;
+            - the stop: nothing said before a start; the hour's summary without `stopping`; the
+              stop's with only what came after it (2, not 3) and the helper's `quiets` and
+              `keptOffPeak`; a lookup the helper's own stop then refuses in no summary; and a
+              second stop saying nothing more.
+          - The D27 round's '"Check now" moving a held name's retry …' test, extended: one lookup
+            refused, two checks.
+          - `name-resolver-check.test.ts`: the `#offProbe` summary test reads `checksFaulted` 1.
+          - SC18: the hour's `checksFaulted` 9 beside `routed.faulted` 9, then the stop's
+            summary: `stopping`, nothing refused, and the start's 4 quiets.
+          - Run one file at a time on the final build, on the shared VM and not in a quiet
+            window: `name-resolver-gate` 69 of 69, `name-resolver-check` 54 of 54,
+            `name-resolver` 99 of 99, `name-resolver-resting` 99 of 99, `name-resolution` 5 of 5,
+            `helper-lanes-model` 1 of 1, `pool-lookups` 11 of 11, the outage scenarios 15 of 15,
+            `lookup-helper.test.ts` 110 of 110 and `name-resolution-process` 4 of 4. `tsc` is
+            clean, and prettier and eslint are clean on the changed files.
+          - **Quiet window:** none owed. Nothing here is measured, and nothing runs on a check's
+            path but a counter.
+        - **Mutants: 13, all killed.** Each had its marker found in `dist`, was restored by copy
+          and compared byte for byte, and the final build was checked against the source with no
+          marker left. Each was run on `name-resolver-gate` and `name-resolver-check`:
+          - no check counted at the settle: the `#offProbe` summary test, the extended D27 test
+            and the two-checks test;
+          - a check counted at the settle though served its kept answer: the rejoin-window test;
+          - checks counted per lookup refused, the counter as the review found it: the
+            two-checks, refresh and rejoin-window tests;
+          - a check counted at the ask though served its kept answer: the as-it-asks test;
+          - no check counted at the ask: the extended D27 test, the as-it-asks test and the stop
+            test;
+          - the check that joins a refused lookup not counted: the extended D27 test;
+          - `checksFaulted` not reset at a summary: the stop test;
+          - no summary at the stop: 7 tests;
+          - a summary at every stop, the tick running or not: the stop test and the
+            throwing-summary test;
+          - the stop's summary without `stopping`: the two-checks and stop tests;
+          - no guard around the stop's summary: the throwing-summary test;
+          - the summary without `checksFaulted`: 7 tests;
+          - `#refuse` not counting `routed.faulted`: 5 tests.
+      - **Decided 2026-10-20 by Claude, under the user's delegation** (fix round 2):
+        - **A count of checks beside `routed.faulted`, not either of the review's fixes alone.**
+          - Calling `routed.faulted` a proxy would leave the field test without the measure
+            `P-463`'s decision rests on: how many checks failed for names kept off. Only the
+            field test can show that.
+          - Counting waiters into `routed.faulted` would mix units in `routed`, whose other
+            fields, like the design's §5 "routes by kind", count lookups. It would also reverse
+            the D27 round's recorded rule for the joining check.
+          - It would still miscount. A "Check now" served its kept answer is a waiter that did
+            not fail, and the check that joins a lookup refused in its own pump is not a waiter.
+          - So `routed.faulted` keeps its unit and is described as lookups, and `checksFaulted`
+            counts each check told the failure. That is at the one place a waiter is told
+            (`#settle`) and the one place an ask is (`#refusedNow`).
+          - Not counted in it: checks failed at a loss, which the loss line counts, and those
+            failed for a name DNS did not answer while the helper is down. Neither is the cost of
+            keeping a name off.
+        - **The stop says a last summary; the runbook also says what an unplanned end drops.**
+          The review offered either. A periodic count said at shutdown is the usual practice.
+          Saying in the runbook only that each stop drops up to an hour would lose that hour at
+          every planned restart of the field week, and the sums could not get it back. A probe
+          killed outright still says nothing, so the runbook tells such an end by its last
+          summary and takes the counts that run since start per start.
+        - **Said from `NameResolver.stop`, before the helper's stop.**
+          - The stop's own refusals ("the probe is stopping") are not a cost of keeping names
+            off, and they come once the pool has drained. Saying the summary first keeps them out
+            without a filter.
+          - A quiet after it is still said, on a `not answering` line or the helper's stopping
+            line (fix round 1).
+        - **The same message, with `stopping: true`.** A reader of the log, and the runbook, finds
+          every summary under one message, and the field says that this one covers part of an
+          hour.
 - [ ] **P-464 — a lookup helper crash on Windows is charged to no one** · XS · P-453, Release
       1.1 · Filed 2026-10-20 by `P-453`. Only a crash signal charges a name. On Windows a
       process that crashes reports no signal: it exits with an NTSTATUS code, which Node

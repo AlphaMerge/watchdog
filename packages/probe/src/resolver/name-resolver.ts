@@ -595,8 +595,18 @@ interface Gate {
   route: RouteState;
   tick: NodeJS.Timeout | undefined;
   lastSummaryAt: number;
-  /** For the hourly summary: what was routed where, and the highest at risk, since the last. */
+  /**
+   * For the hourly summary: what was routed where, and the highest at risk, since the last. Each
+   * counts lookups: `faulted` is one for each lookup the gate refused, however many checks waited
+   * for it, none among them, and one for each check refused as it asked, which starts none.
+   */
   readonly routed: Record<'local' | 'helper' | 'probe' | 'faulted' | 'resting', number>;
+  /**
+   * For the hourly summary, since the last: the checks those refusals failed (`RESOLVER_FAULT`),
+   * each once, a check served its kept answer not among them (`P-463` fix round 2). What keeping a
+   * name off costs, where `routed.faulted` is a refresh nobody waited for as much as two checks.
+   */
+  checksFaulted: number;
   riskPeak: number;
   /** For the hourly summary: the running totals at the last, and the helper's hour (`P-467`). */
   hourFrom: HourCounts;
@@ -872,7 +882,11 @@ type Settled =
   | { readonly error: unknown }
   | { readonly fault: unknown }
   /** A failure that says nothing of the name: told to its checks, nothing kept (gate mode). */
-  | { readonly passed: { readonly code: string; readonly why: string } }
+  | {
+      readonly passed: { readonly code: string; readonly why: string };
+      /** Refused by the gate (`#refuse`): each check it fails counts in `checksFaulted`. */
+      readonly refused?: true;
+    }
   /** Lost with the lookup helper after the child said it was stuck: held, and said so. */
   | { readonly held: string };
 
@@ -1082,6 +1096,7 @@ export class NameResolver implements PoolResolver {
             tick: undefined,
             lastSummaryAt: this.#now(),
             routed: { local: 0, helper: 0, probe: 0, faulted: 0, resting: 0 },
+            checksFaulted: 0,
             riskPeak: 0,
             hourFrom: NO_COUNTS,
             helperHour: newHelperHour(),
@@ -1112,11 +1127,24 @@ export class NameResolver implements PoolResolver {
     this.#watchTimer.unref();
   }
 
+  /**
+   * Stops the watch and gate mode's clock. A gate that was started says its summary for the hour so
+   * far first (`P-463` fix round 2): the tick is the only other place it is said, so a stop would
+   * otherwise lose up to an hour of `routed` and `checksFaulted`, and the helper's last `quiets`.
+   * It is said before the helper stops, so what the stop itself fails is in no summary.
+   */
   stop(): void {
     this.#stopped = true;
     clearInterval(this.#watchTimer);
     this.#watchTimer = undefined;
     if (this.#gate !== undefined) {
+      if (this.#gate.tick !== undefined) {
+        try {
+          this.#summary(this.#gate, this.#now(), true);
+        } catch (error: unknown) {
+          this.#logger.error({ err: error }, 'the probe’s resolver failed on its last summary');
+        }
+      }
       clearInterval(this.#gate.tick);
       this.#gate.tick = undefined;
       this.#gate.check?.stop();
@@ -1552,7 +1580,7 @@ export class NameResolver implements PoolResolver {
       const refusal = this.#gateRefusal(entry);
       if (refusal !== undefined) {
         if (this.#gate !== undefined) this.#gate.routed.faulted += 1;
-        return { now: this.#unanswered(entry, fresh, now, RESOLVER_FAULT, refusal) };
+        return { now: this.#refusedNow(entry, fresh, now, refusal) };
       }
       pending = this.#start(
         entry,
@@ -1584,8 +1612,9 @@ export class NameResolver implements PoolResolver {
     // Gate mode: refused as one of the pumps above would have started it (`#offProbe`, D27), and
     // settled then, with its checks told why, before this one had joined them. It is told now, as
     // they were; it would otherwise wait on a settled lookup for its whole bound (`RESOLVER_LATE`).
+    // Counted as a check refused, not as a lookup again: `#offProbe` counted the lookup.
     if (pending.refused !== undefined) {
-      return { now: this.#unanswered(entry, fresh, now, RESOLVER_FAULT, pending.refused) };
+      return { now: this.#refusedNow(entry, fresh, now, pending.refused) };
     }
     // Gate mode: a name DNS did not answer, while the helper that alone may ask it is down.
     const refused = pending.state === 'queued' ? this.#silentRefusal(pending) : undefined;
@@ -1833,6 +1862,26 @@ export class NameResolver implements PoolResolver {
       };
     }
     return failure(code, why);
+  }
+
+  /**
+   * A check the gate refuses as it asks (§1.3 row 0, D27): told as `#unanswered` tells it, and
+   * counted in `checksFaulted` when it fails, not when "Check now" is served its kept answer.
+   */
+  #refusedNow(entry: Entry, fresh: boolean, now: number, why: string): ResolveOutcome {
+    const told = this.#unanswered(entry, fresh, now, RESOLVER_FAULT, why);
+    if (!told.ok && this.#gate !== undefined) this.#gate.checksFaulted += 1;
+    return told;
+  }
+
+  /**
+   * A lookup the gate refuses on its way to a lane (§1.3 row 0, D27): settled with `RESOLVER_FAULT`
+   * and counted once in `routed.faulted`, however many checks wait for it, none among them; each
+   * check it fails counts in `checksFaulted` as it is told (`#settle`).
+   */
+  #refuse(gate: Gate, pending: Pending, why: string): void {
+    gate.routed.faulted += 1;
+    this.#settle(pending, { passed: { code: RESOLVER_FAULT, why }, refused: true });
   }
 
   /** Why a queued lookup's check fails at once: the lanes it could take, and theirs. */
@@ -2099,8 +2148,7 @@ export class NameResolver implements PoolResolver {
         : undefined
       : this.#gateRefusal(entry);
     if (refusal !== undefined) {
-      gate.routed.faulted += 1;
-      this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
+      this.#refuse(gate, pending, refusal);
       return;
     }
     // Avoided, and not refused: the helper can ask it, and alone may (D27). A walk's verdict is
@@ -2496,12 +2544,15 @@ export class NameResolver implements PoolResolver {
     // A failure that says nothing about the name: each waiter is told it, "Check now" given the
     // kept answer, and nothing is kept.
     let passed: { readonly code: string; readonly why: string } | undefined;
+    // Refused by the gate (`#refuse`): each check it fails counts in `checksFaulted`.
+    let refused = false;
     // What the lookup helper learns of the lookup's key (§1.8).
     let learned: HelperOutcome = 'neutral';
     if ('fault' in result) {
       outcome = failure(RESOLVER_FAULT, this.#fault(result.fault, entry.host).message);
     } else if ('passed' in result) {
       passed = result.passed;
+      refused = result.refused === true;
     } else if ('addresses' in result) {
       learned = 'answer';
       const addresses = result.addresses.map(({ address, family }) => ({ address, family }));
@@ -2604,16 +2655,16 @@ export class NameResolver implements PoolResolver {
     }
 
     for (const waiter of [...pending.waiters]) {
-      this.#deliver(
-        pending,
-        waiter,
+      const told =
         outcome ??
-          (passed !== undefined
-            ? this.#unanswered(entry, waiter.fresh, now, passed.code, passed.why)
-            : entry.denial !== undefined
-              ? failure(entry.denial.code, entry.denial.message)
-              : this.#unanswered(entry, waiter.fresh, now, 'EAI_AGAIN')),
-      );
+        (passed !== undefined
+          ? this.#unanswered(entry, waiter.fresh, now, passed.code, passed.why)
+          : entry.denial !== undefined
+            ? failure(entry.denial.code, entry.denial.message)
+            : this.#unanswered(entry, waiter.fresh, now, 'EAI_AGAIN'));
+      // Each waiter once: the loop reads a copy, and only `#deliver` lets a waiter go.
+      if (refused && !told.ok && this.#gate !== undefined) this.#gate.checksFaulted += 1;
+      this.#deliver(pending, waiter, told);
     }
     this.#pump();
   }
@@ -2726,9 +2777,8 @@ export class NameResolver implements PoolResolver {
     if (!this.#avoided(gate, entry)) return false;
     const refusal = this.#stopped ? stopping(entry.host) : this.#gateRefusal(entry);
     if (refusal !== undefined) {
-      gate.routed.faulted += 1;
       pending.refused = refusal;
-      this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
+      this.#refuse(gate, pending, refusal);
       return true;
     }
     // A sample out for its zone is no longer (D20): it is not asked on the probe's lanes.
@@ -3354,8 +3404,7 @@ export class NameResolver implements PoolResolver {
         const refusal =
           which === 'stopped' ? stopping(pending.entry.host) : this.#gateRefusal(pending.entry);
         if (refusal !== undefined) {
-          gate.routed.faulted += 1;
-          this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
+          this.#refuse(gate, pending, refusal);
           continue;
         }
         pending.pool = 'probe';
@@ -3665,11 +3714,13 @@ export class NameResolver implements PoolResolver {
    * with its reason and how its child ended, and its resident memory now; the check's state and
    * why; and the lookups heard, run in the helper, the misses and the walks deferred, this hour
    * and since the probe started. Said every hour, it also carries what a quiet helper costs
-   * whatever its rate-limited line said (`P-463` fix round 1): `routed.faulted`, the checks failed
-   * at once, the helper's quiets, the most names it kept off the probe's lanes at once, and its
-   * time not answering (`msInState.unresponsive`).
+   * whatever its rate-limited line said (`P-463` fix round 1): `checksFaulted`, the checks failed
+   * at once (fix round 2: `routed.faulted` counts lookups), the helper's quiets, the most names it
+   * kept off the probe's lanes at once, and its time not answering (`msInState.unresponsive`).
+   * Said again as the probe stops, for the part of the hour since the last, with `stopping` (fix
+   * round 2).
    */
-  #summary(gate: Gate, now: number): void {
+  #summary(gate: Gate, now: number, stopping = false): void {
     this.#fillLossEnd(gate);
     const helper = gate.helper.stats();
     const budget = gate.budget.stats();
@@ -3680,6 +3731,7 @@ export class NameResolver implements PoolResolver {
     const hour = gate.helperHour;
     this.#logger.info(
       {
+        ...(stopping ? { stopping: true } : {}),
         routed: { ...gate.routed },
         hour: {
           lookupsHeard: totals.lookupsHeard - from.lookupsHeard,
@@ -3689,6 +3741,7 @@ export class NameResolver implements PoolResolver {
           passedStuck: totals.passedStuck - from.passedStuck,
           helperStuck: totals.helperStuck - from.helperStuck,
         },
+        checksFaulted: gate.checksFaulted,
         passedStuck: gate.passedStuck,
         helperStuck: gate.helperStuck,
         lookupsHeard: gate.lookupsHeard,
@@ -3724,6 +3777,7 @@ export class NameResolver implements PoolResolver {
     );
     gate.lastSummaryAt = now;
     for (const kind of Object.keys(gate.routed) as (keyof Gate['routed'])[]) gate.routed[kind] = 0;
+    gate.checksFaulted = 0;
     gate.riskPeak = 0;
     gate.hourFrom = totals;
     gate.helperHour = newHelperHour();

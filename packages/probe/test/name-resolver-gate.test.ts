@@ -22,9 +22,11 @@ import {
 } from '../src/resolver/lookup-helper.js';
 import {
   ANSWER_MS,
+  GATE_SUMMARY_MS,
   HELPER_LOST_CODE,
   MAX_ADDRESSES,
   NameResolver,
+  STALE_MS,
   systemResolverFiles,
   type Family,
   type NameResolverOptions,
@@ -138,6 +140,31 @@ function outcome<T>(
     (value) => ({ ok: true as const, value }),
     (error: unknown) => ({ ok: false as const, error }),
   );
+}
+
+const SUMMARY = 'the probe’s resolver in gate mode, this hour';
+
+/** What a gate summary says, by the fields the tests read (`P-463` fix rounds 1 and 2). */
+interface Summary {
+  readonly stopping?: unknown;
+  readonly routed?: { readonly faulted?: unknown };
+  readonly checksFaulted?: unknown;
+  readonly helper?: { readonly quiets?: unknown; readonly keptOffPeak?: unknown };
+}
+
+/** A logger at `info` whose lines the test reads, and the gate summaries among them. */
+function captured() {
+  const lines: Record<string, unknown>[] = [];
+  const logger = pino(
+    { level: 'info' },
+    {
+      write: (line: string) => {
+        lines.push(JSON.parse(line) as Record<string, unknown>);
+      },
+    },
+  );
+  const summaries = (): Summary[] => lines.filter((line) => line['msg'] === SUMMARY);
+  return { logger, lines, summaries };
 }
 
 async function isSettled(promise: Promise<unknown>): Promise<boolean> {
@@ -1710,8 +1737,10 @@ describe('D27 when a check starts a lookup in its own ask, check off (P-432 gate
     }
   }
 
-  it('"Check now" moving a held name’s retry ahead of the one on the retry lane fails at once, saying why', async () => {
-    const { helper, callsFor, clock, ask } = make({ route: 'resting' });
+  it('"Check now" moving a held name’s retry ahead of the one on the retry lane fails at once, saying why, one lookup refused and two checks', async () => {
+    const { logger, summaries } = captured();
+    const { resolver, helper, callsFor, clock, ask } = make({ route: 'resting' }, { logger });
+    resolver.start();
     const other = 'r.zone-b.test';
     for (const host of [other, X]) {
       const once = outcome(ask(host, 4, { waitMs: 60_000 }));
@@ -1731,6 +1760,12 @@ describe('D27 when a check starts a lookup in its own ask, check off (P-432 gate
     assert.equal(callsFor(X).length, 1, 'never again on the probe’s own getaddrinfo');
     callsFor(other)[1]?.answer();
     assert.ok((await retried).ok);
+    // `#offProbe` refused one lookup, and failed the check waiting on it; Check now, told by the
+    // words it kept, is a second check (`P-463` fix round 2), not a second lookup.
+    resolver.stop();
+    const said = summaries().at(-1);
+    assert.equal(said?.routed?.faulted, 1, JSON.stringify(said));
+    assert.equal(said.checksFaulted, 2);
   });
 
   it('a check joining a lookup the window after a stuck end held back, the window over and its timer not run, fails at once, saying why', async (t) => {
@@ -1926,6 +1961,211 @@ describe('a poison name’s re-ask ended from outside, isolation off (P-432 gate
       helper.last(crash).answer(B);
       helper.last(later).answer();
       assert.ok((await wait).ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+});
+
+describe('what the gate’s refusals cost, as its summary counts it (P-463 fix round 2)', () => {
+  const X = 'x.zone-a.test';
+  const KEPT_OFF_X = /does not ask its own getaddrinfo for x\.zone-a\.test/u;
+
+  /** zone-a answered in the helper, so its lookups are ungated, and its four first lanes full. */
+  async function lanesFull(made: ReturnType<typeof make>) {
+    const { helper, ask } = made;
+    const seed = ask('a0.zone-a.test');
+    helper.last('a0.zone-a.test').answer();
+    await seed;
+    const firsts = [0, 1, 2, 3].map((i) =>
+      outcome(ask(`f${String(i)}.zone-a.test`, 4, { waitMs: 60_000 })),
+    );
+    assert.equal(helper.inFlight().length, 4, 'the four first lanes');
+    return firsts;
+  }
+
+  it('two checks of one kept-off name waiting on its lookup, refused at the quiet: one lookup, two checks', async () => {
+    const { logger, summaries } = captured();
+    const made = make({}, { logger });
+    const { resolver, helper, ask } = made;
+    resolver.start();
+    try {
+      const firsts = await lanesFull(made);
+      // Kept off by an earlier quiet whose ten minutes have not run: asked in the helper only.
+      helper.avoided.add(`4:${X}`);
+      const ping = outcome(ask(X, 4, { waitMs: 60_000 }));
+      const http = outcome(ask(X, 4, { waitMs: 60_000 }));
+      assert.equal(helper.asksFor(X).length, 0, 'one lookup for both, queued in the helper');
+      helper.goQuiet();
+      for (const [what, got] of [
+        ['the ping check', ping],
+        ['the HTTP check', http],
+      ] as const) {
+        const told = await within(2_000, what, got);
+        assert.ok(!told.ok, what);
+        assert.equal(codeOf(told.error), RESOLVER_FAULT, what);
+        assert.match(messageOf(told.error), KEPT_OFF_X, what);
+      }
+      resolver.stop();
+      const said = summaries().at(-1);
+      assert.equal(said?.stopping, true, JSON.stringify(said));
+      assert.equal(said.routed?.faulted, 1, 'one lookup refused');
+      assert.equal(said.checksFaulted, 2, 'two checks failed at once');
+      for (const asked of helper.inFlight()) asked.answer();
+      for (const got of await Promise.all(firsts)) assert.ok(got.ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('a refresh nobody waits for, refused at the quiet, is a lookup and no check, and the next check is served the kept answer', async () => {
+    const { logger, summaries } = captured();
+    const made = make({}, { logger });
+    const { resolver, helper, ask, clock } = made;
+    resolver.start();
+    try {
+      const kept = ask(X);
+      helper.last(X).answer(B);
+      assert.deepEqual(await kept, B);
+      const firsts = await lanesFull(made);
+      clock.now = ANSWER_MS;
+      await ask('a0.zone-a.test');
+      assert.equal(helper.inFlight().length, 5, 'a refresh takes the fifth lane');
+      helper.avoided.add(`4:${X}`);
+      assert.deepEqual(await ask(X), B, 'served its kept answer, in its grace');
+      assert.equal(helper.asksFor(X).length, 1, 'its refresh queued in the helper, no sixth');
+      helper.goQuiet();
+      await settled();
+      assert.deepEqual(await ask(X), B, 'the next check is served the kept answer');
+      assert.equal(helper.asksFor(X).length, 1, 'and nothing asked for it');
+      resolver.stop();
+      const said = summaries().at(-1);
+      assert.equal(said?.routed?.faulted, 1, `the refresh refused: ${JSON.stringify(said)}`);
+      assert.equal(said.checksFaulted, 0, 'no check failed');
+      for (const asked of helper.inFlight()) asked.answer();
+      for (const got of await Promise.all(firsts)) assert.ok(got.ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('a check refused as it asks is one of each; "Check now" served its kept answer is a lookup refused and no check', async () => {
+    const { logger, summaries } = captured();
+    const { resolver, helper, ask, clock } = make({}, { logger });
+    resolver.start();
+    try {
+      const kept = ask(X);
+      helper.last(X).answer(B);
+      await kept;
+      helper.avoided.add(`4:${X}`);
+      helper.goQuiet();
+      clock.now = ANSWER_MS + 1;
+      assert.deepEqual(await ask(X, 4, { fresh: true }), B, 'Check now: the kept answer');
+      clock.now = ANSWER_MS + STALE_MS + 1;
+      const refused = await outcome(ask(X));
+      assert.ok(!refused.ok && codeOf(refused.error) === RESOLVER_FAULT);
+      assert.match(messageOf(refused.error), KEPT_OFF_X);
+      assert.equal(helper.asksFor(X).length, 1, 'neither asked anywhere');
+      resolver.stop();
+      const said = summaries().at(-1);
+      assert.equal(said?.routed?.faulted, 2, JSON.stringify(said));
+      assert.equal(said.checksFaulted, 1);
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('"Check now" waiting on a lookup refused as the rejoin window ends is served its kept answer, and is no check faulted', async () => {
+    const { logger, summaries } = captured();
+    const { resolver, helper, ask, clock } = make({}, { logger });
+    resolver.start();
+    try {
+      const kept = ask(X);
+      helper.last(X).answer(B);
+      await kept;
+      helper.move('rejoining');
+      helper.avoided.add(`4:${X}`);
+      clock.now = ANSWER_MS + 1;
+      const checkNow = outcome(ask(X, 4, { fresh: true, waitMs: 60_000 }));
+      assert.equal(await isSettled(checkNow), false, 'waiting for the next child');
+      helper.move('down');
+      const got = await within(2_000, 'Check now', checkNow);
+      assert.ok(got.ok && got.value[0]?.address === B[0]?.address, 'the kept answer');
+      resolver.stop();
+      const said = summaries().at(-1);
+      assert.equal(said?.routed?.faulted, 1, `its lookup refused: ${JSON.stringify(said)}`);
+      assert.equal(said.checksFaulted, 0, 'and its check passed');
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('a stop whose summary fails still stops, saying so', () => {
+    const lines: Record<string, unknown>[] = [];
+    const logger = pino(
+      { level: 'error' },
+      {
+        write: (line: string) => {
+          lines.push(JSON.parse(line) as Record<string, unknown>);
+        },
+      },
+    );
+    const { resolver, helper } = make({}, { logger });
+    resolver.start();
+    helper.stats = () => {
+      throw new Error('a helper whose stats fail');
+    };
+    resolver.stop();
+    assert.deepEqual(
+      lines.map((line) => line['msg']),
+      ['the probe’s resolver failed on its last summary'],
+    );
+    resolver.stop();
+    assert.equal(lines.length, 1, 'stopped: the tick is gone, and nothing more is tried');
+  });
+
+  it('the stop says the hour so far, once, with what the hour’s summary had not said, and nothing the stop itself fails', async () => {
+    const { logger, summaries } = captured();
+    const { resolver, helper, ask, clock } = make({ route: 'down', tickMs: 5 }, { logger });
+    resolver.stop();
+    assert.equal(summaries().length, 0, 'never started: nothing to say');
+    resolver.start();
+    try {
+      helper.avoided.add(`4:${X}`);
+      assert.equal((await outcome(ask(X))).ok, false);
+      clock.now += GATE_SUMMARY_MS;
+      await pollWithin(1_000, 'the hour’s summary', () => summaries().length === 1, 5);
+      const hour = summaries()[0];
+      assert.ok(hour !== undefined);
+      assert.equal(hour.stopping, undefined, 'the hour’s own is not the stop’s');
+      assert.equal(hour.routed?.faulted, 1);
+      assert.equal(hour.checksFaulted, 1);
+      // Two more refused in the part of the next hour before the stop.
+      assert.equal((await outcome(ask(X))).ok, false);
+      assert.equal((await outcome(ask(X))).ok, false);
+      helper.quiets = 3;
+      helper.keptOffPeak = 5;
+      // Back up, three lookups in flight in a zone not known to answer, and a fourth queued.
+      helper.move('up');
+      for (let i = 0; i < 3; i += 1)
+        void outcome(ask(`dev-${String(i)}.zone-b.test`, 4, { waitMs: 60_000 }));
+      const queued = outcome(ask('dev-9.zone-b.test', 4, { waitMs: 60_000 }));
+      assert.equal(helper.inFlight().length, 3);
+      resolver.stop();
+      const said = summaries();
+      assert.equal(said.length, 2, 'said as it stopped');
+      const last = said[1];
+      assert.equal(last?.stopping, true);
+      assert.equal(last.routed?.faulted, 2, 'the two since the hour’s summary, not three');
+      assert.equal(last.checksFaulted, 2);
+      assert.equal(last.helper?.quiets, 3, 'the helper’s count since the probe started');
+      assert.equal(last.helper.keptOffPeak, 5);
+      // The helper stops after the resolver: what it then fails is in no summary.
+      await helper.stop();
+      const got = await queued;
+      assert.ok(!got.ok && /the probe is stopping/u.test(messageOf(got.error)));
+      resolver.stop();
+      assert.equal(summaries().length, 2, 'a second stop says nothing more');
     } finally {
       resolver.stop();
     }
