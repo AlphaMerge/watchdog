@@ -18,6 +18,7 @@ import { GlibcNamePolicy, SYSTEM_FILES } from '../../src/resolver/system-names.j
 import { pollWithin } from '../support/within.js';
 import { BuildWatch } from './names-build.js';
 import {
+  ATON_SERVER,
   OFF_CASES,
   STUB,
   boundIn,
@@ -40,18 +41,21 @@ import {
  * - `ld-preload`: `LD_PRELOAD` set to libresolv, which ld.so loads harmlessly.
  * - `ld-so-preload`: /etc/ld.so.preload naming libresolv.
  *
- * And §7.5's other rows the check is off for (`P-462`), each hosts: line written as an operator
- * would, with no action group, so that the rule is seen naming the source:
+ * And §7.5's other rows the check is off for (`P-462`). The first three write their hosts: line
+ * as an operator would, with no action group, so that the rule is seen naming the source:
  * - `sss-first`: `hosts: sss files dns`, with libnss-sss installed.
  * - `mdns4-first`: `hosts: mdns4_minimal files dns`, with libnss-mdns installed.
  * - `files-resolve-dns`: `hosts: files resolve dns`, with libnss-resolve installed.
  * - `stub-refused`: in a box the script boots, resolv.conf a file of its own holding resolved's
  *   stub file as resolved wrote it with the stub listening (`nameserver 127.0.0.53`), then
- *   systemd-resolved restarted with `DNSStubListener=no`, and the hosts: line libnss-resolve wrote:
- *   the stub refuses, and glibc asks resolved over varlink. Not the stub file itself: with the stub
- *   off, systemd 255 makes it a link to its uplink file, which names the uplink servers and no stub
- *   (the first narrowed run of `P-462` read 192.168.65.7 there).
- * - `localdomain-empty`: `LOCALDOMAIN` set and empty, which glibc reads as no search list.
+ *   systemd-resolved restarted with `DNSStubListener=no`, and the hosts: line libnss-resolve wrote,
+ *   which has an action group: the stub refuses, and glibc asks resolved over varlink. Not the stub
+ *   file itself: with the stub off, systemd 255 makes it a link to its uplink file, which names the
+ *   uplink servers and no stub (the first narrowed run of `P-462` read 192.168.65.7 there).
+ * - `localdomain-empty`: `LOCALDOMAIN` set and empty, which glibc reads as no search list; the
+ *   hosts: line is the image's own.
+ * - `nameserver-aton`: resolv.conf naming `10.1` alone, an `inet_aton` form glibc reads as
+ *   10.0.0.1, which the policy does not take; the hosts: line is the image's own.
  *
  * Prints the case's `OffRun` as JSON, with the build it loaded (`names-build.ts`).
  */
@@ -298,13 +302,34 @@ async function setUp(which: OffCase): Promise<{ env: Record<string, string>; set
     case 'localdomain-empty':
       env['LOCALDOMAIN'] = '';
       break;
+    case 'nameserver-aton':
+      try {
+        writeResolvConf(`nameserver ${ATON_SERVER}\n`);
+      } catch (error: unknown) {
+        setup.push(`could not write resolv.conf: ${String(error)}`);
+      }
+      break;
   }
   return { env, setup };
 }
 
 /**
- * systemd-resolved restarted with its stub off, and resolv.conf its stub file as the symlink an
- * Ubuntu host has gives it: what could not be done is returned.
+ * resolv.conf as a file of its own holding `text`: a link to it, as Ubuntu links it to resolved's
+ * stub file, is removed first, since a write through the link would be the file's owner's to
+ * overwrite.
+ */
+function writeResolvConf(text: string): void {
+  if (lstatSync(SYSTEM_FILES.resolvConf, { throwIfNoEntry: false })?.isSymbolicLink() === true) {
+    unlinkSync(SYSTEM_FILES.resolvConf);
+  }
+  writeFileSync(SYSTEM_FILES.resolvConf, text);
+}
+
+/**
+ * resolved's stub file read while the stub listens, and written as resolv.conf, a file of its own
+ * (`writeResolvConf`); then systemd-resolved restarted with its stub off. Not the symlink to the
+ * stub file an Ubuntu host has: with the stub off, systemd 255 makes the stub file a link to its
+ * uplink file, which names the uplink servers and no stub. What could not be done is returned.
  */
 async function stubOff(): Promise<string[]> {
   try {
@@ -321,12 +346,7 @@ async function stubOff(): Promise<string[]> {
     if (!isDeepStrictEqual(nameserversOf(stub), [STUB])) {
       return [`resolved’s stub file names ${JSON.stringify(nameserversOf(stub))}, not ${STUB}`];
     }
-    // A file of its own: Ubuntu links resolv.conf to the stub file, and a write through the link
-    // would be resolved's to overwrite.
-    if (lstatSync(SYSTEM_FILES.resolvConf, { throwIfNoEntry: false })?.isSymbolicLink() === true) {
-      unlinkSync(SYSTEM_FILES.resolvConf);
-    }
-    writeFileSync(SYSTEM_FILES.resolvConf, stub);
+    writeResolvConf(stub);
     mkdirSync('/etc/systemd/resolved.conf.d', { recursive: true });
     writeFileSync(STUB_OFF, '[Resolve]\nDNSStubListener=no\n');
     await run('systemctl', ['restart', 'systemd-resolved'], { timeout: 30_000 });

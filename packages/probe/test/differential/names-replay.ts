@@ -20,7 +20,6 @@ import {
   ANSWER_ROWS,
   ANSWER_WORLD,
   NAMESERVER,
-  SEQUENCE_CACHED,
   SEQUENCE_GATEWAY_LINK,
   SEQUENCE_ROWS,
   STUB,
@@ -56,6 +55,7 @@ import {
 import type { ModesReply, ModesRequest } from './names-modes.js';
 import {
   askedOf,
+  setSequencePlan,
   walkAndModes,
   walkSequence,
   type ModesChannel,
@@ -729,17 +729,7 @@ async function playSequenceRow(
     let spare = 1;
     strays(specs, ipv6, () => `127.0.1.${String(spare++)}`);
     const sim = await DnsSimulator.start({ servers: specs, ipv6: false });
-    const setPlan = async (): Promise<void> => {
-      for (const server of row.servers) {
-        await sim.set({ fallback: true }, server.behaviour, server.address);
-        if (server.cached !== undefined) {
-          await sim.prime(
-            server.cached.map((name) => ({ name, addresses: SEQUENCE_CACHED, ttl: 300 })),
-            server.address,
-          );
-        }
-      }
-    };
+    const setPlan = (): Promise<void> => setSequencePlan(sim, row);
     const first = row.lookups[0];
     const modes = Modes.start(first?.name ?? '', first?.family ?? 0, env);
     try {

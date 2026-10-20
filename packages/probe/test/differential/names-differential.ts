@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { isIP, isIPv4, isIPv6 } from 'node:net';
-import type { DnsBehaviour, DnsServerPolicy } from '@ms/simulators';
+import type { DnsBehaviour, DnsPrimeEntry, DnsServerPolicy } from '@ms/simulators';
 
 /**
  * The differential's judgement (`P-432` S8, the design's D30 and §7.5): what glibc sent for each
@@ -894,10 +894,12 @@ export interface SequenceServer {
   /** What it answers every name not in its cache with. */
   readonly behaviour: DnsBehaviour;
   /**
-   * Names its recursion cache holds, A and AAAA (`SEQUENCE_CACHED`), answered from it whatever
-   * `behaviour` says: names cached at a forwarder whose upstream for their zone is silent.
+   * What its recursion cache holds, each name with its addresses and TTL, primed as written and
+   * answered from it whatever `behaviour` says: names cached at a forwarder whose upstream for
+   * their zone is silent. In the row, so that the answer rows' digest names what glibc and the
+   * walk are answered from it.
    */
-  readonly cached?: readonly string[];
+  readonly cached?: readonly DnsPrimeEntry[];
 }
 
 /**
@@ -931,8 +933,6 @@ export interface SequenceRun {
   readonly setup?: readonly string[];
 }
 
-/** The addresses a sequence row's cache holds for each of its cached names. */
-export const SEQUENCE_CACHED: readonly string[] = [ANSWER_A, ANSWER_AAAA];
 /** The link a sequence row's gateway is on, and its address there (`/24`, `.1`). */
 export const SEQUENCE_GATEWAY_LINK = 'ms-gw';
 export const SEQUENCE_GATEWAY = '198.19.0.254';
@@ -950,6 +950,12 @@ const askedBoth = (name: string): Wire[] => [
   [S1, name, 'AAAA', 1],
 ];
 const GATEWAY_NAME = '_gateway';
+/** A name in a sequence row's server cache: A and AAAA, as the answer rows' server answers. */
+const cachedName = (name: string): DnsPrimeEntry => ({
+  name,
+  addresses: [ANSWER_A, ANSWER_AAAA],
+  ttl: 300,
+});
 const SYSTEMD_NAME: SequenceLookup['reading'] = { class: 'cannotVouch', reason: 'systemd-name' };
 
 export const SEQUENCE_ROWS: readonly SequenceRow[] = [
@@ -963,7 +969,7 @@ export const SEQUENCE_ROWS: readonly SequenceRow[] = [
       {
         address: S1,
         behaviour: { reply: { kind: 'silent' } },
-        cached: [inZone('cached-1'), inZone('cached-2')],
+        cached: [cachedName(inZone('cached-1')), cachedName(inZone('cached-2'))],
       },
     ],
     lookups: [
@@ -1199,9 +1205,11 @@ export function digestOf(bytes: Uint8Array): string {
 /**
  * The sha256 of the answer rows, the sequence rows and their world, as JSON: they live here rather
  * than in the rows file, and a run names the ones it played as it names the rows file, so
- * recordings of a row since changed (its resolv.conf, a server's behaviour, a lookup, what it
- * claims) or played in another world (the hosts file, nsswitch.conf, gai.conf, the hostname or the
- * environment) cannot verify, or stand committed, for it.
+ * recordings of a row since changed (its resolv.conf, a server's behaviour, what a server's cache
+ * holds and for how long, a lookup, what it claims) or played in another world (the hosts file,
+ * nsswitch.conf, gai.conf, the hostname or the environment) cannot verify, or stand committed, for
+ * it. Everything the replay plays a row with is in the row or the world, none of it in a constant
+ * of its own beside them.
  */
 export function answerRowsDigest(
   rows: readonly AnswerRow[] = ANSWER_ROWS,
@@ -1623,7 +1631,19 @@ export type OffCase =
   | 'mdns4-first'
   | 'files-resolve-dns'
   | 'stub-refused'
-  | 'localdomain-empty';
+  | 'localdomain-empty'
+  | 'nameserver-aton';
+
+/** The server the `nameserver-aton` box's resolv.conf names: glibc's `inet_aton` reads 10.0.0.1. */
+export const ATON_SERVER = '10.1';
+
+/** The word after each `nameserver` in a resolv.conf, as written: no address is read into it. */
+export function nameserverWords(resolvConf: string): string[] {
+  return resolvConf
+    .split('\n')
+    .map((line) => /^nameserver[ \t]+(\S+)/u.exec(line)?.[1])
+    .filter((word) => word !== undefined);
+}
 
 /** A box in which the check must be off, in situ: the policy loaded against the box as it is. */
 export interface OffRun {
@@ -1813,6 +1833,20 @@ export const OFF_CASES: Readonly<Record<OffCase, OffCaseClaim>> = {
         ? undefined
         : `LOCALDOMAIN is ${run.localDomain === undefined ? 'unset' : JSON.stringify(run.localDomain)} in the box, not set and empty`,
   },
+  // §7.5's `nameserver 10.1`: an address in an `inet_aton` form, which glibc takes as 10.0.0.1.
+  // The policy reads a nameserver line only as a dotted quad or an IPv6 address (the user's
+  // allowlist), so the check is off for it by `resolv`, and no wire is claimed.
+  'nameserver-aton': {
+    image: 'debian12',
+    code: 'resolv',
+    why: /one IPv4 or IPv6 address/u,
+    inSitu: (run) => {
+      const named = nameserverWords(run.resolvConf ?? '');
+      return isDeepStrictEqual(named, [ATON_SERVER])
+        ? undefined
+        : `resolv.conf names ${JSON.stringify(named)}, not ${ATON_SERVER} alone`;
+    },
+  },
 };
 
 /**
@@ -1849,7 +1883,7 @@ export function offProblems(run: OffRun): string[] {
 
 // --- the boxes with a file edited mid-run (`P-462`, D28) -----------------------------------------
 
-export type SkewCase = 'gai' | 'nsswitch-frozen' | 'nsswitch-reloaded';
+export type SkewCase = 'gai' | 'gai-not-first' | 'nsswitch-frozen' | 'nsswitch-reloaded';
 
 /** What a skew box's case edits, and what D28 says of it at the image's glibc. */
 interface SkewClaim {
@@ -1863,7 +1897,16 @@ interface SkewClaim {
    * rests it until ms-probe restarts; any other file's edit turns the check off and nothing more.
    */
   readonly readOnce: boolean;
+  /**
+   * Every file the policy must read as read once at the image's glibc, in its order (D28):
+   * /etc/ld.so.preload always, gai.conf with no `reload yes`, and nsswitch.conf below 2.33.
+   */
+  readonly readOnceFiles: readonly string[];
 }
+
+/** The read-once files at glibc 2.36 (Debian 12), and at 2.31 (Debian 11), in the policy's order. */
+const READ_ONCE_236 = ['/etc/gai.conf', '/etc/ld.so.preload'];
+const READ_ONCE_231 = ['/etc/nsswitch.conf', '/etc/gai.conf', '/etc/ld.so.preload'];
 
 /** The text a skew box writes before ms-probe starts: one the check is on for. */
 export const SKEW_WORLD: Readonly<Record<string, string>> = {
@@ -1879,18 +1922,30 @@ export const SKEW_CASES: Readonly<Record<SkewCase, SkewClaim>> = {
     file: '/etc/gai.conf',
     edit: 'precedence ::ffff:0:0/96 100\n',
     readOnce: true,
+    readOnceFiles: READ_ONCE_236,
+  },
+  // gai.conf where it is not the first file read once: what the helper says to restart for, and
+  // rests naming, is the file that moved, at every look after it too, and never nsswitch.conf.
+  'gai-not-first': {
+    image: 'debian11',
+    file: '/etc/gai.conf',
+    edit: 'precedence ::ffff:0:0/96 100\n',
+    readOnce: true,
+    readOnceFiles: READ_ONCE_231,
   },
   'nsswitch-frozen': {
     image: 'debian11',
     file: '/etc/nsswitch.conf',
     edit: 'hosts: files myhostname dns\n',
     readOnce: true,
+    readOnceFiles: READ_ONCE_231,
   },
   'nsswitch-reloaded': {
     image: 'debian12',
     file: '/etc/nsswitch.conf',
     edit: 'hosts: files myhostname dns\n',
     readOnce: false,
+    readOnceFiles: READ_ONCE_236,
   },
 };
 
@@ -1917,7 +1972,10 @@ export interface SkewRun {
     readonly off?: { readonly code: string; readonly why: string };
     readonly readOnce: readonly string[];
     readonly skewed: boolean;
-    /** The files the helper said to restart ms-probe for ("<file> changed: restart …"). */
+    /**
+     * The files the helper said to restart ms-probe for ("<file> changed: restart …"), as the
+     * edit's look ended.
+     */
     readonly restartSaid: readonly string[];
   };
   /** After the child was SIGKILLed and the helper had settled, and held there a while. */
@@ -1926,7 +1984,12 @@ export interface SkewRun {
     readonly route: string;
     /** The rest's length when on a timer; absent for a rest until restart, or no rest. */
     readonly restMs?: number;
-    /** Whether a child other than the one killed was up. */
+    /** The child SIGKILLed, and the helper's child then (`stats().pid`): none while it rests. */
+    readonly killedPid?: number;
+    readonly pid?: number;
+    /** The lookups in the helper's child then. */
+    readonly inFlight: number;
+    /** Whether the helper had a child other than the one killed, whatever its state said. */
     readonly respawned: boolean;
     /** Probe Health's `nameResolverMode`: 2 gate, 3 gate with the helper resting. */
     readonly mode: number;
@@ -1937,6 +2000,13 @@ export interface SkewRun {
     /** A name asked then, and how many lookups it sent to the helper. */
     readonly answered: string;
     readonly toHelper: number;
+    /**
+     * The looks of the watch the policy was told of after the edit's, by the run's end, and the
+     * files the helper had said to restart ms-probe for by then: a look that moved nothing must
+     * name no file, least of all one that never changed.
+     */
+    readonly looksAfterEdit: number;
+    readonly restartSaid: readonly string[];
   };
   readonly setup?: readonly string[];
   readonly buildDigest: string;
@@ -1945,12 +2015,14 @@ export interface SkewRun {
 
 /**
  * A skew box against D28 and the allowlist's rule 6: the check on and proven, the helper up and a
- * name answered before the edit; after it, the check off by `skew` naming the file, and the helper
- * marked skewed, saying to restart ms-probe, if and only if this glibc reads the file once. After
- * the SIGKILL, a skewed helper rests until restart: resting with no timer and no new child, gate
- * mode reported resting (3), the trouble latch set, and names asked as with `system`, none sent to
- * the helper. A helper not skewed is up again in a new child, with the latch clear, and the check
- * being off, its names go to the helper.
+ * name answered before the edit; after it, the check off by `skew` naming the file, the policy
+ * reading the image's read-once files as D28 says, and the helper marked skewed, saying to restart
+ * ms-probe for the file, if and only if this glibc reads it once. By the run's end, a look after
+ * the edit's included, it has said so for no other file. After the SIGKILL, a skewed helper rests
+ * until restart: resting with no timer and no child at all, gate mode reported resting (3), the
+ * trouble latch set, and names asked as with `system`, none sent to the helper. A helper not skewed
+ * is up again in a new child, with the latch clear, and the check being off, its names go to the
+ * helper.
  */
 export function skewProblems(run: SkewRun): string[] {
   const claim = SKEW_CASES[run.case];
@@ -1959,6 +2031,9 @@ export function skewProblems(run: SkewRun): string[] {
   const said = (why: string): void => {
     out.push(`${at}: ${why}`);
   };
+  // What the helper owes the edit: "restart ms-probe" for the file if glibc reads it once, and
+  // for no other file, then or at any look after.
+  const restart = claim.readOnce ? [claim.file] : [];
   if (run.image !== claim.image) said(`ran in ${run.image}, not ${claim.image}`);
   const before = run.before;
   if (before === undefined) said('the check before the edit was not recorded');
@@ -1992,11 +2067,14 @@ export function skewProblems(run: SkewRun): string[] {
       said(
         `the policy reads ${claim.file} as ${once ? '' : 'not '}read once at this glibc, and D28 says ${claim.readOnce ? 'it is' : 'it is not'}`,
       );
+    } else if (!isDeepStrictEqual(edited.readOnce, claim.readOnceFiles)) {
+      said(
+        `the policy reads ${JSON.stringify(edited.readOnce)} as read once at this glibc, and D28 says ${JSON.stringify(claim.readOnceFiles)}`,
+      );
     }
     if (edited.skewed !== claim.readOnce) {
       said(`the policy said a new helper would ${edited.skewed ? '' : 'not '}read otherwise`);
     }
-    const restart = claim.readOnce ? [claim.file] : [];
     if (!isDeepStrictEqual(edited.restartSaid, restart)) {
       said(
         `the helper said to restart ms-probe for ${JSON.stringify(edited.restartSaid)}, and D28 says ${JSON.stringify(restart)}`,
@@ -2011,15 +2089,30 @@ export function skewProblems(run: SkewRun): string[] {
   if (!killed.answered.startsWith('answer:')) {
     said(`a name was not answered after the SIGKILL: ${killed.answered}`);
   }
+  if (killed.looksAfterEdit < 1) {
+    said('no look of the watch after the edit’s was told to the policy by the run’s end');
+  }
+  if (!isDeepStrictEqual(killed.restartSaid, restart)) {
+    said(
+      `by the run’s end the helper had said to restart ms-probe for ${JSON.stringify(killed.restartSaid)}, and D28 says ${JSON.stringify(restart)}`,
+    );
+  }
   if (claim.readOnce) {
+    // A rest until restart holds no child at all: not a new one, nor the one killed.
     if (
       killed.helper !== 'resting' ||
       killed.route !== 'resting' ||
       killed.restMs !== undefined ||
-      killed.respawned
+      killed.respawned ||
+      killed.pid !== undefined
     ) {
+      const child = killed.respawned
+        ? ', a new child up'
+        : killed.pid === undefined
+          ? ''
+          : `, child ${String(killed.pid)} still its own`;
       said(
-        `the helper was ${killed.helper} (route ${killed.route}${killed.restMs === undefined ? '' : `, for ${String(killed.restMs)} ms`}${killed.respawned ? ', a new child up' : ''}), not resting until ms-probe restarts`,
+        `the helper was ${killed.helper} (route ${killed.route}${killed.restMs === undefined ? '' : `, for ${String(killed.restMs)} ms`}${child}), not resting until ms-probe restarts`,
       );
     }
     if (killed.mode !== 3) said(`Probe Health said nameResolverMode ${String(killed.mode)}, not 3`);

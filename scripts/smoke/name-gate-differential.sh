@@ -38,12 +38,13 @@
 # libnss-mdns's hosts: lines, LD_PRELOAD and /etc/ld.so.preload. §7.5's other rows (`P-462`): the
 # sequence rows in every image after the answer rows (a partial key, several lookups through one
 # check; `_gateway` on a host with an IPv4 default gateway and no IPv6 one); more boxes with the
-# check off (`sss` and `mdns4_minimal` before `files`, `files resolve dns`, `LOCALDOMAIN=""`, and
-# systemd-resolved's stub refused under `resolve`, in a box booted with systemd); and the skew
-# boxes, a file edited under a running probe in gate mode and its helper then SIGKILLed (gai.conf
-# at Debian 12, nsswitch.conf at Debian 11, where glibc reads it once, and at Debian 12, where it
-# does not). Every one must hold for the run to pass. Every image's run and every box's carries
-# the build it loaded, and says if it changed while it ran: the verdict takes only runs of the
+# check off (`sss` and `mdns4_minimal` before `files`, `files resolve dns`, `LOCALDOMAIN=""`,
+# `nameserver 10.1`, and systemd-resolved's stub refused under `resolve`, in a box booted with
+# systemd); and the skew boxes, a file edited under a running probe in gate mode and its helper
+# then SIGKILLed (gai.conf at Debian 12, and at Debian 11 behind nsswitch.conf among the files read
+# once; nsswitch.conf at Debian 11, where glibc reads it once, and at Debian 12, where it does
+# not). Every one must hold for the run to pass. Every image's run and every box's carries the
+# build it loaded, and says if it changed while it ran: the verdict takes only runs of the
 # build as it is then.
 #
 #   MS_DIFF_IMAGES="debian12 ubuntu2404"   only these (default: all of them)
@@ -92,10 +93,12 @@ mdns4-first debian12 libnss-mdns 0
 files-resolve-dns ubuntu2404 libnss-resolve 0
 stub-refused ubuntu2404 libnss-resolve 1
 localdomain-empty debian12 - 0
+nameserver-aton debian12 - 0
 "
 # case image: each skew box (`P-462`, D28), on the image's base with nothing added.
 SKEW_BOXES="
 gai debian12
+gai-not-first debian11
 nsswitch-frozen debian11
 nsswitch-reloaded debian12
 "

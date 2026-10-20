@@ -6,12 +6,15 @@ import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
+import { pino } from 'pino';
 import { DnsSimulator, dnsQuery, replies, type DnsQueryRecord } from '@ms/simulators';
+import { GlibcNamePolicy, SYSTEM_FILES } from '../src/resolver/system-names.js';
 import { BUILT_TREES, BuildWatch, buildDigest } from './differential/names-build.js';
 import { startCapture, type CaptureOptions } from './differential/names-capture.js';
 import {
   ANSWER_PLAN,
   ANSWER_ROWS,
+  ATON_SERVER,
   ANSWER_WORLD,
   BUDGET_FORWARD_MAX,
   BUDGET_GATE_EXTRA,
@@ -42,6 +45,7 @@ import {
   judgePlan,
   listenerOf,
   modesProblems,
+  nameserverWords,
   nameserversOf,
   offProblems,
   optOf,
@@ -88,6 +92,7 @@ import {
 import type { ModesReply, ModesRequest } from './differential/names-modes.js';
 import {
   NEUTRAL,
+  setSequencePlan,
   walkAndModes,
   walkSequence,
   type ModesChannel,
@@ -985,7 +990,7 @@ describe('the differential: the verdict over the files the runs left', () => {
       );
       assert.match(
         String(passed.stderr),
-        /^skew gai in debian12 \(glibc 2\.36\): after the edit the check off by skew, restart said for \["\/etc\/gai\.conf"\]; after the SIGKILL the helper resting, mode 3, trouble 1, 0 lookups to the helper$/mu,
+        /^skew gai in debian12 \(glibc 2\.36\): after the edit the check off by skew, restart said for \["\/etc\/gai\.conf"\]; after the SIGKILL the helper resting with no child, mode 3, trouble 1, 0 lookups to the helper; by the end 1 looks after the edit's, restart said for \["\/etc\/gai\.conf"\]$/mu,
       );
       assert.match(String(passed.stderr), /^sequence rows: \d+ lookups recorded$/mu);
       const recorded = file.images['debian12'];
@@ -1993,6 +1998,8 @@ function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
         'stub-refused': 'nsswitch.conf’s hosts: line has an action group',
         'localdomain-empty':
           'LOCALDOMAIN is set in ms-probe’s environment, and glibc’s resolver reads it',
+        'nameserver-aton':
+          'resolv.conf line 1: a nameserver line names one IPv4 or IPv6 address, no scope, and nothing after it',
       }[name],
     },
     hostsLine: {
@@ -2006,6 +2013,7 @@ function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
       'files-resolve-dns': 'files resolve dns',
       'stub-refused': 'files resolve [!UNAVAIL=return] dns myhostname',
       'localdomain-empty': 'files dns',
+      'nameserver-aton': 'files dns',
     }[name],
     nscdSocket: name === 'nscd',
     ldPreload: name === 'ld-preload' ? '/usr/lib/aarch64-linux-gnu/libresolv.so.2' : undefined,
@@ -2015,7 +2023,9 @@ function offRun(name: OffCase, change: Partial<OffRun> = {}): OffRun {
     resolvConf:
       name === 'stub-refused'
         ? 'nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n'
-        : 'nameserver 10.0.0.53\n',
+        : name === 'nameserver-aton'
+          ? 'nameserver 10.1\n'
+          : 'nameserver 10.0.0.53\n',
     stubListening: false,
     ...(name === 'stub-refused' ? { resolved: 'active' } : {}),
     nssModules: {
@@ -2536,6 +2546,33 @@ describe('the differential’s script: what each image played', () => {
 
 // --- P-462: §7.5's other rows ---------------------------------------------------------------------
 
+describe('P-462: the script runs every box the claims name', () => {
+  const SCRIPT = fileURLToPath(
+    new URL('../../../../scripts/smoke/name-gate-differential.sh', import.meta.url),
+  );
+  /** A list the script sets, `NAME="` to its closing quote, each line's words. */
+  const listed = (name: string): string[][] => {
+    const text = readFileSync(SCRIPT, 'utf8');
+    const start = text.indexOf(`\n${name}="\n`);
+    assert.ok(start >= 0, name);
+    const body = text.slice(start + name.length + 4, text.indexOf('\n"\n', start));
+    return body.split('\n').map((line) => line.trim().split(/\s+/u));
+  };
+
+  it('every off box and skew box, once each, in its case’s image, and no other', () => {
+    const byName = (pairs: readonly (readonly string[])[]): string[] =>
+      pairs.map((pair) => pair.join(' ')).sort();
+    assert.deepEqual(
+      byName(listed('OFF_BOXES').map(([box = '', image = '']) => [box, image])),
+      byName(Object.entries(OFF_CASES).map(([name, claim]) => [name, claim.image])),
+    );
+    assert.deepEqual(
+      byName(listed('SKEW_BOXES')),
+      byName(Object.entries(SKEW_CASES).map(([name, claim]) => [name, claim.image])),
+    );
+  });
+});
+
 describe('P-462: the sequence rows, several lookups through one check', () => {
   const partial = SEQUENCE_ROWS.find((row) => row.id === 'sequence-partial-key');
   const gateway = SEQUENCE_ROWS.find((row) => row.id === 'sequence-gateway-v4-only');
@@ -2568,7 +2605,9 @@ describe('P-462: the sequence rows, several lookups through one check', () => {
       }
     }
     // The partial key: one zone, its cached names heard and the others silent, in turn.
-    const cached = partial.servers.flatMap((server) => server.cached ?? []);
+    const cached = partial.servers.flatMap((server) =>
+      (server.cached ?? []).map((entry) => entry.name),
+    );
     assert.deepEqual(
       partial.lookups.map((lookup) => [lookup.walk, cached.includes(lookup.name)]),
       [
@@ -2814,6 +2853,77 @@ describe('P-462: the sequence rows, several lookups through one check', () => {
     assert.notEqual(answerRowsDigest(ANSWER_ROWS, ANSWER_WORLD, rest), base);
   });
 
+  it('the digest moves with what a server’s cache holds: a name’s addresses, its TTL, a name more or less', () => {
+    const base = answerRowsDigest();
+    const at = SEQUENCE_ROWS.findIndex((row) =>
+      row.servers.some((one) => one.cached !== undefined),
+    );
+    const row = SEQUENCE_ROWS[at];
+    assert.ok(row !== undefined);
+    const [server, ...others] = row.servers;
+    assert.ok(server?.cached !== undefined && server.cached.length > 0);
+    const [entry, ...entries] = server.cached;
+    assert.ok(entry !== undefined);
+    const { cached: _cached, ...uncached } = server;
+    const cachedAs = (cached: SequenceRow['servers'][number]['cached']): string =>
+      answerRowsDigest(
+        ANSWER_ROWS,
+        ANSWER_WORLD,
+        SEQUENCE_ROWS.map((each, k) =>
+          k === at
+            ? {
+                ...row,
+                servers: [cached === undefined ? uncached : { ...server, cached }, ...others],
+              }
+            : each,
+        ),
+      );
+    assert.equal(cachedAs(server.cached), base);
+    // The review's case: the cache answering A alone, so that AAAA is NODATA.
+    assert.notEqual(
+      cachedAs([{ ...entry, addresses: entry.addresses.slice(0, 1) }, ...entries]),
+      base,
+    );
+    assert.notEqual(cachedAs([{ ...entry, ttl: entry.ttl + 1 }, ...entries]), base);
+    assert.notEqual(cachedAs(entries), base);
+    assert.notEqual(cachedAs(undefined), base);
+  });
+
+  it('sets each server’s answers, and primes its cache with the row’s own entries as written', async () => {
+    const calls: unknown[][] = [];
+    const sim = {
+      set: (...args: unknown[]) => {
+        calls.push(['set', ...args]);
+        return Promise.resolve();
+      },
+      prime: (...args: unknown[]) => {
+        calls.push(['prime', ...args]);
+        return Promise.resolve();
+      },
+    };
+    const cached = [{ name: 'a.zone.test', addresses: ['192.0.2.7'], ttl: 42 }];
+    await setSequencePlan(sim, {
+      servers: [
+        { address: '10.0.0.53', behaviour: { reply: { kind: 'silent' } }, cached },
+        { address: '10.0.0.54', behaviour: { reply: replies.nxdomain } },
+      ],
+    });
+    assert.deepEqual(calls, [
+      ['set', { fallback: true }, { reply: { kind: 'silent' } }, '10.0.0.53'],
+      ['prime', cached, '10.0.0.53'],
+      ['set', { fallback: true }, { reply: replies.nxdomain }, '10.0.0.54'],
+    ]);
+    // The partial key's, as committed: both of its cached names, A and AAAA, five minutes.
+    const partialCache = partial.servers[0]?.cached;
+    assert.deepEqual(
+      partialCache?.map((one) => [one.name, one.addresses.length, one.ttl]),
+      [
+        ['cached-1.zone.example.test', 2, 300],
+        ['cached-2.zone.example.test', 2, 300],
+      ],
+    );
+  });
+
   it('the gateway’s box routes by its IPv4 gateway and has no IPv6 default route', () => {
     const v4 = `default dev ms0 scope link\ndefault via ${SEQUENCE_GATEWAY} dev ${SEQUENCE_GATEWAY_LINK} metric 10\n`;
     assert.equal(gatewayProblem(SEQUENCE_GATEWAY, v4, ''), undefined);
@@ -2992,6 +3102,91 @@ describe('P-462: the boxes with the check off, §7.5’s other shapes', () => {
     ]);
   });
 
+  it('nameserver 10.1: fails a box whose resolv.conf names another server, or more, or is off by another rule', () => {
+    assert.deepEqual(
+      offProblems(offRun('nameserver-aton', { resolvConf: 'nameserver 10.0.0.1\n' })),
+      ['off box nameserver-aton: resolv.conf names ["10.0.0.1"], not 10.1 alone'],
+    );
+    assert.deepEqual(
+      offProblems(
+        offRun('nameserver-aton', { resolvConf: 'nameserver 10.1\nnameserver 10.0.0.53\n' }),
+      ),
+      ['off box nameserver-aton: resolv.conf names ["10.1","10.0.0.53"], not 10.1 alone'],
+    );
+    const { resolvConf: _unread, ...unread } = offRun('nameserver-aton');
+    assert.deepEqual(offProblems(unread as OffRun), [
+      'off box nameserver-aton: resolv.conf names [], not 10.1 alone',
+    ]);
+    assert.deepEqual(
+      offProblems(
+        offRun('nameserver-aton', {
+          off: { code: 'resolv', why: 'resolv.conf line 2: name server 10.1 is named twice' },
+        }),
+      ),
+      [
+        'off box nameserver-aton: the policy has the check off by resolv (resolv.conf line 2: name server 10.1 is named twice), not by resolv',
+      ],
+    );
+    assert.equal(
+      offProblems(offRun('nameserver-aton', { off: { code: 'env', why: 'LOCALDOMAIN is set' } }))
+        .length,
+      1,
+    );
+    assert.deepEqual(offProblems(offRun('nameserver-aton', { check: 'on' })), [
+      'off box nameserver-aton: the policy loaded in the box has the check on',
+    ]);
+    // Each line's word as written: `nameserversOf` reads no address into `10.1`.
+    assert.deepEqual(
+      nameserverWords('# a note\nnameserver 10.1\nnameserver\t::1 # x\nsearch a\n nameserver 9\n'),
+      ['10.1', '::1'],
+    );
+    assert.deepEqual(nameserversOf('nameserver 10.1\n'), []);
+  });
+
+  it('nameserver 10.1: the policy, as the box loads it, has the check off by the case’s rule', async () => {
+    const world: Record<string, string | null> = {
+      [SYSTEM_FILES.resolvConf]: `nameserver ${ATON_SERVER}\n`,
+      [SYSTEM_FILES.nsswitchConf]: 'hosts: files dns\n',
+      [SYSTEM_FILES.hosts]: '127.0.0.1 localhost\n',
+      [SYSTEM_FILES.gaiConf]: '',
+      [SYSTEM_FILES.ldSoPreload]: null,
+    };
+    const policy = new GlibcNamePolicy({
+      logger: pino({ level: 'silent' }),
+      platform: 'linux',
+      env: {},
+      glibcVersion: () => '2.36',
+      hostname: () => 'probe-1',
+      readText: (path) => Promise.resolve(world[path] ?? null),
+      socketExists: () => Promise.resolve(false),
+      moduleLook: () => Promise.resolve({ state: 'installed' }),
+    });
+    await policy.load();
+    const claim = OFF_CASES['nameserver-aton'];
+    const off = policy.describe().shapeOff;
+    assert.equal(off?.code, claim.code);
+    assert.match(off.why, claim.why);
+    assert.equal(
+      off.why,
+      offRun('nameserver-aton').off?.why,
+      'the run the tests hold is its words',
+    );
+    // The same world with the address as a dotted quad: on, so the box's one difference is the form.
+    world[SYSTEM_FILES.resolvConf] = 'nameserver 10.0.0.1\n';
+    const quad = new GlibcNamePolicy({
+      logger: pino({ level: 'silent' }),
+      platform: 'linux',
+      env: {},
+      glibcVersion: () => '2.36',
+      hostname: () => 'probe-1',
+      readText: (path) => Promise.resolve(world[path] ?? null),
+      socketExists: () => Promise.resolve(false),
+      moduleLook: () => Promise.resolve({ state: 'installed' }),
+    });
+    await quad.load();
+    assert.equal(quad.describe().shapeOff, undefined);
+  });
+
   it('reads a socket bound to the stub off /proc/net, UDP bound or TCP listening', () => {
     const header =
       '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
@@ -3024,7 +3219,7 @@ function skewRun(name: SkewCase, change: Partial<SkewRun> = {}): SkewRun {
         code: 'skew',
         why: `${claim.file} changed since ms-probe started, from sha256 a to sha256 b: the check is off until ms-probe restarts`,
       },
-      readOnce: once ? [claim.file, '/etc/ld.so.preload'] : ['/etc/gai.conf', '/etc/ld.so.preload'],
+      readOnce: claim.readOnceFiles,
       skewed: once,
       restartSaid: once ? [claim.file] : [],
     },
@@ -3032,22 +3227,31 @@ function skewRun(name: SkewCase, change: Partial<SkewRun> = {}): SkewRun {
       ? {
           helper: 'resting',
           route: 'resting',
+          killedPid: 4242,
+          inFlight: 0,
           respawned: false,
           mode: 3,
           trouble: 1,
           restingSaid: 1,
           answered: 'answer:192.0.2.53',
           toHelper: 0,
+          looksAfterEdit: 1,
+          restartSaid: [claim.file],
         }
       : {
           helper: 'up',
           route: 'up',
+          killedPid: 4242,
+          pid: 4243,
+          inFlight: 0,
           respawned: true,
           mode: 2,
           trouble: 0,
           restingSaid: 0,
           answered: 'answer:192.0.2.53',
           toHelper: 1,
+          looksAfterEdit: 1,
+          restartSaid: [],
         },
     buildDigest: CURRENT.buildDigest,
     ...change,
@@ -3081,10 +3285,25 @@ describe('P-462: the skew boxes, a file edited under a running probe and its hel
       Object.entries(SKEW_CASES).map(([name, claim]) => [name, claim.image, claim.readOnce]),
       [
         ['gai', 'debian12', true],
+        ['gai-not-first', 'debian11', true],
         ['nsswitch-frozen', 'debian11', true],
         ['nsswitch-reloaded', 'debian12', false],
       ],
     );
+    // D28's read-once files at each image's glibc, which say whether the case's file is one.
+    for (const [name, claim] of Object.entries(SKEW_CASES)) {
+      assert.equal(claim.readOnceFiles.includes(claim.file), claim.readOnce, name);
+      assert.deepEqual(
+        claim.readOnceFiles,
+        claim.image === 'debian11'
+          ? ['/etc/nsswitch.conf', '/etc/gai.conf', '/etc/ld.so.preload']
+          : ['/etc/gai.conf', '/etc/ld.so.preload'],
+        name,
+      );
+    }
+    // A read-once file edited that is not the first the policy reads once (`P-462`'s review).
+    const second = SKEW_CASES['gai-not-first'];
+    assert.ok(second.readOnce && second.readOnceFiles.indexOf(second.file) > 0);
   });
 
   it('fails a check not on before the edit, or not off by skew after it', () => {
@@ -3167,6 +3386,35 @@ describe('P-462: the skew boxes, a file edited under a running probe and its hel
         'skew box nsswitch-reloaded: the helper said to restart ms-probe for ["/etc/gai.conf"], and D28 says []',
       ],
     );
+    // The file is read once, but the policy reads another list once than D28 says at this glibc.
+    assert.deepEqual(
+      skewProblems(edited('gai-not-first', { readOnce: ['/etc/gai.conf', '/etc/ld.so.preload'] })),
+      [
+        'skew box gai-not-first: the policy reads ["/etc/gai.conf","/etc/ld.so.preload"] as read once at this glibc, and D28 says ["/etc/nsswitch.conf","/etc/gai.conf","/etc/ld.so.preload"]',
+      ],
+    );
+  });
+
+  it('fails a helper that by the run’s end has said to restart for another file, or a run whose end no later look reached', () => {
+    // The fallback `P-462`'s review found: each look after the edit's named the first file read
+    // once, nsswitch.conf at 2.31, when gai.conf was the one edited.
+    assert.deepEqual(
+      skewProblems(
+        killed('gai-not-first', { restartSaid: ['/etc/gai.conf', '/etc/nsswitch.conf'] }),
+      ),
+      [
+        'skew box gai-not-first: by the run’s end the helper had said to restart ms-probe for ["/etc/gai.conf","/etc/nsswitch.conf"], and D28 says ["/etc/gai.conf"]',
+      ],
+    );
+    assert.deepEqual(
+      skewProblems(killed('nsswitch-reloaded', { restartSaid: ['/etc/gai.conf'] })),
+      [
+        'skew box nsswitch-reloaded: by the run’s end the helper had said to restart ms-probe for ["/etc/gai.conf"], and D28 says []',
+      ],
+    );
+    assert.deepEqual(skewProblems(killed('gai', { looksAfterEdit: 0 })), [
+      'skew box gai: no look of the watch after the edit’s was told to the policy by the run’s end',
+    ]);
   });
 
   it('a skewed helper rests until restart after its SIGKILL, and one not skewed is up again', () => {
@@ -3179,6 +3427,13 @@ describe('P-462: the skew boxes, a file edited under a running probe and its hel
     // A new child up is no rest until restart, whatever the state says.
     assert.deepEqual(skewProblems(killed('gai', { respawned: true })), [
       'skew box gai: the helper was resting (route resting, a new child up), not resting until ms-probe restarts',
+    ]);
+    assert.deepEqual(skewProblems(killed('gai', { pid: 4243, respawned: true })), [
+      'skew box gai: the helper was resting (route resting, a new child up), not resting until ms-probe restarts',
+    ]);
+    // Nor is any child at all, the one killed still its own included.
+    assert.deepEqual(skewProblems(killed('gai', { pid: 4242 })), [
+      'skew box gai: the helper was resting (route resting, child 4242 still its own), not resting until ms-probe restarts',
     ]);
     assert.deepEqual(skewProblems(killed('nsswitch-frozen', { restMs: 600_000 })), [
       'skew box nsswitch-frozen: the helper was resting (route resting, for 600000 ms), not resting until ms-probe restarts',

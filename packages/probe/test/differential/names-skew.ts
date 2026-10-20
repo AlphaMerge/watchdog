@@ -10,6 +10,7 @@ import type { Logger } from '@ms/shared';
 import { DnsSimulator, replies } from '@ms/simulators';
 import { buildNameResolution, type NameResolution } from '../../src/resolver/name-resolution.js';
 import { RESOLVER_LANES } from '../../src/resolver/name-resolver.js';
+import type { GlibcNamePolicy } from '../../src/resolver/system-names.js';
 import { pollWithin, within } from '../support/within.js';
 import { BuildWatch } from './names-build.js';
 import {
@@ -36,7 +37,10 @@ import {
  * 2. the case's file edited (`SKEW_CASES`), and the watch's next look waited for to its end: the
  *    check off, and what the policy and the helper said of it;
  * 3. the helper's child SIGKILLed, the helper waited on to rest or to be up in a new child, and
- *    held there `HOLD_MS`, past every backoff a loss not resting takes; then a second name asked.
+ *    held there `HOLD_MS`, past every backoff a loss not resting takes; then a second name asked;
+ * 4. a look of the watch after the edit's waited for to its end, and what the helper said to
+ *    restart for read again: a look that moves nothing must name no file (`P-462`'s review, where
+ *    every later look named the first file read once).
  *
  * Prints the case's `SkewRun` as JSON, with the build it loaded (`names-build.ts`).
  */
@@ -100,6 +104,30 @@ function capturedLogger(): {
 const toHelper = (names: NameResolution): number =>
   names.resolver.gateHealth()?.lookupsToHelper ?? 0;
 
+/** The files the log says the helper said to restart ms-probe for, in order. */
+const restartSaid = (lines: readonly Record<string, unknown>[]): string[] =>
+  lines
+    .filter((line) => String(line['msg']).endsWith('changed: restart ms-probe to apply it'))
+    .map((line) => String(line['file']));
+
+/**
+ * The looks of the watch the policy has been told of, each counted as the policy ends it. The
+ * resolver tells the helper of a skewed file straight after, in the same turn, so a count read
+ * after one more turn has that look's word in the log. Nothing else of the policy changes.
+ */
+function countLooks(policy: GlibcNamePolicy): () => number {
+  let looks = 0;
+  const looked = policy.looked.bind(policy);
+  policy.looked = async (readings) => {
+    try {
+      return await looked(readings);
+    } finally {
+      looks += 1;
+    }
+  };
+  return () => looks;
+}
+
 async function inSitu(which: SkewCase, image: string): Promise<Omit<SkewRun, 'buildDigest'>> {
   const claim = SKEW_CASES[which];
   const setup: string[] = [];
@@ -108,6 +136,7 @@ async function inSitu(which: SkewCase, image: string): Promise<Omit<SkewRun, 'bu
   const names = buildNameResolution({ mode: 'gate', logger, lanes: RESOLVER_LANES, spoolDir });
   const gate = names.gate;
   if (gate === undefined) throw new Error('gate mode built no gate');
+  const looks = countLooks(gate.policy);
   let before: SkewRun['before'];
   let edited: SkewRun['edited'];
   let killed: SkewRun['killed'];
@@ -142,6 +171,7 @@ async function inSitu(which: SkewCase, image: string): Promise<Omit<SkewRun, 'bu
     } catch (error: unknown) {
       setup.push(String(error));
     }
+    const looksAtEdit = looks();
     const described = gate.policy.describe();
     edited = {
       check: described.check,
@@ -150,9 +180,7 @@ async function inSitu(which: SkewCase, image: string): Promise<Omit<SkewRun, 'bu
         : { off: { code: described.shapeOff.code, why: described.shapeOff.why } }),
       readOnce: described.readOnce,
       skewed: described.skewed,
-      restartSaid: lines
-        .filter((line) => String(line['msg']).endsWith('changed: restart ms-probe to apply it'))
-        .map((line) => String(line['file'])),
+      restartSaid: restartSaid(lines),
     };
     // The SIGKILL, from outside the helper.
     const killedPid = gate.helper.pid();
@@ -172,18 +200,37 @@ async function inSitu(which: SkewCase, image: string): Promise<Omit<SkewRun, 'bu
     const answered = await said(() =>
       within(LOOKUP_MS, `${AFTER} looked up`, names.resolver.resolve(AFTER, 4, {})),
     );
+    const mode = names.modeValue();
+    const trouble = gate.latch.value();
+    const lookups = toHelper(names) - sent;
+    // A look after the edit's, to its end: what it says, or does not, of the files read once.
+    const afterEdit = looksAtEdit + 1;
+    try {
+      await pollWithin(LOOK_MS, 'a look of the watch after the edit’s', () => looks() >= afterEdit);
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    } catch (error: unknown) {
+      setup.push(String(error));
+    }
     killed = {
       helper: stats.state,
       route: stats.route,
       ...(stats.restMs === undefined ? {} : { restMs: stats.restMs }),
-      respawned: stats.state === 'up' && stats.pid !== undefined && stats.pid !== killedPid,
-      mode: names.modeValue(),
-      trouble: gate.latch.value(),
+      ...(killedPid === undefined ? {} : { killedPid }),
+      ...(stats.pid === undefined ? {} : { pid: stats.pid }),
+      inFlight: stats.inFlight,
+      // Any child but the one killed, whatever the helper's state says of it.
+      respawned: stats.pid !== undefined && stats.pid !== killedPid,
+      mode,
+      trouble,
       restingSaid: lines.filter((line) =>
         String(line['msg']).startsWith('the lookup helper is resting until ms-probe restarts'),
       ).length,
       answered,
-      toHelper: toHelper(names) - sent,
+      toHelper: lookups,
+      looksAfterEdit: looks() - looksAtEdit,
+      restartSaid: restartSaid(lines),
     };
   } catch (error: unknown) {
     setup.push(error instanceof Error ? error.message : String(error));

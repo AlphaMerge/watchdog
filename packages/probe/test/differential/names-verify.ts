@@ -78,8 +78,17 @@ for (const box of off) {
   );
 }
 for (const box of skew) {
+  const killed = box.killed;
+  const child =
+    killed === undefined
+      ? ''
+      : killed.respawned
+        ? ' in a new child'
+        : killed.pid === undefined
+          ? ' with no child'
+          : ` with child ${String(killed.pid)}`;
   process.stderr.write(
-    `skew ${box.case} in ${box.image} (glibc ${String(box.glibc)}): after the edit the check ${String(box.edited?.check)}${box.edited?.off === undefined ? '' : ` by ${box.edited.off.code}`}, restart said for ${JSON.stringify(box.edited?.restartSaid ?? [])}; after the SIGKILL the helper ${String(box.killed?.helper)}${box.killed?.respawned === true ? ' in a new child' : ''}, mode ${String(box.killed?.mode)}, trouble ${String(box.killed?.trouble)}, ${String(box.killed?.toHelper)} lookups to the helper\n`,
+    `skew ${box.case} in ${box.image} (glibc ${String(box.glibc)}): after the edit the check ${String(box.edited?.check)}${box.edited?.off === undefined ? '' : ` by ${box.edited.off.code}`}, restart said for ${JSON.stringify(box.edited?.restartSaid ?? [])}; after the SIGKILL the helper ${String(killed?.helper)}${child}, mode ${String(killed?.mode)}, trouble ${String(killed?.trouble)}, ${String(killed?.toHelper)} lookups to the helper; by the end ${String(killed?.looksAfterEdit)} looks after the edit's, restart said for ${JSON.stringify(killed?.restartSaid ?? [])}\n`,
   );
 }
 process.stderr.write(`build ${current.buildDigest}\n`);

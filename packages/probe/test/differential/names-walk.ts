@@ -1,5 +1,12 @@
 import { replies, type DnsBehaviour, type DnsQueryRecord, type DnsSimulator } from '@ms/simulators';
-import { optOf, wireOf, type Asked, type ModesRun, type WalkRun } from './names-differential.js';
+import {
+  optOf,
+  wireOf,
+  type Asked,
+  type ModesRun,
+  type SequenceRow,
+  type WalkRun,
+} from './names-differential.js';
 import type { ModesReply, ModesRequest } from './names-modes.js';
 
 /**
@@ -90,6 +97,24 @@ export async function walkAndModes(
     modes: answered.modes,
     setup,
   };
+}
+
+/** The simulator, as a sequence row's answers are set on it. */
+export type PlanSimulator = Pick<DnsSimulator, 'set' | 'prime'>;
+
+/**
+ * A sequence row's answers (`P-462`): each server's behaviour as its fallback, and its cache
+ * primed with the row's own entries, each name's addresses and TTL as the row writes them, so
+ * that what glibc and the walk are answered is what the answer rows' digest names.
+ */
+export async function setSequencePlan(
+  sim: PlanSimulator,
+  row: Pick<SequenceRow, 'servers'>,
+): Promise<void> {
+  for (const server of row.servers) {
+    await sim.set({ fallback: true }, server.behaviour, server.address);
+    if (server.cached !== undefined) await sim.prime(server.cached, server.address);
+  }
 }
 
 /** A sequence row's lookups played after glibc's, as `walkAndModes` plays one plan's. */
