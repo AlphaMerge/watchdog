@@ -1285,7 +1285,9 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   now, not until restart**: a read of the settings that has not ended in 10 s (30 s for the one at
   start) is let go, logged, and `nameCheckState` reads 2. At the next look, every 5 s, a read that
   has ended since turns the check back on; one still not ended is taken as hung, and the check is
-  off until the probe restarts. At start that look comes as soon as the 30 s are up. A change to
+  off until the probe restarts. At start the next look is not the probe's first, which the
+  settings were read from and which comes as the 30 s are up, but the one after it, at least 5 s
+  later; a read that ends before then turns the check on as it ends. A change to
   `resolv.conf`, `nsswitch.conf` or the hosts file starts it again from nothing.
 - **A name the check misses is skipped, then its zone, then the check stands down.** A miss is
   a name the helper answered within a second whose walk the check had found silent, its
@@ -1325,8 +1327,12 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
 - **Only a crash is held against a name** (`P-453`): the child ending by a signal a crash
   raises, SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP or SIGSYS. A child killed from
   outside (SIGKILL, SIGTERM or SIGINT: an operator, the kernel's OOM killer, a cgroup kill), or
-  one that exits with a code, makes no name poison: a name it was asking alone is asked again,
-  alone.
+  one that exits with a code, makes no name poison, and the name it was asking is asked again in
+  the next child. A suspect is sent alone there, while the helper isolates. A poison name's re-ask
+  starts first, at a moment nothing else is in flight, as its hourly re-ask does, and what is
+  queued for the helper starts beside it: a crash then is charged to no one, and every name in
+  flight is kept off the probe's lanes. When the kill is the second loss in ten minutes, the
+  helper isolates, and the re-ask is sent alone as a suspect.
   When the child's channel closes before its exit is read, the helper kills it and waits up to a
   second for the exit to say which it was. Every name in flight when the child ends, a crash or
   not, or when it runs out of memory, is kept off the probe's lanes until ten minutes after the

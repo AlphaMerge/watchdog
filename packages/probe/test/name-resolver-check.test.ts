@@ -819,3 +819,126 @@ describe('D27 as a lookup leaves the probe’s queues: what else it settles (P-4
     resolver.stop();
   });
 });
+
+/**
+ * D27 when the asking check's own pump starts the lookup (`P-432` gate, fix round 1). X is heard
+ * and queued on the probe's lanes, held back by `P-438`'s rule for a domain not known to answer
+ * (zone A's three names hold the 3 first lanes it may) beside a free fourth, and a first check
+ * waits for it. Then X becomes a name the probe may not ask, and "Check now" joins it: promoted,
+ * it is exempt from the rule, so the pump in that same ask starts it, and `#offProbe` refuses it
+ * there or moves it to the helper. Refused, it fails the check asking at once with the refusal,
+ * as it fails the one waiting, and on a worker's port with a reply and no acknowledgement; not
+ * after the check's whole bound, on a lookup already settled (`RESOLVER_LATE`).
+ */
+interface JoinedRow {
+  readonly kind: 'crashed' | 'poison';
+  readonly route: 'up' | 'down' | 'resting';
+  /** The resolver stopped, as the probe's shutdown stops it, once the name is avoided. */
+  readonly stopped?: true;
+  /** "Check now" as a worker asks, on its port (`handle`), rather than by `resolve`. */
+  readonly port?: true;
+  /** Both answered in the helper, or both failed at once in these words. */
+  readonly expect: 'helper' | RegExp;
+}
+
+const JOINED_ROWS: readonly JoinedRow[] = [
+  { kind: 'crashed', route: 'up', expect: 'helper' },
+  { kind: 'crashed', route: 'down', expect: AVOIDED },
+  { kind: 'crashed', route: 'down', port: true, expect: AVOIDED },
+  { kind: 'crashed', route: 'resting', expect: AVOIDED },
+  { kind: 'poison', route: 'up', expect: POISON },
+  { kind: 'poison', route: 'down', expect: POISON },
+  { kind: 'crashed', route: 'up', stopped: true, expect: STOPPING },
+  { kind: 'crashed', route: 'down', stopped: true, expect: STOPPING },
+];
+
+/** The "Check now"'s bound: a check left waiting on a settled lookup is told only after it. */
+const CHECK_NOW_MS = 1_500;
+
+const joinedTitle = (row: JoinedRow): string =>
+  `${row.kind}, ${row.route}${row.stopped === true ? ', stopped' : ''}` +
+  `${row.port === true ? ', on a worker’s port' : ''}: ` +
+  (row.expect === 'helper'
+    ? 'both asked in the helper'
+    : `both fail at once (${row.expect.source})`);
+
+/** A worker's request on its port: what was posted, and what the reply told its check. */
+function onPort(
+  resolver: NameResolver,
+  request: { readonly host: string; readonly family: Family; readonly waitMs: number },
+): { readonly posted: string[]; readonly got: Promise<{ code: unknown; message: string }> } {
+  const posted: string[] = [];
+  const got = new Promise<{ code: unknown; message: string }>((resolve) => {
+    resolver.handle({ type: 'resolve', id: 1, fresh: true, ...request }, (message) => {
+      posted.push(message.type);
+      if (message.type !== 'resolved') return;
+      resolve(
+        message.ok
+          ? { code: undefined, message: 'answered' }
+          : { code: message.code, message: message.message },
+      );
+    });
+  });
+  return { posted, got };
+}
+
+async function joined(row: JoinedRow): Promise<void> {
+  const { resolver, helper, asker, callsFor, clock, ask } = await make({
+    stuckMs: 5_000,
+    routeMs: D27_ROUTE,
+  });
+  const title = joinedTitle(row);
+  const zone = ['dev-1.zone-a.test', 'dev-2.zone-a.test', 'dev-3.zone-a.test'];
+  const held: Promise<unknown>[] = [];
+  for (const name of zone) {
+    held.push(ask(name, { waitMs: 10_000 }).catch(() => undefined));
+    await pollWithin(1_000, `${title}: ${name} on a lane`, () => callsFor(name).length === 1, 2);
+  }
+  const first = failed(ask(X, { waitMs: 4_000 }, 0));
+  await pollWithin(
+    1_000,
+    `${title}: heard`,
+    () => asker.askedFor(X).length > 0 && asker.askedFor(X).every((q) => q.replied !== undefined),
+    2,
+  );
+  await wait(ROUTE);
+  assert.equal(resolver.stats().queued, 1, `${title}: queued on a probe lane`);
+  assert.equal(resolver.stats().running, 3, `${title}: held back beside a free first lane`);
+  assert.equal(helper.asksFor(X).length, 0, `${title}: not in the helper`);
+  if (row.kind === 'crashed') helper.avoided.add(`4:${X}`);
+  else helper.markPoison(X, 0, clock.now + 3_600_000);
+  if (row.route !== 'up') helper.move(row.route);
+  if (row.stopped === true) resolver.stop();
+  const port =
+    row.port === true ? onPort(resolver, { host: X, family: 0, waitMs: CHECK_NOW_MS }) : undefined;
+  const now = port?.got ?? failed(ask(X, { fresh: true, waitMs: CHECK_NOW_MS }, 0));
+  if (row.expect === 'helper') {
+    await pollWithin(1_000, `${title}: in the helper`, () => helper.asksFor(X).length === 1, 2);
+    helper.last(X).answer(A);
+    assert.equal((await within(2_000, `${title}: Check now`, now)).message, 'answered', title);
+    assert.equal((await within(2_000, `${title}: the first`, first)).message, 'answered', title);
+  } else {
+    // At once: well inside the bound, which a check left waiting on the settled lookup outlives.
+    const said = await within(CHECK_NOW_MS / 3, `${title}: Check now at once`, now);
+    assert.equal(said.code, RESOLVER_FAULT, `${title}: ${said.message}`);
+    assert.match(said.message, row.expect, title);
+    const before = await within(1_000, `${title}: the first check`, first);
+    assert.equal(before.code, RESOLVER_FAULT, `${title}: ${before.message}`);
+    assert.match(before.message, row.expect, title);
+    if (port !== undefined) {
+      assert.deepEqual(port.posted, ['resolved'], `${title}: a reply, no acknowledgement`);
+    }
+  }
+  assert.equal(callsFor(X).length, 0, `${title}: never on the probe’s own getaddrinfo`);
+  for (const name of zone) for (const call of callsFor(name)) call.answer();
+  await Promise.all(held);
+  resolver.stop();
+}
+
+describe('D27 when "Check now" starts a lookup in its own ask (P-432 gate, fix round 1)', () => {
+  for (const row of JOINED_ROWS) {
+    it(joinedTitle(row), async () => {
+      await joined(row);
+    });
+  }
+});

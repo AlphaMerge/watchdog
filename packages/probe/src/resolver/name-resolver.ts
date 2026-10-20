@@ -452,6 +452,11 @@ interface Pending {
   suspect: boolean;
   /** Gate mode: a poison name's hourly ask, sent alone in the helper (D27). */
   poisonAsk: boolean;
+  /**
+   * Gate mode: why `#offProbe` failed it as it would have started on the probe's lanes (D27). Read
+   * by the check whose own pump started it (`#ask`), which joined it before it was settled.
+   */
+  refused: string | undefined;
   /** Gate mode: a probe-lane DNS lookup past `STUCK_MS` after polls, counted in U (D25). */
   untokened: boolean;
   /** Gate mode: ungated when it started in the helper, which the kept token needs (I8). */
@@ -1487,6 +1492,12 @@ export class NameResolver implements PoolResolver {
     // A lookup held back only by time, its domain's `STUCK_MS` window now over, takes a free lane
     // here, rather than its check failing for lanes it need not wait for (`P-438`'s narrow check).
     if (pending.state === 'queued') this.#pump();
+    // Gate mode: refused as one of the pumps above would have started it (`#offProbe`, D27), and
+    // settled then, with its checks told why, before this one had joined them. It is told now, as
+    // they were; it would otherwise wait on a settled lookup for its whole bound (`RESOLVER_LATE`).
+    if (pending.refused !== undefined) {
+      return { now: this.#unanswered(entry, fresh, now, RESOLVER_FAULT, pending.refused) };
+    }
     // Gate mode: a name DNS did not answer, while the helper that alone may ask it is down.
     const refused = pending.state === 'queued' ? this.#silentRefusal(pending) : undefined;
     if (refused !== undefined) {
@@ -1909,6 +1920,7 @@ export class NameResolver implements PoolResolver {
       detached: false,
       suspect: pool === 'helper' && entry.suspect,
       poisonAsk: false,
+      refused: undefined,
       untokened: false,
       ungated: false,
       armedAt: 0,
@@ -2625,6 +2637,7 @@ export class NameResolver implements PoolResolver {
     const refusal = this.#stopped ? stopping(entry.host) : this.#gateRefusal(entry);
     if (refusal !== undefined) {
       gate.routed.faulted += 1;
+      pending.refused = refusal;
       this.#settle(pending, { passed: { code: RESOLVER_FAULT, why: refusal } });
       return true;
     }
@@ -3482,6 +3495,7 @@ export class NameResolver implements PoolResolver {
         detached: false,
         suspect: false,
         poisonAsk: true,
+        refused: undefined,
         untokened: false,
         ungated: false,
         armedAt: 0,

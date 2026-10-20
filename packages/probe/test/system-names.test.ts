@@ -2323,11 +2323,29 @@ describe('rule 6: what moves after load turns the check off until restart', () =
     assert.equal(rig.errors().length, 0);
   });
 
-  it('a load the first look finds still not ended is a hang: off until restart, named and logged once', async () => {
+  it('a load past its bound is not judged by the look it was read from: that look is kept, and a load that ends before the next builds its view', async () => {
+    const rig = heldLoad();
+    await within(2_000, 'a slow load, let go', rig.policy.load());
+    // The resolver tells the policy the look it loaded from straight after the load is let go.
+    await rig.policy.looked([reading(FILES.hosts, '192.0.2.9 printer.test\n')]);
+    assert.equal(offOf(rig.policy), 'slow', 'off for now: no read could have ended in between');
+    assert.equal(rig.errors().length, 0, 'not a hang');
+    rig.ends.finish();
+    await sleep(10);
+    assert.equal(offOf(rig.policy), 'on', 'slow, not hung: its view is built');
+    assert.equal(rig.policy.classify('printer.test', 4).kind, 'local', 'with what that look read');
+    await rig.policy.looked([]);
+    assert.equal(offOf(rig.policy), 'on');
+    assert.equal(rig.errors().length, 0);
+  });
+
+  it('a load the look after the one it was read from finds still not ended is a hang: off until restart, named and logged once', async () => {
     const failing = heldLoad();
     await within(2_000, 'a slow load, let go', failing.policy.load());
     assert.equal(offOf(failing.policy), 'slow');
     await failing.policy.looked([reading(FILES.hosts, '192.0.2.9 x\n')]);
+    assert.equal(offOf(failing.policy), 'slow', 'the look it was read from judges nothing');
+    await failing.policy.looked([]);
     assert.equal(offOf(failing.policy), 'fault');
     const why = /a load .* did not end within 50 ms, nor by the next look/u;
     assert.match(failing.policy.view().off?.why ?? '', why);
@@ -2340,6 +2358,7 @@ describe('rule 6: what moves after load turns the check off until restart', () =
     // Or it ends, having read what another rule turns the check off for: the hang stays named.
     const ending = heldLoad(`${SERVER}options inet6\n`);
     await within(2_000, 'a slow load, let go', ending.policy.load());
+    await ending.policy.looked([]);
     await ending.policy.looked([]);
     ending.ends.finish();
     await sleep(10);

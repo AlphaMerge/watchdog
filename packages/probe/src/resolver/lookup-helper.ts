@@ -82,16 +82,19 @@ import { afterPolls } from './verdict-timer.js';
  * is charged** (`P-453`): a child ended by a signal a crash raises (`CRASH_SIGNALS`). SIGKILL,
  * SIGTERM or SIGINT from outside (an operator, the kernel's OOM killer, a cgroup kill) and an exit
  * code say nothing of a name, so such an end is an `exit` loss charged to no one, its suspects
- * asked again alone. A loss taken on its channel closing, a failed send or a broken protocol,
- * before the exit is read, waits for the exit when a crash could be charged on it, at most
- * `exitWaitMs`. Every name in flight at an `exit` loss, crash or not, charged or not, is avoided,
- * and at a `memory` loss too, and those asked again go alone. A charged name is poison, never
- * asked on a probe lane, and asked again alone here after an hour, then after twice as long at each
+ * asked again alone. A loss taken on its channel closing or a broken protocol, before the exit is
+ * read, waits for the exit when a crash could be charged on it, at most `exitWaitMs`. One taken on
+ * an ask that could not be written never waits: that ask stays in flight, never charged, so no
+ * lookup in flight is one a crash could be charged to. Every name in flight at an `exit` loss,
+ * crash or not, charged or not, is avoided, and at a `memory` loss too, and those asked again while
+ * it isolates go alone; a poison name's re-ask asked again outside isolation starts first in the
+ * next child, as its hourly ask does, and holds nothing back. A charged name is poison, never asked
+ * on a probe lane, and asked again alone here after an hour, then after twice as long at each
  * crash, to a day at most, at a moment nothing else is in flight; one that finds none for a whole
- * period waits for the next. An answer clears the mark; a restart of the probe does too.
- * `memory`, `hung` and `start` losses are never charged to a name. A change and a loss say whether
- * a crash made a `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and
- * not the second.
+ * period waits for the next. An answer clears the mark; a restart of the probe does too. `memory`,
+ * `hung` and `start` losses are never charged to a name. A change and a loss say whether a crash
+ * made a `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and not the
+ * second.
  *
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So in any state the resolver never asks the
@@ -158,9 +161,9 @@ const NOT_ANSWERING_WARN_MS = 60_000;
 export const HELPER_LOSS_SAY_MS = 1_000;
 /**
  * How long a loss that a crash could be charged on waits for the child's exit status (`P-453`):
- * its channel closed, a send failed or it broke the protocol first, and only the signal it ended
- * with says whether `getaddrinfo` crashed. The child is killed meanwhile, so the exit comes at
- * once unless the process cannot go; one that has not come by then charges no one.
+ * its channel closed or it broke the protocol first, and only the signal it ended with says
+ * whether `getaddrinfo` crashed. The child is killed meanwhile, so the exit comes at once unless
+ * the process cannot go; one that has not come by then charges no one.
  */
 export const HELPER_EXIT_WAIT_MS = 1_000;
 /**
@@ -1928,12 +1931,14 @@ export class LookupHelper implements HelperPort {
 
   /**
    * An `exit` loss taken before the child's exit was read, with a lookup a crash would be charged
-   * to (`P-453`): its channel closed first, a send failed, or it broke the protocol. Whether it
-   * crashed is the signal it ends with, so the loss waits for the exit, the child killed now so
-   * that it exits whatever it was doing (a kill does nothing to one already dead, whose exit still
-   * says how it died). Nothing is sent to it, and nothing it says is read, meanwhile. An exit not
-   * read within `exitWaitMs`, after the polls so that one already in the pipe is read first, is
-   * taken as no crash: the loss is charged to no one.
+   * to (`P-453`): its channel closed first, or it broke the protocol. Never a failed send: the ask
+   * that could not be written stays in flight, never charged (`unsent`), so no lookup in flight is
+   * one a crash could be charged to, and that loss is taken at once. Whether it crashed is the
+   * signal it ends with, so the loss waits for the exit, the child killed now so that it exits
+   * whatever it was doing (a kill does nothing to one already dead, whose exit still says how it
+   * died). Nothing is sent to it, and nothing it says is read, meanwhile. An exit not read within
+   * `exitWaitMs`, after the polls so that one already in the pipe is read first, is taken as no
+   * crash: the loss is charged to no one.
    */
   #awaitExit(record: ChildRecord, why: string): void {
     const wait: ExitWait = { why, over: false, timer: undefined };

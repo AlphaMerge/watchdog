@@ -3333,6 +3333,43 @@ describe('the lookup helper: only a crash is charged (P-453, scripted process, t
     }
   });
 
+  it('a poison name’s re-ask ended from outside at the first loss in ten minutes is asked again, not as a suspect: alone only while the helper isolates', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      await isolating(made);
+      const host = 'bad.example.test';
+      const first = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+      const change = await fakeCrash(made);
+      assert.equal(lostError((await first).error).charged, true);
+      made.helper.endIsolation();
+      made.timers.fire(change.delayMs ?? -1);
+      const next = await fakeUp(made);
+      const mark = made.helper.poison(host, 4);
+      assert.ok(mark !== undefined);
+      // Its hour up, and every crash before it out of the ten minutes.
+      made.timers.clock = mark.nextAskAt;
+      assert.deepEqual(
+        made.helper.poisonDue().map((due) => due.host),
+        [host],
+        'due its re-ask',
+      );
+      const again = settled(made.helper.ask({ host, family: 4, max: 64 }));
+      next.die('SIGKILL');
+      next.closeChannel();
+      await polls();
+      const error = lostError((await again).error);
+      assert.equal(error.charged, false);
+      assert.equal(error.requeue, true, 'asked again');
+      assert.equal(error.suspect, false, 'not a suspect: no isolation at a first loss');
+      assert.equal(made.helper.isolating(), false);
+      assert.equal(made.helper.poison(host, 4), mark, 'still poison: it has not answered');
+      assert.equal(made.helper.avoidsSystem(host, 4), true, 'kept off the probe’s lanes');
+    } finally {
+      await stop(made);
+    }
+  });
+
   it('a channel closed before the exit is read waits for the exit, sends and judges nothing meanwhile, and a crash then is charged', async () => {
     const made = fakeMade();
     void made.helper.start();

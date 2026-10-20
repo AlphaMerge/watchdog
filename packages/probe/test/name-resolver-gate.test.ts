@@ -1655,3 +1655,216 @@ describe('system mode builds none of it (P-432 S3)', () => {
     await resolver.firstLook();
   });
 });
+
+/**
+ * D27 when the asking check's own pump starts a lookup, the check off (`P-432` gate, fix round 1):
+ * name-resolver-check's table covers "Check now" exempting a lookup from `P-438`'s rule; these are
+ * the two other ways a lookup queued on the probe's lanes starts in its check's own ask. "Check
+ * now" moves a held name's retry, queued behind another's on the retry lane, to a free first lane;
+ * and a plain check joins a lookup that the `STUCK_MS` after a stuck end held back, the window over
+ * by the clock and its timer not yet run. The helper rests, so every name is routed as `system`
+ * routes it; the name has since become one the probe may not ask. Each check fails at once, with
+ * the refusal, as the one already waiting does.
+ */
+describe('D27 when a check starts a lookup in its own ask, check off (P-432 gate, fix round 1)', () => {
+  const X = 'x.zone-a.test';
+  const AVOIDED_X =
+    /^the probe’s resolver does not ask its own getaddrinfo for x\.zone-a\.test: .* is resting$/u;
+
+  /** A promise's outcome as soon as it has one: read after a turn, to tell at once from later. */
+  function seen(promise: Promise<unknown>): { got?: { ok: true } | { ok: false; error: unknown } } {
+    const box: { got?: { ok: true } | { ok: false; error: unknown } } = {};
+    void outcome(promise).then((got) => {
+      box.got = got.ok ? { ok: true } : { ok: false, error: got.error };
+    });
+    return box;
+  }
+
+  /** Both checks, told at once that the probe does not ask its own getaddrinfo for X. */
+  function toldAtOnce(checks: Record<string, ReturnType<typeof seen>>): void {
+    for (const [what, box] of Object.entries(checks)) {
+      const got = box.got;
+      assert.ok(got !== undefined, `${what}: told at once, not at its bound`);
+      assert.ok(!got.ok, `${what}: failed`);
+      assert.equal(codeOf(got.error), RESOLVER_FAULT, `${what}: ${messageOf(got.error)}`);
+      assert.match(messageOf(got.error), AVOIDED_X, what);
+    }
+  }
+
+  it('"Check now" moving a held name’s retry ahead of the one on the retry lane fails at once, saying why', async () => {
+    const { helper, callsFor, clock, ask } = make({ route: 'resting' });
+    const other = 'r.zone-b.test';
+    for (const host of [other, X]) {
+      const once = outcome(ask(host, 4, { waitMs: 60_000 }));
+      callsFor(host)[0]?.fail('EAI_AGAIN');
+      assert.equal((await once).ok, false, `${host} failed once`);
+    }
+    // Past both holds: each name's next lookup is a retry.
+    clock.now += 10_000;
+    const retried = outcome(ask(other, 4, { waitMs: 10_000 }));
+    const waiting = seen(ask(X, 4, { waitMs: 10_000 }));
+    assert.equal(callsFor(other).length, 2, 'its retry on the retry lane');
+    assert.equal(callsFor(X).length, 1, 'X’s retry queued behind it');
+    helper.avoided.add(`4:${X}`);
+    const checkNow = seen(ask(X, 4, { fresh: true, waitMs: 1_000 }));
+    await settled();
+    toldAtOnce({ 'the waiting check': waiting, 'Check now': checkNow });
+    assert.equal(callsFor(X).length, 1, 'never again on the probe’s own getaddrinfo');
+    callsFor(other)[1]?.answer();
+    assert.ok((await retried).ok);
+  });
+
+  it('a check joining a lookup the window after a stuck end held back, the window over and its timer not run, fails at once, saying why', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { helper, callsFor, clock, ask } = make({ route: 'resting' });
+    const last = (host: string): Call => {
+      const call = callsFor(host).at(-1);
+      assert.ok(call !== undefined, `a lookup for ${host}`);
+      return call;
+    };
+    const answered = async (
+      host: string,
+      request: { waitMs?: number; fresh?: boolean } = {},
+    ): Promise<void> => {
+      const asked = ask(host, 4, request);
+      last(host).answer();
+      assert.deepEqual(await asked, A);
+    };
+    const s = (n: number): string => `s${String(n)}.silent.test`;
+    const a = (n: number): string => `a${String(n)}.zone-a.test`;
+    // Zone S's four names kept, and zone A known to answer.
+    for (const name of [1, 2, 3, 4].map(s)) await answered(name);
+    clock.now = ANSWER_MS;
+    await answered(a(0));
+    // One of zone A's lookups ends stuck without an answer, and another of its names answers
+    // after it: zone A is held only by the STUCK_MS after that end.
+    const ended = outcome(ask(a(1), 4, { waitMs: 60_000 }));
+    t.mock.timers.tick(STUCK);
+    last(a(1)).fail('EAI_AGAIN');
+    assert.equal((await ended).ok, false);
+    await answered(a(2), { fresh: true, waitMs: 60_000 });
+    // Zone S's four refreshes fill the refresh lanes: X is held back from the last shared lane.
+    for (const name of [1, 2, 3, 4].map(s)) assert.deepEqual(await ask(name), A);
+    const waiting = seen(ask(X, 4, { waitMs: 60_000 }));
+    await settled();
+    assert.equal(waiting.got, undefined, 'its check waits: no lane it could take is stuck');
+    assert.equal(callsFor(X).length, 0, 'held back beside a free first lane');
+    helper.avoided.add(`4:${X}`);
+    // The window over, and nothing starts or ends: no timer runs here, so only the check asking
+    // lets the lookup go.
+    clock.now += STUCK;
+    const joined = seen(ask(X, 4, { waitMs: 60_000 }));
+    await settled();
+    toldAtOnce({ 'the waiting check': waiting, 'the joining check': joined });
+    assert.equal(callsFor(X).length, 0, 'never on the probe’s own getaddrinfo');
+    for (const name of [1, 2, 3, 4].map(s)) last(name).answer();
+  });
+});
+
+describe('a slow first read of the name settings (P-432 gate, fix round 1)', () => {
+  /**
+   * The real policy on a stock shape, its load bounded at 50 ms and its read of resolv.conf held
+   * until `release`, and a resolver in gate mode whose start loads it from its first look.
+   */
+  function slowStart() {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stock: Record<string, string | null> = {
+      [SYSTEM_FILES.resolvConf]: 'nameserver 192.0.2.53\n',
+      [SYSTEM_FILES.nsswitchConf]: 'hosts: files dns\n',
+      [SYSTEM_FILES.hosts]: '127.0.0.1 localhost\n',
+      [SYSTEM_FILES.gaiConf]: '',
+      [SYSTEM_FILES.ldSoPreload]: null,
+    };
+    const policy = new GlibcNamePolicy({
+      logger: silent,
+      platform: 'linux',
+      env: {},
+      glibcVersion: () => '2.39',
+      nodeVersion: 'v24.0.0-test',
+      hostname: () => 'probe-1',
+      readText: async (path) => {
+        if (path === SYSTEM_FILES.resolvConf) await held;
+        return stock[path] ?? null;
+      },
+      socketExists: () => Promise.resolve(false),
+      moduleLook: () => Promise.resolve({ state: 'installed' }),
+      loadMs: 50,
+    });
+    const resolver = new NameResolver({
+      logger: silent,
+      lookup: () => Promise.reject(new Error('no lookup in this test')),
+      watch: { files: [], everyMs: 60_000 },
+      gate: { helper: new FakeHelper(), policy, tickMs: 3_600_000 },
+    });
+    return {
+      policy,
+      resolver,
+      release: () => {
+        release();
+      },
+    };
+  }
+
+  it('is off for now: the start’s own look does not judge it, and one that ends before the next look turns the check on', async () => {
+    const { policy, resolver, release } = slowStart();
+    await within(2_000, 'the start’s first look', resolver.firstLook());
+    assert.equal(policy.view().off?.code, 'slow', 'not a hang: its own look is not the next');
+    release();
+    await pollWithin(1_000, 'the load, ended', () => policy.view().off === undefined, 5);
+    await within(2_000, 'the next look', resolver.checkFiles());
+    assert.equal(policy.view().off, undefined, 'on, and the next look keeps it on');
+  });
+
+  it('is a hang once the look after the start’s finds it still reading: off until restart', async () => {
+    const { policy, resolver, release } = slowStart();
+    await within(2_000, 'the start’s first look', resolver.firstLook());
+    assert.equal(policy.view().off?.code, 'slow');
+    await within(2_000, 'the next look', resolver.checkFiles());
+    assert.equal(policy.view().off?.code, 'fault');
+    assert.match(policy.view().off?.why ?? '', /did not end within 50 ms, nor by the next look/u);
+    release();
+    await settled();
+    assert.equal(policy.view().off?.code, 'fault', 'until restart');
+  });
+});
+
+describe('a poison name’s re-ask ended from outside, isolation off (P-432 gate, fix round 1)', () => {
+  it('is asked again first in the next child, as its hourly re-ask is, at a moment nothing else is in flight, and what is queued starts beside it', async () => {
+    const { helper, ask, clock, resolver } = make({ tickMs: 5 });
+    resolver.start();
+    const crash = 'crash.zone-a.test';
+    try {
+      helper.markPoison(crash, 4, 1_000);
+      clock.now = 1_000;
+      await pollWithin(1_000, 'the re-ask', () => helper.asksFor(crash).length === 1, 2);
+      assert.equal(helper.inFlight().length, 1, 'alone as it starts');
+      // Killed from outside with no loss before it: not charged, and no suspect, since the helper
+      // does not isolate at its first loss in ten minutes. Asked again, its token with it.
+      helper.lose('exit', 'rejoining');
+      await settled();
+      const queued = ['q1.zone-c.test', 'q2.zone-d.test'];
+      const waits = queued.map((host) => outcome(ask(host, 4, { waitMs: 60_000 })));
+      assert.equal(helper.asks.length, 1, 'all of it queued for the next child');
+      helper.move('up');
+      await settled();
+      assert.deepEqual(
+        helper.asks.slice(1).map((asked) => asked.host),
+        [crash, ...queued],
+        'the re-ask first, and what was queued beside it',
+      );
+      assert.equal(
+        helper.last(crash).suspect,
+        false,
+        'not sent alone: the helper is not isolating',
+      );
+      helper.last(crash).answer(B);
+      for (const host of queued) helper.last(host).answer();
+      for (const got of await Promise.all(waits)) assert.ok(got.ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+});

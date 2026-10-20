@@ -1174,7 +1174,7 @@ export interface SystemNamePolicy {
    * what it read, as a look would. Never rejects, and never takes longer than `POLICY_LOAD_MS`:
    * what fails turns the check off until restart (`fault`), and what takes longer turns it off for
    * now (`slow`), until it ends and builds its view, or until a look finds it still reading
-   * (`fault`).
+   * (`fault`): not the look it was read from, which the resolver tells next, but the one after.
    */
   load(options?: { readonly hosts?: string }): Promise<void>;
   /**
@@ -1413,7 +1413,8 @@ const UNREAD: FileReading = { text: null, digest: DIGEST_ABSENT };
  * `POLICY_LOOK_MS`, turns the check off for now (`slow`) and is no longer waited on. A bound passed
  * is not yet a hang, since one stall of the event loop can pass it: a load that ends later builds
  * its view, and a look that ends later has what it found dropped, the next look looking again.
- * Only one the next look finds still not ended turns the check off until restart (`fault`). A look
+ * Only one the next look finds still not ended turns the check off until restart (`fault`); for a
+ * load, the look after the one it was read from, which the start tells straight after it. A look
  * the watch makes before load has read is kept and compared when it has, since the resolver tells
  * each reading once.
  */
@@ -1432,8 +1433,13 @@ export class GlibcNamePolicy implements SystemNamePolicy {
   readonly #loadMs: number;
   readonly #checkBuilt: boolean;
   #loaded = false;
-  /** A load or look past its bound, no longer waited on; `settled` once it has ended. */
-  #late: { readonly what: 'load' | 'look'; readonly ms: number; settled: boolean } | undefined;
+  /**
+   * A load or look past its bound, no longer waited on; `settled` once it has ended. A load's is
+   * `unjudged` until the look it was read from has been told (`looked`).
+   */
+  #late:
+    | { readonly what: 'load' | 'look'; readonly ms: number; settled: boolean; unjudged: boolean }
+    | undefined;
   /** Moved on when a load or look passes its bound: a look that ends later drops what it found. */
   #generation = 0;
   /** What the watch read before load had, the latest of each file (`looked`). */
@@ -1496,7 +1502,13 @@ export class GlibcNamePolicy implements SystemNamePolicy {
     if (this.#moved?.code === 'fault') return noChange();
     const late = this.#late;
     if (late !== undefined) {
-      if (!late.settled) {
+      if (!late.settled && late.unjudged) {
+        // The look a load let go was read from (the resolver's first, L-N3), told as soon as the
+        // load was let go, in the same turn: no read could have ended in between, so it is not
+        // the next look, and judges nothing. The one after it does. Kept as any look before load
+        // has read is, below.
+        late.unjudged = false;
+      } else if (!late.settled) {
         // Past its bound, and not ended by the next look either: a hang, not a stall.
         this.#fail(
           new Error(
@@ -1504,11 +1516,12 @@ export class GlibcNamePolicy implements SystemNamePolicy {
           ),
         );
         return noChange();
+      } else {
+        // Ended since, so it was slow, not hung: what a look found is dropped (`#look`), and this
+        // look looks again from the view as it stands, which can turn the check back on.
+        this.#late = undefined;
+        this.#view = this.#build();
       }
-      // Ended since, so it was slow, not hung: what a look found is dropped (`#look`), and this
-      // look looks again from the view as it stands, which can turn the check back on.
-      this.#late = undefined;
-      this.#view = this.#build();
     }
     if (!this.#loaded) {
       // Kept, the latest of each file, and compared when load has read (`#load`): the resolver
@@ -1714,7 +1727,7 @@ export class GlibcNamePolicy implements SystemNamePolicy {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<undefined>((resolve) => {
       timer = setTimeout(() => {
-        const episode = { what, ms, settled: false };
+        const episode = { what, ms, settled: false, unjudged: what === 'load' };
         const settle = (): void => {
           episode.settled = true;
         };

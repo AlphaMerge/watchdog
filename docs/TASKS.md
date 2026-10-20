@@ -13550,6 +13550,114 @@ because each is a decision rather than a defect:
             `verdict` row with the helper rejoining then down was routed silent in four of eight
             mutant runs while another session's suite shared the VM. When that happens it tests
             nothing.
+      - **The gate track's fix round 1 built** 2026-10-20, on `feat/p432-gate-r2`, for the
+        coordinator to land: six review items on the second round and `P-453`.
+        - **A check whose own ask starts a refused lookup is told at once** (items 1, 2 and 5,
+          one defect, which the second round's `#offProbe` brought in).
+          - `#offProbe` settles a refused lookup inside `#run`. When the pump that runs it is
+            the asking check's own, in `#ask`, the lookup was settled before that check had
+            joined it. Two pumps do that: Check now's `#promote`, which exempts a lookup from
+            `P-438`'s rule or moves a held name's retry to a free first lane, and the pump that
+            lets a lookup held back only by `P-438`'s window go.
+          - The check then waited its whole bound on a settled lookup and failed
+            `RESOLVER_LATE`, naming a slow resolver. On a worker's port it got no reply at all.
+            D27 held: the probe's `getaddrinfo` was never asked.
+          - Now `#offProbe` keeps its refusal on the lookup (`refused`), and `#ask` answers the
+            check at once with `RESOLVER_FAULT` and those words, as the lookup's other checks
+            were answered. A Check now with a kept answer gets it with the words, as they do.
+        - **A slow first read of the name settings is off for now, as the docs say** (item 3).
+          The start tells the policy its own first look straight after the load it was read
+          from, in the same turn. That look judged a load let go at 30 s as hung: off until
+          restart, after a warning that said "off for now". `GlibcNamePolicy.looked` now lets
+          that look by (`unjudged`), keeping its readings as any look before load has read is.
+          The look after it judges, at least 5 s later, and a load that ends before then builds
+          its view. `administration.md` says when that look comes at start.
+        - **A poison name's re-ask ended from outside, as it behaves** (item 4).
+          `administration.md` said such a name is asked again alone. Only a suspect is, while
+          the helper isolates. Outside isolation the re-ask is asked again first in the next
+          child, at a moment nothing else is in flight, as its hourly re-ask is, with what is
+          queued for the helper starting beside it. From the second loss in ten minutes the
+          helper isolates, and sends it alone as a suspect. The helper's header comment said the
+          same of every lookup asked again, and now says it of those asked while isolating.
+        - **A failed send never waits for the exit** (item 6). `P-453`'s outcome above, the
+          helper's header, `HELPER_EXIT_WAIT_MS` and `#awaitExit` listed it as a cause. The code
+          never waits for it: the unsent ask stays in flight and is never charged.
+        - **Tests.**
+          - `name-resolver-check.test.ts`: a table of 8 rows. Check now joins X, heard and held
+            back by `P-438`'s rule for a domain not known to answer, beside a free first lane,
+            after X became avoided: a crash in another family or poison, with the helper up,
+            down or resting, the resolver stopped or not, once on a worker's port. Refused, both
+            checks fail at once with the refusal, the worker's with a reply and no
+            acknowledgement; moved, both are answered in the helper. X is never on the probe's
+            own `getaddrinfo`.
+          - `name-resolver-gate.test.ts`, the check off and the helper resting: Check now moving
+            a held name's retry ahead of the one on the retry lane; and a plain check joining a
+            lookup `P-438`'s window held back, the window over by the clock and its timer not
+            run. Both checks fail at once. Then a slow first read through the resolver's own
+            start, off for now and on once it ends, and a hang only at the look after the
+            start's. Then a poison re-ask killed from outside at a first loss: asked again first
+            in the next child, not as a suspect, with what was queued beside it.
+          - `system-names.test.ts`: the look a late load was read from judges nothing and is
+            kept; the hang test now takes the look after it.
+          - `lookup-helper.test.ts`: a poison re-ask ended by SIGKILL at the first loss in ten
+            minutes is asked again, not as a suspect, still poison and kept off the probe's
+            lanes.
+        - **Mutants: 7, 6 killed, 1 equivalent.**
+          - `#ask` without the `refused` check: 9 tests fail, every refused row and both gate
+            rows.
+          - `#offProbe` not keeping its refusal: the same 9.
+          - A late load never `unjudged`: 4 (the resolver's two, the policy's two).
+          - `unjudged` never cleared, so no look judges a load: the two hang tests.
+          - The helper's suspect taken without isolation: 6, the new one among them.
+          - The resolver keeping a requeued re-ask a suspect: survived, equivalent. The change
+            that follows the loss says the helper is not isolating, and `#dropSuspects` clears
+            every queued suspect.
+          - In its place, a re-ask holding back what is queued in the next child: the re-ask
+            test fails.
+        - **Runs**, on the final build, beside another session's run, not in a quiet window.
+          Prettier and eslint are clean on the changed files.
+          - The eleven targeted unit files of the second round: 963 of 963.
+          - Then one file at a time: `name-lookup-outage-scenario` 14 of 14, and
+            `name-resolution-process` 4 of 4.
+        - **Quiet window, not run here:** the second round's three commands above, unchanged.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **The check is answered in `#ask`, with the words `#offProbe` kept, rather than the
+            settle deferred** (the review's option 1).
+            - A deferred settle leaves a lookup `queued` in no queue until it runs. Each of
+              `#lanesStuck`, `#silentRefusal`, `#queuedCount`, `#fallBack` and `#rejoin` would
+              then have to skip it, and one that did not would tell the check the wrong cause.
+            - The words are kept rather than judged again, so the check is told exactly what
+              the lookup's other checks were. Nothing between the refusal and the read can
+              change them.
+            - `#ask` is not entered again: once stopped, `#start`, `#run` and `#offProbe` would
+              settle the new lookup in the same way, and it would loop.
+            - Not counted again in `routed.faulted`: one lookup refused is one fault, as
+              `#fallBack` and `#scouted` count it, however many checks wait for it.
+          - **The slow first read: the code, not the docs.**
+            - The bound is a hang detector, not a budget (`POLICY_LOOK_MS`'s comment): one stall
+              can pass it. That is why every later read gets a look to end in.
+            - The read at start needs that grace most. A probe starting on a starved host is
+              the one likeliest to read slowly, and losing the check until restart there costs
+              it for the whole run.
+            - The cost: a first read that really hangs is named a hang one look later, at least
+              5 s after the 30 s. The check is off for the whole time either way.
+          - **The poison re-ask: the docs, not the code.**
+            - D27's re-ask holds nothing back (`#poisonAsk`). The moment with nothing in flight is
+              its start only. A new child's first pump is such a moment, so the re-ask asked
+              again there gets the same start as an hourly one.
+            - Sending it truly alone would hold back every lookup queued during the rejoin
+              window, which D27 rejected. Dropping it for its next due re-ask would put it off an
+              hour, since the helper moves `nextAskAt` as it asks.
+            - What the review names, every name in flight avoided at a crash then, is the same
+              as for any re-ask with lookups started beside it. Isolation begins at the second
+              loss.
+          - **The failed send: the docs.** The code is right: an ask the child never saw is
+            never charged.
+        - **Seen, not changed:** a plain check joining a lookup queued on the probe's lanes
+          for a name avoided since it queued, while the helper is down or resting, waits until
+          that lookup starts (and is refused), or until its lanes are stuck (`RESOLVER_STUCK`),
+          rather than failing at once as a new ask for the name would. D27 holds. A ticket
+          number is owed by the coordinator.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,
@@ -13876,8 +13984,11 @@ because each is a decision rather than a defect:
         re-ask. SIGKILL, SIGTERM, SIGINT and any exit code charge no one. A suspect is asked
         again alone. A poison mark keeps its retry, not doubled, and its name is asked again.
       - **A channel that closes before the exit is read waits for the exit** (`#awaitExit`). This
-        happens only when a chargeable lookup is alone in flight: the channel closed, a send
-        failed, or the child broke the protocol. The child is sent SIGKILL at once. A process
+        happens only when a chargeable lookup is alone in flight and the channel closed, or the
+        child broke the protocol, first. A loss taken on an ask that could not be written never
+        waits: that ask stays in flight and is never charged, so no lookup in flight is
+        chargeable, and the loss is taken at once (corrected in the gate track's fix round 1,
+        under `P-432`). The child is sent SIGKILL at once. A process
         already dead is not changed by it, and its exit still says how it died. While the helper
         waits, nothing is sent to the child, nothing it says is read, and it is not judged. An
         exit not read within `exitWaitMs` (1 s), counted after the polls, is taken as no crash.
