@@ -45,12 +45,19 @@ const PROGRAM: JsonSchema = {
   required: ['path'],
   properties: {
     path: { type: 'string', minLength: 1, maxLength: 1000 },
-    args: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: 2000 }, default: [] },
+    args: {
+      type: 'array',
+      title: 'Arguments',
+      maxItems: 16,
+      items: { type: 'string', title: 'Argument', maxLength: 2000 },
+      default: [],
+    },
     secretArgs: {
       type: 'array',
       writeOnly: true,
+      title: 'Secret arguments',
       maxItems: 16,
-      items: { type: 'string', maxLength: 2000 },
+      items: { type: 'string', title: 'Secret argument', maxLength: 2000 },
       default: [],
     },
   },
@@ -152,11 +159,11 @@ describe('a secret that is a list: the program’s secret arguments', () => {
         redacted={['secretArgs']}
       />,
     );
-    const list = screen.getByRole('group', { name: 'Secret args' });
+    const list = screen.getByRole('group', { name: 'Secret arguments' });
     expect(within(list).queryByText('Nothing here yet.')).toBeNull();
     expect(within(list).getByText('set, write-only')).toBeDefined();
     expect(within(list).queryByRole('button', { name: /^Add/u })).toBeNull();
-    expect(within(list).getByRole('button', { name: 'Clear Secret args' })).toBeDefined();
+    expect(within(list).getByRole('button', { name: 'Clear Secret arguments' })).toBeDefined();
   });
 
   it('replaced, opens empty with Add focused, takes entries in password boxes, and says they replace the stored ones', () => {
@@ -167,10 +174,10 @@ describe('a secret that is a list: the program’s secret arguments', () => {
         redacted={['secretArgs']}
       />,
     );
-    const replace = button('Replace Secret args');
+    const replace = button('Replace Secret arguments');
     replace.focus();
     fireEvent.click(replace);
-    const add = button('Add secret args');
+    const add = button('Add secret argument');
     expect(document.activeElement).toBe(add);
     expect(
       screen.getByText('What is listed here replaces every stored one on save.'),
@@ -179,17 +186,17 @@ describe('a secret that is a list: the program’s secret arguments', () => {
     expect('secretArgs' in sent()).toBe(false);
 
     fireEvent.click(add);
-    const entry = screen.getByLabelText('Secret args 1');
+    const entry = screen.getByLabelText('Secret argument 1');
     expect(entry.getAttribute('type')).toBe('password');
     fireEvent.change(entry, { target: { value: 's3cret' } });
     expect(sent()['secretArgs']).toEqual(['s3cret']);
 
-    const keep = button('Keep the current ones, Secret args');
+    const keep = button('Keep the current ones, Secret arguments');
     keep.focus();
     fireEvent.click(keep);
     expect('secretArgs' in sent()).toBe(false);
     expect(screen.getByText('set, write-only')).toBeDefined();
-    expect(document.activeElement).toBe(button('Replace Secret args'));
+    expect(document.activeElement).toBe(button('Replace Secret arguments'));
   });
 
   it('cleared, says so at the list and sends null; kept again, sends nothing', () => {
@@ -200,21 +207,21 @@ describe('a secret that is a list: the program’s secret arguments', () => {
         redacted={['secretArgs']}
       />,
     );
-    const clear = button('Clear Secret args');
+    const clear = button('Clear Secret arguments');
     clear.focus();
     fireEvent.click(clear);
     expect(sent()['secretArgs']).toBeNull();
     expect(screen.getByText('removed on save')).toBeDefined();
-    const keep = button('Keep the current ones, Secret args');
+    const keep = button('Keep the current ones, Secret arguments');
     expect(document.activeElement).toBe(keep);
 
     fireEvent.click(keep);
     expect('secretArgs' in sent()).toBe(false);
-    expect(document.activeElement).toBe(button('Clear Secret args'));
+    expect(document.activeElement).toBe(button('Clear Secret arguments'));
 
     // Replace after Clear starts from keeping, as a single secret's does.
-    fireEvent.click(button('Clear Secret args'));
-    fireEvent.click(button('Replace Secret args'));
+    fireEvent.click(button('Clear Secret arguments'));
+    fireEvent.click(button('Replace Secret arguments'));
     expect('secretArgs' in sent()).toBe(false);
   });
 
@@ -222,11 +229,11 @@ describe('a secret that is a list: the program’s secret arguments', () => {
     render(<Harness schema={PROGRAM} initial={{ path: 'page.sh', args: [], secretArgs: [] }} />);
     expect(screen.queryByText('set, write-only')).toBeNull();
     expect(screen.queryByRole('button', { name: /Keep the current/u })).toBeNull();
-    fireEvent.click(button('Add secret args'));
-    expect(screen.getByLabelText('Secret args 1').getAttribute('type')).toBe('password');
+    fireEvent.click(button('Add secret argument'));
+    expect(screen.getByLabelText('Secret argument 1').getAttribute('type')).toBe('password');
     // The visible arguments are still visible.
-    fireEvent.click(button('Add args'));
-    expect(screen.getByRole('textbox', { name: 'Args 1' }).getAttribute('type')).toBe('text');
+    fireEvent.click(button('Add argument'));
+    expect(screen.getByRole('textbox', { name: 'Argument 1' }).getAttribute('type')).toBe('text');
   });
 });
 

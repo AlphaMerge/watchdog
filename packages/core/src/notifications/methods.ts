@@ -295,10 +295,16 @@ export const PROGRAM_METHOD: NotificationMethod = {
        * the directory are all refused when the notification runs.
        */
       path: { type: 'string', minLength: 1, maxLength: 1000 },
+      /**
+       * Named for the form, the list and one entry of it (`U-91`): the repeating control names
+       * each entry and its buttons by the item's title, and without one by the property's name,
+       * so this read "Args 1" and "Remove Args 1".
+       */
       args: {
         type: 'array',
+        title: 'Arguments',
         maxItems: MAX_VISIBLE_ARGS,
-        items: { type: 'string', maxLength: 2000 },
+        items: { type: 'string', title: 'Argument', maxLength: 2000 },
         default: [],
       },
       /**
@@ -312,8 +318,9 @@ export const PROGRAM_METHOD: NotificationMethod = {
       secretArgs: {
         type: 'array',
         writeOnly: true,
+        title: 'Secret arguments',
         maxItems: MAX_SECRET_ARGS,
-        items: { type: 'string', maxLength: 2000 },
+        items: { type: 'string', title: 'Secret argument', maxLength: 2000 },
         default: [],
       },
       timeoutMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 30_000 },
