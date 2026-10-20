@@ -498,9 +498,11 @@ The numbers that decide the criterion:
     a crash signal (SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP or SIGSYS) is held against
     a name (`P-453`); when it is, the probe also logs `asking getaddrinfo for <name> made the
     lookup helper fail` once, and that name, with the crash line, is a finding to bring back. A
-    `SIGKILL` with `reason` `exit` came from outside the probe (the kernel's OOM killer or a
-    cgroup kill, which `journalctl -k` names, or a person), and `reason` `memory` is the
-    helper's own 256 MiB bound, which the summaries' `rss` shows climbing to: neither is held
+    `SIGKILL` names who sent it in `killedBy` on its line (`P-469`): `probe` is the probe's own
+    kill, for the `why` on the line; `itself` the child ending itself after the line's `fatal`;
+    `outside` the kernel's OOM killer or a cgroup kill, which `journalctl -k` names, or a person,
+    and only for `outside` is `journalctl -k` the place to look. And `reason` `memory` is the
+    helper's own 256 MiB bound, which the summaries' `rss` shows climbing to: none is held
     against a name, and each is still a finding with its reason. **The summaries' `changes`
     pass when they list these and nothing else.** The first summary after a start lists the
     helper's own start, `idle` → `starting` → `up`, with no loss. Each loss listed is a move to

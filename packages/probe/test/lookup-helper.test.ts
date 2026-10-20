@@ -29,6 +29,7 @@ import {
   type HelperSnapshot,
   type HelperTimer,
   type HelperTimers,
+  type KilledBy,
   type LateOutcome,
   type LookupHelperOptions,
   type LossReason,
@@ -776,7 +777,11 @@ describe('the lookup helper: liveness', () => {
       assert.equal(made.changes[backoff]?.loss, 'hung');
       assert.equal(made.changes[backoff].delayMs, 0);
       // The child never writes stderr on its normal path.
-      assert.equal((await lossSaid(made)).stderr, '');
+      const loss = await lossSaid(made);
+      assert.equal(loss.stderr, '');
+      // A live child the probe killed (`P-469`).
+      assert.equal(loss.signal, 'SIGKILL');
+      assert.equal(loss.killedBy, 'probe');
     } finally {
       await stop(made);
     }
@@ -1285,6 +1290,11 @@ describe('the lookup helper: losses', () => {
             (line) => line['msg'] === 'the lookup helper’s process reported an error',
           ),
         );
+        // The probe's kill reached a child already dead: the SIGKILL its exit reports came from
+        // outside (`P-469`), as an OOM kill's would.
+        const loss = await lossSaid(made);
+        assert.equal(loss.signal, 'SIGKILL');
+        assert.equal(loss.killedBy, 'outside');
         await polls();
         assert.deepEqual(uncaught, []);
       } finally {
@@ -3792,6 +3802,331 @@ describe('the lookup helper: names in flight when the child goes quiet are kept 
       } finally {
         await stop(made);
       }
+    }
+  });
+});
+
+const LOST_LINE = 'the lookup helper was lost';
+
+/** The line of the last loss, once said. */
+async function lossLine(made: Made): Promise<Record<string, unknown>> {
+  await lossOf(made);
+  await lossSaid(made);
+  const line = made.lines.filter((one) => one['msg'] === LOST_LINE).at(-1);
+  assert.ok(line !== undefined, 'a loss said');
+  return line;
+}
+
+/** How a child comes to its end, and what its loss says of who sent a SIGKILL (`P-469`). */
+interface KillRow {
+  readonly what: string;
+  /** Lost before it is ready: it is not brought up first. */
+  readonly starting?: boolean;
+  readonly end: (made: FakeMade, child: FakeChild) => Promise<void> | void;
+  readonly reason: LossReason;
+  readonly why: RegExp;
+  readonly signal: NodeJS.Signals | null;
+  readonly killedBy: KilledBy | undefined;
+}
+
+const FATAL = 'an uncaught exception: boom';
+
+const KILLS: readonly KillRow[] = [
+  {
+    what: 'the probe, at a message it cannot read',
+    end: (_made, child) => {
+      child.say({ t: 'nonsense' });
+    },
+    reason: 'exit',
+    why: /^it sent a message the probe cannot read$/u,
+    signal: 'SIGKILL',
+    killedBy: 'probe',
+  },
+  {
+    what: 'the probe, at more addresses than it may send',
+    end: (made, child) => {
+      void settled(made.helper.ask({ host: 'many.example.test', family: 4, max: 1 }));
+      child.say({
+        t: 'answer',
+        id: child.asks.at(-1)?.id ?? -1,
+        ok: true,
+        total: 3,
+        addresses: [1, 2, 3].map((n) => ({ address: `192.0.2.${String(n)}`, family: 4 })),
+        ranMs: 1,
+      });
+    },
+    reason: 'exit',
+    why: /^it sent 3 addresses for many\.example\.test$/u,
+    signal: 'SIGKILL',
+    killedBy: 'probe',
+  },
+  {
+    what: 'the probe, at a second ready',
+    end: (_made, child) => {
+      child.ready(SELF);
+    },
+    reason: 'exit',
+    why: /^it said it was ready twice$/u,
+    signal: 'SIGKILL',
+    killedBy: 'probe',
+  },
+  {
+    what: 'the probe, past its memory',
+    end: (_made, child) => {
+      child.beat({ rss: HELPER_RSS_MAX + 1 });
+    },
+    reason: 'memory',
+    why: /past the \d+ it may use$/u,
+    signal: 'SIGKILL',
+    killedBy: 'probe',
+  },
+  {
+    what: 'the probe, quiet for 20 ticks',
+    end: async (made) => {
+      await tickUntil(made, 20, 'the hung loss', () => made.helper.stats().losses > 0);
+    },
+    reason: 'hung',
+    why: /^it was quiet for 20 ticks/u,
+    signal: 'SIGKILL',
+    killedBy: 'probe',
+  },
+  {
+    what: 'the probe, at no ready by the start bound',
+    starting: true,
+    end: async (made) => {
+      made.timers.fire(60_001);
+      await polls();
+    },
+    reason: 'start',
+    why: /^it had not said it was ready after 60001 ms$/u,
+    signal: 'SIGKILL',
+    killedBy: 'probe',
+  },
+  {
+    what: 'outside, its exit read first',
+    end: (_made, child) => {
+      child.die('SIGKILL');
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^it was ended by SIGKILL$/u,
+    signal: 'SIGKILL',
+    killedBy: 'outside',
+  },
+  {
+    what: 'outside, its channel read closed first: the probe’s own kill came after it was ending',
+    end: (_made, child) => {
+      child.diesUnread('SIGKILL');
+      child.emit('disconnect');
+      assert.deepEqual(child.killed, ['SIGKILL'], 'the probe sent its own');
+      child.reap();
+      child.emit('close');
+    },
+    reason: 'exit',
+    why: /^its channel to the probe closed$/u,
+    signal: 'SIGKILL',
+    killedBy: 'outside',
+  },
+  {
+    what: 'outside, an ask then not written: the probe’s own kill came after it was ending',
+    end: async (made, child) => {
+      child.diesUnread('SIGKILL');
+      child.sendError = new Error('write EPIPE');
+      void settled(made.helper.ask({ host: 'dev-1.example.test', family: 4, max: 64 }));
+      await polls();
+      assert.deepEqual(child.killed, ['SIGKILL'], 'the probe sent its own');
+      child.reap();
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^an ask could not be written to it: write EPIPE$/u,
+    signal: 'SIGKILL',
+    killedBy: 'outside',
+  },
+  {
+    what: 'itself, its fatal read before its exit',
+    end: (_made, child) => {
+      child.say({ t: 'fatal', message: FATAL });
+      child.die('SIGKILL');
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^it ended itself: an uncaught exception: boom$/u,
+    signal: 'SIGKILL',
+    killedBy: 'itself',
+  },
+  {
+    what: 'itself, its exit read before its fatal',
+    end: (_made, child) => {
+      child.die('SIGKILL');
+      child.say({ t: 'fatal', message: FATAL });
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^it was ended by SIGKILL$/u,
+    signal: 'SIGKILL',
+    killedBy: 'itself',
+  },
+  {
+    what: 'no SIGKILL: SIGTERM from outside',
+    end: (_made, child) => {
+      child.die('SIGTERM');
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^it was ended by SIGTERM$/u,
+    signal: 'SIGTERM',
+    killedBy: undefined,
+  },
+  {
+    what: 'no SIGKILL: a crash',
+    end: (_made, child) => {
+      child.die('SIGSEGV');
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^it was ended by SIGSEGV$/u,
+    signal: 'SIGSEGV',
+    killedBy: undefined,
+  },
+  {
+    what: 'no SIGKILL: an exit code',
+    end: (_made, child) => {
+      child.die(null, 1);
+      child.closeChannel();
+    },
+    reason: 'exit',
+    why: /^it exited with code 1$/u,
+    signal: null,
+    killedBy: undefined,
+  },
+];
+
+describe('the lookup helper: who sent a SIGKILL (P-469, scripted process, the test’s clock)', () => {
+  it('the loss and its line say who sent the SIGKILL the child ended by: the probe while the child still talked to it, the child itself after its fatal, or someone outside', async () => {
+    for (const row of KILLS) {
+      const made = fakeMade();
+      void made.helper.start();
+      try {
+        const child = row.starting === true ? newest(made) : await fakeUp(made);
+        await row.end(made, child);
+        await polls();
+        const line = await lossLine(made);
+        const loss = made.helper.stats().lastLoss;
+        assert.ok(loss !== undefined, row.what);
+        assert.equal(loss.reason, row.reason, row.what);
+        assert.match(loss.why, row.why, row.what);
+        assert.equal(loss.signal, row.signal, row.what);
+        assert.equal(loss.killedBy, row.killedBy, row.what);
+        assert.equal(line['signal'], row.signal, row.what);
+        assert.equal(line['killedBy'], row.killedBy, `${row.what}: the line`);
+        assert.equal('killedBy' in line, row.killedBy !== undefined, `${row.what}: said if known`);
+        assert.equal(loss.chargedTo, undefined, `${row.what}: nothing alone in flight to charge`);
+      } finally {
+        await stop(made);
+      }
+    }
+  });
+
+  it('a SIGKILL is never charged, whoever sent it: a suspect alone, its child killed by the probe, by itself or from outside, is asked again alone and kept off the probe’s lanes', async () => {
+    const rows: readonly {
+      readonly what: string;
+      readonly killedBy: KilledBy;
+      readonly end: (child: FakeChild) => void;
+    }[] = [
+      {
+        what: 'the probe, at a protocol break, after waiting for the exit',
+        killedBy: 'probe',
+        end: (child) => {
+          child.say({ t: 'nonsense' });
+        },
+      },
+      {
+        what: 'itself, after its fatal',
+        killedBy: 'itself',
+        end: (child) => {
+          child.say({ t: 'fatal', message: FATAL });
+          child.die('SIGKILL');
+          child.closeChannel();
+        },
+      },
+      {
+        what: 'outside, its channel read closed first, after waiting for the exit',
+        killedBy: 'outside',
+        end: (child) => {
+          child.diesUnread('SIGKILL');
+          child.emit('disconnect');
+          child.reap();
+          child.emit('close');
+        },
+      },
+    ];
+    for (const row of rows) {
+      const made = fakeMade();
+      void made.helper.start();
+      try {
+        const child = await isolating(made);
+        const host = 'bad.example.test';
+        const lost = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+        row.end(child);
+        await polls();
+        const error = lostError((await within(WAIT, row.what, lost)).error);
+        await lossLine(made);
+        const loss = made.helper.stats().lastLoss;
+        assert.equal(loss?.signal, 'SIGKILL', row.what);
+        assert.equal(loss.killedBy, row.killedBy, row.what);
+        assert.equal(error.charged, false, `${row.what}: not charged`);
+        assert.equal(loss.chargedTo, undefined, row.what);
+        assert.equal(made.changes.at(-1)?.charged, undefined, row.what);
+        assert.equal(made.helper.poison(host, 4), undefined, `${row.what}: not poison`);
+        assert.equal(error.requeue && error.suspect, true, `${row.what}: asked again alone`);
+        assert.equal(made.helper.avoidsSystem(host, 4), true, `${row.what}: kept off`);
+      } finally {
+        await stop(made);
+      }
+    }
+  });
+
+  it('a kill the probe sent to a child that does not go at once: the line said before its exit names no sender, and the loss names the probe once the exit is read', async () => {
+    const made = fakeMade();
+    void made.helper.start();
+    try {
+      const child = await fakeUp(made);
+      child.holdOnKill = true;
+      child.beat({ rss: HELPER_RSS_MAX + 1 });
+      await polls();
+      assert.deepEqual(child.killed, ['SIGKILL']);
+      made.timers.fire(7_100);
+      const line = await lossLine(made);
+      assert.equal(line['signal'], null, 'no exit read when it was said');
+      assert.equal('killedBy' in line, false);
+      assert.equal(made.helper.stats().lastLoss?.killedBy, undefined);
+      child.die('SIGKILL');
+      const loss = made.helper.stats().lastLoss;
+      assert.equal(loss?.signal, 'SIGKILL');
+      assert.equal(loss.killedBy, 'probe');
+    } finally {
+      await stop(made);
+    }
+  });
+});
+
+describe('the lookup helper: who sent a SIGKILL, with a real child (P-469)', () => {
+  it('a child killed from outside by SIGKILL, whichever of its exit and its channel’s end the probe reads first, is said to be killed from outside', async () => {
+    const timers = new Timers({ clock: 'real', timeouts: 'fake', ticks: 'fake' });
+    const made = make({ timers });
+    try {
+      assert.equal(await within(WAIT, 'start', made.helper.start()), true);
+      signal(made, 'SIGKILL');
+      await lossOf(made);
+      const loss = await lossSaid(made);
+      assert.equal(loss.reason, 'exit');
+      assert.equal(loss.signal, 'SIGKILL');
+      assert.equal(loss.killedBy, 'outside');
+      const line = made.lines.filter((one) => one['msg'] === LOST_LINE).at(-1);
+      assert.equal(line?.['killedBy'], 'outside');
+    } finally {
+      await stop(made);
     }
   });
 });

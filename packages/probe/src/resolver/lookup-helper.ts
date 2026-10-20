@@ -95,7 +95,9 @@ import { afterPolls } from './verdict-timer.js';
  * period waits for the next. An answer clears the mark; a restart of the probe does too. `memory`,
  * `hung` and `start` losses are never charged to a name. A change and a loss say whether a crash
  * made a `new` mark or crashed `again` at a re-ask: the trouble latch counts the first and not the
- * second.
+ * second. A loss's line says who sent the SIGKILL a child ended by (`killedBy`, `P-469`): this
+ * helper, the child itself after its `fatal`, or someone outside. A SIGKILL is never charged,
+ * whoever sent it.
  *
  * **Names kept off the probe's lanes** (`avoidsSystem`). The helper is there so that a name that
  * crashes `getaddrinfo` cannot take the probe down. So in any state the resolver never asks the
@@ -175,9 +177,9 @@ export const HELPER_EXIT_WAIT_MS = 1_000;
 /**
  * The signals a crash raises (`P-453`): only a child ended by one of these is charged to the
  * lookup alone in it. SIGKILL, SIGTERM and SIGINT come from outside (an operator, the kernel's OOM
- * killer, a cgroup kill, or this helper), and an exit code is the child's own word: neither says
- * anything of a name. SIGABRT is glibc's own end for a corrupted heap, and V8's for its heap
- * limit.
+ * killer, a cgroup kill), from this helper, or for SIGKILL from the child itself after its `fatal`,
+ * and an exit code is the child's own word: none says anything of a name. SIGABRT is glibc's own
+ * end for a corrupted heap, and V8's for its heap limit.
  */
 export const CRASH_SIGNALS: ReadonlySet<NodeJS.Signals> = new Set<NodeJS.Signals>([
   'SIGSEGV',
@@ -414,6 +416,18 @@ export interface PoisonMark {
 /** A crash charged to a name: a new poison mark, or a poison name crashing again at its re-ask. */
 export type ChargedKind = 'new' | 'again';
 
+/**
+ * Who sent the SIGKILL a child ended by (`P-469`).
+ * - `probe`: this helper, while the child still talked to it, for the loss's `why`: a protocol
+ *   break, a quiet child (`hung`), its memory, a start that did not come.
+ * - `itself`: the child, after saying why (`fatal`): it ends itself with SIGKILL.
+ * - `outside`: neither. The kernel's OOM killer or a cgroup kill, which `journalctl -k` names, or a
+ *   person. A kill this helper sends once the child's channel has closed or a send to it has
+ *   failed is not counted: the child never closes its end while it lives, so it was already
+ *   ending, and the SIGKILL its exit reports is not that one.
+ */
+export type KilledBy = 'probe' | 'itself' | 'outside';
+
 /** A child lost, as its log line says it. Completed when the child's exit status is known. */
 export interface HelperLoss {
   readonly at: number;
@@ -422,6 +436,11 @@ export interface HelperLoss {
   readonly why: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  /**
+   * Who sent the SIGKILL the child ended by, once its exit says it did (`P-469`); undefined for
+   * any other end, or while the exit is not read. Never charged, whoever sent it (`P-453`).
+   */
+  killedBy: KilledBy | undefined;
   stderr: string;
   /** What the child said as it ended itself (`fatal`), once read. */
   fatal: string | undefined;
@@ -698,6 +717,13 @@ interface ChildRecord {
   /** The signal it ended with, once its exit is read: undefined until then (`P-453`). */
   endSignal: NodeJS.Signals | null | undefined;
   /**
+   * This helper sent it SIGKILL while it still talked to the probe (`P-469`): its channel open, no
+   * send to it failed, no `fatal` read. A SIGKILL its exit reports is then the probe's.
+   */
+  killedByProbe: boolean;
+  /** A send to it failed: its end of the channel is closed, so it is ending (`P-469`). */
+  sendFailed: boolean;
+  /**
    * Lost, and its loss waiting for the exit to say whether it crashed (`P-453`). Nothing is sent
    * to it, and nothing it says is read, meanwhile.
    */
@@ -705,6 +731,17 @@ interface ChildRecord {
   mismatches: number;
   readonly exit: Promise<void>;
   readonly markExited: () => void;
+}
+
+/**
+ * Who sent the SIGKILL a child's exit reports (`P-469`), undefined for any other end. A child that
+ * said why it ends itself did, since it ends itself so; otherwise this helper, when it sent it one
+ * while the child still talked to it; otherwise someone outside.
+ */
+function killerOf(record: ChildRecord): KilledBy | undefined {
+  if (record.endSignal !== 'SIGKILL') return undefined;
+  if (record.fatal !== undefined) return 'itself';
+  return record.killedByProbe ? 'probe' : 'outside';
 }
 
 /** What follows a loss of the current child, decided before its lookups are told (§1.11). */
@@ -1093,6 +1130,7 @@ export class LookupHelper implements HelperPort {
       const failed = (error: unknown): void => {
         const words = error instanceof Error ? error.message : String(error);
         flight.unsent = true;
+        record.sendFailed = true;
         this.#lose(record, 'exit', `an ask could not be written to it: ${words}`);
       };
       try {
@@ -1364,6 +1402,8 @@ export class LookupHelper implements HelperPort {
       startTimer: undefined,
       chargedKey: undefined,
       endSignal: undefined,
+      killedByProbe: false,
+      sendFailed: false,
       ending: undefined,
       mismatches: 0,
       exit,
@@ -1451,6 +1491,7 @@ export class LookupHelper implements HelperPort {
     if (record.loss !== undefined) {
       record.loss.exitCode = code;
       record.loss.signal = signal;
+      record.loss.killedBy = killerOf(record);
     }
     this.#fillPoison(record);
   }
@@ -1898,6 +1939,7 @@ export class LookupHelper implements HelperPort {
       why: said,
       exitCode: null,
       signal: null,
+      killedBy: undefined,
       stderr: '',
       fatal: undefined,
       held,
@@ -1918,11 +1960,17 @@ export class LookupHelper implements HelperPort {
     }
   }
 
-  /** SIGKILL, whatever it is doing: a hung `getaddrinfo` ignores anything gentler. */
+  /**
+   * SIGKILL, whatever it is doing: a hung `getaddrinfo` ignores anything gentler. Counted as the
+   * probe's own (`P-469`) only when sent while the child still talked to it: once its channel has
+   * closed, a send to it has failed or it has said it ends itself, it was already ending, and the
+   * SIGKILL its exit reports came from elsewhere.
+   */
   #killProcess(record: ChildRecord): void {
     if (record.process === undefined || record.exited) return;
+    const talking = record.connected && !record.sendFailed && record.fatal === undefined;
     try {
-      record.process.kill('SIGKILL');
+      if (record.process.kill('SIGKILL') && talking) record.killedByProbe = true;
     } catch (error: unknown) {
       this.#logger.warn({ err: error, pid: record.pid }, 'the lookup helper could not be killed');
     }
@@ -2013,6 +2061,8 @@ export class LookupHelper implements HelperPort {
     record.lossSaid = true;
     loss.stderr = record.stderr.slice(-STDERR_SAID);
     loss.fatal = record.fatal;
+    // A `fatal` read since the exit says the child ended itself.
+    loss.killedBy = killerOf(record);
     this.#fillPoison(record);
     this.#logger.warn(
       {
@@ -2022,6 +2072,7 @@ export class LookupHelper implements HelperPort {
         ...(loss.fatal === undefined ? {} : { fatal: loss.fatal }),
         exitCode: loss.exitCode,
         signal: loss.signal,
+        ...(loss.killedBy === undefined ? {} : { killedBy: loss.killedBy }),
         stderr: loss.stderr,
         held: loss.held,
         requeued: loss.requeued,

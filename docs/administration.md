@@ -1352,7 +1352,11 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   whole process (an NSS module holding a lock its main thread needs, or a lookup that grows it
   until it swaps) can quiet it, and the same lookup could quiet the probe. At most 8 names are
   let go at each quiet, as many as the helper runs at once. While the helper is not answering
-  their checks fail at once, and once it answers they are asked there. On Windows a crash ends
+  their checks fail at once, and once it answers they are asked there. The probe's
+  `the lookup helper was lost` line says who sent a SIGKILL the child ended by (`killedBy`,
+  `P-469`): `probe` for its own, for the `why` it gives; `itself` for the child ending itself
+  after the `fatal` it gives; `outside` for anyone else, the kernel's OOM killer and a cgroup
+  kill among them. On Windows a crash ends
   with an exit code, so no end is held against a name there yet (`P-464`); the names are still
   kept off the probe's lanes, and losses rest the helper as above.
 - **Stopping.** The helper serves the check pool until the pool has drained, then stops with the

@@ -15177,6 +15177,104 @@ because each is a decision rather than a defect:
           be charged to that name and is then not counted toward a rest (D27), and a SIGKILL is
           never charged (`P-453`).
         - **Quiet-machine runs: none.** Nothing here is measured.
+- [x] **P-469 — the lookup helper's loss line does not say who sent a SIGKILL** · XS · P-432,
+      P-453 · Filed 2026-10-20 by the coordinator's decision under `P-432`, that a SIGKILL the
+      probe sent is told apart from one from outside. The helper sends SIGKILL itself whenever it
+      loses a child that lives: a protocol break ('it sent a message the probe cannot read', 'it
+      sent N addresses for …', 'it said it was ready twice'), a quiet child (`hung`), its memory,
+      a start that did not come. It also sends one after an ask that could not be written, after
+      the channel closed first, and in `#awaitExit`. The child sends one to itself after its
+      `fatal`. So `signal` `SIGKILL` on `the lookup helper was lost` does not say whether the
+      kernel's OOM killer or a cgroup kill ended the child, and the runbook sent the operator to
+      `journalctl -k` for every `SIGKILL` with `reason` `exit`. **Done when** the loss and its
+      line say who sent it, the runbook sends the operator to `journalctl -k` only for one from
+      outside, and `P-453`'s rule holds: a SIGKILL is never charged, whoever sent it.
+
+      **P-469 outcome. The loss says who sent the SIGKILL its child ended by.** Built 2026-10-20 on
+      `feat/p432-helper-r3`, in `packages/probe/src/resolver/lookup-helper.ts`. No protocol
+      change and no migration. The fields track's Probe Health and hourly summary are not
+      touched.
+      - **`killedBy`** is on `HelperLoss` and on the loss's line, only when the exit says SIGKILL:
+        - `probe`: the helper sent it while the child still talked to it, for the line's `why`;
+        - `itself`: the child said why it ends itself (`fatal`), as it then does with SIGKILL;
+        - `outside`: neither, the kernel's OOM killer, a cgroup kill or a person.
+      - **How it is told.** `#killProcess` counts a kill as the probe's only when `kill()` says it
+        was sent and the child still talked to the probe: its channel open, no send to it failed
+        (`sendFailed`), no `fatal` read. The loss fills `killedBy` when the exit is read, and
+        again when its line is said, since a `fatal` can be read after the exit.
+      - **`P-453`'s rule is untouched.** Only a crash signal charges a name. `killedBy` changes no
+        charge.
+      - **The runbook** (the helper-loss reading under the gate's channels) sends the operator to
+        `journalctl -k` only for `outside`, and reads `probe` from the line's `why` and `itself`
+        from its `fatal`. `administration.md` names the field in the helper's failures, and the
+        release notes say it.
+      - **Tests.** `lookup-helper.test.ts`, 'who sent a SIGKILL (P-469)':
+        - a table of 14 ends. The probe at a message it cannot read, at more addresses than it
+          may send, at a second ready, past its memory, quiet for 20 ticks, and at no ready by the
+          start bound. Outside with its exit read first, with its channel read closed first, and
+          with an ask then not written (the probe's kill in both of the last coming after the
+          child was ending). The child itself with its `fatal` read before and after its exit.
+          And three ends that are not SIGKILL (SIGTERM, SIGSEGV, an exit code), which name no
+          sender. Each checks the loss and the line;
+        - a SIGKILL never charged: a suspect alone, its child killed by the probe (after waiting
+          for the exit), by itself, or from outside (after waiting), each asked again alone and
+          kept off the probe's lanes;
+        - a kill the probe sent to a child that does not go at once: the line said before the exit
+          names no sender, and the loss names the probe once the exit is read;
+        - with real children: one killed from outside by SIGKILL is `outside` (new); U8's hung
+          child is `probe`; U18's child killed from outside and then sent an ask that could not
+          be written is `outside`. U18 is the case a rule of "the probe sent a SIGKILL first"
+          would get wrong.
+      - **Mutants: 9, all killed.**
+        - Any kill the probe sent counted as its own: U18, the real outside kill, the table and
+          the never-charged table fail. The real child fails because in that run the probe read
+          its channel's end before its exit and killed a dead process, as at an OOM kill.
+        - The probe's kill never counted: U8, the table, the never-charged table and the late
+          exit fail.
+        - No `itself`: the table and the never-charged table.
+        - Not filled again as the line is said: the table, the row whose `fatal` comes after the
+          exit.
+        - Not filled at the exit: the late exit.
+        - A sender named for any end: the table's three ends that are not SIGKILL.
+        - A failed send not marked: U18 and the table.
+        - The line naming no sender: the table and the real outside kill.
+        - A closed channel not read as ending: the real outside kill (the same order again), the
+          table and the never-charged table.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:**
+        - **A kill the probe sends once the child is ending is not counted as the probe's.**
+          - Neither side closes the channel while the child lives. The production child has no
+            call that closes it, and it SIGKILLs itself on its own `disconnect`. The probe never
+            disconnects it. So a channel the probe reads as closed, or a send to it that fails,
+            means the child is already exiting. Its exit status is already set, and the probe's
+            SIGKILL cannot change it.
+          - An OOM kill is exactly this case. The kernel ends the child, Node hands the probe
+            the channel's end and the exit in either order, and when the end comes first the
+            probe kills a process already dead.
+          - The costs are not even. Counting such a kill as the probe's would hide an OOM kill
+            from the operator, while counting it as from outside costs at most a look at
+            `journalctl -k` that finds nothing.
+          - The coordinator's brief listed these two among the kills the probe sends. It does send
+            them, but they are not the SIGKILL the exit reports.
+        - **A third value, `itself`.** The child ends itself with SIGKILL after its `fatal`. Read
+          as `outside`, that would send the operator to the kernel's log for a fault the line
+          already names.
+        - **The cause is the line's `why`, not a second field.** Every kill the probe counts is sent
+          by the loss it takes, so the cause is that loss's `why` on every path, `#awaitExit`'s
+          included.
+        - **A loss said before its exit is read names no sender.** That is a child that did not go
+          at the kill, such as one in D state. The loss itself is filled when the exit comes, as
+          its `signal` is.
+- [ ] **P-470 — `dns-check`'s "is mixed once both kinds of verdict are within a minute" failed
+      once under load** · XS · P-432 · Found 2026-10-20 by `P-469`'s targeted run, beside another
+      session's suite at a host load near 13. The test's last assertion read `silentKeys` 0 where
+      it expects 1, a minute after the key was mixed. The same build passed the file three times
+      in a row alone, 32 of 32. `P-463` and `P-469` touch neither `DnsCheck` nor its test. Not
+      diagnosed. A likely cause, unverified: a Heard verdict of the same key recorded after the
+      test moves its clock, from a reply still in flight when the route the test awaited
+      returned, which would leave the key heard rather than silent. **Done when** the cause is
+      found from a run that reproduces it under load, the test waits for every reply of the
+      key's walks before it moves the clock (or reads the verdicts it means), with a mutant, and
+      the file passes twenty runs in a row at a load near 20.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
