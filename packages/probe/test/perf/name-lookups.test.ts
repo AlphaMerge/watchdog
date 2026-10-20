@@ -63,8 +63,10 @@ import {
   judgeWorld,
   LOSS_WINDOW_MS,
   overBucket,
+  stretches,
   type GateMode,
   type Group,
+  type LossAt,
   type PeakWindow,
   type WorldFacts,
 } from '../support/name-gate-judge.js';
@@ -1145,6 +1147,11 @@ interface WorldRecord {
     repliesDuring: number;
   };
   kills: { at: number; heldBack: boolean; probeRss: number }[];
+  /**
+   * P1: when the arm killed the helper's child (this thread's `performance.now()`), each a loss the
+   * judge places the transient by. P2's are its look's stamps in `stopped`.
+   */
+  killedAt: number[];
   helperRssAt60s?: number | undefined;
 }
 
@@ -1216,11 +1223,13 @@ const WORLD_ARMS: readonly WorldArm[] = [
     perClient: true,
     transient: true,
     runMs: () => 130_000,
-    events: async ({ at, names, peaks }) => {
+    events: async ({ at, names, record, peaks }) => {
       for (const ms of [5_000, 95_000]) {
         await at(ms);
         killChild(names, 'SIGKILL');
-        // The loss: its lookups are asked again by the next child, from another port.
+        // The loss: its lookups are asked again by the next child, from another port. Stamped
+        // before its cut, which the transient may then start at and no earlier.
+        record.killedAt.push(performance.now());
         await peaks?.loss();
       }
     },
@@ -1686,6 +1695,14 @@ class PeakWindows {
     return this.#clock.now() - this.#origin;
   }
 
+  /**
+   * A time on its clock as ms from the windows' start: P1's kills and P2's looks stamp theirs with
+   * `performance.now()`, the real clock's own.
+   */
+  since(at: number): number {
+    return at - this.#origin;
+  }
+
   /** A loss's window, to `windowMs` from `at`: its timer cuts it there. */
   #lossUntil(at: number): void {
     const until = at + this.#windowMs;
@@ -1765,14 +1782,40 @@ class PeakWindows {
   }
 }
 
+/** A helper loss as the arm stamped it, on this thread's clock. */
+interface LossStamp {
+  readonly at: number;
+  readonly seen: boolean;
+}
+
+/**
+ * The helper losses the judge places the transient by: P1's kills, made by the arm, and P2's
+ * detach and `hung` loss, as its look stamped them. The arm's stamps, not `PeakWindows`', so that
+ * a fault in what cuts the windows is judged against something they did not say.
+ */
+function lossTimes(record: Pick<WorldRecord, 'killedAt' | 'stopped'>): LossStamp[] {
+  const seen = [record.stopped?.downAt, record.stopped?.hungAt].filter(
+    (at): at is number => at !== undefined,
+  );
+  return [
+    ...record.killedAt.map((at) => ({ at, seen: false })),
+    ...seen.map((at) => ({ at, seen: true })),
+  ];
+}
+
 /**
  * The forwarder's peak for the judge: the gauge's for the run, or, with windows once `finish` has
- * cut the last, each window's, where they must reach, and why a read failed if one did.
+ * cut the last, each window's, where they must reach, why a read failed if one did, and the
+ * losses on the windows' clock.
  */
 function peakFacts(
   gaugePeak: number,
   peaks: PeakWindows | undefined,
-): Pick<WorldFacts, 'peakHeld' | 'peakWindows' | 'peakWindowsEndMs' | 'peakReadFailed'> {
+  losses: readonly LossStamp[],
+): Pick<
+  WorldFacts,
+  'peakHeld' | 'peakWindows' | 'peakWindowsEndMs' | 'peakReadFailed' | 'lossesAt'
+> {
   if (peaks === undefined) return { peakHeld: gaugePeak };
   return {
     // With windows, the gauge's own peak is the last window's: the run's is theirs.
@@ -1780,6 +1823,7 @@ function peakFacts(
     peakWindows: peaks.windows,
     ...(peaks.endMs === undefined ? {} : { peakWindowsEndMs: peaks.endMs }),
     ...(peaks.failed === undefined ? {} : { peakReadFailed: peaks.failed }),
+    lossesAt: losses.map(({ at, seen }): LossAt => ({ atMs: peaks.since(at), seen })),
   };
 }
 
@@ -1819,21 +1863,6 @@ function stoppedLook(
     }
     return stopped.upAt !== undefined;
   };
-}
-
-/**
- * The windows as printed: each run of windows with the transient or without, as one stretch with
- * its most (P2's poll reads every 50 ms until its `hung` loss).
- */
-function stretches(windows: readonly PeakWindow[]): PeakWindow[] {
-  const merged: PeakWindow[] = [];
-  for (const w of windows) {
-    const last = merged.at(-1);
-    if (last !== undefined && last.toMs === w.fromMs && last.transient === w.transient) {
-      merged[merged.length - 1] = { ...last, toMs: w.toMs, peak: Math.max(last.peak, w.peak) };
-    } else merged.push(w);
-  }
-  return merged;
 }
 
 interface Routed {
@@ -1955,7 +1984,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
   const jitter: number[] = [];
   const run: number[] = [];
   const lateBySensor = new Map<number, number>();
-  const record: WorldRecord = { kills: [] };
+  const record: WorldRecord = { kills: [], killedAt: [] };
   const walks = new WalkCounter();
   const log = new GateLog();
   const tap = new HelperTap(groupOf);
@@ -2301,7 +2330,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       mode,
       checkOn: !CHECK_OFF,
       q: Q,
-      ...peakFacts(gauge?.peakHeldByClass['other'] ?? 0, peaks),
+      ...peakFacts(gauge?.peakHeldByClass['other'] ?? 0, peaks, lossTimes(record)),
       transient: arm.transient === true ? 8 * Q : 0,
       dropped: gauge?.dropped ?? 0,
       walkSends: walks.sends,
@@ -2389,7 +2418,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
             )
             .join(
               ', ',
-            )}, to the arm's end at ${peaks?.endMs === undefined ? 'unread' : `${(peaks.endMs / 1_000).toFixed(1)} s`}${peaks?.failed === undefined ? '' : `; a read failed: ${peaks.failed}`}`;
+            )}, to the arm's end at ${peaks?.endMs === undefined ? 'unread' : `${(peaks.endMs / 1_000).toFixed(1)} s`}; the losses at ${(facts.lossesAt ?? []).map(({ atMs, seen }) => `${(atMs / 1_000).toFixed(1)} s${seen ? ' (seen)' : ''}`).join(', ') || 'none'}${peaks?.failed === undefined ? '' : `; a read failed: ${peaks.failed}`}`;
     const tally = (label: string, t: WorldTally): string =>
       `${label} ${String(t.answered)} of ${String(t.results)} answered, ${String(t.givenUp)} given up, ${String(t.other)} failed otherwise`;
     lines = [
@@ -2853,6 +2882,22 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     );
     assert.equal(peaks.failed, undefined);
     assert.equal(peaks.endMs, 50_000);
+    // The judge places them by the losses: the one at 25 s carries the 20 s loss's transient on,
+    // 15 s in one run, and without it that run is past a loss's window.
+    const kills = [2_000, 20_000, 25_000].map((atMs): LossAt => ({ atMs, seen: false }));
+    const facts: WorldFacts = {
+      ...clean('P1', 'gate'),
+      peakHeld: 7,
+      peakWindows: windows,
+      peakWindowsEndMs: 50_000,
+      lossesAt: kills,
+    };
+    assert.deepEqual(judgeWorld(facts), []);
+    assert.ok(
+      judgeWorld({ ...facts, lossesAt: kills.slice(0, 2) }).some((said) =>
+        /transient was allowed at 20\.0–35\.0 s, past the 10500 ms after a loss/u.test(said),
+      ),
+    );
   });
 
   it('a table glibc does not follow is told apart: a type too many, a try too many, no floor on the wait', () => {
@@ -2916,6 +2961,46 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       { fromMs: second + LOSS_WINDOW_MS, toMs: 140_000, peak: 18, transient: false },
     ];
   };
+  /** The same runs' losses: P1's kills, made by the arm; P2's detach and `hung` loss, seen. */
+  const lossesOf = (arm: string): LossAt[] =>
+    arm === 'P1'
+      ? [
+          { atMs: 8_000, seen: false },
+          { atMs: 98_000, seen: false },
+        ]
+      : [
+          { atMs: 17_000, seen: true },
+          { atMs: 34_000, seen: true },
+        ];
+  /** Windows `stepMs` long from `fromMs` to `toMs`, as P2's look cuts one at every look. */
+  const polled = (
+    fromMs: number,
+    toMs: number,
+    transient: boolean,
+    peak: number,
+    stepMs = 50,
+  ): PeakWindow[] =>
+    Array.from({ length: Math.round((toMs - fromMs) / stepMs) }, (_, i) => ({
+      fromMs: fromMs + i * stepMs,
+      toMs: fromMs + (i + 1) * stepMs,
+      peak,
+      transient,
+    }));
+  /**
+   * P2's windows as its look cuts them: one every 50 ms from the SIGSTOP at 13 s to the `hung`
+   * loss, the detach seen at 17 s and the `hung` loss at 34 s, each taking the window the read
+   * before its look closed. Kept on, the transient runs from the detach through the `hung` loss's
+   * window: 26 allowed across 27.5–34 s, where 18 is the bound, in windows each 50 ms long.
+   */
+  const polledP2 = (keptOn: boolean): PeakWindow[] => [
+    { fromMs: 0, toMs: 13_000, peak: 18, transient: false },
+    ...polled(13_000, 16_950, false, 18),
+    ...polled(16_950, 27_500, true, 26),
+    ...polled(27_500, 33_950, keptOn, keptOn ? 26 : 18),
+    { fromMs: 33_950, toMs: 34_000, peak: 26, transient: true },
+    { fromMs: 34_000, toMs: 44_500, peak: 26, transient: true },
+    { fromMs: 44_500, toMs: 140_000, peak: 18, transient: false },
+  ];
   const withLosses = (arm: string): boolean =>
     WORLD_ARMS.find(({ name }) => name === arm)?.transient === true;
 
@@ -2927,7 +3012,9 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     q: 1,
     peakHeld: mode === 'system' ? 6 : withLosses(arm) ? 26 : 18,
     transient: withLosses(arm) ? 8 : 0,
-    ...(withLosses(arm) ? { peakWindows: lossWindows(arm), peakWindowsEndMs: 140_000 } : {}),
+    ...(withLosses(arm)
+      ? { peakWindows: lossWindows(arm), peakWindowsEndMs: 140_000, lossesAt: lossesOf(arm) }
+      : {}),
     dropped: 0,
     walkSends: new Map([['127.0.0.1', mode === 'system' ? [] : [0, 100, 200]]]),
     givenUp: { answering: 0, silent: 40, cached: 0 },
@@ -3025,6 +3112,47 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
         peakWindowsEndMs: 70_000,
       },
       says: /transient was allowed at 17\.0–70\.0 s, past the 10500 ms/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks:
+        'the transient kept on from its detach through its hung loss’s window, cut every 50 ms',
+      patch: { peakWindows: polledP2(true) },
+      says: /transient was allowed at 1[67]\.\d–44\.5 s, past the 10500 ms after a loss it lasts/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'the transient where no loss was',
+      patch: {
+        peakWindows: [
+          ...lossWindows('P1').filter(({ fromMs }) => fromMs !== 18_500),
+          { fromMs: 18_500, toMs: 50_000, peak: 18, transient: false },
+          { fromMs: 50_000, toMs: 55_000, peak: 26, transient: true },
+          { fromMs: 55_000, toMs: 98_000, peak: 18, transient: false },
+        ].sort((a, b) => a.fromMs - b.fromMs),
+      },
+      says: /transient was allowed at 50\.0–55\.0 s with no loss to open it/u,
+    },
+    {
+      arm: 'P1',
+      mode: 'gate',
+      breaks: 'the transient from before the kill it is the loss of',
+      patch: {
+        peakWindows: lossWindows('P1').map((w) =>
+          w.fromMs === 0 ? { ...w, toMs: 7_900 } : w.fromMs === 8_000 ? { ...w, fromMs: 7_900 } : w,
+        ),
+      },
+      says: /transient was allowed at 7\.9–18\.5 s with no loss to open it/u,
+    },
+    {
+      arm: 'P2',
+      mode: 'gate',
+      breaks: 'its losses’ times not measured',
+      patch: {},
+      omit: ['lossesAt'],
+      says: /the losses’ times were not measured/u,
     },
     {
       arm: 'P1',
@@ -3568,6 +3696,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       peakHeld: 24,
       peakWindows: windows,
       peakWindowsEndMs: 30_000,
+      lossesAt: [{ atMs: 10_100, seen: true }],
     };
     assert.deepEqual(judgeWorld(facts), []);
     // The window before the look judged outside the loss, as a poll that read after it did: the
@@ -3636,14 +3765,71 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       [30_000, 39_999.5, 8, true],
       [39_999.5, 50_000, 7, false],
     ]);
+    // The losses the judge places the transient by are the look's own stamps.
+    const facts = peakFacts(0, peaks, lossTimes({ killedAt: [], stopped }));
+    assert.deepEqual(facts.lossesAt, [
+      { atMs: 10_100, seen: true },
+      { atMs: 30_000, seen: true },
+    ]);
+    assert.deepEqual(judgeWorld({ ...clean('P2', 'gate'), ...facts }), []);
+  });
+
+  it('the transient is judged a run at a time and placed by the losses’ own times: P2’s 50 ms windows pass inside their losses’ stretches, and a seen loss’s may start a second before it', () => {
+    const p2 = (patch: Partial<WorldFacts>): string[] =>
+      judgeWorld({ ...clean('P2', 'gate'), peakWindows: polledP2(false), ...patch });
+    assert.deepEqual(p2({}), []);
+    // Each window of the kept-on transient is 50 ms long and inside a loss's 10.5 s, but the run
+    // is not: the one violation names the run, not a window.
+    const keptOn = p2({ peakWindows: polledP2(true) });
+    assert.equal(keptOn.length, 1, JSON.stringify(keptOn));
+    assert.match(keptOn[0] ?? '', /allowed at 1[67]\.\d–44\.5 s, past the 10500 ms/u);
+    // A seen loss's transient may start up to a second before the look saw it, and no earlier.
+    const seenAt = (atMs: number): Partial<WorldFacts> => ({
+      lossesAt: [
+        { atMs, seen: true },
+        { atMs: 34_000, seen: true },
+      ],
+    });
+    assert.deepEqual(p2(seenAt(17_950)), []);
+    assert.ok(
+      p2(seenAt(18_050)).some((said) =>
+        /allowed at 1[67]\.\d–27\.5 s with no loss to open it/u.test(said),
+      ),
+    );
+    // Its end is the loss's window and a late timer's second.
+    assert.deepEqual(p2(seenAt(16_000)), []);
+    assert.ok(p2(seenAt(15_990)).some((said) => /allowed at 1[67]\.\d–27\.5 s, past/u.test(said)));
+  });
+
+  it('the losses reach the judge on the windows’ clock: P1’s kills made, P2’s look’s stamps seen', () => {
+    const time = manualClock();
+    time.set(5_000);
+    const peaks = new PeakWindows(() => Promise.resolve(3), {
+      clock: time.clock,
+      windowMs: 10_000,
+    });
     assert.deepEqual(
-      judgeWorld({
-        ...clean('P2', 'gate'),
-        peakHeld: 24,
-        peakWindows: windows,
-        peakWindowsEndMs: 50_000,
-      }),
-      [],
+      lossTimes({ killedAt: [13_000], stopped: { at: 14_000, downAt: 20_000, hungAt: 40_000 } }),
+      [
+        { at: 13_000, seen: false },
+        { at: 20_000, seen: true },
+        { at: 40_000, seen: true },
+      ],
+    );
+    // No stopped child, and a detach with no `hung` loss after it.
+    assert.deepEqual(lossTimes({ killedAt: [13_000] }), [{ at: 13_000, seen: false }]);
+    assert.deepEqual(lossTimes({ killedAt: [], stopped: { at: 14_000, downAt: 20_000 } }), [
+      { at: 20_000, seen: true },
+    ]);
+    assert.deepEqual(
+      peakFacts(0, peaks, [
+        { at: 13_000, seen: false },
+        { at: 20_000, seen: true },
+      ]).lossesAt,
+      [
+        { atMs: 8_000, seen: false },
+        { atMs: 15_000, seen: true },
+      ],
     );
   });
 
@@ -3670,15 +3856,16 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       [8_000, 18_000, 5, true],
     ]);
     assert.equal(peaks.endMs, 130_000);
-    const facts = peakFacts(0, peaks);
+    const facts = peakFacts(0, peaks, [{ at: 8_000, seen: false }]);
     assert.deepEqual(facts, {
       peakHeld: 5,
       peakWindows: windows,
       peakWindowsEndMs: 130_000,
       peakReadFailed: 'Error: the DNS simulator did not answer gauge within 10000 ms',
+      lossesAt: [{ atMs: 8_000, seen: false }],
     });
     // An arm with no loss: the gauge's peak for the run, and no windows to reach its end.
-    assert.deepEqual(peakFacts(7, undefined), { peakHeld: 7 });
+    assert.deepEqual(peakFacts(7, undefined, []), { peakHeld: 7 });
     const said = judgeWorld({ ...clean('P1', 'gate'), ...facts });
     assert.ok(
       said.some((one) => /not read from 18000 ms to the arm’s end at 130000 ms/u.test(one)),

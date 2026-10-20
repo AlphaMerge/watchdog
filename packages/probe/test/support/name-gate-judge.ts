@@ -12,9 +12,13 @@ import { ANSWER_MS } from '../../src/resolver/name-resolver.js';
  *   most q × 6, P-426's six lanes; gate at most q × 6 + 12, the walk's heard and discovery pools
  *   beside the six tokens (D16). In the arms with a helper loss (P1, P2) the peak is read in
  *   windows cut at each loss and `LOSS_WINDOW_MS` after it: those windows may hold the transient
- *   8 × q more, and every other one is held to q × 6 + 12, as the design's bound table says. The
- *   windows run on from the forwarder's start to the arm's end with no stretch unread, and a read
- *   that failed fails the arm, since the stretch it ends was judged against nothing;
+ *   8 × q more, and every other one is held to q × 6 + 12, as the design's bound table says. Each
+ *   run of windows with the transient is judged as one, since P2 cuts one at every look until its
+ *   `hung` loss, and is held inside the stretch the losses' own times allow (`lossesAt`, stamped by
+ *   the arm, not by the windows): from the loss, or a second before a poll saw it, to
+ *   `LOSS_WINDOW_MS` and a late timer's second after it. The windows run on from the forwarder's
+ *   start to the arm's end with no stretch unread, and a read that failed fails the arm, since the
+ *   stretch it ends was judged against nothing;
  * - no question dropped at the forwarder for want of a slot;
  * - the walk's questions to each server within D19's bucket: 20 at once, refilled at 10 a second
  *   (one more for the time between a token taken and its datagram sent). Check now's walk is cut
@@ -57,6 +61,24 @@ export interface PeakWindow {
 export const LOSS_WINDOW_MS = FORWARD_HOLD_MS + 500;
 /** How late a loss window's end may be read: a timer behind a busy event loop (P1's runs: 519 ms). */
 const LOSS_WINDOW_LATE_MS = 1_000;
+/**
+ * How long before a poll saw a loss its transient may be allowed (P2's detach and `hung` loss).
+ * The loss came after the look before, and the window the read before that look closed began a
+ * poll's 50 ms and two reads' round trips before the look stamped it: a second, behind a busy
+ * event loop, as `LOSS_WINDOW_LATE_MS` allows a timer. A loss the arm made itself (P1's kill) is
+ * cut at once, so its transient may start no earlier than the loss.
+ */
+const LOSS_SEEN_EARLY_MS = 1_000;
+
+/** A helper loss the transient is placed by: when it came, on the windows' clock. */
+export interface LossAt {
+  readonly atMs: number;
+  /**
+   * Seen by a poll that reads the forwarder's peak before it looks (P2), not made by the arm (P1's
+   * kill): the window that read closed is the loss's too.
+   */
+  readonly seen: boolean;
+}
 
 export interface WorldFacts {
   readonly arm: string;
@@ -81,6 +103,12 @@ export interface WorldFacts {
   readonly peakWindowsEndMs?: number;
   /** Why a read of the forwarder's peak failed, if one did: its stretch was judged against nothing. */
   readonly peakReadFailed?: string;
+  /**
+   * With the windows: the helper losses, as the arm stamped them (P1's kills, P2's detach and
+   * `hung` loss), on the windows' clock. The transient is allowed only where these place it, so
+   * that a fault in what cuts the windows cannot carry it on unjudged.
+   */
+  readonly lossesAt?: readonly LossAt[];
   /** Questions the forwarder dropped with every slot held. */
   readonly dropped: number;
   /** The walk's questions, by server: when each was sent, in ms. */
@@ -299,12 +327,51 @@ function respawned(facts: WorldFacts, said: (violation: string) => void, gated: 
   }
 }
 
-const stretch = (w: PeakWindow): string =>
+const stretch = (w: Pick<PeakWindow, 'fromMs' | 'toMs'>): string =>
   `${(w.fromMs / 1_000).toFixed(1)}–${(w.toMs / 1_000).toFixed(1)} s`;
 
 /**
+ * The windows as runs: each run of windows that meet, with the transient or without, as one
+ * stretch with its most. P2 reads one every 50 ms or so until its `hung` loss, so a run is what
+ * the transient's length is judged by, and what is printed.
+ */
+export function stretches(windows: readonly PeakWindow[]): PeakWindow[] {
+  const merged: PeakWindow[] = [];
+  for (const w of windows) {
+    const last = merged.at(-1);
+    if (last !== undefined && last.toMs === w.fromMs && last.transient === w.transient) {
+      merged[merged.length - 1] = { ...last, toMs: w.toMs, peak: Math.max(last.peak, w.peak) };
+    } else merged.push(w);
+  }
+  return merged;
+}
+
+/**
+ * Where the losses allow the transient: each from the loss (a seen one's from `LOSS_SEEN_EARLY_MS`
+ * before) to `LOSS_WINDOW_MS` and a late timer's second after it, those that meet merged, so that
+ * a loss inside another's window carries the transient on to its own end.
+ */
+function lossStretches(losses: readonly LossAt[]): { fromMs: number; toMs: number }[] {
+  const each = losses
+    .map(({ atMs, seen }) => ({
+      fromMs: atMs - (seen ? LOSS_SEEN_EARLY_MS : 0),
+      toMs: atMs + LOSS_WINDOW_MS + LOSS_WINDOW_LATE_MS,
+    }))
+    .sort((a, b) => a.fromMs - b.fromMs);
+  const merged: { fromMs: number; toMs: number }[] = [];
+  for (const one of each) {
+    const last = merged.at(-1);
+    if (last !== undefined && one.fromMs <= last.toMs) {
+      merged[merged.length - 1] = { fromMs: last.fromMs, toMs: Math.max(last.toMs, one.toMs) };
+    } else merged.push(one);
+  }
+  return merged;
+}
+
+/**
  * The forwarder's bound for the probe (D16): the whole run's peak, or in the arms with a helper
- * loss each window's, the windows opened at a loss with the transient and every other without.
+ * loss each window's, the windows opened at a loss with the transient and every other without,
+ * and each run of windows with the transient inside the stretch the losses allow it.
  */
 function peaksHeld(facts: WorldFacts, said: (violation: string) => void): void {
   const strict = heldBound({ ...facts, transient: 0 });
@@ -335,10 +402,24 @@ function peaksHeld(facts: WorldFacts, said: (violation: string) => void): void {
         `the forwarder held ${String(w.peak)} slots for the probe at ${stretch(w)}, past ${String(bound)} ${w.transient ? 'with the transient after a loss' : 'outside a loss'}`,
       );
     }
-    if (w.transient && w.toMs - w.fromMs > LOSS_WINDOW_MS + LOSS_WINDOW_LATE_MS) {
-      said(
-        `the transient was allowed at ${stretch(w)}, past the ${String(LOSS_WINDOW_MS)} ms after a loss it lasts`,
-      );
+  }
+  // The transient's length and place, by run: a window at a time, P2's 50 ms windows would let it
+  // run on through every look.
+  const losses = facts.lossesAt;
+  if (losses === undefined) {
+    said('the losses’ times were not measured, so the transient was placed by nothing');
+  } else {
+    const allowed = lossStretches(losses);
+    const at = `losses at ${losses.map(({ atMs }) => `${(atMs / 1_000).toFixed(1)} s`).join(', ') || 'none'}`;
+    for (const run of stretches(windows).filter(({ transient }) => transient)) {
+      const opened = allowed.find(({ fromMs, toMs }) => fromMs <= run.fromMs && run.fromMs <= toMs);
+      if (opened === undefined) {
+        said(`the transient was allowed at ${stretch(run)} with no loss to open it (${at})`);
+      } else if (run.toMs > opened.toMs) {
+        said(
+          `the transient was allowed at ${stretch(run)}, past the ${String(LOSS_WINDOW_MS)} ms after a loss it lasts (${at})`,
+        );
+      }
     }
   }
   // The last stretch, to the arm's end: a last read that failed pushes no window and leaves no gap.
