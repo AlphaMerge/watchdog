@@ -13658,6 +13658,62 @@ because each is a decision rather than a defect:
           that lookup starts (and is refused), or until its lanes are stuck (`RESOLVER_STUCK`),
           rather than failing at once as a new ask for the name would. D27 holds. A ticket
           number is owed by the coordinator.
+      - **The gate track's fix round 2 built** 2026-10-20, on `feat/p432-gate-r2`, for the
+        coordinator to land: one review item on fix round 1's docs (N1). No code changed.
+        - **What a crash at a re-ask carried to the next child is charged to, both ways** (N1).
+          `administration.md` said that a poison name's re-ask killed from outside starts first
+          in the next child, with what is queued starting beside it: "a crash then is charged
+          to no one". That holds only while something is in flight beside it. On a quiet probe
+          nothing asks during the backoff of 0 to 1,000 ms, so the re-ask starts alone, and a
+          crash then is charged to it (`again`), its retry doubled: D27, and fix round 1's
+          decision that it gets the same start as an hourly re-ask. The sentence now says both
+          halves: charged to no one while anything else is in flight beside it; alone, as it is
+          from its start when nothing was queued, charged as at its hourly re-ask, its next
+          re-ask twice as far off. It also says that what is asked after it starts beside it,
+          as D27 holds nothing back. `#poisonAsk`'s comment had the same "then" for an hourly
+          re-ask, and now says both halves.
+        - **Tests**, pinning both halves in the review's scenario.
+          - `lookup-helper.test.ts`: a table of 2 rows. A poison re-ask killed by SIGKILL at the
+            first loss in ten minutes is asked again, not as a suspect. The next child is then
+            asked for it and crashes (SIGSEGV). Alone: charged `again` to the name, its retry
+            doubled and its next re-ask moved. Beside a lookup started after it: charged to no
+            one, the mark not doubled, and the helper isolating at this second loss in ten
+            minutes, both asked again as suspects. In both rows the name stays poison and off
+            the probe's lanes.
+          - `name-resolver-gate.test.ts`: with nothing queued for the next child, the carried
+            re-ask starts there alone, not as a suspect, and a check asked after it starts
+            beside it. The fake helper's `poisonDue` leaves a mark due after it is asked, which
+            the real helper does not, so a tick asked the name anew in place of a dropped carried
+            re-ask: fix round 1's row passed with it dropped. Both rows now move the mark as the
+            real helper does when it asks.
+        - **Mutants: 5, all killed.**
+          - `#chargeable` never charging a poison re-ask: 5 helper tests fail, the new one among
+            them.
+          - `#chargeable` charging the first of two lookups in flight: 5, the new one among them.
+          - Only a re-ask due as it is asked made chargeable, so never one carried to the next
+            child: 3, the new one among them.
+          - A running poison re-ask holding back what is asked after it: 3 gate tests, both of
+            the next child's rows among them.
+          - The carried re-ask dropped at a loss charged to no one, not asked again: the new gate
+            row only, and with fix round 1's row's mark moved, both rows.
+        - **Runs**, on the final build, beside another session's run, not in a quiet window.
+          Prettier and eslint are clean on the changed files. `lookup-helper`,
+          `name-resolver-gate` and `name-resolver-check`: 217 of 217.
+        - **Quiet window, not run here:** nothing new. The round changes docs and a comment, and
+          its tests run on the scripted process and the fake helper.
+        - **Decided 2026-10-20 by Claude, under the user's delegation:**
+          - **N1: the docs, as the review suggested, not the code.** Charging a carried re-ask
+            alone in the next child is D27's rule: a crash is charged to a lookup alone in
+            flight that is a suspect or a poison name's re-ask, and fix round 1 decided that the
+            carried re-ask gets an hourly one's start. Exempting it would cost twice: an
+            uncharged crash counts toward a rest (charged ones do not, `U27`), and its retry
+            would stay at an hour, so a name that crashes every child would go on being asked
+            hourly.
+          - **"Or asked after it" added to the sentence.** D27's re-ask holds nothing back, so a
+            check that asks while it runs starts beside it too. The new gate row pins it.
+          - **The fake helper is not changed.** Moving `nextAskAt` in `FakeHelper.ask` would
+            reach the nine other marks made in three test files, each read for its due time.
+            The two rows about a carried re-ask move it themselves, with a comment saying why.
 
 - [ ] **P-433 — a device under `targetPolicy: none` resolves outside the probe's resolver** · S ·
       P-426, A-57 · Filed 2026-10-17 by `P-426`. Under `probe.targetPolicy: none`,

@@ -3370,6 +3370,81 @@ describe('the lookup helper: only a crash is charged (P-453, scripted process, t
     }
   });
 
+  it('a poison name’s re-ask asked again in the next child after a kill at the first loss in ten minutes: alone, a crash is charged again; beside another lookup, to no one', async () => {
+    const rows = [
+      { what: 'alone, as when nothing was queued for the next child', beside: undefined },
+      { what: 'beside a lookup started after it', beside: 'dev-5.example.test' },
+    ] as const;
+    for (const row of rows) {
+      const made = fakeMade();
+      void made.helper.start();
+      try {
+        await isolating(made);
+        const host = 'bad.example.test';
+        const first = settled(made.helper.ask({ host, family: 4, max: 64, suspect: true }));
+        const charged = await fakeCrash(made);
+        assert.equal(lostError((await first).error).charged, true, row.what);
+        made.helper.endIsolation();
+        made.timers.fire(charged.delayMs ?? -1);
+        const next = await fakeUp(made);
+        const mark = made.helper.poison(host, 4);
+        assert.ok(mark !== undefined);
+        const retryMs = mark.retryMs;
+        // Its hour up, and every crash before it out of the ten minutes.
+        made.timers.clock = mark.nextAskAt;
+        const killed = settled(made.helper.ask({ host, family: 4, max: 64 }));
+        next.die('SIGKILL');
+        next.closeChannel();
+        await polls();
+        const kill = lostError((await killed).error);
+        assert.equal(kill.charged, false, row.what);
+        assert.equal(kill.requeue, true, `${row.what}: asked again`);
+        assert.equal(kill.suspect, false, `${row.what}: not a suspect, no isolation`);
+        assert.equal(made.helper.isolating(), false, row.what);
+        const backoff = made.changes.at(-1);
+        assert.ok(backoff !== undefined && backoff.state === 'backoff', row.what);
+        made.timers.fire(backoff.delayMs ?? -1);
+        const third = await fakeUp(made);
+        // The re-ask carried to this child is asked first, poison and not yet due again.
+        const again = settled(made.helper.ask({ host, family: 4, max: 64 }));
+        const beside =
+          row.beside === undefined
+            ? undefined
+            : {
+                host: row.beside,
+                lost: settled(made.helper.ask({ host: row.beside, family: 4, max: 64 })),
+              };
+        third.die('SIGSEGV');
+        third.closeChannel();
+        await polls();
+        const crash = lostError((await again).error);
+        if (beside === undefined) {
+          assert.equal(crash.charged, true, `${row.what}: charged to it`);
+          assert.equal(made.changes.at(-1)?.charged, 'again', row.what);
+          assert.equal(made.helper.stats().lastLoss?.chargedTo, host, row.what);
+          assert.equal(mark.retryMs, retryMs * 2, `${row.what}: its next re-ask twice as far off`);
+          assert.equal(mark.nextAskAt, made.timers.clock + retryMs * 2, row.what);
+        } else {
+          const other = lostError((await beside.lost).error);
+          assert.equal(crash.charged, false, `${row.what}: charged to no one`);
+          assert.equal(other.charged, false, row.what);
+          assert.equal(made.changes.at(-1)?.charged, undefined, row.what);
+          assert.equal(made.helper.stats().lastLoss?.chargedTo, undefined, row.what);
+          assert.equal(mark.retryMs, retryMs, `${row.what}: its mark not doubled`);
+          // The second loss in ten minutes: the helper isolates, and each is asked again alone.
+          assert.equal(made.helper.isolating(), true, row.what);
+          assert.equal(crash.requeue && crash.suspect, true, `${row.what}: the re-ask a suspect`);
+          assert.equal(other.requeue && other.suspect, true, `${row.what}: the other a suspect`);
+          assert.equal(made.helper.avoidsSystem(beside.host, 4), true, `${row.what}: kept off`);
+        }
+        assert.equal(made.helper.poison(host, 4), mark, `${row.what}: still poison`);
+        assert.equal(made.helper.avoidsSystem(host, 4), true, `${row.what}: kept off`);
+      } finally {
+        await stop(made);
+      }
+    }
+  });
+
   it('a channel closed before the exit is read waits for the exit, sends and judges nothing meanwhile, and a crash then is charged', async () => {
     const made = fakeMade();
     void made.helper.start();

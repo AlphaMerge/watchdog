@@ -1837,10 +1837,12 @@ describe('a poison name’s re-ask ended from outside, isolation off (P-432 gate
     resolver.start();
     const crash = 'crash.zone-a.test';
     try {
-      helper.markPoison(crash, 4, 1_000);
+      const mark = helper.markPoison(crash, 4, 1_000);
       clock.now = 1_000;
       await pollWithin(1_000, 'the re-ask', () => helper.asksFor(crash).length === 1, 2);
       assert.equal(helper.inFlight().length, 1, 'alone as it starts');
+      // As the real helper does as it asks: not due again for its retry, so no tick asks it anew.
+      mark.nextAskAt = clock.now + mark.retryMs;
       // Killed from outside with no loss before it: not charged, and no suspect, since the helper
       // does not isolate at its first loss in ten minutes. Asked again, its token with it.
       helper.lose('exit', 'rejoining');
@@ -1863,6 +1865,48 @@ describe('a poison name’s re-ask ended from outside, isolation off (P-432 gate
       helper.last(crash).answer(B);
       for (const host of queued) helper.last(host).answer();
       for (const got of await Promise.all(waits)) assert.ok(got.ok);
+    } finally {
+      resolver.stop();
+    }
+  });
+
+  it('with nothing queued for the next child, starts there alone, so that a crash is its own, and a check asked after it starts beside it', async () => {
+    const { helper, ask, clock, resolver } = make({ tickMs: 5 });
+    resolver.start();
+    const crash = 'crash.zone-a.test';
+    try {
+      const mark = helper.markPoison(crash, 4, 1_000);
+      clock.now = 1_000;
+      await pollWithin(1_000, 'the re-ask', () => helper.asksFor(crash).length === 1, 2);
+      // As the real helper does as it asks: not due again for its retry, so no tick asks it anew.
+      mark.nextAskAt = clock.now + mark.retryMs;
+      helper.lose('exit', 'rejoining');
+      await settled();
+      assert.equal(helper.asks.length, 1, 'nothing asked while the next child comes');
+      helper.move('up');
+      await settled();
+      assert.equal(
+        helper.asksFor(crash).length,
+        2,
+        'asked again in the next child, its hour moved',
+      );
+      assert.deepEqual(
+        helper.inFlight().map((asked) => asked.host),
+        [crash],
+        'alone: nothing was queued for the next child',
+      );
+      assert.equal(helper.last(crash).suspect, false, 'not a suspect: the helper is not isolating');
+      const later = 'l1.zone-c.test';
+      const wait = outcome(ask(later, 4, { waitMs: 60_000 }));
+      await settled();
+      assert.deepEqual(
+        helper.inFlight().map((asked) => asked.host),
+        [crash, later],
+        'a check asked after it starts beside it: it holds nothing back',
+      );
+      helper.last(crash).answer(B);
+      helper.last(later).answer();
+      assert.ok((await wait).ok);
     } finally {
       resolver.stop();
     }

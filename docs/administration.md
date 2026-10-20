@@ -1330,9 +1330,12 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   one that exits with a code, makes no name poison, and the name it was asking is asked again in
   the next child. A suspect is sent alone there, while the helper isolates. A poison name's re-ask
   starts first, at a moment nothing else is in flight, as its hourly re-ask does, and what is
-  queued for the helper starts beside it: a crash then is charged to no one, and every name in
-  flight is kept off the probe's lanes. When the kill is the second loss in ten minutes, the
-  helper isolates, and the re-ask is sent alone as a suspect.
+  queued for the helper, or asked after it, starts beside it. A crash while anything else is in
+  flight beside it is charged to no one, and every name in flight is kept off the probe's lanes.
+  A crash while it is alone in flight, as it is from its start when nothing was queued for the
+  next child, is charged to it as at its hourly re-ask, and its next re-ask is twice as far off.
+  When the kill is the second loss in ten minutes, the helper isolates, and the re-ask is sent
+  alone as a suspect.
   When the child's channel closes before its exit is read, the helper kills it and waits up to a
   second for the exit to say which it was. Every name in flight when the child ends, a crash or
   not, or when it runs out of memory, is kept off the probe's lanes until ten minutes after the

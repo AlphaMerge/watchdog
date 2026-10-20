@@ -3465,8 +3465,9 @@ export class NameResolver implements PoolResolver {
   /**
    * A poison name due its re-ask (D27), sent now, as nothing is in flight, so that a crash is its
    * alone at the start. It holds nothing back: what is asked meanwhile starts beside it, and a
-   * crash then is charged to no one, every name in flight kept off the probe's lanes. One due that
-   * finds no such moment for a whole period waits for its next (`poisonDue`).
+   * crash with any of that in flight is charged to no one, every name in flight kept off the
+   * probe's lanes; a crash with it alone is charged to it. One due that finds no such moment for a
+   * whole period waits for its next (`poisonDue`).
    */
   #poisonAsk(gate: Gate): { pending: Pending; token: GaiToken } | undefined {
     for (const mark of gate.helper.poisonDue()) {
