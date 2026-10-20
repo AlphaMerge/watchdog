@@ -253,6 +253,10 @@ function model(seed: number) {
       unitCapped: keys.capped(p.key, p.cls),
       atRisk,
       classOk: p.urgent || classOkNow(p.cls),
+      // The model builds no name check: nothing is vouched, and no lane is kept (`P-478`), as with
+      // the check off.
+      classSpare: p.urgent || classOkNow(p.cls),
+      keepLast: false,
       urgentAvailable: budget.available('urgent'),
       sharedAvailable: budget.available('shared'),
       keptAvailable: budget.available('kept'),
@@ -270,9 +274,10 @@ function model(seed: number) {
         violations.push(`I4: a gated start for ${p.entry.host} at risk ${String(atRisk)}`);
       }
     }
-    if (kind !== 'urgent' && ask.keyQuiet && ask.keyRunning >= KEY_QUIET) {
+    // I6 (`P-478`): a key the walk does not vouch for, quiet or not, never starts its 4th.
+    if (kind !== 'urgent' && !ask.vouched && ask.keyRunning >= KEY_QUIET) {
       violations.push(
-        `I6: quiet key ${p.key} started its ${String(ask.keyRunning + 1)}th (${p.entry.host})`,
+        `I6: unvouched key ${p.key} started its ${String(ask.keyRunning + 1)}th (${p.entry.host})`,
       );
     }
     if (kind === 'kept' && (!ungated || p.urgent)) {

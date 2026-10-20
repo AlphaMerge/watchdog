@@ -7,6 +7,7 @@ import { pino } from 'pino';
 import { probeHealth, type ResolvedAddress } from '@ms/sensors';
 import type { CheckResult } from '@ms/shared';
 import { AnswerFile, answerFilePath } from '../src/resolver/answer-file.js';
+import { SAMPLED_PER_KEY } from '../src/resolver/dns-check.js';
 import { buildNameResolution, type NameResolution } from '../src/resolver/name-resolution.js';
 import {
   ANSWER_MS,
@@ -78,7 +79,9 @@ import {
  * probe no longer fails the answering zone's first scans, and the helper's own faults raise one
  * Warning and change no sensor's state. Its probes are built as `main.ts` builds them. **And a
  * starved helper that keeps going quiet** (SC18, `P-463` fix round 1): the names it keeps off the
- * probe's lanes add up across its quiets, and only their sensors change state.
+ * probe's lanes add up across its quiets, and only their sensors change state. **And with the
+ * name check on** (`P-432` S6): a cold outage (SC1), and an authoritative outage behind a recursor
+ * whose cached answers run out one scan apart (SC16, `P-478`).
  */
 
 const silent = pino({ level: 'silent' });
@@ -1904,7 +1907,101 @@ describe('the gate with its name check on: one zone stops answering (P-432 S6)',
     );
   });
 
-  it('SC16, the first name answering: a partial outage of zone B whose names stop answering as their cached answers run out puts at most two of its refreshes on the probe’s lanes while DNS does not answer them, however many of its names still answer (D20, P-477 fix round 1)', async (t) => {
+  it('SC16: an authoritative outage behind a recursor whose cached answers run out one scan apart, check on: zone A and each cached name never change state while cached, the uncached names go Warning, then Down, once, and no name DNS did not answer runs on the probe’s lanes after (O-OS-1, P-478)', async (t) => {
+    const devices = 100;
+    const zones: Zones = { bSilent: false, hangMs: HANG_MS };
+    const clock = { now: 0 };
+    const running = await probe(zones, clock, [], 8, 1_000, 'gate', true);
+    const gate = running.gate;
+    assert.ok(gate !== undefined);
+    const scan = scanner(running, clock, devices);
+    /** The outage starts after the sixth scan: zone b's authoritative servers stop answering. */
+    const outageAfter = 5 * INTERVAL_MS;
+    /** Half of zone B's names are in the recursor's cache, each until its TTL ends, one scan apart. */
+    const cachedUntil = new Map<number, number>([
+      [10, 7.5 * INTERVAL_MS],
+      [30, 8.5 * INTERVAL_MS],
+      [50, 9.5 * INTERVAL_MS],
+      [70, 10.5 * INTERVAL_MS],
+      [90, Number.POSITIVE_INFINITY],
+    ]);
+    const deviceOfHost = (host: string): number => Number(/^dev-(\d+)\./u.exec(host)?.[1] ?? '-1');
+    const silentAt = (host: string, at: number): boolean => {
+      const device = deviceOfHost(host);
+      if (zoneOf(device) !== 'b' || at <= outageAfter) return false;
+      const until = cachedUntil.get(device);
+      return until === undefined || at >= until;
+    };
+    zones.silentName = (host) => silentAt(host, clock.now);
+    // When each name's DNS question first went unanswered, on the scenario's clock.
+    const unansweredAt = new Map<string, number>();
+    const rule = gate.asker.rule;
+    gate.asker.rule = (server, name, type) => {
+      const said = rule(server, name, type);
+      const bare = name.endsWith('.') ? name.slice(0, -1) : name;
+      if (said === 'silent' && !unansweredAt.has(bare)) unansweredAt.set(bare, clock.now);
+      return said;
+    };
+    const graceEnds = outageAfter + ANSWER_MS + STALE_MS;
+    const firstFailing = Math.ceil(graceEnds / INTERVAL_MS) * INTERVAL_MS;
+    try {
+      for (let at = 0; at <= firstFailing + 2 * INTERVAL_MS; at += INTERVAL_MS) {
+        await scan.scanAt(at);
+      }
+    } finally {
+      await running.stop();
+    }
+    const changesA = scan.changes.filter(({ sensorId }) => zoneOf(sensorId - 1) === 'a');
+    assert.deepEqual(changesA, [], `zone A never changed state: ${scan.why(changesA)}`);
+    for (const [device, until] of cachedUntil) {
+      const whileCached = scan.changes.filter(
+        ({ sensorId, at }) => sensorId - 1 === device && at < until,
+      );
+      assert.deepEqual(
+        whileCached,
+        [],
+        `cached device ${String(device)} while cached: ${scan.history(device + 1)}; ${scan.why(whileCached)}`,
+      );
+    }
+    for (const device of [0, 20, 40, 60, 80]) {
+      const its = scan.changes.filter(({ sensorId }) => sensorId - 1 === device);
+      assert.deepEqual(
+        its,
+        [
+          { sensorId: device + 1, at: firstFailing, from: 'up', to: 'warning' },
+          { sensorId: device + 1, at: firstFailing + INTERVAL_MS, from: 'warning', to: 'down' },
+        ],
+        `uncached device ${String(device)}: ${scan.history(device + 1)}; ${scan.why(its)}`,
+      );
+    }
+    // The probe's lanes: no zone-B name after DNS left its own question unanswered (D18: nothing
+    // moves on its key's evidence). A refresh that rode its zone's heard walk (D20) was asked of
+    // no DNS server, and is said, not judged: §3 bounds those at 2 a zone, once an outage, and a
+    // zone whose cached names keep answering lets more ride (`P-478`'s outcome, a finding for the
+    // walk's riders, not this ticket's).
+    const asked = running.probeAsked.map((line) => {
+      const [, host = '', at = '-1'] = /^(\S+) at (\d+) ms/u.exec(line) ?? [];
+      return { host: host.endsWith('.') ? host.slice(0, -1) : host, at: Number(at), line };
+    });
+    const late = asked.filter(({ host, at }) => {
+      const since = unansweredAt.get(host);
+      return since !== undefined && at > since;
+    });
+    assert.deepEqual(
+      late.map(({ line }) => line),
+      [],
+      'no name on the probe’s lanes after its own question went unanswered',
+    );
+    const riders = asked.filter(({ host, at }) => silentAt(host, at));
+    t.diagnostic(
+      `zone-B names silent when they rode a sample onto the probe’s lanes: ${String(riders.length)}, ` +
+        `which §3 bounds at ${String(SAMPLED_PER_KEY)} a zone once an outage: ` +
+        (riders.map(({ line }) => line).join(' | ') || 'none'),
+    );
+    assert.ok(unansweredAt.size > 0, 'the walk asked zone B’s silent names');
+  });
+
+  it('SC16b, the first name answering: a partial outage of zone B whose names stop answering as their cached answers run out puts at most two of its refreshes on the probe’s lanes while DNS does not answer them, however many of its names still answer (D20, P-477 fix round 1)', async (t) => {
     const devices = 100;
     const zones: Zones = { bSilent: false, hangMs: HANG_MS };
     const clock = { now: 0 };

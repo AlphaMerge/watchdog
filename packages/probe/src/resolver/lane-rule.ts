@@ -210,7 +210,12 @@ export function firstLoad<H extends DomainHistory>(ask: FirstAsk<H>): KeyLoad {
 
 // --- The lookup helper's lanes (`P-432` §1.8, S3) ---------------------------------------------
 
-/** The most lookups a quiet key the walk does not vouch for runs in the helper at once. */
+/**
+ * The most lookups a key the walk does not vouch for runs in the helper at once, quiet or not
+ * (`P-478`). Not only a quiet one, as §1.8 had it: one answer from a name its recursor still
+ * caches lifts a key's quiet, and for a cold start's first second nothing is stuck, so nothing in
+ * the helper's own evidence tells a zone that answers some names from one that answers all.
+ */
 export const KEY_QUIET = 3;
 /** At-risk helper lanes at which a gated start waits (T). */
 export const RISK_T = 4;
@@ -454,7 +459,10 @@ export interface HelperAdmitAsk {
   readonly keyNew: boolean;
   readonly keyQuiet: boolean;
   readonly keyRunning: number;
-  /** The walk vouches for the key (D23, S6): never in S3. */
+  /**
+   * The walk vouches for the key (D23, `P-478`): its phase heard and fresh at the check, which is
+   * on, and none of its lookups on either lane set past `STUCK_MS`. Never with the check off.
+   */
   readonly vouched: boolean;
   readonly unitRunning: number;
   readonly unitCapped: boolean;
@@ -462,6 +470,17 @@ export interface HelperAdmitAsk {
   readonly atRisk: number;
   /** Its class may run another in the helper (`#canRun`). */
   readonly classOk: boolean;
+  /**
+   * One more of its class leaves the helper's last free first lane and its last free shared lane
+   * (`helperSpare`): what a lookup the gate holds may take while they are kept (`keepLast`).
+   */
+  readonly classSpare: boolean;
+  /**
+   * The check is on, so the helper's last first lane and last shared lane are kept for lookups the
+   * gate does not hold (`P-478`): with it off, nothing can tell zones apart, and a never-seen key's
+   * first look takes the last lane, as `system` does (§3, risk 11).
+   */
+  readonly keepLast: boolean;
   readonly urgentAvailable: number;
   readonly sharedAvailable: number;
   readonly keptAvailable: number;
@@ -469,10 +488,13 @@ export interface HelperAdmitAsk {
 
 export type HelperToken = 'urgent' | 'shared' | 'kept';
 
-/** The key rule (§1.8's `keyOk`). */
+/**
+ * The key rule (§1.8's `keyOk`, `P-478`): a key the walk does not vouch for runs at most
+ * `KEY_QUIET`, quiet or not; a vouched one is held by its unit.
+ */
 export function helperKeyOk(a: HelperAdmitAsk): boolean {
   if (a.overflow) return !a.stuckAnywhere;
-  if (a.keyQuiet && !a.vouched) return a.keyRunning < KEY_QUIET;
+  if (!a.vouched) return a.keyRunning < KEY_QUIET;
   return mayStart(
     { running: a.unitRunning, unacked: 0, capped: a.unitCapped, sharedTaken: 0 },
     HELPER_UNIT_RULE,
@@ -493,17 +515,56 @@ export function helperRiskOk(a: HelperAdmitAsk): boolean {
   return a.atRisk < (firstLook ? RISK_T + RISK_F : RISK_T);
 }
 
+/** What the helper's first and refresh classes hold, and its caps (`P-426`'s lane set). */
+export interface HelperLanes {
+  readonly first: number;
+  readonly refresh: number;
+  readonly firstCap: number;
+  readonly refreshCap: number;
+  /** The lanes first lookups and refreshes share. */
+  readonly sharedCap: number;
+}
+
+/**
+ * Whether one more of a class leaves the last free first lane and the last free shared lane
+ * (`P-478`): what a lookup the gate holds may take while they are kept. The retry lane is its own,
+ * and nothing of it is kept: its class's cap alone holds it (`classOk`).
+ */
+export function helperSpare(lanes: HelperLanes, cls: HelperClass): boolean {
+  if (cls === 'retry') return true;
+  const shared = lanes.first + lanes.refresh;
+  if (shared >= lanes.sharedCap - 1) return false;
+  return cls === 'first' ? lanes.first < lanes.firstCap - 1 : lanes.refresh < lanes.refreshCap;
+}
+
+/**
+ * Whether a lookup's class has a lane for it (§1.8's `classOk`, `P-478`): its class's cap, and,
+ * while the last lanes are kept, a lookup the gate holds never takes the last free first lane or
+ * the last free shared lane. D22's kept token made a kept lane: without it, whatever passed the
+ * key rule could fill the 4 first lanes, since T and T + F are not below them.
+ */
+export function helperClassOk(
+  a: Pick<
+    HelperAdmitAsk,
+    'classOk' | 'classSpare' | 'keepLast' | 'overflow' | 'vouched' | 'keyQuiet' | 'unitCapped'
+  >,
+): boolean {
+  if (!a.classOk) return false;
+  return !a.keepLast || a.classSpare || helperUngated(a);
+}
+
 /**
  * The token a queued helper lookup starts on, or undefined while it waits (§1.3's Check now and
  * §1.8's `admit`). "Check now" takes an urgent token when one is free, under no key rule, so it
  * passes a silent zone's stuck lookups; otherwise a shared one, as its key's first look, under the
- * key rule and T. Any other lookup needs the key rule, T and its class's cap, and takes a shared
- * token, or the kept one only while ungated: the kept token is never a gated lookup's.
+ * key rule and T. Any other lookup needs the key rule, T and its class's lane (`helperClassOk`),
+ * and takes a shared token, or the kept one only while ungated: the kept token is never a gated
+ * lookup's.
  */
 export function admitHelper(a: HelperAdmitAsk): HelperToken | undefined {
   if (a.urgent && a.urgentAvailable > 0) return 'urgent';
   if (!helperKeyOk(a) || !helperRiskOk(a)) return undefined;
-  if (!a.urgent && !a.classOk) return undefined;
+  if (!a.urgent && !helperClassOk(a)) return undefined;
   if (a.sharedAvailable > 0) return 'shared';
   if (!a.urgent && helperUngated(a) && a.keptAvailable > 0) return 'kept';
   return undefined;

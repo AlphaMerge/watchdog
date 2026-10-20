@@ -32,8 +32,10 @@ import {
   firstLoad,
   gateFirstRule,
   heldBy,
+  helperClassOk,
   helperKeyOk,
   helperRiskOk,
+  helperSpare,
   helperUngated,
   HelperKeys,
   KEY_QUIET,
@@ -902,7 +904,7 @@ type Settled =
 
 /** Why a queued helper lookup fails fast, and what holds it (§1.8). */
 interface HelperBlock {
-  readonly condition: 'key' | 'unit' | 'risk' | 'class' | 'token';
+  readonly condition: 'key' | 'unit' | 'risk' | 'class' | 'kept' | 'token';
   readonly lookups: readonly Pending[];
   /** Ghosts and U among the blockers: each stuck. */
   readonly ghosts: number;
@@ -3490,13 +3492,35 @@ export class NameResolver implements PoolResolver {
   #ungatedNow(gate: Gate, pending: Pending): boolean {
     return helperUngated({
       overflow: false,
-      vouched: false,
+      vouched: this.#vouched(gate, pending.key),
       keyQuiet: gate.keys.quiet(pending.key),
       unitCapped: gate.keys.capped(pending.key, pending.cls),
     });
   }
 
-  /** What the admission reads of a queued helper lookup (§1.8). The walk's vouching is `S6`'s. */
+  /**
+   * Whether the walk vouches for a key (D23, `P-478`): the check on, the key's phase heard and
+   * fresh (`DnsCheck.vouches`), and none of its lookups on either lane set past `STUCK_MS`. Never
+   * without the check, or with it off.
+   */
+  #vouched(gate: Gate, key: string): boolean {
+    if (gate.check?.vouches(key) !== true) return false;
+    return ![...this.#probeRunning(), ...helperRunning(gate)].some(
+      (running) => running.stuck && running.key === key,
+    );
+  }
+
+  /**
+   * Whether the helper keeps its last first lane and last shared lane for lookups the gate does
+   * not hold (`P-478`): while the check is on, proven and not stood down, as `nameCheckOnSeconds`
+   * counts it. With it off, or not built, nothing can vouch for a zone, and a never-seen key's
+   * first look takes the last lane, as `system` mode's does.
+   */
+  #keepLast(gate: Gate): boolean {
+    return gate.check?.state() === 1;
+  }
+
+  /** What the admission reads of a queued helper lookup (§1.8, `P-478`). */
   #admitAsk(gate: Gate, pending: Pending, atRisk: number): HelperAdmitAsk {
     const { keys, budget } = gate;
     const key = pending.key;
@@ -3511,11 +3535,24 @@ export class NameResolver implements PoolResolver {
       keyNew: keys.isNew(key),
       keyQuiet: keys.quiet(key),
       keyRunning: keys.running(key),
-      vouched: false,
+      vouched: this.#vouched(gate, key),
       unitRunning: keys.unitRunning(key, pending.cls),
       unitCapped: keys.capped(key, pending.cls),
       atRisk,
       classOk: pending.urgent || this.#canRun(gate.lanes, pending.cls),
+      classSpare:
+        pending.urgent ||
+        helperSpare(
+          {
+            first: gate.lanes.running.first.size,
+            refresh: gate.lanes.running.refresh.size,
+            firstCap: gate.lanes.firstCap,
+            refreshCap: gate.lanes.refreshCap,
+            sharedCap: gate.lanes.sharedCap,
+          },
+          pending.cls,
+        ),
+      keepLast: this.#keepLast(gate),
       urgentAvailable: budget.available('urgent'),
       sharedAvailable: budget.available('shared'),
       keptAvailable: budget.available('kept'),
@@ -3540,10 +3577,10 @@ export class NameResolver implements PoolResolver {
     const { keys, budget } = gate;
     const blocks: HelperBlock[] = [];
     if (!helperKeyOk(ask)) {
-      const quiet = ask.keyQuiet && !ask.vouched;
+      const unvouched = !ask.vouched;
       blocks.push({
-        condition: quiet ? 'key' : 'unit',
-        lookups: (quiet
+        condition: unvouched ? 'key' : 'unit',
+        lookups: (unvouched
           ? keys.runningOf(pending.key)
           : keys.runningOf(pending.key, pending.cls)
         ).map((lookup) => lookup as Pending),
@@ -3566,6 +3603,8 @@ export class NameResolver implements PoolResolver {
     }
     if (!ask.classOk) {
       blocks.push({ condition: 'class', lookups: this.#blockers(pending), ghosts: 0 });
+    } else if (!pending.urgent && !helperClassOk(ask)) {
+      blocks.push({ condition: 'kept', lookups: this.#keptBlockers(gate, pending), ghosts: 0 });
     }
     const ungated = helperUngated(ask);
     const noToken =
@@ -3590,6 +3629,17 @@ export class NameResolver implements PoolResolver {
     );
   }
 
+  /**
+   * The lookups whose end could give a lookup the gate holds a lane it may take, while the last
+   * lanes are kept (`P-478`): its class's, when it holds all but the last of them; otherwise every
+   * shared lane's.
+   */
+  #keptBlockers(gate: Gate, pending: Pending): Pending[] {
+    const { running, firstCap } = gate.lanes;
+    if (pending.cls === 'first' && running.first.size >= firstCap - 1) return [...running.first];
+    return [...running.first, ...running.refresh];
+  }
+
   /** The words a helper lookup's fail-fast message names its condition in (§5). */
   #helperWhy(gate: Gate, pending: Pending, block: HelperBlock): string {
     const lanes = block.lookups
@@ -3603,11 +3653,12 @@ export class NameResolver implements PoolResolver {
     const domain = keyWords(pending.key);
     switch (block.condition) {
       case 'key':
-        return (
-          `${prefix}: no name of ${domain} has answered in the lookup helper since one of its ` +
-          `lookups ran past ${String(this.#stuckMs)} ms, so it holds at most ` +
-          `${String(KEY_QUIET)} of the helper’s lanes; it stays queued`
-        );
+        return gate.keys.quiet(pending.key)
+          ? `${prefix}: no name of ${domain} has answered in the lookup helper since one of its ` +
+              `lookups ran past ${String(this.#stuckMs)} ms, so it holds at most ` +
+              `${String(KEY_QUIET)} of the helper’s lanes; it stays queued`
+          : `${prefix}: the DNS check does not vouch for ${domain} now, so it holds at most ` +
+              `${String(KEY_QUIET)} of the helper’s lanes; it stays queued`;
       case 'unit':
         return (
           `${prefix}: a ${pending.cls} lookup of ${domain} gave up or is stuck in the lookup ` +
@@ -3621,6 +3672,11 @@ export class NameResolver implements PoolResolver {
         );
       case 'class':
         return `${prefix}, in the lookup helper; it stays queued`;
+      case 'kept':
+        return (
+          `${prefix}: the lookup helper keeps its last lane for names the DNS check has heard ` +
+          `answer, or that answer there; it stays queued`
+        );
       case 'token':
         return (
           `${prefix}, and every lane of the lookup helper is taken, ` +

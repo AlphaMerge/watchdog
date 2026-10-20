@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { pino } from 'pino';
-import { notAnswered, RESOLVER_FAULT, RESOLVER_HELD, type ResolvedAddress } from '@ms/sensors';
+import {
+  notAnswered,
+  RESOLVER_FAULT,
+  RESOLVER_HELD,
+  RESOLVER_STUCK,
+  type ResolvedAddress,
+} from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
@@ -25,8 +31,10 @@ import { pollWithin, within } from './support/within.js';
  * The resolver in gate mode with the name check built (`P-432` S6, §1.3): a lookup whose walk was
  * heard runs on the probe's lanes, one whose walk went unanswered in the helper, and only there,
  * a refresh rides its zone's heard walk, and a name heard that then sticks on a lane makes its
- * zone unsafe. DNS is a scripted asker, the helper a fake one, and `getaddrinfo` on the probe's
- * lanes is settled by hand; the routing wait is a real 60 ms.
+ * zone unsafe. And the helper's lanes with the check on (D23, `P-478`): a key the walk vouches for
+ * is ungated there, any other is held to 3, and the last first lane and last shared lane are kept
+ * for lookups the gate does not hold. DNS is a scripted asker, the helper a fake one, and
+ * `getaddrinfo` on the probe's lanes is settled by hand; the routing wait is a real 60 ms.
  */
 
 const silent = pino({ level: 'silent' });
@@ -87,6 +95,12 @@ async function make(
     readonly logger?: Logger;
     /** The check's routing wait, and its miss a little after it: `ROUTE` and `MISS` unless set. */
     readonly routeMs?: number;
+    /** D19's bucket, `WALK_RATE`'s unless set: refilled on the test's clock. */
+    readonly rate?: {
+      readonly perSecond: number;
+      readonly burst: number;
+      readonly reserve: number;
+    };
   } = {},
 ) {
   const calls: Call[] = [];
@@ -96,7 +110,10 @@ async function make(
   const policy = new WalkPolicy();
   const asker = new ScriptedAsker();
   asker.rule = (_server, name) => (name.endsWith('zone-b.test') ? 'silent' : 'answer');
-  const budget = new ForwardBudget({ now: () => clock.now });
+  const budget = new ForwardBudget({
+    now: () => clock.now,
+    ...(setup.rate === undefined ? {} : { rate: setup.rate }),
+  });
   const resolver = new NameResolver({
     logger: setup.logger ?? silent,
     lookup: (host) =>
@@ -422,8 +439,10 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
     assert.ok(said !== undefined);
     assert.equal(said.walksDeferred, 2, 'two past the pool’s 4, and no more');
     assert.equal(said.misses, 0);
-    assert.ok(said.lookupsToHelper >= 4, 'in the helper');
-    assert.ok(helper.asks.length >= 4);
+    // Six never-seen keys, none heard: 3 of the first lanes, the fourth kept for a zone the walk
+    // heard (`P-478`).
+    assert.equal(said.lookupsToHelper, 3, 'in the helper');
+    assert.equal(helper.asks.length, 3);
     assert.equal(said.checkState, 1);
     // Probe Health has no channel for these (OPEN-5): the hour's summary says them.
     const first = await summaryAfter(lines, clock, 0);
@@ -460,6 +479,272 @@ describe('gate mode with the name check routes by the walk (P-432 S6, §1.3)', (
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * D19's bucket with room for the canary and one scout, and refilled never, since the test's clock
+ * stands still: zone a's scout is heard, and every walk after it is refused and routes `rate`,
+ * unwalked, to the helper, as most first lookups do at a cold start's burst (§3).
+ */
+const COLD_BURST = { perSecond: 0, burst: 2, reserve: 5 } as const;
+
+/** A check's outcome, without letting a rejection go unhandled. */
+const ended = (got: Promise<unknown>): Promise<boolean> =>
+  got.then(
+    () => true,
+    () => false,
+  );
+
+/** Zone a's scout, `dev-0.zone-a.test`, heard and answered on the probe's lanes: zone a vouched. */
+async function scoutZoneA(
+  calls: readonly Call[],
+  ask: (host: string, request?: { waitMs?: number }) => Promise<readonly ResolvedAddress[]>,
+): Promise<void> {
+  const scout = ask('dev-0.zone-a.test');
+  await pollWithin(1_000, 'zone a’s scout heard', () => calls.length === 1, 2);
+  calls[0]?.answer();
+  assert.deepEqual(await scout, A);
+}
+
+describe('the helper’s lanes with the name check on (P-432 D23, P-478)', () => {
+  it('K2: a partial outage, check on, cached names among silent ones: the key goes mixed, the cached names run on the probe’s lanes and answer, and the silent ones stay in the helper, at most 3', async () => {
+    const { logger, lines } = captured();
+    const { resolver, helper, asker, calls, ask } = await make({ logger });
+    // Zone b's authoritative servers are down; its recursor still has dev-c0 to dev-c3 cached.
+    asker.rule = (_server, name) => (name.startsWith('dev-s') ? 'silent' : 'answer');
+    const cached = [0, 1, 2, 3].map((i) => `dev-c${String(i)}.zone-b.test`);
+    const uncached = [0, 1, 2, 3, 4, 5].map((i) => `dev-s${String(i)}.zone-b.test`);
+    // Asked at one instant, the two kinds in turn: a cached name scouts first, and an uncached one.
+    const hosts = [0, 1, 2, 3, 4, 5].flatMap((i) =>
+      i < cached.length
+        ? [`dev-c${String(i)}.zone-b.test`, `dev-s${String(i)}.zone-b.test`]
+        : [`dev-s${String(i)}.zone-b.test`],
+    );
+    const waits = hosts.map((host) => ({ host, got: ended(ask(host, { waitMs: 60_000 })) }));
+    let most = 0;
+    const inHelper = (): number => {
+      const now = helper.inFlight().filter((sent) => uncached.includes(sent.host)).length;
+      most = Math.max(most, now);
+      return now;
+    };
+    // The cached names heard, each on the probe's lanes as a lane is free: a domain not yet known
+    // to answer there holds 3 of its first lanes (`P-438`).
+    await pollWithin(
+      2_000,
+      () =>
+        `every name routed: ${String(calls.length)} on lanes, ${String(helper.asks.length)} in the helper`,
+      () => {
+        inHelper();
+        for (const call of calls) call.answer();
+        return calls.length === cached.length && helper.asks.length === 3;
+      },
+      2,
+    );
+    assert.deepEqual(
+      calls.map((call) => call.host).sort(),
+      [...cached].sort(),
+      'the cached names, heard, on the probe’s lanes, and nothing else',
+    );
+    for (const { host, got } of waits.filter(({ host }) => cached.includes(host))) {
+      assert.equal(await got, true, `${host} answered`);
+    }
+    // The uncached ones in the helper, 3 at a time, each failing after it hangs.
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      assert.ok(inHelper() <= 3);
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+    }
+    assert.equal(most, 3, 'at most 3 of the silent names in the helper at once');
+    for (const { host, got } of waits.filter(({ host }) => uncached.includes(host))) {
+      assert.equal(await got, false, `${host} not answered`);
+    }
+    assert.ok(
+      helper.asks.every((sent) => uncached.includes(sent.host)),
+      'only the uncached names in the helper',
+    );
+    assert.ok(
+      lines.some(
+        (line) =>
+          line['msg'] === 'a DNS zone the check walks is not answering every name' &&
+          line.key === 'd:zone-b.test' &&
+          line['phase'] === 'mixed',
+      ),
+      'd:zone-b.test mixed',
+    );
+    resolver.stop();
+  });
+
+  it('K17: vouched keys at a cold start, D19 refusing their walks: ungated in the helper, past a key’s 3 and counted at no risk, and held to 3 once one sticks', async () => {
+    const { resolver, helper, calls, ask } = await make({ rate: COLD_BURST });
+    await scoutZoneA(calls, ask);
+    const names = [1, 2, 3, 4, 5, 6].map((i) => `dev-${String(i)}.zone-a.test`);
+    const waits = names.map((host) => ended(ask(host, { waitMs: 60_000 })));
+    await pollWithin(
+      1_000,
+      () => `zone a’s walks refused: ${String(resolver.gateHealth()?.walksDeferred)}`,
+      () => resolver.gateHealth()?.walksDeferred === names.length,
+      2,
+    );
+    await wait(0);
+    assert.equal(calls.length, 1, 'no walk heard: none on the probe’s lanes');
+    assert.deepEqual(
+      helper.inFlight().map((sent) => sent.host),
+      names.slice(0, 4),
+      'vouched: the 4 first lanes, past the 3 a key the walk does not vouch for holds',
+    );
+    assert.equal(resolver.riskSeen()?.atRisk, 0, 'ungated: none of them at risk');
+    // One sticks: the key is no longer vouched, so it is held to 3 until that one ends.
+    helper.last('dev-1.zone-a.test').stuck();
+    helper.last('dev-2.zone-a.test').answer();
+    await wait(0);
+    assert.equal(helper.inFlight().length, 3, 'the one that answered is not replaced');
+    assert.equal(helper.asksFor('dev-5.zone-a.test').length, 0);
+    helper.last('dev-1.zone-a.test').answer();
+    await pollWithin(1_000, 'vouched again: the rest start', () => helper.asks.length === 6, 2);
+    // Three said stuck and the fourth answering after them: the key answers in the helper, but
+    // the walk vouches for it no more, so its 3 hold, and a check behind them fails at once.
+    for (const host of ['dev-3', 'dev-4', 'dev-5']) helper.last(`${host}.zone-a.test`).stuck();
+    helper.last('dev-6.zone-a.test').answer();
+    await wait(0);
+    const held = await failed(ask('dev-7.zone-a.test', { waitMs: 2_000 }));
+    assert.equal(held.code, RESOLVER_STUCK, held.message);
+    assert.match(
+      held.message,
+      /\(dev-3\.zone-a\.test, dev-4\.zone-a\.test, dev-5\.zone-a\.test\): the DNS check does not vouch for zone-a\.test now, so it holds at most 3 of the helper’s lanes; it stays queued$/u,
+    );
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.answer();
+      await wait(0);
+    }
+    for (const got of waits) assert.equal(await got, true);
+    resolver.stop();
+  });
+
+  it('P-478: the check turned off, a key it heard is vouched no more and no lane is kept: held to 3, and a never-seen key’s first look takes the fourth, as system mode’s does', async () => {
+    const { resolver, helper, policy, calls, ask } = await make();
+    await scoutZoneA(calls, ask);
+    policy.off = { code: 'env', why: 'the test turned the check off' };
+    const names = [1, 2, 3, 4, 5].map((i) => `dev-${String(i)}.zone-a.test`);
+    const waits = names.map((host) => ended(ask(host, { waitMs: 60_000 })));
+    await pollWithin(1_000, 'zone a in the helper', () => helper.inFlight().length === 3, 2);
+    await wait(0);
+    assert.deepEqual(
+      helper.inFlight().map((sent) => sent.host),
+      names.slice(0, 3),
+      'its walk heard it, but the check is off: held to 3',
+    );
+    const other = ended(ask('dev.k0.zone-b.test', { waitMs: 60_000 }));
+    await pollWithin(
+      1_000,
+      () =>
+        `the never-seen key asked: ${helper
+          .inFlight()
+          .map((s) => s.host)
+          .join(', ')}`,
+      () => helper.asksFor('dev.k0.zone-b.test').length === 1,
+      2,
+    );
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.answer();
+      await wait(0);
+    }
+    assert.equal(await other, true);
+    for (const got of waits) assert.equal(await got, true);
+    resolver.stop();
+  });
+
+  it('P-478: a name its recursor caches, answering in the helper, does not lift its zone’s 3, check on: a vouched zone takes the fourth first lane at once', async () => {
+    const { resolver, helper, asker, calls, ask } = await make({ rate: COLD_BURST });
+    asker.rule = (_server, name) => (name.startsWith('dev-s') ? 'silent' : 'answer');
+    await scoutZoneA(calls, ask);
+    // Zone b's cached name, its walk refused, answers in the helper: its key is not quiet.
+    const cached = ask('dev-c0.zone-b.test', { waitMs: 60_000 });
+    await pollWithin(1_000, 'in the helper', () => helper.asks.length === 1, 2);
+    helper.last('dev-c0.zone-b.test').answer();
+    assert.deepEqual(await cached, A);
+    const zoneB = (): number =>
+      helper.inFlight().filter((sent) => sent.host.endsWith('.zone-b.test')).length;
+    const uncached = [0, 1, 2, 3, 4].map((i) =>
+      ended(ask(`dev-s${String(i)}.zone-b.test`, { waitMs: 60_000 })),
+    );
+    // Its walk and theirs refused: each routed to the helper unwalked.
+    await pollWithin(
+      1_000,
+      () => `zone b’s walks refused: ${String(resolver.gateHealth()?.walksDeferred)}`,
+      () => resolver.gateHealth()?.walksDeferred === 6,
+      2,
+    );
+    await wait(0);
+    assert.equal(zoneB(), 3, 'held to 3 though it answered there, not the 4 first lanes');
+    const answering = ended(ask('dev-1.zone-a.test', { waitMs: 60_000 }));
+    await pollWithin(
+      1_000,
+      () =>
+        `zone a asked in the helper: ${helper
+          .inFlight()
+          .map((s) => s.host)
+          .join(', ')}`,
+      () => helper.asksFor('dev-1.zone-a.test').length === 1,
+      2,
+    );
+    assert.equal(zoneB(), 3);
+    helper.last('dev-1.zone-a.test').answer();
+    assert.equal(await answering, true);
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+      assert.ok(zoneB() <= 3);
+    }
+    for (const got of uncached) assert.equal(await got, false);
+    resolver.stop();
+  });
+
+  it('P-478: many small silent keys, check on: they hold at most 3 first lanes, and a vouched zone takes the fourth at once', async () => {
+    const { resolver, helper, calls, ask } = await make({ rate: COLD_BURST });
+    await scoutZoneA(calls, ask);
+    // Six keys of one name each: no key's 3 can bind, and each is a never-seen key's first look.
+    const keys = [0, 1, 2, 3, 4, 5].map((i) => `dev.k${String(i)}.zone-b.test`);
+    const silentOnes = keys.map((host) => ended(ask(host, { waitMs: 60_000 })));
+    await pollWithin(
+      1_000,
+      () => `the keys’ walks refused: ${String(resolver.gateHealth()?.walksDeferred)}`,
+      () => resolver.gateHealth()?.walksDeferred === keys.length,
+      2,
+    );
+    await wait(0);
+    const silentNow = (): number =>
+      helper.inFlight().filter((sent) => keys.includes(sent.host)).length;
+    assert.equal(silentNow(), 3, 'the fourth first lane kept for a zone the walk heard');
+    const answering = ended(ask('dev-1.zone-a.test', { waitMs: 60_000 }));
+    await pollWithin(
+      1_000,
+      () =>
+        `zone a asked in the helper: ${helper
+          .inFlight()
+          .map((s) => s.host)
+          .join(', ')}`,
+      () => helper.asksFor('dev-1.zone-a.test').length === 1,
+      2,
+    );
+    assert.equal(silentNow(), 3);
+    helper.last('dev-1.zone-a.test').answer();
+    assert.equal(await answering, true);
+    // Its 3 said stuck, another such key's check fails at once, naming the lane kept.
+    for (const sent of helper.inFlight()) sent.stuck();
+    const refused = await failed(ask('dev.k6.zone-b.test', { waitMs: 2_000 }));
+    assert.equal(refused.code, RESOLVER_STUCK, refused.message);
+    assert.match(
+      refused.message,
+      /: the lookup helper keeps its last lane for names the DNS check has heard answer, or that answer there; it stays queued$/u,
+    );
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+      assert.ok(silentNow() <= 3);
+    }
+    for (const got of silentOnes) assert.equal(await got, false);
+    resolver.stop();
   });
 });
 

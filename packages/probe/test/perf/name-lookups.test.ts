@@ -5087,9 +5087,14 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       WORLD_ARMS.map((arm) => arm.name).sort(),
       'the judge knows every arm',
     );
-    // The check off: the helper's 3 a key is the check's, so `partial` does not hold it to them.
+    // The check off: the helper's 3 a key is the helper's, not the check's, so `partial` holds the
+    // silent zone to them still (`P-478`), and at 3 is clean.
     assert.deepEqual(
       judgeWorld({ ...clean('partial', 'gate'), checkOn: false, helperPeak: { silent: 5 } }),
+      ['the silent zone held 5 of the helper’s lanes at once, past 3'],
+    );
+    assert.deepEqual(
+      judgeWorld({ ...clean('partial', 'gate'), checkOn: false, helperPeak: { silent: 3 } }),
       [],
     );
     // `spread10` at the edge of telling the two apart: system answered 180 of 3,000, so the gate

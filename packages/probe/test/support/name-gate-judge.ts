@@ -561,6 +561,11 @@ function silentOffProbeLanes(facts: WorldFacts, said: (violation: string) => voi
   }
 }
 
+/**
+ * The silent zone held to `QUIET_KEY_LANES` of the helper's lanes at once: the helper's cap, which
+ * holds with the check on and off (`P-478`), since the helper judges a key by what its own lookups
+ * did, whatever routed them there.
+ */
 function silentHelperCapped(facts: WorldFacts, said: (violation: string) => void): void {
   if (count(facts.helperPeak, 'silent') > QUIET_KEY_LANES) {
     said(
@@ -903,7 +908,7 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
     if (facts.mode === 'system') return;
     allAnswered(facts, said, ['answering', 'cached']);
     silentOffProbeLanes(facts, said);
-    if (facts.checkOn) silentHelperCapped(facts, said);
+    silentHelperCapped(facts, said);
   },
   steady(facts, said) {
     allAnswered(facts, said, ['answering']);

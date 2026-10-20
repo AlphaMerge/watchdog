@@ -326,37 +326,44 @@ describe('gate mode routes by the helper’s state (P-432 S3, §1.3)', () => {
 describe('the helper’s lanes (P-432 S3, §1.8)', () => {
   it('K9: P-426’s caps in the helper: first at most 4, first and refresh 5, the retry lane its own', async () => {
     const { helper, ask, clock } = make();
-    // zone-a answers in the helper, so its lookups are ungated.
-    const seed = ask('a0.zone-a.test');
-    helper.last('a0.zone-a.test').answer();
-    await seed;
-    const retry = outcome(ask('r.zone-a.test', 4, { waitMs: 60_000 }));
-    helper.last('r.zone-a.test').fail('EAI_AGAIN');
+    // Four zones answer in the helper, so their lookups are ungated. With the check off each is
+    // held to 3 (`P-478`), so the lookups are spread over them, for the class's caps to bind.
+    for (const host of ['a0.zone-a.test', 'c0.zone-c.test', 'd0.zone-d.test', 'e0.zone-e.test']) {
+      const seed = ask(host);
+      helper.last(host).answer();
+      await seed;
+    }
+    const retry = outcome(ask('r.zone-e.test', 4, { waitMs: 60_000 }));
+    helper.last('r.zone-e.test').fail('EAI_AGAIN');
     await retry;
-    const firsts = Array.from({ length: 6 }, (_, i) =>
-      outcome(ask(`f${String(i)}.zone-a.test`, 4, { waitMs: 60_000 })),
-    );
+    const firsts = [
+      'f0.zone-a.test',
+      'f1.zone-a.test',
+      'f2.zone-c.test',
+      'f3.zone-c.test',
+      'f4.zone-d.test',
+      'f5.zone-d.test',
+    ].map((host) => outcome(ask(host, 4, { waitMs: 60_000 })));
     assert.equal(helper.inFlight().length, 4, 'four first lanes');
     clock.now = ANSWER_MS;
     await ask('a0.zone-a.test');
     assert.equal(helper.inFlight().length, 5, 'a refresh takes the fifth');
-    void outcome(ask('b0.zone-a.test', 4, { waitMs: 60_000 }));
+    void outcome(ask('b0.zone-d.test', 4, { waitMs: 60_000 }));
     clock.now = ANSWER_MS + 1;
     await ask('a0.zone-a.test');
     assert.equal(helper.inFlight().length, 5, 'no sixth for first lookups and refreshes');
     clock.now = 10_000 + ANSWER_MS;
-    const again = outcome(ask('r.zone-a.test', 4, { waitMs: 60_000 }));
+    const again = outcome(ask('r.zone-e.test', 4, { waitMs: 60_000 }));
     assert.equal(helper.inFlight().length, 6, 'the retry lane, on the kept token');
-    for (const sent of helper.inFlight()) sent.answer();
-    await settled();
-    for (const sent of helper.inFlight()) sent.answer();
-    await settled();
-    for (const sent of helper.inFlight()) sent.answer();
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.answer();
+      await settled();
+    }
     assert.ok((await again).ok);
     for (const got of await Promise.all(firsts)) assert.ok(got.ok);
   });
 
-  it('K1: a warm zone of 500 names gone silent, check off: at most 4 of its refreshes run, 3 once it has given up, and another zone’s first lookup starts at once', async () => {
+  it('K1: a warm zone of 500 names gone silent, check off: at most 3 of its refreshes run, before it gives up and after, and another zone’s first lookup starts at once', async () => {
     const { helper, ask, clock, keys } = make();
     const names = Array.from({ length: 500 }, (_, i) => `dev-${String(i)}.zone-b.test`);
     // Warm: every name asked and answered in the helper.
@@ -373,17 +380,18 @@ describe('the helper’s lanes (P-432 S3, §1.8)', () => {
       assert.deepEqual(await ask(name), A, `${name} served its kept answer`);
       most = Math.max(most, helper.inFlight().length);
     }
-    assert.equal(most, 4, 'the 4 refresh lanes, and never a fifth');
+    // Answering in the helper, but with the check off nothing vouches for it: held to 3, not the
+    // 4 refresh lanes (`P-478`).
+    assert.equal(most, 3, 'its key’s 3, and never a fourth');
     // The child says each has run past its bound: the zone's key is quiet again and its refresh
-    // unit capped. One gives up, EAI_AGAIN after stuck, and none starts in its place: a quiet key
-    // runs 3.
+    // unit capped. One gives up, EAI_AGAIN after stuck, and one starts in its place, to 3.
     for (const sent of helper.inFlight()) sent.stuck();
     assert.equal(keys.capped('d:zone-b.test', 'refresh'), true);
     const [first, second] = helper.inFlight();
     first?.fail('EAI_AGAIN');
     await settled();
     assert.equal(keys.quiet('d:zone-b.test'), true);
-    assert.equal(helper.inFlight().length, 3, 'none starts for the one that gave up');
+    assert.equal(helper.inFlight().length, 3, 'one starts for the one that gave up, to 3');
     second?.fail('EAI_AGAIN');
     await settled();
     assert.equal(helper.inFlight().length, 3, 'one starts for the next, to 3 and no more');
@@ -508,9 +516,53 @@ describe('the helper’s lanes (P-432 S3, §1.8)', () => {
     helper.last(name(3)).answer();
     await settled();
     assert.equal(keys.capped('d:zone-b.test', 'first'), false);
-    assert.equal(helper.inFlight().length, 4, 'the class answered: its cap is the class’s');
-    for (const sent of helper.inFlight()) sent.answer();
+    assert.equal(
+      helper.inFlight().length,
+      3,
+      'the class answered, and the key, which nothing vouches for with the check off, holds 3 (P-478)',
+    );
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.answer();
+      await settled();
+    }
     await Promise.all(waits);
+  });
+
+  it('P-478, check off: a name its recursor still caches answering in the helper does not lift its zone’s 3, and an answering zone is asked beside the silent names at once', async () => {
+    const { helper, ask, keys } = make();
+    // Zone p: one name answers at once, the recursor's cache, and five hang. Asked at one instant,
+    // the answering name first, as a cold start's first second asks them.
+    const cached = ask('dev-0.zone-p.test');
+    assert.equal(helper.asksFor('dev-0.zone-p.test').length, 1);
+    helper.last('dev-0.zone-p.test').answer();
+    assert.deepEqual(await cached, A);
+    assert.equal(keys.quiet('d:zone-p.test'), false, 'its answer lifts the key’s quiet');
+    const hanging = [1, 2, 3, 4, 5].map((i) =>
+      outcome(ask(`dev-${String(i)}.zone-p.test`, 4, { waitMs: 60_000 })),
+    );
+    const zoneP = (): number =>
+      helper.inFlight().filter((sent) => sent.host.endsWith('.zone-p.test')).length;
+    assert.equal(zoneP(), 3, 'held to 3, not the 4 first lanes');
+    // Zone a: eight answering names, each asked while nothing of zone p is stuck, and answered.
+    for (let i = 0; i < 8; i += 1) {
+      const host = `dev-${String(i)}.zone-a.test`;
+      const answering = ask(host, 4, { waitMs: 60_000 });
+      assert.equal(helper.asksFor(host).length, 1, `${host} asked at once`);
+      assert.ok(zoneP() <= 3);
+      helper.last(host).answer();
+      assert.deepEqual(await answering, A, host);
+    }
+    assert.equal(
+      helper.inFlight().some((sent) => sent.stuckSaid),
+      false,
+      'nothing was said stuck meanwhile',
+    );
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await settled();
+      assert.ok(zoneP() <= 3);
+    }
+    for (const got of await Promise.all(hanging)) assert.ok(!got.ok);
   });
 
   it('Q1, Q2: with no token free a lookup stays queued, and its check fails at once only while every holder is stuck', async () => {
@@ -2077,11 +2129,15 @@ describe('what the gate’s refusals cost, as its summary counts it (P-463 fix r
   /** zone-a answered in the helper, so its lookups are ungated, and its four first lanes full. */
   async function lanesFull(made: ReturnType<typeof make>) {
     const { helper, ask } = made;
-    const seed = ask('a0.zone-a.test');
-    helper.last('a0.zone-a.test').answer();
-    await seed;
-    const firsts = [0, 1, 2, 3].map((i) =>
-      outcome(ask(`f${String(i)}.zone-a.test`, 4, { waitMs: 60_000 })),
+    // Two zones that answer in the helper: with the check off each holds 3 (`P-478`), so the
+    // four first lanes take two of each.
+    for (const host of ['a0.zone-a.test', 'c0.zone-c.test']) {
+      const seed = ask(host);
+      helper.last(host).answer();
+      await seed;
+    }
+    const firsts = ['f0.zone-a.test', 'f1.zone-a.test', 'f2.zone-c.test', 'f3.zone-c.test'].map(
+      (host) => outcome(ask(host, 4, { waitMs: 60_000 })),
     );
     assert.equal(helper.inFlight().length, 4, 'the four first lanes');
     return firsts;

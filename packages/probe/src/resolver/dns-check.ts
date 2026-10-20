@@ -527,6 +527,18 @@ export class DnsCheck {
     return 1;
   }
 
+  /**
+   * Whether the walk vouches for a key (D23, `P-478`): the check on, and the key's phase heard and
+   * fresh (`freshUntil`). A read: it moves no key. The resolver adds D23's third condition, none
+   * of the key's lookups past `STUCK_MS` on either lane set, which only it sees.
+   */
+  vouches(key: string): boolean {
+    if (this.state() !== 1) return false;
+    const state = this.#keys.get(key);
+    const now = this.#now();
+    return state !== undefined && this.#phase(state, now) === 'heard' && state.freshUntil > now;
+  }
+
   stats(): DnsCheckStats {
     const now = this.#now();
     let silentKeys = 0;
