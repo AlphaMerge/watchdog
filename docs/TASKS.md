@@ -32700,6 +32700,85 @@ because each is a decision rather than a defect:
         control outside the form while the check is out stays there after the refusal. Mutation:
         the guard removed 1.
 
+      **Walked in a browser, with a keyboard, light and dark, 2026-10-20. Left unticked: the
+      screen-reader pass (VoiceOver) is still owed, and is the user's.** Chromium (Playwright),
+      1280 wide, against a scratch core of `origin/main` serving the built UI itself, on a scratch
+      database and data directory, both gone since; never `ms-server` or its database. A device
+      `u23-test-device` at 192.0.2.10 under a group under a probe. Keyboard only: Tab, Shift+Tab,
+      Enter, Space, letter type-ahead on the kind select, Escape. Web only.
+      - **Walked.** All five kinds stored (SNMP, SSH, HTTP, Mail, Database) with `test-user` and
+        `test-secret-*` values and TEST-NET targets; edited; a secret replaced, kept, cleared and
+        kept again; a save that widens the targets asked about, gone back from, and confirmed
+        (the community cleared, as it says); a set removed after *Keep it* once; Cancel from a
+        new set and from an edit; a Mail set with no bounds stored on the group and seen here as
+        inherited, with its *No bounds* flag. Focus order follows the page in every state; every
+        stop has the 2 px accent outline; after each action focus lands where `U-21` and the
+        notes above say — the form's heading on open, the notice after a save or a removal, the
+        confirmation when one is asked, *Save changes* after *Go back*, Edit or Add after Cancel,
+        Remove after *Keep it*.
+      - **Both edges, in a browser.** An allowed target typed to `x` and deleted: the box is empty
+        and stays focused, *1 field needs attention*, Save disabled, and on Tab the box is
+        `aria-invalid` and described by "cannot be empty: type a value, or remove the entry". A
+        target that does not parse, sent with Enter from its box: the core refuses the check (400),
+        the region above the buttons says why with its correlation id, the entry is `aria-invalid`,
+        and focus is on *Save changes*, in both themes.
+      - **Write-only, checked on the wire too.** No response read during the walk — the list, each
+        check, each write, the group's — carried a `test-secret` value; a set says which secrets
+        it holds by name (`secretsSet`) and nothing else, and the form's boxes open empty.
+      - **Measured** from computed styles, over the tab in each state above (the list, the form
+        with an entry emptied, the refused preview, a secret cleared, a save asked about, a
+        removal asked about), disabled controls excluded as `U-11` did: text at worst 5.45:1
+        light and 5.86:1 dark, none under 4.5; control edges at worst 3.29:1 light (*Keep it* on
+        the removal's fill) and 3.96:1 dark; focus outline at worst 5.07:1 light and 5.31:1 dark;
+        the refusal and the problem paragraph 6.41:1 light and 6.85:1 dark, the invalid box's edge
+        the same; *removed on save* 5.53:1 and 6.61:1; *set, write-only* 6.39:1 and 7.07:1. Those
+        are after the fixes below.
+      - **Found and fixed, each with a test that fails without it** (three commits, web only):
+        1. **The theme never followed the system or the reader on a page the core served.** The
+           script setting `data-theme` before first paint was inline in `index.html`, and the core
+           serves it under `default-src 'self'`, which refuses inline script; the console said so,
+           and the Vite server, which sends no policy, hid it. Dark from the system, and dark
+           chosen and reloaded, both opened light. Now `public/theme-07a2a7d5.js`, the head's first
+           script, classic and not deferred; named by its hash because the core caches files
+           beside `index.html` for a year. `theme-boot.test.ts` (7); mutations: inline again 7,
+           the system overriding a reader's light (renamed to its own hash) 1.
+        2. **Six buttons were edged in the hairline**, 1.36:1 light and 1.44:1 dark — Edit,
+           Remove, Add, Cancel, *Keep it*, *Go back* — where `index.css` holds every pressable edge
+           to 3:1 with `--ms-control-border`. Now that grey.
+        3. **A list entry's box named `border-subtle`, which is no token**, so Tailwind made no
+           rule and it was drawn in the text colour: black on paper, near-white on charcoal. Now
+           the hairline. Tests for 2 and 3 (`credentials-panel.test.tsx`, "as drawn"): no class
+           names a colour `index.css` lacks; no control is edged in the hairline in the list, a
+           removal asked about, the form or a save asked about. Mutations 1 and 1.
+        4. **A stored secret's buttons left focus on the wrong thing, and Clear said nothing at the
+           field.** Replace left focus on *Keep the current one*, which undoes it: React kept the
+           pressed button's node for the one in its place. Clear left the control reading "set,
+           write-only" with the same buttons; only the line at the foot of the form said the
+           secret would go. Now Replace focuses the box, Keep returns to Replace, Clear turns the
+           control to *removed on save* with a focused *Keep the current one* described by it,
+           which returns to Clear; each button keyed. `SchemaForm`'s, so a sensor's write-only
+           parameters have it too. Tests (56 in the file): two; mutations, each failing: no focus
+           owed after Replace, Clear and either Keep 4, a cleared secret drawn as stored 1.
+        Web suite 92 files, 1,240 tests, green.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** Escape does not dismiss the
+        removal or the save confirmation. They are groups in the page, not dialogs, focus is
+        never trapped in them, *Keep it* and *Go back* are one Tab away, and no inline
+        confirmation anywhere in the UI takes Escape; one that did here would be the odd one out.
+      - **Decided 2026-10-20 by Claude, under the user's delegation:** the theme script became a
+        file named by its hash, not a `sha256-` source added to the core's policy. The policy stays
+        `'self'` with nothing derived from a build, and the fix stays in the package that has the
+        script; the test keeps the name honest.
+      - **Seen, not this ticket's, for whoever orders the queue to file.** `RediscoveryPanel.tsx`
+        (five buttons) and `DiscoveryView.tsx` (one) edge buttons in the hairline as this tab did;
+        "as drawn" holds this tab only. The credential kinds' `allowedTargets` and SSH `hostKeys`
+        items have no `title` (`packages/sensors`), so entries read "Allowed targets 1", "Remove
+        Allowed targets 1" and "Add allowed targets". Kind descriptions carry Markdown backticks
+        shown as typed (HTTP's token, Database's `SELECT`).
+      - **For the screen-reader pass.** Replace, Clear and Keep are named by their text alone, so
+        a form with three secrets (SNMP) says "Replace" three times; whether the field's label
+        before them is enough when tabbing is the pass's to judge. The notice after a save is a
+        polite status that is also focused.
+
 - [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
       sensor the reader can see — exactly a probe getting its first sensor — sends no frame, so
