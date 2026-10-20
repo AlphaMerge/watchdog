@@ -55,11 +55,14 @@ Windows Installer refuses; Windows is release 1.1, and that is `H-49`.
 Each of these is a yes, or the cut waits.
 
 1. **`P-432` has landed whole**: S1 to S8 on `origin/main`, S7 with its findings file
-   (`2026-10-20-name-lookups-gated.md` in `docs/findings/`); and the four things the coordinator
+   (`2026-10-20-name-lookups-gated.md` in `docs/findings/`); the four things the coordinator
    put in 1.0 before this cut on 2026-10-20 (`P-432`'s outcome in `TASKS.md`): `P-453` (a child
    killed from outside poisons no name), `P-460` (the differential records the check's questions
    too), `P-461` (boxes that show the check off), and S6's re-check gaps (no avoided name started
-   from the probe's queues, or settled after `stop()`). And `P-467`: S6's eight Probe Health
+   from the probe's queues, or settled after `stop()`); and the three it put in after them (its
+   decisions for rc.3, also under `P-432`): `P-462` (the differential replays §7.5's other rows),
+   `P-463` (names in flight when the helper goes quiet kept off the probe's lanes) and `P-465`
+   (`spread10` and `walkrate`, which step 0.7 runs). And `P-467`: S6's eight Probe Health
    fields out by the user's decision of 2026-10-18 (OPEN-5), so the cut speaks protocol 38 with
    six name fields, and the field test reads the rest from the probe's hourly summary. `P-454`
    stays open: it is a known limit in the release notes.
@@ -69,7 +72,7 @@ Each of these is a yes, or the cut waits.
    git fetch -q origin
    git log --oneline origin/main | grep -E 'P-432 S[0-9]'    # S1 to S8, each at least once
    git cat-file -e origin/main:docs/findings/2026-10-20-name-lookups-gated.md && echo "S7's findings"
-   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461|P-467) '    # 4
+   git show origin/main:docs/TASKS.md | grep -cE '^- \[x\] \*\*(P-453|P-460|P-461|P-462|P-463|P-465|P-467) '    # 7
    git show origin/main:packages/shared/src/protocol/messages.ts | grep -c 'PROTOCOL_VERSION = 38;'    # 1
    ```
 
@@ -252,8 +255,20 @@ Each of these is a yes, or the cut waits.
    perl -e 'alarm 660; exec @ARGV' ./scripts/dev.sh "timeout 600 npx tsc -b"
    perl -e 'alarm 12300; exec @ARGV' ./scripts/dev.sh "timeout 12180 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_RESOLVER=system,gate MS_DNS_WARM_MINUTES=7 MS_DNS_COLD_MINUTES=7 MS_DNS_STEADY_MINUTES=10 MS_DNS_ARMS=world/slow,world/warmzone,world/zone,world/partial,world/steady,world/forwarder,P1,P2,P3,P5,P5b,P6,world/spread10,world/addresses,world/walkrate node --test --test-concurrency=1 packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups.out
    perl -e 'alarm 1440; exec @ARGV' ./scripts/dev.sh "timeout 1380 sh -c 'sleep 180; node scripts/perf-conditions.mjs; MS_DNS_CHECK=off MS_DNS_RESOLVER=gate MS_DNS_COLD_MINUTES=7 MS_DNS_ARMS=world/partial node --test packages/probe/dist/test/perf/name-lookups.test.js'" 2>&1 | tee /tmp/rc3-diff/name-lookups-check-off.out
+   for row in \
+     'two names in five silent, twenty keys of ten, cold, the check off: system' \
+     'two names in five silent, twenty keys of ten, cold, the check off: gate (check off)' \
+     'every device given as an address, at walkrate’s load: walkrate’s baseline: gate' \
+     'twice the names, one in ten silent, one sensor a device at twice the interval, cold: gate' \
+     'held against spread10, system' 'held against addresses, gate'; do
+     grep -qF "${row}" /tmp/rc3-diff/name-lookups.out || { echo "no row in the run: ${row}"; exit 1; }
+   done
    ```
 
+   The loop finds `P-465`'s rows: `spread10` in each mode, `addresses` and `walkrate`, and the two
+   lines that say what each was held against. Before `P-465`'s fix round 1, `MS_DNS_ARMS` skipped
+   a name no arm had, so a build without the arms ran none of them and still ended `fail 0`; the
+   test file now stops on such a name, and the loop is the check for a build before that.
    Both runs pass (`fail 0`, `cancelled 0`): each arm's bounds are asserted in the run, by
    `name-gate-judge.ts` (the findings file's *Asserted in every arm* and its table of arms say which
    and why), so a bound crossed fails its arm. The findings file has no full-size numbers yet (its
@@ -264,8 +279,10 @@ Each of these is a yes, or the cut waits.
    of the design's verdict for `gate` as the field test's setting (§9: the memory arms, the event
    loop's p99) stops the cut. That verdict also reads `spread10`'s event-loop p99 in each mode, with
    its lanes at risk, and `walkrate`'s against `addresses`', with its channels' busiest second
-   (`P-465`): the record gives them. Then, **however the block above ended**, `ms-server` is started
-   from the main checkout and verified: it runs `origin/main`, both services name that commit at
+   (`P-465`): the record gives them. `spread10`'s line held against `system` also says how many
+   answering checks `system` answered and how many the gate had to, and the arm fails where
+   `system` answered too few for its bound to tell the two apart. Then, **however the block above
+   ended**, `ms-server` is started from the main checkout and verified: it runs `origin/main`, both services name that commit at
    start, the probe connects, the log has no error line, and the API answers 401 without a
    credential. Unpause what was paused for the window (`docker unpause` on each).
 

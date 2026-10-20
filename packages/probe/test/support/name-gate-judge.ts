@@ -31,8 +31,10 @@ import { ANSWER_MS, type RiskSeen } from '../../src/resolver/name-resolver.js';
  * does, since `GIVEN_UP`'s words are only the resolver's for a name it did not hear.
  *
  * Two arms are held to another run of the same process (`baseline`), and fail without it
- * (`P-465`): `walkrate`'s event loop to the `addresses` arm's in its mode, and `spread10`'s
- * answering checks in gate mode to its own run in `system`.
+ * (`P-465`): `walkrate`'s event loop to the `addresses` arm's in its mode, both with the name
+ * check on and `walkrate` walking names; and `spread10`'s answering checks in gate mode to its own
+ * run in `system`, counted over the checks the wheel made due, a check the pool did not run being
+ * one not answered, and failed where `system` answered too few for the bound to tell them apart.
  */
 
 export type GateMode = 'system' | 'gate';
@@ -181,6 +183,16 @@ export interface WorldFacts {
     readonly lagAroundForkMs: readonly number[];
     readonly lagBaselineMs: number;
     readonly helperRssAt60s: number | undefined;
+    /**
+     * How long the helper's route read `down` after each kill, to the next or the arm's end, by
+     * the changes the resolver was handed: 0 while every respawn came within `HELPER_REJOIN_MS`.
+     */
+    readonly routeDownMs: readonly number[];
+    /**
+     * Answering checks failed by D27's refusal of a name in flight at an earlier loss (`P-453`),
+     * which only a route `down` lets through (`#gateRefusal`): read from the checks' own words.
+     */
+    readonly avoidedRefused: number;
   };
   /** P6: `getaddrinfo` asked on the probe's own lanes for the crash name: the probe would crash. */
   readonly probeCrashes?: number;
@@ -200,6 +212,11 @@ export interface WorldFacts {
   readonly namesWalked?: number;
   /** The answering group's checks that ran: answered, given up or failed otherwise. */
   readonly answeringResults?: number;
+  /**
+   * The answering group's checks the wheel made due that the pool did not run: refused for a full
+   * queue, or deferred behind their own sensor's check still running. Each is one not answered.
+   */
+  readonly answeringNotRun?: number;
   /** Probe Health's `lookupsInFlight` at its highest, sampled each second and at the drain. */
   readonly inFlightMax?: number;
   /** Gate mode: the helper's lanes at risk at a pick at their most, as the resolver kept them. */
@@ -213,18 +230,66 @@ export interface Baseline {
   readonly arm: string;
   readonly mode: GateMode;
   readonly eventLoopP99Ms: number | undefined;
-  /** Its answering checks that did not answer: given up, or failed any other way. */
+  /** Its answering checks the wheel made due: run, refused or deferred. */
+  readonly answeringChecks: number;
+  /** Of them, the ones that did not answer: given up, failed any other way, or not run. */
   readonly answeringNotAnswered: number;
 }
 
 /** What a run's facts give an arm held against it. */
 export function baselineOf(facts: WorldFacts): Baseline {
+  const notRun = facts.answeringNotRun ?? 0;
   return {
     arm: facts.arm,
     mode: facts.mode,
     eventLoopP99Ms: facts.eventLoopP99Ms,
+    answeringChecks: (facts.answeringResults ?? 0) + notRun,
     answeringNotAnswered:
-      count(facts.givenUp, 'answering') + count(facts.failedOtherwise, 'answering'),
+      count(facts.givenUp, 'answering') + count(facts.failedOtherwise, 'answering') + notRun,
+  };
+}
+
+/**
+ * `spread10`'s bound on the gate's answering checks not answered, from its run and `system`'s
+ * (`P-465`), counted over the checks the wheel made due, so that a check the pool refused or
+ * deferred is one not answered, and the noise does not shrink as fewer run.
+ */
+export interface Spread10Bound {
+  /** The gate's answering checks the wheel made due. */
+  readonly checks: number;
+  /** Of them, not answered: given up, failed otherwise, or not run. */
+  readonly notAnswered: number;
+  /** Of those, not run. */
+  readonly notRun: number;
+  /** `system`'s answering checks, and how many of them it answered. */
+  readonly systemChecks: number;
+  readonly systemAnswered: number;
+  /** `SPREAD10_NOISE` of the gate's checks. */
+  readonly noise: number;
+  /** The most the gate may leave not answered: `system`'s and the noise. */
+  readonly bound: number;
+  /** The fewest the gate must answer to pass: at 0 or less, the bound holds by construction. */
+  readonly mustAnswer: number;
+}
+
+/** `spread10`'s bound, or undefined where the run did not count its answering checks. */
+export function spread10Bound(facts: WorldFacts, base: Baseline): Spread10Bound | undefined {
+  const results = facts.answeringResults;
+  const notRun = facts.answeringNotRun;
+  if (results === undefined || notRun === undefined) return undefined;
+  const checks = results + notRun;
+  const noise = Math.ceil(SPREAD10_NOISE * checks);
+  const bound = base.answeringNotAnswered + noise;
+  return {
+    checks,
+    notAnswered:
+      count(facts.givenUp, 'answering') + count(facts.failedOtherwise, 'answering') + notRun,
+    notRun,
+    systemChecks: base.answeringChecks,
+    systemAnswered: base.answeringChecks - base.answeringNotAnswered,
+    noise,
+    bound,
+    mustAnswer: checks - bound,
   };
 }
 
@@ -294,6 +359,13 @@ const RISK_ADMITTED_MAX = RISK_T + RISK_F;
  * across (`P-465`): a strict bound is a coin flip between equals. Three times that spread.
  */
 export const SPREAD10_NOISE = 0.03;
+/**
+ * `spread10`: the bound must fail a gate that answered fewer than this share of what `system`
+ * answered. Where `system` answers little, `system`'s count and the noise reach about every check,
+ * and a gate that answered almost none would pass (`P-465`'s first review): the run is then not a
+ * comparison, and is failed as one that could not tell the gate from `system`.
+ */
+export const SPREAD10_TELLS = 0.5;
 
 type Rule = (facts: WorldFacts, said: (violation: string) => void) => void;
 
@@ -388,6 +460,15 @@ function respawned(facts: WorldFacts, said: (violation: string) => void, gated: 
   }
   if (respawn.helperRssAt60s === undefined || respawn.helperRssAt60s > HELPER_RSS_MAX) {
     said(`the helper’s resident set at 60 s was ${String(respawn.helperRssAt60s)}`);
+  }
+  // Why answering checks failed, where D27 did it: a name in flight at an earlier kill is avoided
+  // until ten minutes after the helper is next up (`P-453`), and refused while the route is `down`,
+  // which a respawn later than `HELPER_REJOIN_MS` after its loss opens. The route read `down` with
+  // nothing refused is not judged: the gate is then only as it would be at any slow start.
+  if (respawn.avoidedRefused > 0) {
+    said(
+      `${String(respawn.avoidedRefused)} answering checks refused as names in flight at an earlier kill, the route down ${respawn.routeDownMs.map((ms) => `${String(Math.round(ms))} ms`).join(', ')} after each kill`,
+    );
   }
 }
 
@@ -633,6 +714,10 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
   addresses(facts, said) {
     // `walkrate`'s baseline (round 2's row): every device given as an address, so nothing resolved.
     allAnswered(facts, said, ['answering']);
+    // The check on, as in `walkrate`: its canary and its timers are the harness the p99 is net of.
+    if (!facts.checkOn) {
+      said('addresses is walkrate’s baseline with the name check on, and the check was off');
+    }
     if (facts.inFlightMax === undefined) said('lookupsInFlight was not measured');
     else if (facts.inFlightMax > 0) {
       said(
@@ -680,6 +765,12 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
         `the walk opened ${String(channels)} channels in one second, past ${String(CHANNELS_A_SECOND)}`,
       );
     }
+    // What the arm is for: with the check off, or nothing walked, both p99s lack the walk.
+    if (!facts.checkOn) said('walkrate measures the walk, and the name check was off');
+    if (facts.namesWalked === undefined) said('the walk’s questions for names were not measured');
+    else if (facts.namesWalked === 0) {
+      said('walkrate walked no name, so its event loop was held to the baseline without the walk');
+    }
   },
   spread10(facts, said) {
     // `system`'s run is the gate's bound, and holds only every arm's.
@@ -691,13 +782,17 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
         'spread10 was not measured in system mode, so the gate’s answering checks were held to nothing',
       );
     } else {
-      const notAnswered =
-        count(facts.givenUp, 'answering') + count(facts.failedOtherwise, 'answering');
-      const noise = Math.ceil(SPREAD10_NOISE * (facts.answeringResults ?? 0));
-      if (facts.answeringResults === undefined) said('the answering checks run were not counted');
-      else if (notAnswered > base.answeringNotAnswered + noise) {
+      const held = spread10Bound(facts, base);
+      const noise = `${String(SPREAD10_NOISE * 100)}%`;
+      if (held === undefined) said('the answering checks run and not run were not counted');
+      else if (held.mustAnswer < SPREAD10_TELLS * held.systemAnswered) {
+        // Before the bound itself: a bound that cannot fail would pass it whatever the gate did.
         said(
-          `${String(notAnswered)} answering checks not answered in the gate, past system’s ${String(base.answeringNotAnswered)} and ${String(noise)} (${String(SPREAD10_NOISE * 100)}% of ${String(facts.answeringResults)})`,
+          `spread10 could not tell the gate from system: system answered ${String(held.systemAnswered)} of ${String(held.systemChecks)} answering checks, and with ${String(held.noise)} of noise (${noise} of ${String(held.checks)}) the gate passes answering ${String(Math.max(0, held.mustAnswer))}, under ${String(SPREAD10_TELLS * 100)}% of that`,
+        );
+      } else if (held.notAnswered > held.bound) {
+        said(
+          `${String(held.notAnswered)} answering checks not answered in the gate (${String(held.notRun)} of them not run), past system’s ${String(held.systemChecks - held.systemAnswered)} and ${String(held.noise)} (${noise} of ${String(held.checks)})`,
         );
       }
     }
