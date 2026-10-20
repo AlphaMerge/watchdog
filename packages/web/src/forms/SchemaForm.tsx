@@ -1,4 +1,13 @@
-import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { InlineMarkdown } from '../components/InlineMarkdown';
 import {
   existingEntry,
@@ -171,9 +180,18 @@ interface FieldProps {
 function Field(props: FieldProps): React.JSX.Element {
   const { field } = props;
   if (field.kind === 'array' && field.items !== undefined) {
-    return <ArrayField {...props} items={field.items} />;
+    // **A list that is a secret is kept, replaced or cleared whole** (`U-23` review), as the core
+    // keeps it: it never returns the entries, so "Nothing here yet." was a list it would not show,
+    // and an entry added there replaced every stored one without a word.
+    return field.writeOnly ? (
+      <SecretList {...props} items={field.items} />
+    ) : (
+      <ArrayField {...props} items={field.items} />
+    );
   }
-  if (field.kind === 'object') {
+  // An object that is a secret is one value the core never returns, not fields to lay out: it is
+  // drawn as the JSON box a free-form object gets, inside the secret's keep, replace and clear.
+  if (field.kind === 'object' && !field.writeOnly) {
     const within = existingWithin(props.existing, field.name);
     return (
       <fieldset className="border border-border px-3 pb-3 pt-1">
@@ -298,10 +316,10 @@ function Control({
             field={field}
             isSet={isSet}
             replacing={beingReplaced}
-            value={typeof value === 'string' ? value : ''}
-            cleared={value === null}
+            value={value}
             disabled={disabled}
             describedBy={describedBy}
+            invalid={problems.length > 0}
             onReplace={onReplace}
             onValue={(next) => {
               set(next);
@@ -379,7 +397,15 @@ function Control({
  * one of these — a transaction's steps run in order — so it has to be changeable; and buttons are
  * reachable from a keyboard, which `U-11`'s WCAG pass requires and a drag target is not.
  */
-function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): React.JSX.Element {
+function ArrayField({
+  items,
+  after,
+  ...props
+}: FieldProps & {
+  items: JsonSchema;
+  /** Drawn in the list's fieldset after *Add*: a secret list's *Keep the current ones*. */
+  after?: ReactNode;
+}): React.JSX.Element {
   const { field, values, onChange, disabled, moveTouched } = props;
   // **The entry's own noun, where the item schema gives one.** The fieldset is named for the
   // parameter — "Steps" — and an entry inside it wants the singular. Nothing here can derive one
@@ -516,6 +542,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
       <button
         ref={add}
         type="button"
+        data-entry-add=""
         disabled={disabled || atLimit}
         onClick={() => {
           replace([...entries, newEntryFor(items)], keysFor(keys, entries.length + 1));
@@ -529,6 +556,7 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
           {String(field.schema.maxItems)} is the most this parameter takes.
         </span>
       )}
+      {after}
     </fieldset>
   );
 }
@@ -656,6 +684,41 @@ type WriteOnlyPart = 'box' | 'replace' | 'clear' | 'keep';
 
 const WRITE_ONLY_BUTTON = 'border border-control px-2 py-1 text-xs text-text-muted hover:text-text';
 
+/** A secret's buttons, and the one focus is owed to once the control has changed shape. */
+interface OwedFocus {
+  readonly owe: (part: WriteOnlyPart) => void;
+  readonly replace: RefObject<HTMLButtonElement | null>;
+  readonly clear: RefObject<HTMLButtonElement | null>;
+  readonly keep: RefObject<HTMLButtonElement | null>;
+}
+
+/**
+ * Where focus goes after one of a secret's buttons (`U-23`): owed as the button is pressed, and
+ * given once the control has its new shape. `box` is what a Replace opens.
+ */
+function useOwedFocus(box: () => HTMLElement | null): OwedFocus {
+  const next = useRef<WriteOnlyPart | null>(null);
+  const replace = useRef<HTMLButtonElement>(null);
+  const clear = useRef<HTMLButtonElement>(null);
+  const keep = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    const wanted = next.current;
+    if (wanted === null) return;
+    next.current = null;
+    const parts: Record<WriteOnlyPart, HTMLElement | null> = {
+      box: box(),
+      replace: replace.current,
+      clear: clear.current,
+      keep: keep.current,
+    };
+    parts[wanted]?.focus();
+  });
+  const owe = useCallback((part: WriteOnlyPart) => {
+    next.current = part;
+  }, []);
+  return { owe, replace, clear, keep };
+}
+
 /**
  * A credential.
  *
@@ -675,12 +738,21 @@ const WRITE_ONLY_BUTTON = 'border border-control px-2 py-1 text-xs text-text-mut
  * **A secret cleared says so where it was cleared** (`U-23`). Clear used to change nothing at the
  * control: it still read "set, write-only", with the same two buttons, and only a sentence at the
  * foot of the form said the secret would go. It now reads "removed on save", and offers to keep
- * the stored one instead, which is the only way back that does not go through Replace.
+ * the stored one instead.
+ *
+ * **Replace after Clear starts from keeping** (`U-23` review). It took the "removed on save" away
+ * and left the `null` behind, so an empty box that looked like every other Replace, which keeps
+ * the stored secret, removed it on save. An empty box keeps it, wherever it was opened from.
  *
  * **Each button is named for its field as well as what it does** (`U-90`). By their text alone,
  * SNMP's three secrets gave three buttons called "Replace" and three called "Clear", which is all
  * a list of buttons or a voice command has to go on. The name starts with the text shown, so the
  * words a reader sees are the words that press it (WCAG 2.5.3), and the field's label follows.
+ *
+ * **A secret that is an object is typed as JSON** (`U-23` review): the webhook's `secretHeaders`.
+ * It was drawn as a password box, which stored what was typed as a string the core refuses, with
+ * nothing to say what it wanted. And **a secret in error is marked as every other field is**
+ * (WCAG 3.3.1): `aria-invalid`, and the edge in the error colour.
  */
 function WriteOnly({
   id,
@@ -688,9 +760,9 @@ function WriteOnly({
   isSet,
   replacing,
   value,
-  cleared,
   disabled,
   describedBy,
+  invalid,
   onReplace,
   onValue,
   onClear,
@@ -699,78 +771,87 @@ function WriteOnly({
   field: FieldModel;
   isSet: boolean;
   replacing: boolean;
-  value: string;
-  /** The stored secret is to be removed on save: the form holds `null` for it. */
-  cleared: boolean;
+  /** What the form holds: `null` is the stored secret to be removed on save. */
+  value: unknown;
   disabled: boolean;
   describedBy: string;
+  /** The field has a problem, said in the region `describedBy` names. */
+  invalid: boolean;
   onReplace: (path: string, replacing: boolean) => void;
   onValue: (next: unknown) => void;
   onClear: () => void;
 }): React.JSX.Element {
-  const next = useRef<WriteOnlyPart | null>(null);
-  const replaceButton = useRef<HTMLButtonElement>(null);
-  const clearButton = useRef<HTMLButtonElement>(null);
-  const keepButton = useRef<HTMLButtonElement>(null);
-  useLayoutEffect(() => {
-    const wanted = next.current;
-    if (wanted === null) return;
-    next.current = null;
-    const parts: Record<WriteOnlyPart, HTMLElement | null> = {
-      box: document.getElementById(id),
-      replace: replaceButton.current,
-      clear: clearButton.current,
-      keep: keepButton.current,
-    };
-    parts[wanted]?.focus();
-  });
+  const focus = useOwedFocus(() => document.getElementById(id));
   const keepName = `Keep the current one, ${field.label}`;
 
   if (!isSet || replacing) {
+    const edge = invalid ? 'border-down-fg' : 'border-control';
+    const text = typeof value === 'string' ? value : '';
+    const shared = {
+      id,
+      disabled,
+      autoComplete: 'off',
+      'aria-describedby': describedBy === '' ? undefined : describedBy,
+      'aria-invalid': invalid ? true : undefined,
+    } as const;
+    const typed = (next: string): void => {
+      onValue(next === '' ? undefined : next);
+    };
     return (
-      <div className="flex flex-wrap items-center gap-2">
-        {isMultiline(field.schema) ? (
+      <div className="flex flex-wrap items-start gap-2">
+        {field.kind === 'json' || field.kind === 'object' ? (
+          // The JSON box a free-form parameter gets, with what it wants said under it (3.3.2): an
+          // object parsed as it is typed, and an emptied box keeping the stored one.
+          <div className="w-full max-w-md">
+            <SchemaControl
+              id={id}
+              field={{ ...field, kind: 'json' }}
+              value={value === null ? undefined : value}
+              disabled={disabled}
+              describedBy={describedBy}
+              invalid={invalid}
+              hint={jsonHintOf(field)}
+              onValue={onValue}
+              onBlur={() => undefined}
+            />
+          </div>
+        ) : isMultiline(field.schema) ? (
           // **A box that keeps line breaks, for a secret that has them** (`U-21`). A password
           // input strips them from a paste, which turns a private key into something no server
           // accepts. What is typed here is visible while it is typed and never afterwards: once
           // saved the core returns it to nobody, and this box is not filled from a read.
           <textarea
-            id={id}
+            {...shared}
             rows={6}
-            autoComplete="off"
             autoCapitalize="off"
             spellCheck={false}
-            value={value}
-            disabled={disabled}
-            aria-describedby={describedBy === '' ? undefined : describedBy}
+            value={text}
             onChange={(event) => {
-              onValue(event.target.value === '' ? undefined : event.target.value);
+              typed(event.target.value);
             }}
-            className="w-full max-w-xl border border-control bg-surface px-2 py-1 font-mono text-xs text-text"
+            className={`w-full max-w-xl border bg-surface px-2 py-1 font-mono text-xs text-text ${edge}`}
           />
         ) : (
           <input
-            id={id}
+            {...shared}
             type="password"
             autoComplete="new-password"
-            value={value}
-            disabled={disabled}
-            aria-describedby={describedBy === '' ? undefined : describedBy}
+            value={text}
             onChange={(event) => {
-              onValue(event.target.value === '' ? undefined : event.target.value);
+              typed(event.target.value);
             }}
-            className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
+            className={`w-64 border bg-surface px-2 py-1 text-sm text-text ${edge}`}
           />
         )}
         {isSet && (
           <button
             key="keep"
-            ref={keepButton}
+            ref={focus.keep}
             type="button"
             disabled={disabled}
             aria-label={keepName}
             onClick={() => {
-              next.current = 'replace';
+              focus.owe('replace');
               onValue(undefined);
               onReplace(field.path, false);
             }}
@@ -783,6 +864,63 @@ function WriteOnly({
     );
   }
 
+  return (
+    <StoredSecret
+      id={id}
+      field={field}
+      cleared={value === null}
+      disabled={disabled}
+      focus={focus}
+      keepText="Keep the current one"
+      onReplace={() => {
+        // From "removed on save", the `null` goes with the marker: the box opens empty, and an
+        // empty box keeps the stored secret, as it does from "set, write-only".
+        if (value === null) onValue(undefined);
+        onReplace(field.path, true);
+      }}
+      onKeep={() => {
+        onValue(undefined);
+      }}
+      onClear={onClear}
+    />
+  );
+}
+
+/** What a secret's JSON box says it wants (WCAG 3.3.2), where its schema says it is an object. */
+function jsonHintOf(field: FieldModel): string | undefined {
+  const type = field.schema.type;
+  const object = type === 'object' || (Array.isArray(type) && type.includes('object'));
+  return object
+    ? 'Typed as JSON: an object of names and values, such as {"name": "value"}.'
+    : undefined;
+}
+
+/**
+ * A stored secret: "set, write-only" or "removed on save", with Replace and Clear or Keep.
+ * `WriteOnly`'s and `SecretList`'s, which own the focus each press owes.
+ */
+function StoredSecret({
+  id,
+  field,
+  cleared,
+  disabled,
+  focus,
+  keepText,
+  onReplace,
+  onKeep,
+  onClear,
+}: {
+  id: string;
+  field: FieldModel;
+  /** The form holds `null` for it: it is removed on save. */
+  cleared: boolean;
+  disabled: boolean;
+  focus: OwedFocus;
+  keepText: string;
+  onReplace: () => void;
+  onKeep: () => void;
+  onClear: () => void;
+}): React.JSX.Element {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span
@@ -797,13 +935,13 @@ function WriteOnly({
       </span>
       <button
         key="replace"
-        ref={replaceButton}
+        ref={focus.replace}
         type="button"
         disabled={disabled}
         aria-label={`Replace ${field.label}`}
         onClick={() => {
-          next.current = 'box';
-          onReplace(field.path, true);
+          focus.owe('box');
+          onReplace();
         }}
         className={WRITE_ONLY_BUTTON}
       >
@@ -812,29 +950,29 @@ function WriteOnly({
       {cleared ? (
         <button
           key="keep"
-          ref={keepButton}
+          ref={focus.keep}
           type="button"
           disabled={disabled}
-          aria-label={keepName}
+          aria-label={`${keepText}, ${field.label}`}
           aria-describedby={id}
           onClick={() => {
-            next.current = 'clear';
-            onValue(undefined);
+            focus.owe('clear');
+            onKeep();
           }}
           className={WRITE_ONLY_BUTTON}
         >
-          Keep the current one
+          {keepText}
         </button>
       ) : (
         !field.required && (
           <button
             key="clear"
-            ref={clearButton}
+            ref={focus.clear}
             type="button"
             disabled={disabled}
             aria-label={`Clear ${field.label}`}
             onClick={() => {
-              next.current = 'keep';
+              focus.owe('keep');
               onClear();
             }}
             className={WRITE_ONLY_BUTTON}
@@ -844,5 +982,97 @@ function WriteOnly({
         )
       )}
     </div>
+  );
+}
+
+/**
+ * A list that is a secret: the program method's `secretArgs` (`U-23` review).
+ *
+ * **Kept, replaced or cleared whole**, as `WriteOnly` does a single secret, because that is what
+ * the core does with it: it returns none of the entries, and one sent replaces them all. The list
+ * was drawn as any other, so a stored one read "Nothing here yet.", and an entry added there, in
+ * a box that showed what was typed, replaced every stored one on save without a word.
+ *
+ * **Replace opens the list empty**, its entries in password boxes, says that what is listed
+ * replaces the stored ones, and offers to keep them instead. A list left empty keeps them, as an
+ * empty box does. Focus moves as `WriteOnly`'s does, Replace to *Add*.
+ */
+function SecretList({ items, ...props }: FieldProps & { items: JsonSchema }): React.JSX.Element {
+  const { field, values, redacted, replacing, onChange, onReplace, disabled } = props;
+  const id = useId();
+  const isSet = redacted.includes(field.path);
+  const cleared = readAt(values, field.path) === null;
+  const list = useRef<HTMLDivElement>(null);
+  const focus = useOwedFocus(
+    () => list.current?.querySelector<HTMLElement>(':scope > fieldset > [data-entry-add]') ?? null,
+  );
+  const keepText = 'Keep the current ones';
+  const keep = (): void => {
+    onChange(removeAt(values, field.path));
+  };
+
+  if (!isSet || replacing.has(field.path)) {
+    return (
+      <div ref={list}>
+        <ArrayField
+          {...props}
+          items={items}
+          after={
+            isSet && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className="text-xs text-text-muted">
+                  What is listed here replaces every stored one on save.
+                </span>
+                <button
+                  key="keep"
+                  ref={focus.keep}
+                  type="button"
+                  disabled={disabled}
+                  aria-label={`${keepText}, ${field.label}`}
+                  onClick={() => {
+                    focus.owe('replace');
+                    keep();
+                    onReplace(field.path, false);
+                  }}
+                  className={WRITE_ONLY_BUTTON}
+                >
+                  {keepText}
+                </button>
+              </div>
+            )
+          }
+        />
+      </div>
+    );
+  }
+
+  return (
+    <fieldset className="border border-border px-3 pb-3 pt-1">
+      <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
+        {field.label}
+      </legend>
+      {field.description !== undefined && (
+        <p className="mb-2 text-xs text-text-muted">
+          <InlineMarkdown text={field.description} />
+        </p>
+      )}
+      <StoredSecret
+        id={id}
+        field={field}
+        cleared={cleared}
+        disabled={disabled}
+        focus={focus}
+        keepText={keepText}
+        onReplace={() => {
+          if (cleared) keep();
+          onReplace(field.path, true);
+        }}
+        onKeep={keep}
+        onClear={() => {
+          // `null` is the API's unset, as for a single secret; an absent key keeps the list.
+          onChange(writeAt(values, field.path, null));
+        }}
+      />
+    </fieldset>
   );
 }

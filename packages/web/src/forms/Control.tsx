@@ -47,6 +47,7 @@ export function SchemaControl({
   onValue,
   onBlur,
   readOnly = false,
+  hint,
 }: {
   id: string;
   field: FieldModel;
@@ -58,6 +59,8 @@ export function SchemaControl({
   onBlur: () => void;
   /** Shown and announced, never changed (`U-34`). The caller says why, through `describedBy`. */
   readOnly?: boolean;
+  /** A JSON box's line under it, in place of the fallback's, while what is typed parses. */
+  hint?: string | undefined;
 }): React.JSX.Element {
   if (readOnly) {
     // **A read-only text box, whatever the kind**, rather than the kind's own control disabled.
@@ -157,7 +160,14 @@ export function SchemaControl({
 
   if (field.kind === 'json') {
     return (
-      <JsonBox {...shared} value={value} entry={field.entry} border={border} onValue={onValue} />
+      <JsonBox
+        {...shared}
+        value={value}
+        entry={field.entry}
+        border={border}
+        hint={hint}
+        onValue={onValue}
+      />
     );
   }
 
@@ -244,6 +254,7 @@ function JsonBox({
   value,
   entry,
   border,
+  hint,
   onValue,
   ...shared
 }: {
@@ -251,6 +262,7 @@ function JsonBox({
   /** An entry of an array (`FieldModel.entry`), whose `''` is a cleared box (`U-41`). */
   entry: boolean;
   border: string;
+  hint: string | undefined;
   onValue: (next: unknown) => void;
 } & Record<string, unknown>): React.JSX.Element {
   const [text, setText] = useState(() => jsonTextOf(value, entry));
@@ -297,7 +309,7 @@ function JsonBox({
         {broken ? (
           <span className="text-down-fg">Not valid JSON — the last valid value will be saved.</span>
         ) : (
-          'Edited as JSON: this parameter is a shape the generated controls do not cover.'
+          (hint ?? 'Edited as JSON: this parameter is a shape the generated controls do not cover.')
         )}
       </p>
     </div>

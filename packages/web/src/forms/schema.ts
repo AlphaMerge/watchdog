@@ -192,7 +192,9 @@ export function scalarEntryOf(items: JsonSchema, array: FieldModel, index: numbe
     kind,
     schema: items,
     required: true,
-    writeOnly: items.writeOnly === true,
+    // An entry of a list that is a secret is one too (`U-23` review): typed in a password box,
+    // and never filled from a read, as the list's own keep, replace and clear around it say.
+    writeOnly: items.writeOnly === true || array.writeOnly,
     createOnly: false,
     entry: true,
     children: [],

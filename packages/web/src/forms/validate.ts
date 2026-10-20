@@ -160,7 +160,9 @@ export function allProblems(
 ): FieldProblem[] {
   const problems: FieldProblem[] = [];
   for (const field of fields) {
-    if (field.kind === 'object') {
+    // An object that is a secret is one value, typed as JSON (`SchemaForm`'s `Field`), and its
+    // properties are not fields: left alone it is absent, and its required ones are not missing.
+    if (field.kind === 'object' && !field.writeOnly) {
       problems.push(...allProblems(field.children, values, read, fieldsFor));
       continue;
     }

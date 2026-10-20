@@ -551,6 +551,55 @@ describe('the credentials tab', () => {
       expect('community' in (writes(calls)[1]?.body as { values: object }).values).toBe(false);
     });
 
+    it('keeps the stored secret when Replace follows Clear and nothing is typed (U-23 review)', async () => {
+      // Replace took "removed on save" away and left the clear behind: an empty box that looked
+      // like any other Replace, which keeps the secret, removed it on save.
+      const { calls, form } = await editSnmp({ write: written() });
+      fireEvent.click(within(form).getByRole('button', { name: 'Clear Community string' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace Community string' }));
+      expect(within(form).getByLabelText<HTMLInputElement>('Community string').value).toBe('');
+      expect(within(form).queryByText('removed on save')).toBeNull();
+      expect(within(form).queryByText(/On save/u)).toBeNull();
+      expect(within(form).getByText('Nothing has changed yet.')).toBeDefined();
+
+      fireEvent.change(within(form).getByLabelText('SNMP version'), { target: { value: 'v1' } });
+      fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+      await waitFor(() => {
+        expect(writes(calls)).toHaveLength(2);
+      });
+      for (const call of writes(calls)) {
+        expect('community' in (call.body as { values: object }).values).toBe(false);
+      }
+    });
+
+    it('marks a secret in error as every other field is: aria-invalid, and edged in the error colour (U-23 review)', async () => {
+      await show({ sets: [] });
+      fireEvent.change(screen.getByLabelText('Store a set here'), { target: { value: 'ssh' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Add SSH credentials' }));
+      const form = screen.getByRole('form', { name: 'New SSH credentials' });
+      const said = (box: HTMLElement): string[] =>
+        (box.getAttribute('aria-describedby') ?? '')
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent ?? '');
+
+      const password = within(form).getByLabelText('Password');
+      expect(password.getAttribute('aria-invalid')).toBeNull();
+      expect(password.classList.contains('border-control')).toBe(true);
+      fireEvent.change(password, { target: { value: 'p'.repeat(1_100) } });
+      expect(password.getAttribute('aria-invalid')).toBe('true');
+      expect(password.classList.contains('border-down-fg')).toBe(true);
+      expect(password.classList.contains('border-control')).toBe(false);
+      expect(said(password)).toContain('must be at most 1024 characters');
+      expect(within(form).getByText('1 field needs attention')).toBeDefined();
+
+      const key = within(form).getByRole('textbox', { name: 'Private key' });
+      expect(key.getAttribute('aria-invalid')).toBeNull();
+      fireEvent.change(key, { target: { value: 'k'.repeat(32_769) } });
+      expect(key.getAttribute('aria-invalid')).toBe('true');
+      expect(key.classList.contains('border-down-fg')).toBe(true);
+      expect(said(key)).toContain('must be at most 32768 characters');
+    });
+
     it('names each stored secret’s buttons for its field, so three secrets are not three Replaces (U-90)', async () => {
       // Walked in a browser (`U-23`): by their text alone, an SNMP v3 set's three secrets gave a
       // reader three buttons called "Replace" and three called "Clear".
