@@ -1335,6 +1335,21 @@ describe('the credentials tab', () => {
         .filter((control) => control.classList.contains('border-border'))
         .map((control) => `${when}: ${control.textContent.trim() || control.tagName}`);
 
+    it('draws a kind’s description as the Markdown it is written in, not in backticks (U-89)', async () => {
+      const said =
+        'Used by every database sensor. Give it `SELECT` on what it is watching, and two *sets* of it at most.';
+      const { form } = await editSnmp({
+        kinds: KINDS.map((kind) => (kind.id === 'snmp' ? { ...kind, description: said } : kind)),
+      });
+      const heading = within(form).getByRole('heading', { name: 'Editing SNMP credentials' });
+      const description = heading.nextElementSibling;
+      expect(description?.textContent).toBe(
+        'Used by every database sensor. Give it SELECT on what it is watching, and two sets of it at most.',
+      );
+      expect(description?.querySelector('code')?.textContent).toBe('SELECT');
+      expect(description?.querySelector('em')?.textContent).toBe('sets');
+    });
+
     it('names no colour the stylesheet lacks, so no edge falls back to the text colour', async () => {
       const { form } = await editSnmp();
       // An allowed target is an entry of a list, with a box of its own.

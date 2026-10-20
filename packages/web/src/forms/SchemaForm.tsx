@@ -1,4 +1,5 @@
 import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { InlineMarkdown } from '../components/InlineMarkdown';
 import {
   existingEntry,
   existingWithin,
@@ -180,7 +181,9 @@ function Field(props: FieldProps): React.JSX.Element {
           {field.label}
         </legend>
         {field.description !== undefined && (
-          <p className="mb-2 text-xs text-text-muted">{field.description}</p>
+          <p className="mb-2 text-xs text-text-muted">
+            <InlineMarkdown text={field.description} />
+          </p>
         )}
         <div className="space-y-4">
           {field.children.map((child) => (
@@ -283,8 +286,9 @@ function Control({
         </div>
 
         {field.description !== undefined && (
+          // Markdown, as the catalogue writes it (`U-89`): `SELECT` as code, not in backticks.
           <p id={`${id}-hint`} className="text-xs text-text-muted">
-            {field.description}
+            <InlineMarkdown text={field.description} />
           </p>
         )}
 
@@ -456,7 +460,9 @@ function ArrayField({ items, ...props }: FieldProps & { items: JsonSchema }): Re
         {field.label}
       </legend>
       {field.description !== undefined && (
-        <p className="mb-2 text-xs text-text-muted">{field.description}</p>
+        <p className="mb-2 text-xs text-text-muted">
+          <InlineMarkdown text={field.description} />
+        </p>
       )}
 
       {entries.length === 0 ? (

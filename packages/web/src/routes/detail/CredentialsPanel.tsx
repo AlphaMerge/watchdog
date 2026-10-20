@@ -10,6 +10,7 @@ import type {
   ObjectRef,
 } from '../../api/types';
 import { useSession } from '../../auth/session';
+import { InlineMarkdown } from '../../components/InlineMarkdown';
 import { Card, CorrelationId, Empty } from '../../components/Panels';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt } from '../../forms/schema';
@@ -835,7 +836,9 @@ function CredentialForm({
         >
           {set === null ? `New ${kind.name} credentials` : `Editing ${kind.name} credentials`}
         </Heading>
-        <p className="mt-1 text-xs text-text-muted">{kind.description}</p>
+        <p className="mt-1 text-xs text-text-muted">
+          <InlineMarkdown text={kind.description} />
+        </p>
       </div>
 
       <SchemaForm

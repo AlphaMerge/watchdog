@@ -97,6 +97,9 @@ it is JSON an operator types by hand, so prefer a shape with a control where one
 "Remove Column 2". Without one they fall back to the plural, "Remove Columns 2", which is all a
 screen reader says of the entry. `entry-titles.test.ts` holds every shipped list to it (`U-88`).
 
+**A `description` is inline Markdown**: `` `code` ``, `*emphasis*` and `**strong**`, drawn as
+such in the form (`U-89`) and on `docs/sensor-reference.md`. Nothing else — no links, lists or
+headings — and a `*` that opens or closes nothing (`*.domain`) stays a star, as CommonMark has it.
 
 ### `listener` (optional)
 
