@@ -17316,6 +17316,94 @@ because each is a decision rather than a defect:
         should wait for the key's next step rather than route `stall`, and the answer is built or
         recorded.
 
+- [x] **P-486 — `lookup-helper`'s U18 asks once the child is a zombie, which does not mean the
+      child's end of the channel has closed** · XS · P-432 · Filed 2026-10-21 by the coordinator,
+      from `P-484`'s runs. 'U18: an ask written after the child died raises nothing and is an exit
+      loss' failed once in a run of the 11 resolver files: the loss said "its channel to the probe
+      closed", where the test expects /an ask could not be written/. It then passed 5 of 5 alone.
+      **Done when** the cause is found from a run that reproduces it under load, the test or the
+      product is fixed, and the fix is shown over as many runs as reproduced it.
+
+      **P-486 outcome. U18 waits for the condition it needs, read at the probe's own end: a write
+      on the channel refused. A zombie child's end can stay open for milliseconds.** Built
+      2026-10-21 on `fix/flakes-new`, in `lookup-helper.test.ts` only. The product is right.
+      - **Why.** U18 SIGKILLs the child, holds the probe's thread until the child is a zombie
+        with one task left, then asks. A write to a channel whose far end has closed fails at
+        once, and Node gives that failure to the send's callback on the next tick, before any I/O
+        is read, so the send's failure takes the loss. But the child's end closes only when the
+        kernel releases its socket. When that comes later, the ask's write goes through, Node
+        calls the callback with no error, and the channel's closing takes the loss. Nothing can
+        tell an ask written into a dying child's socket from one written just before it died, and
+        both are exit losses killed from outside, so the product is right both ways.
+      - **Reproduced.** The test alone, under 20 busy loops (load 22–25 on 8 CPUs): 1 of 300
+        failed, in the flake's words. A script of U18's steps, with the real helper and the
+        scripted child, read the probe's end with a write of nothing the moment the child was a
+        zombie. In 1,000 runs the end was still open twice, and those two failed in the flake's
+        words. Every other run passed. EPIPE came 0.04 and 3.5 ms later. No process held the
+        child's socket in its descriptor table then, and the child holds no io_uring. A process
+        reading the child's descriptor link in a loop did not make it likelier: 0 in 300. The
+        holder is not traced (kernel 6.12.76-linuxkit).
+      - **The fix.** After the child is a zombie, U18 holds the thread until a write of nothing on
+        the channel's descriptor is refused (`EPIPE`), which is what the ask's write then meets.
+        The write sends nothing. A read before the kill asserts the end is open while the child
+        lives, so the wait cannot pass on a wrong descriptor or on a read that always refuses.
+        The descriptor is the channel's, from a `fork` the test hands the helper. Node's types
+        leave `fd` out, so it is read with `in` and asserted to be a number.
+      - **Decided by the builder:** the probe's own end, not the child's socket leaving
+        `/proc/net/unix`. The kernel takes the socket out of that table first and shuts it
+        after, so for a moment the table can say closed while a write still goes through.
+      - **Runs.** The test alone, fixed, the same load (median 22.8): 300 of 300. The script with
+        the fix's wait, 1,300 runs (300 beside the reader): 0 failures. The end was open at the
+        zombie 6 times, the wait took 5.6 to 17.2 ms, and each ask then failed as U18 expects.
+        The file 110 of 110, 0 skipped.
+      - **Mutants: 2, both killed.** The send's callback made to drop its error fails U18 in the
+        flake's exact words (and 2 more tests). Before the fix a loaded host could give the same
+        failure, so it was not told apart. `writeRefused` always true fails 'its channel open
+        while it lives'.
+
+- [x] **P-487 — `name-resolver-check`'s token test reads `released` after a walk reply it put
+      on a 30 ms timer** · XS · P-480 · Filed 2026-10-21 by the coordinator, from `P-485`'s
+      outcome. "gives back the token a lookup carries when it moves, asked again after a loss
+      during its walk (P1, P5)" failed once, `released` 2 where 3 was expected, while S7's
+      full-size run had the VM, and passed 17 other times. Its builder suspected the walk's 30 ms
+      reply racing the test's read of `released`. **Done when** the cause is found from a run
+      that reproduces it under load, the test or the product is fixed, and the fix is shown over
+      as many runs.
+
+      **P-487 outcome. The walk's reply is the test's to give, after it counts the tokens.** Built
+      2026-10-21 on `fix/flakes-new`, in `name-resolver-check.test.ts` only. The product is right.
+      - **Why.** dev-c5's own walk was answered on a real 30 ms timer, meant to land after the
+        loss's requeue and the read of `released`. Under load the steps before the read took
+        longer: the reply came during the `wait(0)` after the loss, dev-c5 moved and gave its
+        token back, and the read counted after it. The token was given back once, as it should
+        be. `held()` still matched because dev-s3 took the freed token, so the first assert to
+        see it was the count.
+      - **Reproduced.** The test alone under 20 busy loops (load 12–34, median 24): 1 of 100
+        failed, "its token given back as it moved", 2 !== 3. A test mutant that gives the reply
+        just before the `wait(0)` fails every time with the same 2 !== 3.
+      - **The fix.** dev-c5's walk is `silent` until the test answers it by hand, after reading
+        `released`. Before the answer the test asserts that the walk was asked, has no reply and
+        has not moved dev-c5. The routing wait is 5 s for this test (`HELD_ROUTE`, through
+        `coldPartial`, which now takes `make`'s setup), and dev-c5's bound 20 s, so its walk
+        window is the whole wait. Only a test already failing reaches it: the waits before the
+        answer are two `pollWithin`s of 1 s.
+      - **Decided by the builder:** a longer wait, not a faked one. The verdict's timer is a real
+        `setTimeout` in `DnsCheck`, and `realNow` moves only its arithmetic.
+      - **Runs.** Fixed, the same load (median 22.6): 100 of 100. The file 79 of 79, 0 skipped.
+      - **Mutants: 3, all killed.** The reply given before the count without the new asserts
+        (the flake, 2 !== 3) and with them ('its walk not yet answered'), and the token's release
+        removed from `#rewalked`'s move (1 !== 2), which no other test in the file kills.
+      - **Found, not fixed.** Four more cases in the file put a walk's reply on a 20 or 30 ms
+        timer and then change the world after polling for the walk: dev-c3's in 'walks no queued
+        lookup of a suspect's name…' (to `rejoining`), dev-31's and dev-32's cases of a name
+        avoided during its walk, and D27's `verdict` rows. A loaded host can let those replies in
+        first too, and the same fix fits them. None of them failed in 11 runs of the whole base
+        file at loads of 24 to 52, with another builder's load loop beside it from the fifth run.
+        Two other cases failed once each, not traced: K17 (`P-483`), where dev-1 had left the
+        helper before the read and dev-2 to dev-4 were in flight; and 'never walks again a queued
+        lookup its own walk left unanswered…' (D18), with "dev-s1.zone-b.test: not asked, its
+        zone silent", 1 !== 0. The runs stopped there, so as not to load the other builder's.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the

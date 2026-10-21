@@ -46,6 +46,12 @@ const STUCK = 40;
 const ROUTE = 60;
 /** When a silent walk's question is judged a miss: well before the helper's answer could be slow. */
 const MISS = 80;
+/**
+ * A routing wait for a walk whose reply the test gives by hand (`P-487`): longer than the
+ * `pollWithin` bounds between the walk's send and its reply added together, so that only a test
+ * already failing reaches it.
+ */
+const HELD_ROUTE = 5_000;
 
 interface Call {
   readonly host: string;
@@ -992,9 +998,10 @@ const partly = (_server: string, name: string): ScriptedReply =>
  * each of `queued` asked behind them with D19's bucket spent, so that it goes to the helper
  * unwalked and its check fails at once, behind the cap; then the bucket refilled and the zone made
  * mixed: `dev-c0` heard and answered on the probe's lanes, `dev-s3` walked and not heard.
+ * `setup` is `make`'s.
  */
-async function coldPartial(queued: readonly string[]) {
-  const made = await make();
+async function coldPartial(queued: readonly string[], setup: Parameters<typeof make>[0] = {}) {
+  const made = await make(setup);
   const { helper, asker, budget, callsFor, clock, ask } = made;
   asker.rule = partly;
   spend(budget);
@@ -1266,16 +1273,20 @@ describe('a queued helper lookup’s own walk, once its key is heard again (P-48
   });
 
   it('gives back the token a lookup carries when it moves, asked again after a loss during its walk (P1, P5)', async () => {
-    const { resolver, helper, asker, budget, callsFor, ask, stuck } = await coldPartial([
-      'dev-c5.zone-b.test',
-    ]);
+    // The walk's reply is the test's to give, after the token is counted (`P-487`): on a 30 ms
+    // timer it raced the steps before the count, and a loaded host let it in first.
+    const { resolver, helper, asker, budget, callsFor, ask, stuck } = await coldPartial(
+      ['dev-c5.zone-b.test'],
+      { routeMs: HELD_ROUTE },
+    );
     asker.rule = (server, name) =>
-      name === 'dev-c5.zone-b.test' ? { reply: 'answer', delayMs: 30 } : partly(server, name);
+      name === 'dev-c5.zone-b.test' ? 'silent' : partly(server, name);
     const held = (): number => {
       const tokens = budget.stats().held;
       return tokens.shared + tokens.kept + tokens.urgent;
     };
-    const c5 = ask('dev-c5.zone-b.test', { waitMs: 2_000 });
+    // Its walk window the whole routing wait: a quarter of its bound.
+    const c5 = ask('dev-c5.zone-b.test', { waitMs: 4 * HELD_ROUTE });
     await pollWithin(
       1_000,
       'dev-c5 walked',
@@ -1308,6 +1319,12 @@ describe('a queued helper lookup’s own walk, once its key is heard again (P-48
     await wait(0);
     assert.equal(held(), before, 'carried');
     const released = budget.stats().released;
+    // Its walk still waiting on its reply, so nothing has moved it yet.
+    const walk = asker.askedFor('dev-c5.zone-b.test')[0];
+    assert.ok(walk !== undefined, 'its walk asked');
+    assert.equal(walk.replied, undefined, 'its walk not yet answered');
+    assert.equal(callsFor('dev-c5.zone-b.test').length, 0, 'not yet on the probe’s lanes');
+    walk.release('answer');
     await pollWithin(
       1_000,
       'dev-c5 on the probe’s lanes',

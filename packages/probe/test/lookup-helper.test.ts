@@ -1,8 +1,16 @@
 import { strict as assert } from 'node:assert';
-import { spawn, spawnSync } from 'node:child_process';
+import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { getDefaultResultOrder } from 'node:dns';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it, type TestContext } from 'node:test';
@@ -113,6 +121,29 @@ function goneButUnreaped(pid: number): boolean {
     return readdirSync(`/proc/${String(pid)}/task`).length === 1;
   } catch {
     return false;
+  }
+}
+
+/** The probe's end of a child's channel, by its descriptor. */
+function channelFd(child: ChildProcess | undefined): number {
+  const channel = child?.channel;
+  const fd = channel !== null && channel !== undefined && 'fd' in channel ? channel.fd : undefined;
+  assert.ok(typeof fd === 'number', 'the channel’s descriptor');
+  return fd;
+}
+
+/**
+ * Whether a write on the probe's end of a child's channel is refused now, as the next ask's
+ * would be: a write of nothing, which sends nothing and fails once the child's end has closed.
+ */
+function writeRefused(fd: number): boolean {
+  try {
+    writeSync(fd, new Uint8Array(0));
+    return false;
+  } catch (error: unknown) {
+    const code = (error as { readonly code?: unknown }).code;
+    if (code === 'EPIPE' || code === 'ECONNRESET') return true;
+    throw error;
   }
 }
 
@@ -1267,14 +1298,29 @@ describe('the lookup helper: losses', () => {
       };
       process.on('uncaughtException', record);
       const timers = new Timers({ clock: 'real', timeouts: 'fake', ticks: 'fake' });
-      const made = make({ timers });
+      const forked: ChildProcess[] = [];
+      const made = make({
+        timers,
+        fork: (module, args, options) => {
+          const child = fork(module, [...args], options);
+          forked.push(child);
+          return child;
+        },
+      });
       try {
         assert.equal(await within(WAIT, 'start', made.helper.start()), true);
         const pid = made.helper.pid();
         assert.ok(pid !== undefined);
+        assert.equal(forked.length, 1);
+        const fd = channelFd(forked[0]);
+        assert.equal(writeRefused(fd), false, 'its channel open while it lives');
         process.kill(pid, 'SIGKILL');
-        // Dead, its channel's end closed, and not yet reaped: the probe has not seen it go.
+        // Dead and not yet reaped: the probe has not seen it go.
         blockUntil(WAIT, 'the child dead', () => goneButUnreaped(pid));
+        // And its channel's end closed, read at the probe's end (`P-486`): the kernel closes the
+        // child's end when it releases its socket, which can come after the child is gone. Until
+        // then the ask's write goes through, and the channel's closing takes the loss instead.
+        blockUntil(WAIT, 'its channel’s end closed', () => writeRefused(fd));
         assert.equal(made.helper.state, 'up');
         const asked = settled(made.helper.ask({ host: 'delay-0.ok.test', family: 4, max: 64 }));
         const lost = lostError((await within(WAIT, 'the ask lost', asked)).error);
