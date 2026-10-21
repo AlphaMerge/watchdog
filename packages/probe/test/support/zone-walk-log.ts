@@ -108,12 +108,12 @@ export class ZoneWalkLog {
   }
 
   /**
-   * When a name's own walks were deferred for `why` (`rate` is D19's refusal), in ms from the arm's
-   * start.
+   * When a name's own walks were deferred for `why` (`rate` is D19's refusal), or for any why when
+   * it is undefined, in ms from the arm's start.
    */
-  deferredMs(host: string, why: string, startedAt: number): number[] {
+  deferredMs(host: string, why: string | undefined, startedAt: number): number[] {
     return (this.#deferred.get(asNamed(host)) ?? [])
-      .filter((one) => one.why === why)
+      .filter((one) => why === undefined || one.why === why)
       .map((one) => one.at - startedAt);
   }
 }
@@ -182,8 +182,8 @@ export interface PartialRead {
  * `partial`'s cached facts (`P-478`, `P-480`, `P-484`, `P-485`), in ms from the arm's start, from
  * what the arm read: the cached names' first answers, their checks given up, their first asks and
  * every check, the silent names asked, the silent hold, the time the check first heard the zone,
- * each cached name's own walks D19 refused, the walk's questions for each of the zone's names, and
- * the zone's scouts and walks again. Pure: the judge block holds it to a log it writes.
+ * each cached name's own walks D19 refused and those deferred for any why, the walk's questions for
+ * each of the zone's names, and the zone's scouts and walks again. Pure: the judge block holds it to a log it writes.
  */
 export function partialFacts(read: PartialRead): NonNullable<WorldFacts['cachedGivenUp']> {
   const { startedAt } = read;
@@ -224,6 +224,9 @@ export function partialFacts(read: PartialRead): NonNullable<WorldFacts['cachedG
     ),
     ownRefusedMs: Object.fromEntries(
       read.cached.map((name) => [name, read.log.deferredMs(name, 'rate', startedAt)] as const),
+    ),
+    ownDeferredMs: Object.fromEntries(
+      read.cached.map((name) => [name, read.log.deferredMs(name, undefined, startedAt)] as const),
     ),
     zoneQuestionsMs: questions,
     zoneWalks: { heardMs: zone.heardMs, verdicts: zone.verdicts, walksAgain: zone.walksAgain },

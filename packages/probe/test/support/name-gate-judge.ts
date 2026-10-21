@@ -229,12 +229,17 @@ export interface WorldFacts {
     readonly keyHeardMs?: number;
     /**
      * Each cached name's checks, when each was asked, in ms from the arm's start, in order
-     * (`P-485`): its own largest gap between checks, and the held checks a walk again must go out
-     * by.
+     * (`P-485`): its own largest gap between checks.
      */
     readonly checksAtMs?: Readonly<Record<string, readonly number[]>>;
     /** Each cached name's own walks D19 refused (`rate`), when, in ms from the arm's start (`P-485`). */
     readonly ownRefusedMs?: Readonly<Record<string, readonly number[]>>;
+    /**
+     * Each cached name's own walks deferred, for any why (`OWN_WALK_DEFERRED`), when, in ms from the
+     * arm's start (`P-485`): a check with one within `STUCK_MS` of its ask could not carry a walk
+     * again.
+     */
+    readonly ownDeferredMs?: Readonly<Record<string, readonly number[]>>;
     /**
      * The walk's questions for each of the silent zone's names, cached or silent, when each was
      * sent, in ms from the arm's start (`P-485`): those that share discovery with a cached name's
@@ -790,6 +795,7 @@ export function cachedCeilingsOn(
     ...(lagMs === undefined ? ['the lag'] : []),
     ...(checksAtMs === undefined ? ['the cached names’ checks'] : []),
     ...(ownRefusedMs === undefined ? ['their own walks D19 refused'] : []),
+    ...(given.ownDeferredMs === undefined ? ['their own walks deferred'] : []),
     ...(zoneQuestionsMs === undefined ? ['the zone’s questions'] : []),
     ...(given.zoneWalks === undefined ? ['the zone’s scouts and walks again'] : []),
   ];
@@ -872,20 +878,40 @@ const LAST_STEP = Math.ceil(Math.log2(REWALK_MAX_MS / REWALK_FIRST_MS));
 const SAME_TURN_MS = 1;
 
 /**
- * How long after the first check of a held cached name after its due a walk again may be sent,
- * less the lag (`P-485`): `STUCK_MS`, the most the stuck flush takes to carry it. Neither of the
- * two ways the check carries it is sure to be at once:
+ * How long after the ask of the first check after its due that could carry it a walk again may be
+ * sent, less the lag (`P-485`): `STUCK_MS`, the most the stuck flush takes to carry it. Neither of
+ * the two ways the check carries it is sure to be at once:
  * - every lane its lookup could take held by a lookup past `STUCK_MS` (`#lanesStuck`, in the
  *   helper `#helperBlocked`), the check walks at once (`#rewalk`) and the walk again is sent then;
  * - otherwise the check waits behind a lookup of its key not yet stuck, which started before the
  *   check and which the child says is stuck `STUCK_MS` after it started, decided after its polls;
  *   the stuck flush (`#onStuck`) then walks the lookups still queued with checks waiting, and the
  *   walk again with them, within `STUCK_MS` of the check.
- * Not covered: a lookup ahead that answers within `STUCK_MS` lets the queue move, so the held name
- * may answer in the helper unwalked and a later check carry the walk again; and the child's poll
- * turn and the pipe from it are not in the lag the run measured, which is the probe's.
+ * The child's poll turn and the pipe from it are not in the lag the run measured, which is the
+ * probe's.
  */
 const lateWithin = (lagMs: number): number => STUCK_MS + lagMs;
+
+/**
+ * The checks that could have carried a walk again (`P-485`), by ask, in ms from the arm's start: a
+ * cached name's check of the silent zone, given up in a held name's words (`HELD_CACHED_WORDS`),
+ * with no own walk of its name deferred, for any why, from its ask to `STUCK_MS` after. A held
+ * name's check that answered, in the helper once the queue moved, never waited behind stuck lanes
+ * for the walk, and one whose own walk D19 or a pool deferred did not send it.
+ */
+function carriers(
+  given: NonNullable<WorldFacts['cachedGivenUp']>,
+): { readonly name: string; readonly atMs: number }[] {
+  const deferred = given.ownDeferredMs ?? {};
+  return given.checks
+    .filter(
+      ({ name, askedMs, message }) =>
+        HELD_CACHED_WORDS.test(message) &&
+        !(deferred[name] ?? []).some((atMs) => atMs >= askedMs && atMs <= askedMs + STUCK_MS),
+    )
+    .map(({ name, askedMs }) => ({ name, atMs: askedMs }))
+    .sort((a, b) => a.atMs - b.atMs);
+}
 
 /**
  * What the silent zone's key's own walks did against what the code says they do (`P-485`), from
@@ -897,10 +923,11 @@ const lateWithin = (lagMs: number): number => STUCK_MS + lagMs;
  *   starts at its step; each later one a step on, to the last. Each falls due its step's base
  *   (`REWALK_FIRST_MS` doubling to `REWALK_MAX_MS`) ± `REWALK_JITTER` after its NotHeard, or after
  *   the walk again before it where that had none, and never before.
- * - **The late walk again.** Each is sent by the first check after its due of a held cached name
- *   (one not yet answered), plus `STUCK_MS` and the lag: that check's own walk carries it, at once
- *   or from the stuck flush (`P-484`, `lateWithin`). A due after the last verdict with no walk
- *   again sent, though such a check came, is one never sent.
+ * - **The late walk again.** Each is sent by the ask of the first check after its due that could
+ *   carry it, plus `STUCK_MS` and the lag: that check's own walk carries it, at once or from the
+ *   stuck flush (`P-484`, `lateWithin`). Only a check that could carry it counts (`carriers`). A
+ *   due after the last verdict with no walk again sent, though such a check came, is one never
+ *   sent; with none before the arm's end, it is not.
  * - **The anchor.** The time the check first heard the zone is the first heard verdict among its
  *   scouts and walks again: what the ceilings start from is what these judge.
  */
@@ -911,24 +938,18 @@ export function zoneWalkFaults(given: NonNullable<WorldFacts['cachedGivenUp']>):
   const lagMs = given.lagMs ?? 0;
   const s = (ms: number): string => `${(ms / 1_000).toFixed(3)} s`;
   const faults: string[] = [];
-  const held: { readonly name: string; readonly atMs: number }[] = [];
-  for (const [name, times] of Object.entries(given.checksAtMs ?? {})) {
-    const answered = given.firstAnswerMs[name];
-    for (const atMs of times)
-      if (answered === undefined || atMs < answered) held.push({ name, atMs });
-  }
-  held.sort((a, b) => a.atMs - b.atMs);
-  const firstHeldFrom = (ms: number) => held.find((check) => check.atMs >= ms);
+  const chances = carriers(given);
+  const firstChanceFrom = (ms: number) => chances.find((check) => check.atMs >= ms);
   const late = (which: string, dueMs: number, sentMs: number | undefined): void => {
-    const check = firstHeldFrom(dueMs);
+    const check = firstChanceFrom(dueMs);
     if (check === undefined) return;
     if (sentMs === undefined) {
       faults.push(
-        `${which}, due at ${s(dueMs)}, never sent, though ${check.name}, held, was checked at ${s(check.atMs)}`,
+        `${which}, due at ${s(dueMs)}, never sent, though ${check.name}’s check asked at ${s(check.atMs)} could have carried it`,
       );
     } else if (sentMs > check.atMs + lateWithin(lagMs)) {
       faults.push(
-        `${which}, due at ${s(dueMs)}, sent at ${s(sentMs)}: late, after the first check of a held name after its due, ${check.name}’s at ${s(check.atMs)}, the ${String(STUCK_MS)} ms the stuck flush may take to carry it, and the ${String(Math.round(lagMs))} ms lag`,
+        `${which}, due at ${s(dueMs)}, sent at ${s(sentMs)}: late, after the first check after its due that could carry it, ${check.name}’s asked at ${s(check.atMs)}, the ${String(STUCK_MS)} ms the stuck flush may take to carry it, and the ${String(Math.round(lagMs))} ms lag`,
       );
     }
   };
