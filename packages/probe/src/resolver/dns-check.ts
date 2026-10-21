@@ -1021,8 +1021,8 @@ export class DnsCheck {
         // A zone heard within `KEY_FRESH_MS` walks every name in heard, its own walks included:
         // never in discovery, which a zone not yet heard needs for its scouts. With many zones
         // each heard through a name that answers, their silent names' own walks would otherwise
-        // hold discovery 10 s apiece and starve every new zone's scouts (`P-488`, `forwarder`).
-        // An own walk of a zone not fresh takes the own walks' places (`P-484`).
+        // hold discovery 10 s apiece, ahead of every new zone's scouts (`P-488`). An own walk of a
+        // zone not fresh takes the own walks' places (`P-484`).
         pool = state.freshUntil > now ? 'heard' : ask.own ? 'own' : 'discovery';
         kind = 'name';
         // Out until its verdict, taken or dropped: the zone's other refreshes wait on it.

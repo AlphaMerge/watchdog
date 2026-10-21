@@ -17245,28 +17245,31 @@ because each is a decision rather than a defect:
         answering check answered, 41 cached checks of 17 names given up, all allowed, every cached
         name answered, the longest first answer 36.8 s, the nearest name 1.8 s against its ceiling
         of 21.7 s; with it off, 510, the longest 317.4 s against 375.3 s. `warmzone` and the rest
-        passed. `forwarder` in gate mode gave up 2,025 answering checks: half of it this ticket's
-        own walks of a fresh zone's never-answered names in discovery (`P-488`), half the event
-        loop's lag at the cold burst while other runs shared the VM (`P-489`).
+        passed. `forwarder` in gate mode gave up 2,025 answering checks, with the signature `P-489`
+        later showed is the event loop's lag at the cold burst while other runs share the VM;
+        `P-488` takes back this ticket's pool for a fresh zone on its design, not as that run's
+        proven cause.
 
 - [x] **P-488 — a freshly heard zone's own walks of names never answered take discovery, so many
       zones half silent starve new zones' scouts** · XS · P-432, P-485 · Filed 2026-10-21 by the
       coordinator, from S7 whole at full size on `dda2cb1e`.
       - **What happened.** `forwarder` in gate mode (a hundred keys of three, three names in five
-        silent) gave up 2,025 of 14,000 answering checks. On `16b6f0de` and `734d4e30` it answered
-        all 14,000. Its walk asked 314 questions, its busiest second 5, against 490 and 23 before,
-        and 151 lookups routed `stall`, against 1: zones' scouts were deferred for want of room, and
-        the lookups waiting on them went to the helper unwalked.
-      - **The cause.** `P-485` made an own walk of a name never answered take the own walks'
-        places in a freshly heard zone too: discovery's first. Each of a hundred zones is heard
-        through the name that answers, and each of their silent names' own walks then held a
-        discovery place 10 s, so new zones' scouts waited. `P-485` took it from the review's
-        finding that "the zones that answer keep 4" was false for a fresh zone; the finding was
-        about the docs' words, and the code change was the coordinator's choice.
-      - **Decided 2026-10-21 by Claude, under the user's delegation:** restore `P-484`'s rule. A
-        zone heard within `KEY_FRESH_MS` walks every name in heard, its own walks included, never
-        in discovery; an own walk of a zone not fresh takes the own walks' places. The docs say
-        so, and no longer say that the zones that answer keep 4 against a fresh zone's walks.
+        silent) gave up 2,025 of 14,000 answering checks on `dda2cb1e`, where `16b6f0de` and
+        `734d4e30` answered all 14,000. Its walk asked 314 questions, its busiest second 5, against
+        490 and 23 before, and 151 lookups routed `stall`, against 1.
+      - **The cause first read, and what the runs since say.** `P-485` made an own walk of a name
+        never answered take the own walks' places in a freshly heard zone too, discovery's first;
+        with a hundred zones heard through the name that answers, their silent names' own walks
+        would hold discovery 10 s apiece, and the coordinator read the run as that. The runs after
+        this change say otherwise: with `P-485`'s line taken back, one of two runs failed the same
+        way, `stall` 152 and D19's `rate` 0, while builders' unit files shared the VM, and two more
+        with the VM to itself passed. The `stall` routes are D31's late timers (`P-489`), and how
+        much `P-485`'s line added to that run was not measured.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** restore `P-484`'s rule, on
+        its design, since discovery is for zones not yet heard: a zone heard within `KEY_FRESH_MS`
+        walks every name in heard, its own walks included, never in discovery; an own walk of a zone
+        not fresh takes the own walks' places. The docs say so, and no longer say that the zones
+        that answer keep 4 against a fresh zone's walks.
       - **Done when** a case pins it (a fresh zone's own walks of silent names in heard, none in
         discovery, a new zone's scout sent at once) and a mutant restoring `P-485`'s line fails
         it; `forwarder` in gate mode answers every answering check at full size, twice; and
@@ -17298,9 +17301,9 @@ because each is a decision rather than a defect:
       - **What happened.** `forwarder` in gate mode (a hundred keys of three, three names in five
         silent) passed in five full-size runs, `stall` routes 1 each, two of them with the VM's
         container count read at 1 throughout. Twice with builders' unit files sharing the VM, it
-        routed 151 and 152 lookups `stall`, its walk's
-        busiest second fell from 23 questions to 5 and 9, and it gave up 2,025 and 381 of 14,000
-        answering checks (the first with `P-488`'s cause too). `system` mode gives up 12,739.
+        routed 151 and 152 lookups `stall`, its walk's busiest second fell from 23 questions to 5
+        and 9, and it gave up 2,025 and 381 of 14,000 answering checks (the first with `P-488`'s
+        cause too). `system` mode gives up 12,739.
       - **The cause, as read.** At the cold burst the event loop's lag passes D31's `LATE_MS` on
         the walk's deadline timers. A late verdict is dropped by design, and the lookups waiting
         on a dropped scout route `stall`, to the helper unwalked, where the silent ones fill its
