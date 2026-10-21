@@ -17,7 +17,6 @@ import {
   STALE_MS,
   type NameResolverOptions,
 } from '../src/resolver/name-resolver.js';
-import { SAMPLED_PER_KEY } from '../src/resolver/dns-check.js';
 import { CheckPool } from '../src/runner/index.js';
 import { ScriptedAsker } from './support/fake-dns.js';
 import { pollWithin, within } from './support/within.js';
