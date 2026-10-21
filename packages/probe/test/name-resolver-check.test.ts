@@ -34,8 +34,8 @@ import { pollWithin, within } from './support/within.js';
  * heard runs on the probe's lanes, one whose walk went unanswered in the helper, and only there,
  * a refresh rides its zone's heard walk, and a name heard that then sticks on a lane makes its
  * zone unsafe. And the helper's lanes with the check on (D23, `P-478`): a key the walk vouches for
- * is ungated there, any other is held to 3, and the last first lane and last shared lane are kept
- * for lookups the gate does not hold. DNS is a scripted asker, the helper a fake one, and
+ * is ungated there, any other is held to 3, no key runs every first lane (`P-483`), and the last
+ * first lane and last shared lane are kept for lookups the gate does not hold. DNS is a scripted asker, the helper a fake one, and
  * `getaddrinfo` on the probe's lanes is settled by hand; the routing wait is a real 60 ms.
  */
 
@@ -577,7 +577,7 @@ describe('the helper’s lanes with the name check on (P-432 D23, P-478)', () =>
     resolver.stop();
   });
 
-  it('K17: vouched keys at a cold start, D19 refusing their walks: ungated in the helper, past a key’s 3 and counted at no risk, and held to 3 once one sticks', async () => {
+  it('K17: vouched keys at a cold start, D19 refusing their walks: ungated in the helper and counted at no risk, never a key’s fourth first lane though nothing else waits (P-483), and held to 3 once one sticks', async () => {
     const { resolver, helper, calls, ask } = await make({ rate: COLD_BURST });
     await scoutZoneA(calls, ask);
     const names = [1, 2, 3, 4, 5, 6].map((i) => `dev-${String(i)}.zone-a.test`);
@@ -589,31 +589,57 @@ describe('the helper’s lanes with the name check on (P-432 D23, P-478)', () =>
       2,
     );
     await wait(0);
+    const inFlight = (): string[] => helper.inFlight().map((sent) => sent.host);
     assert.equal(calls.length, 1, 'no walk heard: none on the probe’s lanes');
     assert.deepEqual(
-      helper.inFlight().map((sent) => sent.host),
-      names.slice(0, 4),
-      'vouched: the 4 first lanes, past the 3 a key the walk does not vouch for holds',
+      inFlight(),
+      names.slice(0, 3),
+      'vouched, with nothing else queued: 3 of the 4 first lanes, never the fourth',
     );
+    assert.equal(helper.asksFor('dev-4.zone-a.test').length, 0);
     assert.equal(resolver.riskSeen()?.atRisk, 0, 'ungated: none of them at risk');
-    // One sticks: the key is no longer vouched, so it is held to 3 until that one ends.
+    // One sticks: the key is no longer vouched, so the key rule holds it to 3 of every class.
     helper.last('dev-1.zone-a.test').stuck();
     helper.last('dev-2.zone-a.test').answer();
+    await pollWithin(
+      1_000,
+      'the one that answered replaced',
+      () => helper.asksFor('dev-4.zone-a.test').length === 1,
+      2,
+    );
     await wait(0);
-    assert.equal(helper.inFlight().length, 3, 'the one that answered is not replaced');
+    assert.deepEqual(
+      inFlight(),
+      ['dev-1.zone-a.test', 'dev-3.zone-a.test', 'dev-4.zone-a.test'],
+      'held to 3, the stuck one among them',
+    );
     assert.equal(helper.asksFor('dev-5.zone-a.test').length, 0);
+    // Vouched again once that one ends: the next starts, to 3 first lanes, and not the fourth.
     helper.last('dev-1.zone-a.test').answer();
-    await pollWithin(1_000, 'vouched again: the rest start', () => helper.asks.length === 6, 2);
-    // Three said stuck and the fourth answering after them: the key answers in the helper, but
+    await pollWithin(1_000, 'vouched again: the next starts', () => helper.asks.length === 5, 2);
+    await wait(0);
+    assert.deepEqual(inFlight(), ['dev-3.zone-a.test', 'dev-4.zone-a.test', 'dev-5.zone-a.test']);
+    assert.equal(helper.asksFor('dev-6.zone-a.test').length, 0, 'not the fourth first lane');
+    helper.last('dev-3.zone-a.test').answer();
+    await pollWithin(1_000, 'the last starts', () => helper.asks.length === 6, 2);
+    // Three said stuck and Check now answering after them: the key answers in the helper, but
     // the walk vouches for it no more, so its 3 hold, and a check behind them fails at once.
-    for (const host of ['dev-3', 'dev-4', 'dev-5']) helper.last(`${host}.zone-a.test`).stuck();
-    helper.last('dev-6.zone-a.test').answer();
+    const now = ask('dev-2.zone-a.test', { fresh: true });
+    await pollWithin(
+      1_000,
+      'Check now in the helper',
+      () => helper.asksFor('dev-2.zone-a.test').length === 2,
+      2,
+    );
+    for (const host of ['dev-4', 'dev-5', 'dev-6']) helper.last(`${host}.zone-a.test`).stuck();
+    helper.last('dev-2.zone-a.test').answer();
+    assert.deepEqual(await now, A);
     await wait(0);
     const held = await failed(ask('dev-7.zone-a.test', { waitMs: 2_000 }));
     assert.equal(held.code, RESOLVER_STUCK, held.message);
     assert.match(
       held.message,
-      /\(dev-3\.zone-a\.test, dev-4\.zone-a\.test, dev-5\.zone-a\.test\): the DNS check does not vouch for zone-a\.test now, so it holds at most 3 of the helper’s lanes; it stays queued$/u,
+      /\(dev-4\.zone-a\.test, dev-5\.zone-a\.test, dev-6\.zone-a\.test\): the DNS check does not vouch for zone-a\.test now, so it holds at most 3 of the helper’s lanes; it stays queued$/u,
     );
     for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
       for (const sent of helper.inFlight()) sent.answer();
@@ -623,7 +649,79 @@ describe('the helper’s lanes with the name check on (P-432 D23, P-478)', () =>
     resolver.stop();
   });
 
-  it('P-481: a key the walk heard through two cached names, four of its silent names asked at once and another key’s answering name queued: that name takes the last first lane, and the key its fourth only once none waits', async () => {
+  it('P-483: a key the walk heard through one cached scout, four of its first lookups asked at once with nothing else queued: the fourth does not start, and another key’s lookup asked after them takes the last first lane', async () => {
+    // Room for the canary, zone a's scout and one walk of zone b, refilled never: every walk after
+    // them is refused and routes `rate`, unwalked, to the helper.
+    const { resolver, helper, asker, calls, ask } = await make({
+      rate: { perSecond: 0, burst: 3, reserve: 0 },
+    });
+    asker.rule = (_server, name) => (name.startsWith('dev-s') ? 'silent' : 'answer');
+    await scoutZoneA(calls, ask);
+    // Zone b heard through one name its recursor caches, answered on the probe's lanes.
+    const scout = ask('dev-c0.zone-b.test');
+    await pollWithin(
+      1_000,
+      'zone b’s scout heard',
+      () => calls.some((call) => call.host === 'dev-c0.zone-b.test'),
+      2,
+    );
+    calls.find((call) => call.host === 'dev-c0.zone-b.test')?.answer();
+    assert.deepEqual(await scout, A, 'zone b’s scout answered on the probe’s lanes');
+    assert.equal(helper.asks.length, 0, 'nothing in the helper yet');
+    // Four of its first lookups at once, three silent names and one cached, as the run had them.
+    const four = ['dev-s0', 'dev-s1', 'dev-c1', 'dev-s2'].map((name) => `${name}.zone-b.test`);
+    const fourWaits = four.map((host) => ended(ask(host, { waitMs: 60_000 })));
+    await pollWithin(
+      1_000,
+      () => `zone b’s walks refused: ${String(resolver.gateHealth()?.walksDeferred)}`,
+      () => resolver.gateHealth()?.walksDeferred === four.length,
+      2,
+    );
+    await wait(0);
+    const inFlight = (): string[] => helper.inFlight().map((sent) => sent.host);
+    assert.deepEqual(
+      inFlight(),
+      four.slice(0, 3),
+      'vouched, with nothing stuck and nothing else queued: 3 of the 4 first lanes',
+    );
+    assert.equal(helper.asksFor('dev-s2.zone-b.test').length, 0, 'the fourth does not start');
+    // Another key's name, its walk refused too, takes the last first lane at once.
+    const other = ended(ask('dev-1.zone-a.test', { waitMs: 60_000 }));
+    await pollWithin(
+      1_000,
+      () => `zone a in the helper: ${inFlight().join(', ')}`,
+      () => helper.asksFor('dev-1.zone-a.test').length === 1,
+      2,
+    );
+    assert.deepEqual(inFlight(), [...four.slice(0, 3), 'dev-1.zone-a.test']);
+    // It ends, and nothing of another key's waits: zone b still does not take its fourth.
+    helper.last('dev-1.zone-a.test').answer();
+    assert.equal(await other, true);
+    await wait(0);
+    assert.deepEqual(inFlight(), four.slice(0, 3), 'with none waiting, not the fourth either');
+    assert.equal(helper.asksFor('dev-s2.zone-b.test').length, 0);
+    // One of its own ends: the fourth name takes its lane, zone b again at 3.
+    helper.last('dev-c1.zone-b.test').answer();
+    await pollWithin(
+      1_000,
+      'the fourth name started',
+      () => helper.asksFor('dev-s2.zone-b.test').length === 1,
+      2,
+    );
+    assert.deepEqual(inFlight(), [
+      'dev-s0.zone-b.test',
+      'dev-s1.zone-b.test',
+      'dev-s2.zone-b.test',
+    ]);
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+    }
+    assert.deepEqual(await Promise.all(fourWaits), [false, false, true, false]);
+    resolver.stop();
+  });
+
+  it('P-481: a key the walk heard through two cached names, four of its silent names asked at once and another key’s answering name queued: that name takes the last first lane, and the key never its fourth while it runs the other 3 (P-483)', async () => {
     // Room for the canary, zone a's scout and two walks of zone b, refilled never: every walk
     // after them is refused and routes `rate`, unwalked, to the helper.
     const { resolver, helper, asker, calls, ask } = await make({
@@ -677,11 +775,22 @@ describe('the helper’s lanes with the name check on (P-432 D23, P-478)', () =>
     );
     assert.equal(helper.asksFor('dev-2.zone-a.test').length, 1, 'the other key’s name took it');
     assert.deepEqual(zoneB(), silentNames.slice(0, 3), 'not zone b’s fourth');
-    // With none of another key's waiting, zone b takes its fourth, as K17's does.
+    // With none of another key's waiting, zone b still does not take its fourth (P-483).
     helper.last('dev-2.zone-a.test').answer();
     assert.equal(await answering, true);
-    await pollWithin(1_000, 'zone b’s fourth', () => zoneB().length === 4, 2);
-    assert.deepEqual(zoneB(), silentNames);
+    await wait(0);
+    assert.deepEqual(zoneB(), silentNames.slice(0, 3), 'not its fourth, with none waiting');
+    assert.equal(helper.asksFor('dev-s3.zone-b.test').length, 0);
+    assert.equal(helper.inFlight().length, 3, 'the last first lane left free');
+    // One of its own ends: its fourth name takes that one's lane.
+    helper.last('dev-s0.zone-b.test').fail('EAI_AGAIN');
+    await pollWithin(
+      1_000,
+      'zone b’s fourth name',
+      () => helper.asksFor('dev-s3.zone-b.test').length === 1,
+      2,
+    );
+    assert.deepEqual(zoneB(), silentNames.slice(1));
     for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
       for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
       await wait(0);

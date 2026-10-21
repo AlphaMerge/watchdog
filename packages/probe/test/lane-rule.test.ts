@@ -783,7 +783,6 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
       keyFailingRunning: 0,
       keyFirstRunning: 0,
       firstCap: 4,
-      otherKeyFirstQueued: false,
       unitRunning: 0,
       unitCapped: false,
       atRisk: 0,
@@ -932,7 +931,7 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
       );
     });
 
-    it('lastFirst: no key takes the last first lane while it runs every other and another key’s first lookup waits, vouched or not, with the check on or off (P-481)', () => {
+    it('lastFirst: no key takes the last first lane while it runs every other, vouched or not, whether or not another key’s first lookup waits, with the check on or off (P-481, P-483)', () => {
       const vouched = asking({
         vouched: true,
         keyNew: false,
@@ -940,7 +939,6 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
         keyRunning: 3,
         unitRunning: 3,
         keyFirstRunning: 3,
-        otherKeyFirstQueued: true,
         keepLast: true,
         classSpare: false,
       });
@@ -950,18 +948,20 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
         'vouched: past the 3 a key it does not vouch for holds',
       );
       assert.equal(helperClassOk(vouched), true, 'ungated: the kept lane is its');
+      assert.equal(helperRiskOk(vouched), true, 'ungated: at no risk');
       assert.equal(helperLastFirstOk(vouched), false);
       assert.equal(
         admitHelper(vouched),
         undefined,
-        'another key waits: the last first lane is its',
+        'vouched, at 3: the last first lane is never its, whatever else waits',
       );
       assert.equal(admitHelper({ ...vouched, keepLast: false }), undefined, 'the check off too');
       assert.equal(
-        admitHelper({ ...vouched, otherKeyFirstQueued: false }),
-        'shared',
-        'none waiting: it takes every first lane, as K17’s does',
+        admitHelper({ ...vouched, vouched: false, keyQuiet: false }),
+        undefined,
+        'not vouched: the key rule’s 3 holds it first',
       );
+      assert.equal(helperKeyOk({ ...vouched, vouched: false }), false);
       assert.equal(admitHelper({ ...vouched, keyFirstRunning: 2 }), 'shared', 'one lane to spare');
       assert.equal(
         admitHelper({ ...vouched, keyFirstRunning: 0 }),
@@ -972,6 +972,11 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
         admitHelper({ ...vouched, sharedAvailable: 0 }),
         undefined,
         'nor on the kept token',
+      );
+      assert.equal(
+        admitHelper({ ...vouched, keyFirstRunning: 2, sharedAvailable: 0 }),
+        'kept',
+        'the kept token for one lane to spare',
       );
       assert.equal(
         admitHelper({ ...vouched, urgent: true }),
@@ -986,6 +991,13 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
       // The first lanes from the lane set, not worked out from P-426's 6.
       assert.equal(admitHelper({ ...vouched, firstCap: 6, keyFirstRunning: 4 }), 'shared');
       assert.equal(admitHelper({ ...vouched, firstCap: 6, keyFirstRunning: 5 }), undefined);
+      for (let running = 0; running <= 5; running += 1) {
+        assert.equal(
+          helperLastFirstOk({ keyFirstRunning: running, firstCap: 4 }),
+          running < 3,
+          `${String(running)} of 4 running`,
+        );
+      }
     });
 
     it('riskOk: a gated start waits at T, a never-seen key’s first look at T + F, an ungated one never', () => {
@@ -1099,6 +1111,8 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
 
     it('every start it admits satisfies keyOk, riskOk, its class and a token of the kind named', () => {
       let seen = 0;
+      // Starts that take a key's third first lane, so that the fourth is the one left (P-483).
+      let spared = 0;
       for (const urgent of [false, true])
         for (const overflow of [false, true])
           for (const keyNew of [false, true])
@@ -1118,11 +1132,7 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
                         [false, true, 2],
                         [true, true, 2],
                       ] as const)
-                        for (const [keyFirstRunning, otherKeyFirstQueued] of [
-                          [2, true],
-                          [3, false],
-                          [3, true],
-                        ] as const)
+                        for (const keyFirstRunning of [0, 2, 3])
                           for (const keyRunning of [0, 1, 2, 3])
                             for (const atRisk of [0, 3, 4, 5])
                               for (const urgentAvailable of [0, 1])
@@ -1142,7 +1152,6 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
                                       keyAnsweringQueued,
                                       keyFailingRunning,
                                       keyFirstRunning,
-                                      otherKeyFirstQueued,
                                       keyRunning,
                                       unitRunning: keyRunning,
                                       atRisk,
@@ -1170,10 +1179,10 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
                                     assert.ok(
                                       urgent || !keepLast || classSpare || helperUngated(a),
                                     );
-                                    // P-481: never a key's last first lane while another key waits.
-                                    assert.ok(
-                                      urgent || keyFirstRunning < 3 || !otherKeyFirstQueued,
-                                    );
+                                    // P-483: no start runs a key's last first lane, whether or
+                                    // not another key waits.
+                                    assert.ok(urgent || keyFirstRunning + 1 < a.firstCap);
+                                    if (!urgent && keyFirstRunning === a.firstCap - 2) spared += 1;
                                     if (token === 'shared') assert.ok(sharedAvailable > 0);
                                     if (token === 'kept') {
                                       assert.ok(keptAvailable > 0 && sharedAvailable === 0);
@@ -1181,6 +1190,7 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
                                     }
                                   }
       assert.equal(seen, 2 ** 7 * 4 * 4 * 3 * 4 * 4 * 2 ** 3);
+      assert.ok(spared > 0, 'a key’s third first lane is taken in the grid');
     });
 
     it('the unit’s rule is mayStart’s with no shared lane and no unacked', () => {

@@ -304,21 +304,11 @@ function model(seed: number) {
       nameAnswering,
       keyAnsweringQueued: knownQueued,
       keyFailingRunning,
-      // The model builds no name check, so no key is vouched and the key rule holds each to 3:
-      // `P-481`'s rule never binds here. Its cases are the check's own (`name-resolver-check`).
+      // The model builds no name check, so no key is vouched and the key rule holds each to 3,
+      // one fewer than the first lanes: `P-483`'s rule never binds here. Its cases are the check's
+      // own (`name-resolver-check`) and the pure grid's (`lane-rule`).
       keyFirstRunning: p.cls === 'first' ? keys.unitRunning(p.key, 'first') : 0,
       firstCap: RESOLVER_LANES - 2,
-      otherKeyFirstQueued: [...seenEntries].some((entry) => {
-        const queued = entry.pending;
-        return (
-          queued !== undefined &&
-          queued.state === 'queued' &&
-          queued.pool === 'helper' &&
-          queued.cls === 'first' &&
-          !queued.urgent &&
-          queued.key !== p.key
-        );
-      }),
       unitRunning: keys.unitRunning(p.key, p.cls),
       unitCapped: keys.capped(p.key, p.cls),
       atRisk,

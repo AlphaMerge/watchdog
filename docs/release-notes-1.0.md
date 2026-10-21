@@ -481,12 +481,14 @@ ms-probe`: the setting is read only at start
   `getaddrinfo` on its own lookup lanes only for a name they answered within 250 ms (or a quarter
   of the check's bound, if that is less). Every other name it asks in a helper process it starts,
   `ms-probe: lookups`, with six lanes under the probe resolver's own rules and two more for Check
-  now: a zone that stops answering holds at most 3 of the six, and while the check is on the last
-  lane for new names and the last shared one are kept for zones the check heard answer, or that
-  answer in the helper (`P-478`). A name the hosts file gives stays on the probe's own lanes while
-  the check is on (below), and Check now goes to the helper without asking first. **Every answer is
-  still the operating system's**: what the probe asks decides only where `getaddrinfo` runs. A zone
-  that stops answering raises nothing of its own, and the probe's own thread pool is not the silent
+  now: a zone that stops answering holds at most 3 of the six, no zone takes the last of the four
+  lanes for new names while it holds the other three, even one the check heard answer, whether or
+  not another zone's name is waiting (`P-483`), and while the check is on the last lane for new
+  names and the last shared one are kept for zones the check heard answer, or that answer in the
+  helper (`P-478`). A name the hosts file gives stays on the probe's own lanes while the check is
+  on (below), and Check now goes to the helper without asking first. **Every answer is still the
+  operating system's**: what the probe asks decides only where `getaddrinfo` runs. A zone that
+  stops answering raises nothing of its own, and the probe's own thread pool is not the silent
   zone's while the helper is up, so a cold start in the middle of one zone's outage answers the
   other zones from its first scan, with or without the answer file.
 

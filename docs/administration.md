@@ -1313,19 +1313,22 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   hosts file's while the check stands down, is asked in the helper, unwalked. Misses with no
   stand-down are these skips; the probe's log names each name and zone skipped, and the hourly
   summary counts them.
-- **The helper's lanes keep a silent zone to its share.** At most 6 of its lookups run at once:
-  4 for names with nothing kept, 4 for refreshes, 5 for the two together, and 1 for held
-  names' retries, and 2 more for Check now. **A zone the check does not vouch for holds at most
-  3 of them**, of every kind together (`P-478`). The check vouches for a zone only while it is on,
-  has heard the zone answer lately, and none of the zone's lookups is stuck, so with the check
-  off every zone is held to 3. A zone it vouches for is held by `P-438`'s rule (3 of the first 4
-  for a domain not known to answer), and never takes the last of the 4 while another zone's name
-  waits for one (`P-481`). **With the check on, the last of the 4 and the last of the 5 are
-  kept** for names the check heard answer, or that answer in the helper; a name held back only by
-  that fails at once when every lookup ahead of it is stuck (`P-478`). So a zone that stops
-  answering, warm or cold, holds at most 3 of them, and the zones that answer are asked beside it
-  from the first scan, a probe started cold in the middle of the outage included. A lookup the
-  helper's child has run a second without an answer is stuck, held as above.
+- **The helper's lanes keep a silent zone to its share.** At most 6 of its lookups run at once: 4
+  for names with nothing kept, 4 for refreshes, 5 for the two together, and 1 for held names'
+  retries, and 2 more for Check now. **A zone the check does not vouch for holds at most 3 of
+  them**, of every kind together (`P-478`). The check vouches for a zone only while it is on, has
+  heard the zone answer lately, and none of the zone's lookups is stuck, so with the check off
+  every zone is held to 3. A zone it vouches for is held by `P-438`'s rule (3 of the first 4 for a
+  domain not known to answer). **No zone takes the last of the 4 lanes for new names while it holds
+  the other 3**, vouched or not, whether or not another zone's name is waiting: it waits for one of
+  its own to end (`P-483`). A zone the check heard through a name its DNS server still caches can
+  ask for all 4 within milliseconds of a cold start, before any other zone's name is queued, with
+  names that then hang for the resolver's whole timeout. **With the check on, the last of the 4 and
+  the last of the 5 are kept** for names the check heard answer, or that answer in the helper; a
+  name held back only by that fails at once when every lookup ahead of it is stuck (`P-478`). So a
+  zone that stops answering, warm or cold, holds at most 3 of them, and the zones that answer are
+  asked beside it from the first scan, a probe started cold in the middle of the outage included. A
+  lookup the helper's child has run a second without an answer is stuck, held as above.
 - **A helper that fails is replaced, and the probe never waits on it.** The probe judges it
   every second by its beats: quiet for 3 seconds, its lookups in flight are let go and other
   names asked elsewhere, the names it was asking kept off the probe's own lanes as below; quiet

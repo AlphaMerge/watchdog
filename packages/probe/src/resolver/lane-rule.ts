@@ -478,14 +478,12 @@ export interface HelperAdmitAsk {
   readonly keyFailingRunning: number;
   /**
    * For a first lookup, its key's first lookups running in the helper, as its unit counts them
-   * (`P-481`): a lookup let go at a configuration change or as the child went quiet counts against
-   * no key. 0 for a refresh or a retry, which take no first lane.
+   * (`P-481`, `P-483`): a lookup let go at a configuration change or as the child went quiet counts
+   * against no key. 0 for a refresh or a retry, which take no first lane.
    */
   readonly keyFirstRunning: number;
   /** The helper's first lanes (`P-426`'s `firstCap`). */
   readonly firstCap: number;
-  /** Another key has a first lookup queued in the helper that is not "Check now"'s (`P-481`). */
-  readonly otherKeyFirstQueued: boolean;
   readonly unitRunning: number;
   readonly unitCapped: boolean;
   /** The helper's lanes at risk now. */
@@ -540,21 +538,25 @@ export function helperAnsweringOk(
 }
 
 /**
- * Whether a lookup may take the helper's last first lane (`P-481`): never one whose key runs every
- * other, vouched or not, while another key has a first lookup queued. A key's walk evidence says
- * that its names answered the walk, not that each will answer `getaddrinfo`: a zone the walk heard
- * through names its recursor caches took all 4 first lanes with names that hang, for 30 s, while
- * other zones' names that answer waited. So no key holds every first lane by itself while another
- * waits for one; with none waiting it may, as `K17`'s does. It binds a vouched key alone, since the
- * key rule holds one the walk does not vouch for to `KEY_QUIET`, fewer than the first lanes. Never
- * a fail-fast condition of its own: the key's first lookups it waits behind are none of them past
- * `STUCK_MS`, since one that is unvouches the key, and the key rule then holds it and names them.
- * Never asked of "Check now", which takes no lane of a class.
+ * Whether a lookup may take the helper's last first lane (`P-481`, `P-483`): never one whose key
+ * runs every other, vouched or not, whether or not another key's first lookup is queued. A key's
+ * walk evidence says that its names answered the walk, not that each will answer `getaddrinfo`: a
+ * zone the walk heard through a name its recursor caches took all 4 first lanes with names that
+ * hang, for 30 s, while other zones' names that answer waited. `P-481` refused it the fourth only
+ * while another key's first lookup was queued, but a zone vouched in a cold start's first second
+ * asks for its first lanes within milliseconds, before another zone's lookup is queued, and with
+ * none of its own stuck yet to unvouch it. So no key ever runs every first lane: a zone alone in
+ * the helper loses a quarter of them, and every other zone has one from the first scan (while the
+ * check is on, a zone the gate does not hold: `helperClassOk`). It binds a vouched key alone, since
+ * the key rule holds one the walk does not vouch for to `KEY_QUIET`, fewer than the first lanes.
+ * Never a fail-fast condition of its own: the key's first lookups it waits behind are none of them
+ * past `STUCK_MS`, since one that is unvouches the key, and the key rule then holds it and names
+ * them. Never asked of "Check now", which takes no lane of a class.
  */
 export function helperLastFirstOk(
-  a: Pick<HelperAdmitAsk, 'keyFirstRunning' | 'firstCap' | 'otherKeyFirstQueued'>,
+  a: Pick<HelperAdmitAsk, 'keyFirstRunning' | 'firstCap'>,
 ): boolean {
-  return a.keyFirstRunning < a.firstCap - 1 || !a.otherKeyFirstQueued;
+  return a.keyFirstRunning < a.firstCap - 1;
 }
 
 /** Whether a lookup is ungated (§1.8, D23): its key answers, or is vouched, and its unit is not capped. */
@@ -614,8 +616,8 @@ export function helperClassOk(
  * §1.8's `admit`). "Check now" takes an urgent token when one is free, under no key rule, so it
  * passes a silent zone's stuck lookups; otherwise a shared one, as its key's first look, under the
  * key rule and T. Any other lookup needs the key rule, T and its class's lane (`helperClassOk`),
- * never its key's last first lane while another key waits for one (`helperLastFirstOk`), and takes
- * a shared token, or the kept one only while ungated: the kept token is never a gated lookup's.
+ * never its key's last first lane (`helperLastFirstOk`), and takes a shared token, or the kept one
+ * only while ungated: the kept token is never a gated lookup's.
  */
 export function admitHelper(a: HelperAdmitAsk): HelperToken | undefined {
   if (a.urgent && a.urgentAvailable > 0) return 'urgent';
