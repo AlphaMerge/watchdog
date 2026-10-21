@@ -17121,6 +17121,57 @@ because each is a decision rather than a defect:
         to the probe closed") and passed 5 of 5 alone; untraced.
       - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
 
+- [ ] **P-485 — `partial`'s check-on ceiling starts at the run's own time for the zone, so the
+      fixes that make that time early are not judged at full size** · S · P-432, P-484 · Filed
+      2026-10-21 by the coordinator, from an adversarial review of `P-484`
+      (`scratchpad/s7-rca/review-p484.md`). The review found `P-484`'s code sound and its judge
+      not.
+      - **What is wrong.**
+        - **The anchor is unjudged.** The ceiling is the key's first heard time, read from the run,
+          plus the rest, so a late zone raises its own ceiling. The root cause's forced silent-first
+          runs with the backoff or the carried walk again missing (zone heard at 49 s, longest wait
+          71 and 72 s) pass the new ceiling of about 87 s. The old rule failed both.
+        - **A never-answered cached name can pass** in a 2-minute arm: nothing says every cached
+          name answers.
+        - **The spacing term is an average.** The wheel hashes each sensor's phase, so a cached
+          name's checks are 12 to 23 s apart at most, not 6 s. An own walk deferred at a check, or
+          refused by D19, waits for the next one. The forced silent-first run's margin was 7.7 s.
+        - **8 places are the most own walks get, not what they are guaranteed.** Heard is a cap,
+          not a reservation, and discovery is shared with scouts, walks again and silent names'
+          retries walked again. The release note's "÷ 8" is not a bound.
+        - **The wait is measured from each name's first ask**, the ceiling from the arm's start:
+          lax by the smaller of the two, up to 15 s.
+        - Lesser: the arm's `keyHeardMs` extraction has no unit test; a fresh heard zone's own
+          walks are uncapped in heard, so "the zones that answer keep 4" is false; the flush's
+          1 ms floor counts a `budget` deferral that is not one; the docs' backoff schedule is
+          false for a zone that turns silent from mixed; resolver case E does not assert that the
+          silent name fails at once; `#leftOfBounds` is untested.
+      - **Decided 2026-10-21 by Claude, under the user's delegation.**
+        - **Judge the anchor.** The arm records each walk again of zone b: when it fell due, when
+          it was sent, its carrier and its verdict. The judge fails a step that is not one of the
+          schedule's (5, 10, 20, 40, 60 s ± 20%, each from its NotHeard), and a walk again sent
+          later than the first check of a held zone-b name after its due, plus the lag. The key's
+          first heard time must be the first heard verdict among its scouts and walks again.
+        - **Every cached name answers** within the arm, with the check on.
+        - **Each name's own terms, from the run.** A name's first answer is held to the later of
+          its first ask and the key's heard time, plus its own largest gap between checks, plus
+          one more such gap for each D19 refusal of its own walk the arm records, plus the drain,
+          plus the lag.
+        - **The drain uses the places own walks are guaranteed**, discovery's 4, and counts in it
+          every question of the zone that shares them (own walks, walks again, retries walked
+          again), from the run. The release note gives ÷ 8 as typical and this as the bound.
+        - **An own walk of a name never answered takes discovery, then at most 4 of heard's 8,
+          whatever its key's phase**, a fresh heard zone included. A known name's own walk walks
+          as `P-484` built it, and a test pins that.
+        - **The flush does not walk** with less than a walk's least window left; nothing counted.
+        - The docs say the backoff from mixed as the code does; case E and `#leftOfBounds` get
+          their asserts; the judge gets cases for a late key, a never-answered name, a name first
+          asked after the key, and a schedule broken each way.
+      - **Done when** the review's mutants R1 to R5 are killed, and in a clone, not of record, a
+        forced silent-first `partial` at full size fails the judge with the carried walk again
+        reverted, and again with the backoff's double step restored; `partial` at full size passes
+        in both modes, heard-first, 3 runs of 2 minutes; and `warmzone` still passes.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
