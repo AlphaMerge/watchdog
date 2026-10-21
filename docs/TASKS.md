@@ -17034,7 +17034,7 @@ because each is a decision rather than a defect:
         most 3 in the helper's child, at risk at most 3; `slow`, `zone`, `spread10`, `steady` and
         `forwarder` passed, `forwarder` answering 14,000 of 14,000 against `system`'s 1,261.
 
-- [ ] **P-484 — with the check on, a partly cached zone's cached names wait behind its silent
+- [x] **P-484 — with the check on, a partly cached zone's cached names wait behind its silent
       names' own walks** · S · P-432, P-479, P-480 · Filed 2026-10-21 by the coordinator, from
       the same trace.
       - **What happened.** S7's whole run on `734d4e30` gave up one cached check of `partial` past
@@ -17138,8 +17138,11 @@ because each is a decision rather than a defect:
         39.0 s and inside the first interval (`system` gave up 423); with it off, 499, the longest
         317.4 s against 375.2 s. `warmzone`, `zone`, `steady`, `forwarder`, P1, P5 and P5b passed.
         The judge's ceiling is replaced by `P-485`'s, so the box waits for it.
+      - **Done** with `P-485`'s ceiling, which judges this ticket's runs as its own outcome says,
+        and `P-488`, which takes back the one part of `P-485` that undid this ticket's pool for a
+        fresh zone.
 
-- [ ] **P-485 — `partial`'s check-on ceiling starts at the run's own time for the zone, so the
+- [x] **P-485 — `partial`'s check-on ceiling starts at the run's own time for the zone, so the
       fixes that make that time early are not judged at full size** · S · P-432, P-484 · Filed
       2026-10-21 by the coordinator, from an adversarial review of `P-484`
       (`scratchpad/s7-rca/review-p484.md`). The review found `P-484`'s code sound and its judge
@@ -17236,16 +17239,24 @@ because each is a decision rather than a defect:
         on the step.
       - **Found, not fixed:** `name-resolver-check`'s "gives back the token a lookup carries when
         it moves…" failed once under load (`released` 2 of 3) and passed 17 other times.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `dda2cb1e`, alone on the VM
+        but for single unit files, `ms-server` up, so not of record: 188 of 196, and the check-off
+        run 168 of 196, 1 failed): **`partial` passed in both modes.** With the check on, every
+        answering check answered, 41 cached checks of 17 names given up, all allowed, every cached
+        name answered, the longest first answer 36.8 s, the nearest name 1.8 s against its ceiling
+        of 21.7 s; with it off, 510, the longest 317.4 s against 375.3 s. `warmzone` and the rest
+        passed. `forwarder` in gate mode gave up 2,025 answering checks: half of it this ticket's
+        own walks of a fresh zone's never-answered names in discovery (`P-488`), half the event
+        loop's lag at the cold burst while other runs shared the VM (`P-489`).
 
-- [ ] **P-488 — a freshly heard zone's own walks of names never answered take discovery, so many
+- [x] **P-488 — a freshly heard zone's own walks of names never answered take discovery, so many
       zones half silent starve new zones' scouts** · XS · P-432, P-485 · Filed 2026-10-21 by the
       coordinator, from S7 whole at full size on `dda2cb1e`.
       - **What happened.** `forwarder` in gate mode (a hundred keys of three, three names in five
         silent) gave up 2,025 of 14,000 answering checks. On `16b6f0de` and `734d4e30` it answered
         all 14,000. Its walk asked 314 questions, its busiest second 5, against 490 and 23 before,
-        and 151 lookups routed `stall`, against 1: zones' scouts were deferred for want of room,
-        and the lookups waiting on them went to the helper unwalked.
+        and 151 lookups routed `stall`, against 1: zones' scouts were deferred for want of room, and
+        the lookups waiting on them went to the helper unwalked.
       - **The cause.** `P-485` made an own walk of a name never answered take the own walks'
         places in a freshly heard zone too: discovery's first. Each of a hundred zones is heard
         through the name that answers, and each of their silent names' own walks then held a
@@ -17260,6 +17271,47 @@ because each is a decision rather than a defect:
         discovery, a new zone's scout sent at once) and a mutant restoring `P-485`'s line fails
         it; `forwarder` in gate mode answers every answering check at full size, twice; and
         `partial` with the check on and `warmzone` still pass.
+
+      **P-488 outcome. A zone heard within `KEY_FRESH_MS` walks every name in heard, its own walks
+      included, and never takes discovery's places from a zone not yet heard.** Built and landed
+      2026-10-21 on `integ/r8-1020` as `f0f7f63f`, by the coordinator: one line of `dns-check.ts`
+      back to `P-484`'s, with its comment, the test, and the walk's paragraph in
+      `administration.md`.
+      - **Test.** `dns-check`'s `P-485` case is replaced: zone f heard and fresh, five of its silent
+        names' own walks and a known name's all in heard, none in the own walks' places or
+        discovery's, and a new zone's scout sent at once into discovery. `dns-check` and
+        `name-resolver-check` 141 of 141.
+      - **Mutant: 1 of 1 killed.** `P-485`'s line restored fails the case ("in heard"); restored by
+        copy and `utime`, checked byte for byte, rebuilt, the dist clean of it, 62 of 62.
+      - **Runs**, full size, gate mode, `ms-server` up: `forwarder` at 7 minutes four times,
+        answering 14,000, 13,619, 14,000 and 14,000 of 14,000. The second run shared the VM with
+        builders' unit files: 152 lookups routed `stall` (D31's late timer), against 1 in each of
+        the others, and its jitter reached 1,537 ms; the third and fourth ran with the VM otherwise
+        idle, its container count never above 1 in 175 readings. That is `P-489`'s, not this
+        ticket's. `partial` with the check on, 2 minutes: 9,000 of 9,000, 25 cached checks given up,
+        all allowed. `warmzone`, 2 minutes: passed.
+
+- [ ] **P-489 — with the probe's event loop late at a cold burst, D31 drops the scouts' verdicts
+      and a many-zone probe's names go to the helper unwalked** · S · P-432 · Release 1.1 · Filed
+      2026-10-21 by the coordinator, from `forwarder`'s full-size runs on `dda2cb1e` and
+      `f0f7f63f`.
+      - **What happened.** `forwarder` in gate mode (a hundred keys of three, three names in five
+        silent) passed in five full-size runs, `stall` routes 1 each, two of them with the VM's
+        container count read at 1 throughout. Twice with builders' unit files sharing the VM, it
+        routed 151 and 152 lookups `stall`, its walk's
+        busiest second fell from 23 questions to 5 and 9, and it gave up 2,025 and 381 of 14,000
+        answering checks (the first with `P-488`'s cause too). `system` mode gives up 12,739.
+      - **The cause, as read.** At the cold burst the event loop's lag passes D31's `LATE_MS` on
+        the walk's deadline timers. A late verdict is dropped by design, and the lookups waiting
+        on a dropped scout route `stall`, to the helper unwalked, where the silent ones fill its
+        lanes for 30 s and answering ones of keys not yet vouched wait behind them.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** release 1.1. The gate's
+        degradation is toward the helper, which is safe, and it still answers almost every check
+        `system` mode gives up; S7's arms are measured on a quiet VM, as CLAUDE.md asks of every
+        `test:perf` budget, and the quiet window is the measurement of record. **Done when** a run
+        with the event loop held at the burst (`P3`'s way) shows whether a dropped scout's waiters
+        should wait for the key's next step rather than route `stall`, and the answer is built or
+        recorded.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
