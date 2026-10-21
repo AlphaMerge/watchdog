@@ -17195,7 +17195,8 @@ because each is a decision rather than a defect:
       them, and to the time the zone was first heard; an own walk of a name never answered takes
       discovery, then at most 4 of heard's 8, whatever its zone's phase; and the stuck flush walks
       nothing with less than a walk's least window left.** Built 2026-10-21 on `fix/p485-ceiling`
-      and landed on `integ/r8-1020` as TODO(integ). No protocol change and no migration.
+      and landed on `integ/r8-1020` as `2f96e8b7`, `50b6bddc` and `8718a4f5`. No protocol change and
+      no migration.
       - **What was built.**
         - Debug lines the judge reads: `WALKING_AGAIN` (key, carrier, own, step, due, the
           NotHeard it counts from, sent), `ZONE_VERDICT` (a scout's or walk again's verdict and
