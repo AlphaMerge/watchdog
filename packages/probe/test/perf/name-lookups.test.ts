@@ -51,6 +51,7 @@ import {
   OWN_WALK_DEFERRED,
   resolverLanes,
   STALE_MS,
+  STUCK_MS,
   type Family,
 } from '../../src/resolver/name-resolver.js';
 import type { ResolveAck, ResolveReply } from '../../src/resolver/protocol.js';
@@ -5546,7 +5547,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     );
   });
 
-  it('partial with the check on judges the anchor: each walk again of zone b at its step of the schedule from its NotHeard, sent by the first check of a held name after its due and the lag, and the zone first heard at its first heard scout or walk again (P-485)', () => {
+  it('partial with the check on judges the anchor: each walk again of zone b at its step of the schedule from its NotHeard, sent by the first check of a held name after its due, the stuck flush’s STUCK_MS and the lag, and the zone first heard at its first heard scout or walk again (P-485)', () => {
     const { b20, given, zoneWalks, walksAgain } = silentFirst;
     const [first, second] = walksAgain;
     assert.ok(first !== undefined && second !== undefined);
@@ -5589,8 +5590,8 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       [
         'zone b’s walk again 2 by dev-20.zone-b.test, sent at 16.600 s: at step 0, where the schedule has step 1 (10.000 s)',
         'zone b’s walk again 2 by dev-20.zone-b.test: due 5.000 s after its NotHeard at 6.550 s, not 10.000 s ± 20% (step 1)',
-        // Due at 11.55 s, it was late too: dev-40, held, was checked at 15 s.
-        'zone b’s walk again 2 by dev-20.zone-b.test, due at 11.550 s, sent at 16.600 s: late, after the first check of a held name after its due, dev-40.zone-b.test’s at 15.000 s, and the 40 ms lag',
+        // Due at 11.55 s, it was late too: dev-40, held, was checked at 15 s, 1.6 s before.
+        'zone b’s walk again 2 by dev-20.zone-b.test, due at 11.550 s, sent at 16.600 s: late, after the first check of a held name after its due, dev-40.zone-b.test’s at 15.000 s, the 1000 ms the stuck flush may take to carry it, and the 40 ms lag',
       ],
     );
     // At its step, the jitter's edges pass and past them do not; never before its due.
@@ -5632,12 +5633,26 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     assert.deepEqual(faults({ walksAgain: [{ ...first, step: 4 }, second] }).slice(0, 1), [
       'zone b’s walk again 1 by dev-50.zone-b.test, sent at 6.300 s: at step 4, where the schedule has step 0 (5.000 s)',
     ]);
-    // Late: sent past the first check of a held cached name after its due and the lag, as with
-    // the carried walk again reverted; at the lag's edge, not.
-    assert.deepEqual(faults({ walksAgain: [first, { ...second, sentMs: 16_640 }] }), []);
-    const late = faults({ walksAgain: [first, { ...second, sentMs: 16_641 }] });
-    assert.deepEqual(late, [
-      `zone b’s walk again 2 by ${b20}, due at 16.550 s, sent at 16.641 s: late, after the first check of a held name after its due, ${b20}’s at 16.600 s, and the 40 ms lag`,
+    // Late: sent past the first check of a held cached name after its due, plus what the stuck
+    // flush may take to carry it and the lag, as with the carried walk again reverted. dev-20's
+    // check at 16.6 s is the first after the due at 16.55 s: the edge is 16.6 s, `STUCK_MS` and
+    // the 40 ms lag. Its walk again heard 50 ms after its send, dev-20 answering 50 ms after.
+    const edgeMs = 16_600 + STUCK_MS + 40;
+    const sentAt = (ms: number): string[] =>
+      faults(
+        {
+          heardMs: [ms + 50],
+          walksAgain: [first, { ...second, sentMs: ms, atMs: ms + 50 }],
+          verdicts: zoneWalks.verdicts.map((verdict) =>
+            verdict.verdict === 'heard' ? { ...verdict, sentMs: ms, atMs: ms + 50 } : verdict,
+          ),
+        },
+        { keyHeardMs: ms + 50, firstAnswerMs: { [b20]: ms + 100, [silentFirst.b40]: 21_100 } },
+      );
+    assert.deepEqual(sentAt(edgeMs - 1), []);
+    assert.deepEqual(sentAt(edgeMs), []);
+    assert.deepEqual(sentAt(edgeMs + 1), [
+      `zone b’s walk again 2 by ${b20}, due at 16.550 s, sent at ${((edgeMs + 1) / 1_000).toFixed(3)} s: late, after the first check of a held name after its due, ${b20}’s at 16.600 s, the ${String(STUCK_MS)} ms the stuck flush may take to carry it, and the 40 ms lag`,
     ]);
     // A late key: the zone heard at 49 s, on a walk again sent then though held names were
     // checked from its due on. Each name's own ceiling starts there and passes; the walk again
@@ -5655,7 +5670,7 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       },
     });
     assert.deepEqual(judgeWorld(lateKey), [
-      `zone b’s walk again 2 by ${b20}, due at 16.550 s, sent at 49.000 s: late, after the first check of a held name after its due, ${b20}’s at 16.600 s, and the 40 ms lag`,
+      `zone b’s walk again 2 by ${b20}, due at 16.550 s, sent at 49.000 s: late, after the first check of a held name after its due, ${b20}’s at 16.600 s, the ${String(STUCK_MS)} ms the stuck flush may take to carry it, and the 40 ms lag`,
     ]);
     // A due after the last verdict, with none sent though a held name was checked.
     const { keyHeardMs: _never, ...unheard } = given;

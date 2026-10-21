@@ -11,7 +11,12 @@ import {
   WALK_RATE,
 } from '../../src/resolver/forward-budget.js';
 import { KEY_QUIET, RISK_F, RISK_T } from '../../src/resolver/lane-rule.js';
-import { ANSWER_MS, RESOLVER_LANES, type RiskSeen } from '../../src/resolver/name-resolver.js';
+import {
+  ANSWER_MS,
+  RESOLVER_LANES,
+  STUCK_MS,
+  type RiskSeen,
+} from '../../src/resolver/name-resolver.js';
 
 /**
  * What the name gate's perf arms assert (`P-432` S7, the design's §7.6), as one pure function of
@@ -867,6 +872,22 @@ const LAST_STEP = Math.ceil(Math.log2(REWALK_MAX_MS / REWALK_FIRST_MS));
 const SAME_TURN_MS = 1;
 
 /**
+ * How long after the first check of a held cached name after its due a walk again may be sent,
+ * less the lag (`P-485`): `STUCK_MS`, the most the stuck flush takes to carry it. Neither of the
+ * two ways the check carries it is sure to be at once:
+ * - every lane its lookup could take held by a lookup past `STUCK_MS` (`#lanesStuck`, in the
+ *   helper `#helperBlocked`), the check walks at once (`#rewalk`) and the walk again is sent then;
+ * - otherwise the check waits behind a lookup of its key not yet stuck, which started before the
+ *   check and which the child says is stuck `STUCK_MS` after it started, decided after its polls;
+ *   the stuck flush (`#onStuck`) then walks the lookups still queued with checks waiting, and the
+ *   walk again with them, within `STUCK_MS` of the check.
+ * Not covered: a lookup ahead that answers within `STUCK_MS` lets the queue move, so the held name
+ * may answer in the helper unwalked and a later check carry the walk again; and the child's poll
+ * turn and the pipe from it are not in the lag the run measured, which is the probe's.
+ */
+const lateWithin = (lagMs: number): number => STUCK_MS + lagMs;
+
+/**
  * What the silent zone's key's own walks did against what the code says they do (`P-485`), from
  * the check's debug lines: a fault for each, naming what failed. Read from the facts and the code's
  * constants, never typed.
@@ -877,8 +898,9 @@ const SAME_TURN_MS = 1;
  *   (`REWALK_FIRST_MS` doubling to `REWALK_MAX_MS`) ± `REWALK_JITTER` after its NotHeard, or after
  *   the walk again before it where that had none, and never before.
  * - **The late walk again.** Each is sent by the first check after its due of a held cached name
- *   (one not yet answered), plus the lag: that check's own walk carries it (`P-484`). A due after
- *   the last verdict with no walk again sent, though such a check came, is one never sent.
+ *   (one not yet answered), plus `STUCK_MS` and the lag: that check's own walk carries it, at once
+ *   or from the stuck flush (`P-484`, `lateWithin`). A due after the last verdict with no walk
+ *   again sent, though such a check came, is one never sent.
  * - **The anchor.** The time the check first heard the zone is the first heard verdict among its
  *   scouts and walks again: what the ceilings start from is what these judge.
  */
@@ -904,9 +926,9 @@ export function zoneWalkFaults(given: NonNullable<WorldFacts['cachedGivenUp']>):
       faults.push(
         `${which}, due at ${s(dueMs)}, never sent, though ${check.name}, held, was checked at ${s(check.atMs)}`,
       );
-    } else if (sentMs > check.atMs + lagMs) {
+    } else if (sentMs > check.atMs + lateWithin(lagMs)) {
       faults.push(
-        `${which}, due at ${s(dueMs)}, sent at ${s(sentMs)}: late, after the first check of a held name after its due, ${check.name}’s at ${s(check.atMs)}, and the ${String(Math.round(lagMs))} ms lag`,
+        `${which}, due at ${s(dueMs)}, sent at ${s(sentMs)}: late, after the first check of a held name after its due, ${check.name}’s at ${s(check.atMs)}, the ${String(STUCK_MS)} ms the stuck flush may take to carry it, and the ${String(Math.round(lagMs))} ms lag`,
       );
     }
   };
