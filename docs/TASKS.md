@@ -16983,6 +16983,44 @@ because each is a decision rather than a defect:
           2 minutes, and `slow`, `zone`, `spread10`, `steady` and `forwarder` still pass at full
           size.
 
+      **P-483 outcome. No key takes the helper's last first lane, vouched or not, whether or not
+      another key's first lookup is queued: `firstCap - 1` for every key, for every lookup but
+      "Check now".** Built 2026-10-21 on `fix/p483-first-lane`, and landed on `integ/r8-1020` as
+      `820a6a64`. In `lane-rule.ts` and `name-resolver.ts`, with the helper's lanes paragraph in
+      `administration.md` and the gate's paragraph in the release notes. No protocol change and no
+      migration.
+      - **What was built.** `helperLastFirstOk` is `keyFirstRunning < firstCap - 1`. The ask's
+        `otherKeyFirstQueued`, and the resolver's queue read for it (`#otherFirstQueued`,
+        `#otherFirstQueuedOnce`), are gone: nothing else read them.
+      - **Decided by the builder, under the ticket's decision:**
+        - it binds a vouched key alone, since the key rule holds any other to 3 across classes;
+        - it is still no fail-fast condition of its own: a key refused it runs 3 first lookups, and
+          one of them stuck unvouches the key, whose rule then names them;
+        - `keyFirstRunning` counts as `P-481` built it, a key's "Check now" in its first unit
+          included, so a vouched key with one running is refused a third first lane while it runs;
+        - **not widened to the last shared lane.** A vouched key's 3 first lookups and 2 refreshes
+          would hold all 5, but no refresh exists on a cold start's first scan, all 5 would have to
+          start within 1 s and hang (one past it unvouches the key), and a vouched zone's refreshes
+          in `partial` are of cached names, which answer at once. Refusing them would idle a lane
+          or bring back the race this ticket removes. Neither the trace nor any run showed it.
+      - **Tests.** `name-resolver-check` 73 → 74: the ticket's case, zone b vouched by one cached
+        scout, four of its first lookups asked at once, three started, zone a's lookup takes the
+        last lane, and zone b's fourth waits for one of its own to end. K17 and `P-481`'s step 6 now
+        pin that the fourth does not start with nothing else waiting. `lane-rule`'s lastFirst case
+        is rewritten, and its admission grid (786,432 asks) asserts that no admitted non-urgent
+        start runs a key's last first lane, counting the third-lane starts so it is not vacuous.
+      - **Mutants: 7 of 7 killed**: the old `P-481` rule, the rule gone, `firstCap` for
+        `firstCap - 1`, the rule asked of "Check now", a refresh counted as a first lane, and
+        `P-478`'s two mutants the old K17 killed, run again against its new form.
+      - **Runs.** The 11 resolver unit files and the outage scenario, 1,050 of 1,050. **`partial`
+        at full size, 5 runs of 2 minutes, gate, check on**: 9,000 of 9,000 answering checks in
+        each, no "held 4", at most 3 silent in the helper's child, and 64 to 101 cached checks given
+        up, all within the first interval, the longest first answer 53.0 to 60.1 s. Before it, 6
+        of 11 such runs gave up 1,360 to 1,539. Not measurements of record: `ms-server` was up.
+      - **Found, not fixed:** lookups let go at a quiet or a configuration change count against no
+        key but hold their lanes until they end.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+
 - [ ] **P-484 — with the check on, a partly cached zone's cached names wait behind its silent
       names' own walks** · S · P-432, P-479, P-480 · Filed 2026-10-21 by the coordinator, from
       the same trace.
