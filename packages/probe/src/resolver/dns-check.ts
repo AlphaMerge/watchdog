@@ -38,7 +38,8 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * phase is derived from its verdict times, never stored: `heard`, `silent`, `mixed` (both within
  * `KEY_SETTLE_MS`), or `unknown`. An unknown key sends at most `KEY_SCOUTS` scouts and its other
  * names wait for their verdict; a silent key sends nothing until its walk again is due (5 s
- * doubling to 60 s), and its names go straight to the helper; a mixed key walks each name. A
+ * doubling to 60 s, one step a walk again: a NotHeard of a key already silent keeps its step,
+ * `P-484`), and its names go straight to the helper; a mixed key walks each name. A
  * verdict is taken after polls, and one whose timer fired more than `LATE_MS` late is dropped
  * (D31): its scout is released and its waiters route unvouched (`stall`).
  *
@@ -65,8 +66,11 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * **The budgets** (§1.6, D19): every question is open in the budget's ledger, in one of three pools,
  * until the server's first reply or `FORWARD_HOLD_MS`, never less for the channel giving up
  * (`P-479`); a step short of room waits in its pool's queue until its deadline, woken by a reply
- * or a hold's end, then routes `budget`. Each server's bucket gives at most 10 questions a second;
- * a step it refuses routes `rate`, at once.
+ * or a hold's end, then routes `budget`. A waiter given room sends in the same turn, so that no
+ * pool admits past its places however many wakes come in one turn (`P-484`). An own walk of a
+ * mixed key, or of a heard one not fresh, takes discovery's room, and while discovery is full up
+ * to `OWN_WALK_HEARD` of heard's (`P-484`). Each server's bucket gives at most 10 questions a
+ * second; a step it refuses routes `rate`, at once.
  *
  * **Proven, misses and the stand-down** (§1.10). The check walks nothing until a reply has proven
  * the path to the servers under this configuration: any reply to a walk, or to the canary, a
@@ -83,7 +87,8 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * an urgent token, as with the check off). Item 4 is back in one narrow form (`P-480`): a queued
  * helper lookup whose own name was never walked (deferred, or silent on its zone's evidence alone)
  * gets one walk of its own when a check of it would fail at once behind its key's cap, its key
- * heard or mixed (`heardOrMixed`); the resolver moves it on that walk alone.
+ * heard or mixed (`heardOrMixed`), or silent with its walk again due (`walkAgainDue`, `P-484`),
+ * which that walk then carries; the resolver moves it on that walk alone.
  */
 
 /** How long a walk may take to be heard: a quarter of a check's bound at most (§1.3). */
@@ -126,6 +131,8 @@ export const KEY_IDLE_MS = 390_000;
 export const MAX_KEYS = 20_000;
 /** The canary's name (§1.10): a question every server answers at once, NXDOMAIN or not. */
 export const CANARY_NAME = 'localhost.';
+/** The debug line a key heard or mixed from unknown or silent says (`P-484`), with its key. */
+export const HEARD_A_ZONE = 'the DNS check heard a zone it walks';
 const STUCK_MS = 1_000;
 const LOG_EVERY_MS = 60_000;
 /** A walk deferred after this long with none for the same reason (and server) starts an episode. */
@@ -243,6 +250,12 @@ export interface CheckAsk {
   readonly boundMs: number | undefined;
   /** Its lookup: sampling counts it until `sampledEnded`. */
   readonly ref: object;
+  /**
+   * A queued helper lookup's own walk (`P-480`), never a ride: of a mixed key, or a heard one not
+   * fresh, it takes discovery's room and, while discovery is full, up to `OWN_WALK_HEARD` of
+   * heard's (`P-484`).
+   */
+  readonly own: boolean;
 }
 
 /** Why a lookup is asked in the helper without being heard or found silent. */
@@ -399,6 +412,17 @@ type ServerSaid =
   | { readonly kind: 'silent' | 'stall' }
   | { readonly kind: 'deferred'; readonly why: 'budget' | 'rate'; readonly at: DeferredAt };
 
+/**
+ * Where a step's questions go (§1.6): one of the budget's pools, or, for an own walk, discovery's
+ * room and then up to `OWN_WALK_HEARD` of heard's (`P-484`), which the budget's `ownPlace` gives.
+ */
+type PoolChoice = WalkPool | 'own';
+
+const POOL_CHOICES: readonly PoolChoice[] = ['heard', 'discovery', 'urgent', 'own'];
+
+/** The pool a step waited in, as a deferral says it: an own walk waits for discovery's first. */
+const poolSaid = (choice: PoolChoice): WalkPool => (choice === 'own' ? 'discovery' : choice);
+
 /** Where a walk was deferred: the pool short of room, or the server whose rate was spent. */
 interface DeferredAt {
   readonly pool?: WalkPool;
@@ -420,10 +444,16 @@ type StepEnd =
 
 /** A step waiting for room in its pool (§1.4). */
 interface RoomWait {
-  /** Takes the room if there is some now: true once it has ended, either way. */
+  /**
+   * Takes the room if there is some now, and sends in it before returning (`P-484`): true once it
+   * has ended, either way.
+   */
   readonly tryNow: () => boolean;
   readonly cancel: () => void;
 }
+
+/** What a question given room did: sent, or refused by its server's rate (D19). */
+type Sent = Question | ServerSaid;
 
 const withoutDot = (host: string): string =>
   host.length > 1 && host.endsWith('.') ? host.slice(0, -1) : host;
@@ -444,8 +474,13 @@ export class DnsCheck {
   readonly #keys = new Map<string, KeyState>();
   /** Questions still open, by (server, name, type): a second asker listens (§1.4). */
   readonly #open = new Map<string, Question>();
-  /** Steps waiting for room in a pool, oldest first. */
-  readonly #queued: Record<WalkPool, RoomWait[]> = { heard: [], discovery: [], urgent: [] };
+  /** Steps waiting for room in a pool, oldest first: own walks apart, for either pool's room. */
+  readonly #queued: Record<PoolChoice, RoomWait[]> = {
+    heard: [],
+    discovery: [],
+    urgent: [],
+    own: [],
+  };
   /** A wake for those steps at the soonest a place frees with no reply (`P-479`). */
   #expiry: { readonly at: number; readonly timer: NodeJS.Timeout } | undefined;
   readonly #nameSkips = new Map<string, number>();
@@ -525,7 +560,7 @@ export class DnsCheck {
       for (const wake of [...state.waiting]) wake('dropped');
     }
     this.#keys.clear();
-    for (const pool of ['heard', 'discovery', 'urgent'] as const) {
+    for (const pool of POOL_CHOICES) {
       for (const wait of this.#queued[pool].splice(0)) wait.cancel();
     }
     clearTimeout(this.#expiry?.timer);
@@ -570,6 +605,26 @@ export class DnsCheck {
     if (state === undefined) return false;
     const phase = this.#phase(state, this.#now());
     return phase === 'heard' || phase === 'mixed';
+  }
+
+  /**
+   * When a silent key's walk again falls due, on the resolver's clock (`P-484`): its `rewalkAt`,
+   * undefined unless the check is on and the key silent. A read: it moves no key.
+   */
+  walkAgainAt(key: string): number | undefined {
+    if (this.state() !== 1) return undefined;
+    const state = this.#keys.get(key);
+    if (state === undefined || this.#phase(state, this.#now()) !== 'silent') return undefined;
+    return state.rewalkAt;
+  }
+
+  /**
+   * Whether a silent key's walk again is due now (`P-484`): what lets a queued helper lookup of it
+   * have a walk of its own, which then walks it again, as any lookup of the key routed now would.
+   */
+  walkAgainDue(key: string): boolean {
+    const at = this.walkAgainAt(key);
+    return at !== undefined && this.#now() >= at;
   }
 
   stats(): DnsCheckStats {
@@ -874,7 +929,7 @@ export class DnsCheck {
       const now = this.#now();
       const state = this.#key(key, now);
       const phase = this.#phase(state, now);
-      let pool: WalkPool;
+      let pool: PoolChoice;
       let kind: 'key' | 'name';
       let scout = false;
       let asPilot = false;
@@ -890,7 +945,8 @@ export class DnsCheck {
         pool = 'discovery';
         kind = 'key';
       } else if (phase === 'mixed') {
-        pool = ask.known ? 'heard' : 'discovery';
+        // An own walk takes discovery's room, then up to `OWN_WALK_HEARD` of heard's (`P-484`).
+        pool = ask.own ? 'own' : ask.known ? 'heard' : 'discovery';
         kind = 'name';
       } else if (phase === 'unknown') {
         if (state.scoutsOut >= KEY_SCOUTS) {
@@ -906,7 +962,7 @@ export class DnsCheck {
         pool = 'discovery';
         kind = 'key';
       } else {
-        pool = state.freshUntil > now ? 'heard' : 'discovery';
+        pool = state.freshUntil > now ? 'heard' : ask.own ? 'own' : 'discovery';
         kind = 'name';
         // Out until its verdict, taken or dropped: the zone's other refreshes wait on it.
         if (piloting) {
@@ -988,7 +1044,7 @@ export class DnsCheck {
     key: string,
     candidate: string,
     types: readonly QType[],
-    pool: WalkPool,
+    pool: PoolChoice,
     kind: 'key' | 'name',
     deadline: number,
     scout: boolean,
@@ -1028,7 +1084,9 @@ export class DnsCheck {
       if (late) return { kind: 'stall' };
       const question = questions.find((asked) => asked.reply === undefined);
       // Nothing of the step sent and still unanswered: it was waiting for room, not on a server.
-      if (question === undefined) return { kind: 'deferred', why: 'budget', at: { pool } };
+      if (question === undefined) {
+        return { kind: 'deferred', why: 'budget', at: { pool: poolSaid(pool) } };
+      }
       return { kind: 'silent', question };
     });
     return Promise.race([chain, own]);
@@ -1038,7 +1096,7 @@ export class DnsCheck {
   async #chain(
     candidate: string,
     types: readonly QType[],
-    pool: WalkPool,
+    pool: PoolChoice,
     kind: 'key' | 'name',
     verdictAt: number,
     questions: Question[],
@@ -1089,7 +1147,7 @@ export class DnsCheck {
     server: string,
     candidate: string,
     types: readonly QType[],
-    pool: WalkPool,
+    pool: PoolChoice,
     kind: 'key' | 'name',
     verdictAt: number,
     questions: Question[],
@@ -1148,7 +1206,7 @@ export class DnsCheck {
     server: string,
     name: string,
     type: QType,
-    pool: WalkPool,
+    pool: PoolChoice,
     kind: 'key' | 'name',
     verdictAt: number,
     channelOf: () => DnsChannel,
@@ -1157,14 +1215,24 @@ export class DnsCheck {
     const id = `${server}|${name}|${type}`;
     const joined = this.#open.get(id);
     if (joined !== undefined && joined.reply === undefined && !joined.ledger.closed) return joined;
-    if (!this.#budget.admit(pool, 1)) {
-      const room = await this.#room(pool, verdictAt);
-      if (!room) return { kind: 'deferred', why: 'budget', at: { pool } };
-    }
-    if (!this.#budget.serverTake(server, 1, kind)) {
-      return { kind: 'deferred', why: 'rate', at: { server } };
-    }
-    return this.#send(server, name, type, pool, channelOf(), open, id);
+    // Sent in the turn its room is found, so that nothing else can be admitted to the same place
+    // before the question holds it (`P-484`).
+    const sendIn = (into: WalkPool): Sent => {
+      if (!this.#budget.serverTake(server, 1, kind)) {
+        return { kind: 'deferred', why: 'rate', at: { server } };
+      }
+      return this.#send(server, name, type, into, pool === 'own', channelOf(), open, id);
+    };
+    const into = this.#placeFor(pool);
+    if (into !== undefined) return sendIn(into);
+    const sent = await this.#room(pool, verdictAt, sendIn);
+    return sent ?? { kind: 'deferred', why: 'budget', at: { pool: poolSaid(pool) } };
+  }
+
+  /** The pool a step's question may take now, or none (§1.6, `P-484`). */
+  #placeFor(pool: PoolChoice): WalkPool | undefined {
+    if (pool === 'own') return this.#budget.ownPlace();
+    return this.#budget.admit(pool, 1) ? pool : undefined;
   }
 
   #send(
@@ -1172,11 +1240,12 @@ export class DnsCheck {
     name: string,
     type: QType,
     pool: WalkPool,
+    own: boolean,
     channel: DnsChannel,
     open: Promise<DnsReplyKind>[],
     id: string,
   ): Question {
-    const ledger = this.#budget.open(pool);
+    const ledger = this.#budget.open(pool, own);
     const asked = channel.ask(name, type);
     open.push(asked);
     const question: Question = {
@@ -1227,43 +1296,57 @@ export class DnsCheck {
     });
   }
 
-  /** Waits for room in a pool until a deadline, in the pool's order (§1.4). */
-  #room(pool: WalkPool, deadline: number): Promise<boolean> {
+  /**
+   * Waits for room in a pool until a deadline, in the pool's order (§1.4): given room, the step
+   * sends in it at once (`sendIn`), in the turn the room was found, so a pool woken twice in one
+   * turn can never admit two steps to one place (`P-484`). What was sent, or a rate's refusal, or
+   * undefined at the deadline or a reset.
+   */
+  #room(
+    pool: PoolChoice,
+    deadline: number,
+    sendIn: (into: WalkPool) => Sent,
+  ): Promise<Sent | undefined> {
     return new Promise((resolve) => {
       let done = false;
-      const end = (room: boolean): void => {
+      const end = (sent: Sent | undefined): void => {
         if (done) return;
         done = true;
         const queue = this.#queued[pool];
         const at = queue.indexOf(wait);
         if (at !== -1) queue.splice(at, 1);
-        resolve(room);
+        resolve(sent);
       };
       const wait: RoomWait = {
         tryNow: () => {
-          if (!this.#budget.admit(pool, 1)) return false;
-          end(true);
+          const into = this.#placeFor(pool);
+          if (into === undefined) return false;
+          end(sendIn(into));
           return true;
         },
         cancel: () => {
-          end(false);
+          end(undefined);
         },
       };
       this.#queued[pool].push(wait);
       this.#armExpiry();
       void this.#deadline(deadline).then(() => {
-        end(false);
+        end(undefined);
       });
     });
   }
 
   /**
-   * A question replied, or a hold ended: the oldest step waiting in each pool may take its room,
-   * one at a time, since a step admitted sends its question only after this turn.
+   * A question replied, or a hold ended: the steps waiting in each pool take the room there is, in
+   * order, each sending as it takes it (`P-484`); own walks last, for what heard's and discovery's
+   * own waiters left.
    */
   #pumpRoom(): void {
-    for (const pool of ['heard', 'discovery', 'urgent'] as const) {
-      this.#queued[pool][0]?.tryNow();
+    for (const pool of POOL_CHOICES) {
+      const queue = this.#queued[pool];
+      while (queue[0]?.tryNow() === true) {
+        // Each one admitted has sent, or was refused by its server's rate and left the room.
+      }
     }
     this.#armExpiry();
   }
@@ -1276,9 +1359,14 @@ export class DnsCheck {
    */
   #armExpiry(): void {
     let at: number | undefined;
-    for (const pool of ['heard', 'discovery', 'urgent'] as const) {
+    for (const pool of POOL_CHOICES) {
       if (this.#queued[pool].length === 0) continue;
-      const frees = this.#budget.admit(pool, 1) ? this.#now() : this.#budget.walkFreesAt(pool);
+      const frees =
+        this.#placeFor(pool) !== undefined
+          ? this.#now()
+          : pool === 'own'
+            ? this.#budget.ownFreesAt()
+            : this.#budget.walkFreesAt(pool);
       if (frees !== undefined && (at === undefined || frees < at)) at = frees;
     }
     if (at === undefined || (this.#expiry !== undefined && this.#expiry.at <= at)) return;
@@ -1378,6 +1466,7 @@ export class DnsCheck {
   #heard(key: string, sentAt: number, name: string): void {
     const now = this.#now();
     const state = this.#key(key, now);
+    const was = this.#phase(state, now);
     state.lastHeardAt = now;
     state.lastHeardSentAt = Math.max(state.lastHeardSentAt, sentAt);
     state.freshUntil = now + KEY_FRESH_MS;
@@ -1385,6 +1474,11 @@ export class DnsCheck {
     if (state.heardSentBy.size > 1_000) {
       const [oldest] = state.heardSentBy.keys();
       if (oldest !== undefined) state.heardSentBy.delete(oldest);
+    }
+    // Heard or mixed from now, where it was neither (`P-484`): when a queued helper lookup of it
+    // may have a walk of its own, as `heardOrMixed` reads it. Debug: what a trace places by.
+    if (was === 'unknown' || was === 'silent') {
+      this.#logger.debug({ key, name, phase: this.#phase(state, now) }, HEARD_A_ZONE);
     }
     this.#wake(state, now);
   }
@@ -1397,7 +1491,10 @@ export class DnsCheck {
     if (heardAfter !== undefined && heardAfter > sentAt) return;
     const was = this.#phase(state, now);
     const lately = state.lastHeardAt !== undefined && now - state.lastHeardAt < KEY_SETTLE_MS;
-    state.step = was === 'silent' || lately ? Math.min(state.step + 1, 4) : 0;
+    // One step a walk again (`P-484`): a key already silent keeps its step, which its walk again
+    // took as it was sent, so its walks again come 5 s doubling to 60 s apart, as designed. One
+    // heard lately steps on; any other starts again at 5 s.
+    state.step = was === 'silent' ? state.step : lately ? Math.min(state.step + 1, 4) : 0;
     state.lastNotHeardAt = now;
     state.rewalkAt = now + this.#backoff(state.step);
     const phase = this.#phase(state, now);
@@ -1450,6 +1547,7 @@ export class DnsCheck {
       CANARY_NAME,
       'A',
       'discovery',
+      false,
       channel,
       open,
       `${server}|${CANARY_NAME}|canary`,

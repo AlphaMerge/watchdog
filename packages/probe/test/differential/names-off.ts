@@ -193,6 +193,7 @@ async function inSitu(which: OffCase, image: string): Promise<Omit<OffRun, 'buil
       lastRanMs: undefined,
       boundMs: undefined,
       ref: {},
+      own: false,
     }),
   );
   check.stop();

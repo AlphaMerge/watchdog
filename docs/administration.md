@@ -1281,12 +1281,17 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   the probe's lanes sends its zone to the helper for five minutes. Each server is asked at most 10
   questions a second, 20 at once, and the check holds at most 8 questions open for zones it has
   heard and 4 for the rest; a name past either goes to the helper. A question with no reply holds
-  its place for 10 s from its send, as a forwarder such as dnsmasq holds it (`P-479`). A name
-  that went to the helper without a walk of its own (past a server's rate or the questions held
-  open, or after its wait for a walk of its zone ran out) is walked once, when a check of it would
-  otherwise fail at once behind its zone's share of the helper and the check has heard some of
-  the zone's names answer: heard, it leaves the helper for the probe's own lanes; not heard, it
-  stays there and is not walked again (`P-480`). Check now goes to the helper without a walk.
+  its place for 10 s from its send, as a forwarder such as dnsmasq holds it (`P-479`). A zone
+  that does not answer is not walked again until 5 s later, then 10, 20, 40 and 60 s, each 20%
+  either way, while it stays silent (`P-484`). A name that went to the helper without a walk of
+  its own (past a server's rate or the questions held open, after its wait for a walk of its zone
+  ran out, or while its zone was silent) is walked once, when a check of it would otherwise fail
+  at once behind its zone's share of the helper, or the lookups ahead of it there have all stuck,
+  and the check has heard some of the zone's names answer, or the zone's next walk again is due,
+  which this walk then is: heard, it leaves the helper for the probe's own lanes; not heard, it
+  stays there and is not walked again (`P-480`). Such a walk takes one of the 4 places for zones
+  not yet heard, and while those are full one of the 8 for zones heard, at most 4 of those, so
+  the zones that answer always keep 4 (`P-484`). Check now goes to the helper without a walk.
 - **When the check is off, every name not the hosts file's is asked in the helper, and while
   the system's name settings turn it off, the hosts file's too.** The settings turn it off when
   they say it cannot vouch for what glibc would do (`nscd`, an NSS module it does not model,

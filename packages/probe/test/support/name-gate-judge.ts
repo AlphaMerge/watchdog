@@ -1,5 +1,10 @@
 import { SAMPLED_PER_KEY } from '../../src/resolver/dns-check.js';
-import { FORWARD_HOLD_MS, WALK_BURST, WALK_RATE } from '../../src/resolver/forward-budget.js';
+import {
+  FORWARD_HOLD_MS,
+  OWN_WALK_PLACES,
+  WALK_BURST,
+  WALK_RATE,
+} from '../../src/resolver/forward-budget.js';
 import { KEY_QUIET, RISK_F, RISK_T } from '../../src/resolver/lane-rule.js';
 import { ANSWER_MS, RESOLVER_LANES, type RiskSeen } from '../../src/resolver/name-resolver.js';
 
@@ -168,6 +173,14 @@ export interface WorldFacts {
      * try's wait (`P-480`'s ceiling).
      */
     readonly silentHoldMs?: number;
+    /**
+     * When the check first heard the silent zone's key, heard or mixed, in ms from the arm's start,
+     * as its debug line said it (`P-484`'s ceiling): from then a held name of it may have its own
+     * walk. Undefined if the key never was, or the arm did not record it.
+     */
+    readonly keyHeardMs?: number;
+    /** The sensors each name has, so a held name's checks come the interval over them apart. */
+    readonly sensorsPerName?: number;
   };
   /** The helper, in gate mode. */
   readonly helper?: {
@@ -644,6 +657,60 @@ export function cachedCeiling(given: NonNullable<WorldFacts['cachedGivenUp']>): 
   };
 }
 
+/** `partial`'s ceiling with the check on (`P-484`), or what the run did not record to place it. */
+export type CachedCeilingOn =
+  | {
+      readonly ms: number;
+      readonly keyHeardMs: number;
+      readonly spacingMs: number;
+      readonly ownWalks: number;
+      readonly holdMs: number;
+      readonly places: number;
+      readonly lagMs: number;
+    }
+  | { readonly missing: readonly string[] };
+
+/**
+ * The longest a cached name of `partial` may wait for its first answer with the check on
+ * (`P-484`), from the arm's start: the time the check first heard its zone's key, heard or mixed,
+ * since a held name's own walk waits for that; one check's spacing, the interval over the sensors a
+ * name, for the held name's next check to come and ask for that walk; the zone's silent names' own
+ * walks, at most one each of those the arm asked, each holding a place the forwarder's hold
+ * (`FORWARD_HOLD_MS`), over the places own walks have (`OWN_WALK_PLACES`), since a cached name's
+ * own walk may wait for them; and the lag the run measured. A cached name asked at the arm's start
+ * or later waits no longer than that from its first ask. Read from the run's facts and the code's
+ * constants, never typed.
+ */
+export function cachedCeilingOn(given: NonNullable<WorldFacts['cachedGivenUp']>): CachedCeilingOn {
+  const { keyHeardMs, sensorsPerName, silentUntried: ownWalks, lagMs } = given;
+  const missing = [
+    ...(given.firstAskedMs === undefined ? ['the cached names’ first asks'] : []),
+    ...(keyHeardMs === undefined ? ['the time the check first heard their zone'] : []),
+    ...(sensorsPerName === undefined ? ['the sensors a name'] : []),
+    ...(ownWalks === undefined ? ['the silent names asked'] : []),
+    ...(lagMs === undefined ? ['the lag'] : []),
+  ];
+  if (
+    keyHeardMs === undefined ||
+    sensorsPerName === undefined ||
+    ownWalks === undefined ||
+    lagMs === undefined ||
+    missing.length > 0
+  ) {
+    return { missing };
+  }
+  const spacingMs = given.intervalMs / sensorsPerName;
+  return {
+    ms: keyHeardMs + spacingMs + (ownWalks * FORWARD_HOLD_MS) / OWN_WALK_PLACES + lagMs,
+    keyHeardMs,
+    spacingMs,
+    ownWalks,
+    holdMs: FORWARD_HOLD_MS,
+    places: OWN_WALK_PLACES,
+    lagMs,
+  };
+}
+
 /** The longest a cached name waited from its first ask to its first answer, of those both placed. */
 export function cachedLongestWait(
   given: NonNullable<WorldFacts['cachedGivenUp']>,
@@ -660,90 +727,71 @@ export function cachedLongestWait(
 }
 
 /**
- * `partial`'s cached checks given up that the judge allows (`P-478`'s fix rounds 1 and 2), and why
- * each of the rest is not. At a cold start a cached name's first lookup may wait behind its zone's
- * silent lookups, which nothing has yet told apart from it, and every one of its checks that comes
- * due meanwhile gives up with it, as `system`'s do on the probe's lanes: ten sensors a device. So a
- * cached check given up is allowed only while its name is held, one episode a name: asked within
- * the arm's first scan interval, before its name's first answer plus the lag the run measured,
- * and in the words a held name's check gives up with (`HELD_CACHED_WORDS`). With the check off,
- * `cachedAllowanceOff`'s instead. Read from the facts, never a count fixed beforehand. Every other
- * is not, nor is one the facts do not place.
+ * `partial`'s cached checks given up that the judge allows, and why each of the rest is not. At a
+ * cold start a cached name's first lookup may wait behind its zone's silent lookups, which nothing
+ * has yet told apart from it, and every one of its checks that comes due meanwhile gives up with
+ * it, as `system`'s do on the probe's lanes: ten sensors a device. So a cached check given up is
+ * allowed only while its name is held: in the words a held name's check gives up with
+ * (`HELD_CACHED_WORDS`), asked before its name's first answer plus the lag the run measured, and,
+ * for a name never answered, within a ceiling of its first ask; and the longest a cached name
+ * waited for its first answer holds that ceiling. A known limit, read from the run: with the check
+ * on `cachedCeilingOn`'s (`P-484`), which replaced round 2's first scan interval; with it off
+ * `cachedCeiling`'s (`P-480`). A run whose facts do not place the ceiling has none allowed, and
+ * fails once, naming what is missing. Every other check is not allowed, nor one the facts do not
+ * place.
  */
 export function cachedAllowance(facts: WorldFacts): {
   readonly names: number;
   readonly checks: number;
   readonly refused: readonly string[];
 } {
-  if (!facts.checkOn) return cachedAllowanceOff(facts);
-  const total = count(facts.givenUp, 'cached');
-  const given = facts.cachedGivenUp;
-  if (given === undefined) {
-    return {
-      names: 0,
-      checks: 0,
-      refused: total > 0 ? [`${String(total)} cached checks given up`] : [],
-    };
-  }
-  const refused: string[] = [];
-  if (given.checks.length !== total) {
-    refused.push(
-      `${String(total)} cached checks given up, and ${String(given.checks.length)} placed by name and time`,
-    );
-  }
-  const names = new Set<string>();
-  let checks = 0;
-  const first = `the arm’s first scan interval of ${String(given.intervalMs / 1_000)} s`;
-  const s = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
-  for (const { name, askedMs, message } of given.checks) {
-    const which = `a cached check of ${name} given up, asked at ${s(askedMs)}`;
-    const answered = given.firstAnswerMs[name];
-    if (askedMs < 0 || askedMs >= given.intervalMs) {
-      refused.push(`${which}, past ${first}`);
-    } else if (answered !== undefined && given.lagMs === undefined) {
-      refused.push(
-        `${which}: the lag was not measured, so it is not placed before ${name}’s first answer`,
-      );
-    } else if (answered !== undefined && askedMs >= answered + (given.lagMs ?? 0)) {
-      refused.push(
-        `${which}, after ${name}’s first answer at ${s(answered)} and the ${String(Math.round(given.lagMs ?? 0))} ms lag measured`,
-      );
-    } else if (!HELD_CACHED_WORDS.test(message)) {
-      refused.push(
-        `${which}, in words a held name’s check does not give up with: ${wordsOf(message)}`,
-      );
-    } else {
-      names.add(name);
-      checks += 1;
-    }
-  }
-  return { names: names.size, checks, refused };
-}
-
-/**
- * `cachedAllowance` with the check off (`P-480`): a known limit, read from the run. A cached check
- * given up in a held name's words is allowed only before its name's first answer plus the lag,
- * with no first-interval limit, since nothing but a silent lookup's own end tells its zone's names
- * apart; one never answered, only within the ceiling (`cachedCeiling`) of its first ask. And the
- * longest a cached name waited for its first answer holds the ceiling. A run whose facts do not
- * place the ceiling has none allowed.
- */
-function cachedAllowanceOff(facts: WorldFacts): {
-  readonly names: number;
-  readonly checks: number;
-  readonly refused: readonly string[];
-} {
+  const check = facts.checkOn ? 'on' : 'off';
   const unplaced = (missing: readonly string[]) => ({
     names: 0,
     checks: 0,
     refused: [
-      `with the name check off, the cached names’ ceiling is not placed: ${missing.join(', ')} not recorded`,
+      `with the name check ${check}, the cached names’ ceiling is not placed: ${missing.join(', ')} not recorded`,
     ],
   });
   const given = facts.cachedGivenUp;
   if (given === undefined) return unplaced(['the cached names’ waits']);
-  const ceiling = cachedCeiling(given);
-  if ('missing' in ceiling) return unplaced(ceiling.missing);
+  const s = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
+  if (facts.checkOn) {
+    const on = cachedCeilingOn(given);
+    if ('missing' in on) return unplaced(on.missing);
+    return cachedWithin(
+      facts,
+      given,
+      on,
+      `the check first heard their zone at ${s(on.keyHeardMs)}, a check’s spacing of ${s(on.spacingMs)}, ${String(on.ownWalks)} silent names’ own walks of ${s(on.holdMs)} each over ${String(on.places)} places, and the ${String(Math.round(on.lagMs))} ms lag`,
+    );
+  }
+  const off = cachedCeiling(given);
+  if ('missing' in off) return unplaced(off.missing);
+  return cachedWithin(
+    facts,
+    given,
+    off,
+    `${String(off.untried)} silent names never yet tried, ${s(off.holdMs)} each, over ${String(off.lanes)} lanes, and the ${String(Math.round(off.lagMs))} ms lag`,
+  );
+}
+
+/**
+ * The cached checks given up that a placed ceiling allows (`P-480`, `P-484`): in a held name's
+ * words, before its name's first answer plus the lag, or, never answered, within the ceiling of
+ * its first ask; and the longest wait for a first answer within the ceiling, whose parts `parts`
+ * says.
+ */
+function cachedWithin(
+  facts: WorldFacts,
+  given: NonNullable<WorldFacts['cachedGivenUp']>,
+  ceiling: { readonly ms: number; readonly lagMs: number },
+  parts: string,
+): {
+  readonly names: number;
+  readonly checks: number;
+  readonly refused: readonly string[];
+} {
   const total = count(facts.givenUp, 'cached');
   const refused: string[] = [];
   if (given.checks.length !== total) {
@@ -784,7 +832,7 @@ function cachedAllowanceOff(facts: WorldFacts): {
   const longest = cachedLongestWait(given);
   if (longest !== undefined && longest.ms > ceiling.ms) {
     refused.push(
-      `the longest a cached name waited for its first answer, ${s(longest.ms)} (${longest.name}), past ${over}: ${String(ceiling.untried)} silent names never yet tried, ${s(ceiling.holdMs)} each, over ${String(ceiling.lanes)} lanes, and the ${String(Math.round(ceiling.lagMs))} ms lag`,
+      `the longest a cached name waited for its first answer, ${s(longest.ms)} (${longest.name}), past ${over}: ${parts}`,
     );
   }
   return { names: names.size, checks, refused };

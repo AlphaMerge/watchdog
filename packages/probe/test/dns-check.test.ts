@@ -8,9 +8,11 @@ import {
   CHANNEL_TIMEOUT_MS,
   DEFER_QUIET_MS,
   DnsCheck,
+  HEARD_A_ZONE,
   KEY_FRESH_MS,
   KEY_SAMPLE_MS,
   KEY_SETTLE_MS,
+  REWALK_FIRST_MS,
   REWALK_MAX_MS,
   SAMPLED_PER_KEY,
   SKIP_MS,
@@ -20,7 +22,12 @@ import {
   type CheckRoute,
   type DnsCheckOptions,
 } from '../src/resolver/dns-check.js';
-import { FORWARD_HOLD_MS, ForwardBudget } from '../src/resolver/forward-budget.js';
+import {
+  FORWARD_HOLD_MS,
+  ForwardBudget,
+  OWN_WALK_HEARD,
+  WALK_QUESTIONS,
+} from '../src/resolver/forward-budget.js';
 import { CONF, ScriptedAsker, WalkPolicy } from './support/fake-dns.js';
 import { pollWithin, within } from './support/within.js';
 
@@ -106,6 +113,7 @@ function make(
         lastRanMs: ask.lastRanMs,
         boundMs: ask.boundMs ?? 2_000,
         ref: ask.ref ?? {},
+        own: ask.own ?? false,
       }),
     );
   const prove = async (): Promise<void> => {
@@ -558,6 +566,7 @@ function refresh(
     lastRanMs: 3,
     boundMs: undefined,
     ref,
+    own: false,
   });
 }
 
@@ -677,6 +686,209 @@ describe('the walk’s ledger holds a question the server never answered for the
       'each walked within its routing wait, not routed budget',
     );
     assert.equal(budget.stats().deferred.budget, 0);
+    check.stop();
+  });
+});
+
+describe('own walks’ places, one step a walk again, and no pool past its places (P-484)', () => {
+  it('admits no step past its pool’s places when two wakes come in one turn: a waiter given room sends in it before the next pool is pumped', async () => {
+    const { check, asker, route, budget, ready } = make();
+    await ready;
+    asker.rule = (_server, name) => (name === 'dev-0.zone-x.test' ? 'answer' : 'silent');
+    // A heard zone's next name walks in the heard pool, its question left open.
+    assert.equal((await route('dev-0.zone-x.test')).route, 'heard');
+    const heard = route('dev-1.zone-x.test');
+    assert.equal(budget.walkOpen('heard'), 1);
+    // Discovery full: two zones' two scouts each, never answered.
+    const scouts = ['i', 'j'].flatMap((zone) => [
+      route(`dev-1.zone-${zone}.test`),
+      route(`dev-2.zone-${zone}.test`),
+    ]);
+    assert.equal(budget.walkOpen('discovery'), WALK_QUESTIONS.discovery);
+    // Two steps wait for discovery's room: zone k's scouts.
+    const waiting = [route('dev-1.zone-k.test'), route('dev-2.zone-k.test')];
+    assert.equal(asker.askedFor('dev-1.zone-k.test').length, 0, 'waiting for room');
+    // In one turn, a discovery place freed by a reply, and a heard reply: each wakes every pool.
+    const freed = asker.askedFor('dev-1.zone-i.test')[0] ?? assert.fail('a scout of zone i');
+    const other = asker.askedFor('dev-1.zone-x.test')[0] ?? assert.fail('zone x’s walk');
+    freed.release('answer');
+    other.release('answer');
+    await macrotask();
+    assert.equal(budget.walkOpen('discovery'), WALK_QUESTIONS.discovery, 'one place, one waiter');
+    assert.equal(asker.askedFor('dev-1.zone-k.test').length, 1, 'the first waiter sent');
+    assert.equal(asker.askedFor('dev-2.zone-k.test').length, 0, 'the second still waits');
+    await Promise.all([heard, ...scouts, ...waiting]);
+    check.stop();
+  });
+
+  it('walks a mixed zone’s own walks in discovery’s room, then, discovery full, in up to 4 of heard’s 8: a cached name’s is sent and heard while silent names fill discovery, and heard zones keep the rest', async () => {
+    const { check, asker, route, budget, clock, ready } = make();
+    await ready;
+    asker.rule = (_server, name) =>
+      name.startsWith('dev-s') || (name.endsWith('zone-x.test') && name !== 'dev-0.zone-x.test')
+        ? 'silent'
+        : 'answer';
+    // Zone x heard and fresh; zone b mixed: dev-c0 heard, then dev-s0 walked in heard and not.
+    assert.equal((await route('dev-0.zone-x.test')).route, 'heard');
+    assert.equal((await route('dev-c0.zone-b.test')).route, 'heard');
+    assert.equal((await route('dev-s0.zone-b.test')).route, 'silent');
+    await pollWithin(1_000, 'zone b mixed', () => check.stats().mixedKeys === 1, 2);
+    assert.equal(budget.walkOpen('heard'), 1, 'dev-s0’s question, in heard');
+    const own = (host: string): Promise<CheckRoute> => route(host, { own: true });
+    // Discovery's places first: four silent names' own walks take them.
+    const silents = [1, 2, 3, 4].map((i) => own(`dev-s${String(i)}.zone-b.test`));
+    assert.equal(budget.walkOpen('discovery'), WALK_QUESTIONS.discovery, 'discovery’s, first');
+    assert.equal(budget.ownOpen(), 0, 'none of heard’s');
+    // Discovery full: a cached name's own walk is sent at once, in one of heard's, and heard.
+    const c1 = own('dev-c1.zone-b.test');
+    assert.equal(asker.askedFor('dev-c1.zone-b.test').length, 1, 'sent at once');
+    assert.equal(budget.ownOpen(), 1, 'in one of heard’s places');
+    assert.equal((await c1).route, 'heard');
+    // A walk that is not an own walk, of a name the zone never answered, waits for discovery's.
+    const plain = route('dev-c2.zone-b.test');
+    assert.equal(asker.askedFor('dev-c2.zone-b.test').length, 0, 'discovery’s room alone');
+    // Own walks hold at most 4 of heard's places: a fifth there waits.
+    const more = [5, 6, 7, 8].map((i) => own(`dev-s${String(i)}.zone-b.test`));
+    assert.equal(budget.ownOpen(), OWN_WALK_HEARD);
+    const fifth = own('dev-s9.zone-b.test');
+    assert.equal(asker.askedFor('dev-s9.zone-b.test').length, 0, 'the own walks’ places held');
+    // Heard zones keep the rest of the heard pool, each sent at once, D19's bucket a second on.
+    clock.now += 1_000;
+    const left = WALK_QUESTIONS.heard - budget.walkOpen('heard');
+    assert.equal(
+      left,
+      WALK_QUESTIONS.heard - OWN_WALK_HEARD - 1,
+      'all but the own walks’, dev-s0’s',
+    );
+    const heardWalks = Array.from({ length: left }, (_, i) =>
+      route(`dev-${String(i + 1)}.zone-x.test`),
+    );
+    assert.equal(budget.walkOpen('heard'), WALK_QUESTIONS.heard, 'every heard place held');
+    assert.deepEqual(await fifth, { route: 'unvouched', key: 'd:zone-b.test', why: 'budget' });
+    assert.deepEqual(await plain, { route: 'unvouched', key: 'd:zone-b.test', why: 'budget' });
+    await Promise.all([...silents, ...more, ...heardWalks]);
+    check.stop();
+  });
+
+  it('gives a heard zone’s own walk the same places once the zone is not fresh, and a fresh one’s the heard pool as any of its walks', async () => {
+    const { check, asker, route, budget, clock, ready } = make();
+    await ready;
+    asker.rule = (_server, name) => (/^dev-[01]\.zone-f\./u.test(name) ? 'answer' : 'silent');
+    assert.equal((await route('dev-0.zone-f.test')).route, 'heard');
+    // Fresh: an own walk is one of the zone's walks, in the heard pool, not an own walk's place.
+    const fresh = route('dev-1.zone-f.test', { own: true });
+    assert.equal(budget.walkOpen('heard'), 1);
+    assert.equal(budget.ownOpen(), 0);
+    assert.equal((await fresh).route, 'heard');
+    clock.now += KEY_FRESH_MS + 1;
+    // Discovery full of other zones' silent scouts.
+    const scouts = ['i', 'j'].flatMap((zone) => [
+      route(`dev-1.zone-${zone}.test`),
+      route(`dev-2.zone-${zone}.test`),
+    ]);
+    assert.equal(budget.walkOpen('discovery'), WALK_QUESTIONS.discovery);
+    // Heard and not fresh: an own walk takes one of heard's, an ordinary walk waits.
+    const stale = route('dev-2.zone-f.test', { own: true });
+    assert.equal(asker.askedFor('dev-2.zone-f.test').length, 1, 'sent at once');
+    assert.equal(budget.ownOpen(), 1);
+    const plain = route('dev-3.zone-f.test');
+    assert.equal(asker.askedFor('dev-3.zone-f.test').length, 0, 'discovery’s, full');
+    assert.deepEqual(await plain, { route: 'unvouched', key: 'd:zone-f.test', why: 'budget' });
+    await Promise.all([...scouts, stale]);
+    check.stop();
+  });
+
+  it('wakes an own walk waiting for room when the holds end, with no reply to wake it', async () => {
+    const { check, asker, route, budget, clock, ready } = make();
+    await ready;
+    asker.rule = (_server, name) => (name.startsWith('dev-s') ? 'silent' : 'answer');
+    assert.equal((await route('dev-c0.zone-b.test')).route, 'heard');
+    assert.equal((await route('dev-s0.zone-b.test')).route, 'silent');
+    await pollWithin(1_000, 'zone b mixed', () => check.stats().mixedKeys === 1, 2);
+    // Every place an own walk may take held by silent names' own walks: discovery's and heard's.
+    const sentAt = clock.now;
+    const holding = Array.from({ length: WALK_QUESTIONS.discovery + OWN_WALK_HEARD }, (_, i) =>
+      route(`dev-s${String(i + 1)}.zone-b.test`, { own: true }),
+    );
+    assert.equal(budget.walkOpen('discovery'), WALK_QUESTIONS.discovery);
+    assert.equal(budget.ownOpen(), OWN_WALK_HEARD);
+    await Promise.all(holding);
+    // Never answered: only the holds' end frees a place, and nothing else wakes the waiter then.
+    clock.now = sentAt + FORWARD_HOLD_MS - 20;
+    const waiting = route('dev-c1.zone-b.test', { own: true });
+    assert.equal(asker.askedFor('dev-c1.zone-b.test').length, 0, 'waiting for room');
+    clock.now = sentAt + FORWARD_HOLD_MS;
+    assert.equal((await waiting).route, 'heard', 'asked at the holds’ end, not routed budget');
+    assert.equal(asker.askedFor('dev-c1.zone-b.test').length, 1);
+    check.stop();
+  });
+
+  it('says at debug when a zone is heard or mixed from unknown or silent, and not while it stays so: when a held name of it may have its own walk', async () => {
+    const lines: Record<string, unknown>[] = [];
+    const logger = pino(
+      { level: 'debug' },
+      { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+    );
+    const { check, asker, route, clock, silentKeys, ready } = make({ logger });
+    await ready;
+    const said = (): unknown[][] =>
+      lines
+        .filter((line) => line['msg'] === HEARD_A_ZONE)
+        .map((line) => [line['key'], line['phase']]);
+    asker.rule = (_server, name) => (name.startsWith('dev-s') ? 'silent' : 'answer');
+    // Unknown, then heard: said once, and not again as it is heard again.
+    assert.equal((await route('dev-c0.zone-a.test')).route, 'heard');
+    assert.equal((await route('dev-c1.zone-a.test')).route, 'heard');
+    assert.deepEqual(said(), [['d:zone-a.test', 'heard']]);
+    // Silent first: not said; its walk again heard, mixed: said.
+    assert.equal((await route('dev-s0.zone-b.test')).route, 'silent');
+    await pollWithin(1_000, 'zone b silent', () => silentKeys.length === 1, 2);
+    assert.equal(said().length, 1, 'not for a zone found silent');
+    clock.now += REWALK_FIRST_MS;
+    assert.equal((await route('dev-c2.zone-b.test')).route, 'heard', 'its walk again');
+    assert.deepEqual(said(), [
+      ['d:zone-a.test', 'heard'],
+      ['d:zone-b.test', 'mixed'],
+    ]);
+    assert.equal((await route('dev-c3.zone-b.test')).route, 'heard');
+    assert.equal(said().length, 2, 'mixed and heard again: not said again');
+    check.stop();
+  });
+
+  it('steps a silent key’s backoff once a walk again, never again at its NotHeard: two asks two steps, the walks again 5 s, then 10 s, then 20 s on', async () => {
+    const { check, asker, route, clock, silentKeys, ready } = make();
+    await ready;
+    asker.rule = () => 'silent';
+    const key = 'd:zone-b.test';
+    const notHeards = (count: number): Promise<void> =>
+      pollWithin(1_000, `NotHeard ${String(count)}`, () => silentKeys.length === count, 2);
+    // Its two scouts, both not heard: the second keeps the step the first left it at.
+    const scoutedAt = clock.now;
+    await Promise.all([route('dev-1.zone-b.test'), route('dev-2.zone-b.test')]);
+    await notHeards(2);
+    assert.equal(
+      check.walkAgainAt(key),
+      scoutedAt + REWALK_FIRST_MS,
+      'its first walk again 5 s on',
+    );
+    const asked = asker.asked.length;
+    clock.now = scoutedAt + REWALK_FIRST_MS - 1;
+    assert.equal((await route('dev-3.zone-b.test')).route, 'silent');
+    assert.equal(asker.asked.length, asked, 'not yet due: nothing asked');
+    // Two asks, each its walk again as it falls due, each one step on.
+    for (const [ask, nextMs] of [
+      [1, 2 * REWALK_FIRST_MS],
+      [2, 4 * REWALK_FIRST_MS],
+    ] as const) {
+      clock.now = check.walkAgainAt(key) ?? assert.fail('the key silent');
+      assert.equal(check.walkAgainDue(key), true);
+      const sentAt = clock.now;
+      assert.equal((await route(`dev-${String(ask + 3)}.zone-b.test`)).route, 'silent');
+      assert.equal(asker.asked.length, asked + ask, `walk again ${String(ask)} asked`);
+      await notHeards(2 + ask);
+      assert.equal(check.walkAgainAt(key), sentAt + nextMs, `ask ${String(ask)}: one step`);
+      assert.equal(check.walkAgainDue(key), false);
+    }
     check.stop();
   });
 });
@@ -1497,6 +1709,7 @@ describe('c-ares as the check asks with it, against the DNS simulator (§1.4)', 
           lastRanMs: undefined,
           boundMs: 2_000,
           ref: {},
+          own: false,
         }),
       );
     assert.equal((await at('dev-2.zone-a.test')).route, 'heard');

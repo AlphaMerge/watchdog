@@ -452,6 +452,9 @@ interface Waiter {
   /** Undefined once the waiter has been forgotten at its bound. */
   readonly deliver: (outcome: ResolveOutcome | undefined) => void;
   readonly timers: NodeJS.Timeout[];
+  /** Its check's bound, and when it began to wait, on the real clock: what is left (`P-484`). */
+  readonly boundMs: number;
+  readonly since: number;
 }
 
 interface Pending {
@@ -1703,16 +1706,20 @@ export class NameResolver implements PoolResolver {
     family: Family,
     request: { readonly waitMs?: number; readonly fresh?: boolean },
   ): Promise<ResolveOutcome | undefined> {
-    const realNow = this.#gate?.realNow ?? (() => performance.now());
-    const asked = realNow();
+    const asked = this.#realNow();
     await walking;
     try {
-      const waitMs = Math.max(1, boundOf(request.waitMs) - (realNow() - asked));
+      const waitMs = Math.max(1, boundOf(request.waitMs) - (this.#realNow() - asked));
       const again = this.#ask(host, family, { ...request, waitMs }, false);
       return 'now' in again ? again.now : await again.later;
     } catch (error: unknown) {
       return failure(RESOLVER_FAULT, this.#fault(error, host).message);
     }
+  }
+
+  /** The gate's real clock, or `performance.now`: what a check's bound is spent on. */
+  #realNow(): number {
+    return this.#gate?.realNow() ?? performance.now();
   }
 
   /**
@@ -2074,7 +2081,7 @@ export class NameResolver implements PoolResolver {
       const verdict = this.#checkRoute(
         check,
         pending,
-        cls === 'refresh' && entry.failures === 0,
+        { refresh: cls === 'refresh' && entry.failures === 0, own: false },
         boundMs,
       );
       if (verdict instanceof Promise) {
@@ -2160,12 +2167,14 @@ export class NameResolver implements PoolResolver {
 
   /**
    * What the name check makes of a lookup (§1.3): never throws, an unvouched route at worst.
-   * `refresh` is a refresh with no failure behind it, which may ride its zone (D20).
+   * `refresh` is a refresh with no failure behind it, which may ride its zone (D20); `own`, a
+   * queued helper lookup's own walk (`P-480`), which never rides and walks in its own places
+   * (`P-484`).
    */
   #checkRoute(
     check: DnsCheck,
     pending: Pending,
-    refresh: boolean,
+    how: { readonly refresh: boolean; readonly own: boolean },
     boundMs: number | undefined,
   ): CheckRoute | Promise<CheckRoute> {
     const entry = pending.entry;
@@ -2174,13 +2183,14 @@ export class NameResolver implements PoolResolver {
       return check.route({
         host: entry.host,
         family: entry.family,
-        refresh,
+        refresh: how.refresh,
         known:
           entry.answer !== undefined ||
           (entry.lastAnsweredAt !== undefined && now - entry.lastAnsweredAt <= this.#staleMs),
         lastRanMs: entry.lastRanMs,
         boundMs,
         ref: pending,
+        own: how.own,
       });
     } catch (error: unknown) {
       this.#logger.error({ err: error, host: entry.host }, 'the name check failed on a name');
@@ -2362,9 +2372,11 @@ export class NameResolver implements PoolResolver {
    * D18's per-name walk of a queued helper lookup, in its narrow form (`P-480`): one walk of its
    * own, for a lookup the check routed to the helper with nothing asked or answered for its name
    * (`NEVER_WALKED`: deferred, or silent on its zone's evidence alone), when a check of it would
-   * fail at once behind its key's cap (`key`, `answering` or `unit`) and its key is heard or mixed.
-   * Its verdict is taken by `#rewalked`. The walk under way, joined by any check of it meanwhile,
-   * or undefined when there is none to take: nothing was sent, or it may not walk.
+   * fail at once behind its key's cap (`key`, `answering` or `unit`) and its key is heard or mixed,
+   * or silent with its walk again due (`P-484`). Asked by a check (`#ask`) and by the flush of a
+   * lookup's checks once the lanes it waits on are every one stuck (`#onStuck`). Its verdict is
+   * taken by `#rewalked`. The walk under way, joined by any check of it meanwhile, or undefined
+   * when there is none to take: nothing was sent, or it may not walk.
    */
   #rewalk(pending: Pending, boundMs: number): Promise<void> | undefined {
     const gate = this.#gate;
@@ -2374,9 +2386,11 @@ export class NameResolver implements PoolResolver {
     if (pending.rewalk === 'done' || !this.#mayRewalk(gate, pending)) return undefined;
     const block = this.#helperBlocked(gate, pending);
     if (block === undefined || !CAPPED_BY_KEY.has(block.condition)) return undefined;
-    if (!check.heardOrMixed(pending.key)) return undefined;
+    // Its key heard or mixed; or silent with its walk again due, which this walk then carries, in
+    // discovery as a key's walk, since nothing else routed now would (`P-484`).
+    if (!check.heardOrMixed(pending.key) && !check.walkAgainDue(pending.key)) return undefined;
     // Its own walk, never a ride: what moves it is its own name heard (D18, §3).
-    const verdict = this.#checkRoute(check, pending, false, boundMs);
+    const verdict = this.#checkRoute(check, pending, { refresh: false, own: true }, boundMs);
     // Judged at once (a skip, a stand-down, a wait too short to walk in): nothing was asked.
     if (!(verdict instanceof Promise)) return undefined;
     const walking = verdict.then(
@@ -2684,30 +2698,53 @@ export class NameResolver implements PoolResolver {
       if (outcome.ok) this.#deliver(pending, waiter, outcome);
     }
     // And whatever is queued behind lanes that are now every one stuck stops waiting too, on
-    // either lane set.
+    // either lane set: in gate mode a queued helper lookup its own walk may take first walks, as
+    // a fresh check of it would (`P-484`), and its checks stop only if it still waits behind them.
     const sets = this.#gate === undefined ? [this.#probe] : [this.#probe, this.#gate.lanes];
     for (const set of sets) {
       for (const cls of ['first', 'refresh', 'retry'] as const) {
-        for (const queued of set.queues[cls]) {
+        for (const queued of [...set.queues[cls]]) {
           if (queued.waiters.size === 0 || !this.#lanesStuck(queued)) continue;
-          for (const waiter of [...queued.waiters]) {
-            this.#deliver(
-              queued,
-              waiter,
-              this.#unanswered(
-                queued.entry,
-                waiter.fresh,
-                now,
-                RESOLVER_STUCK,
-                this.#stuckWhy(queued),
-              ),
-            );
+          const walking = this.#rewalk(queued, this.#leftOfBounds(queued));
+          if (walking === undefined) {
+            this.#flushStuck(queued);
+            continue;
           }
+          void walking.then(() => {
+            if (stateOf(queued) === 'queued' && this.#lanesStuck(queued)) {
+              this.#flushStuck(queued);
+            }
+          });
         }
       }
     }
     if (this.#gate !== undefined && pending.pool === 'probe')
       this.#markAfterPolls(this.#gate, pending);
+  }
+
+  /** A queued lookup's checks, failed at once: every lane it could take is held by a stuck one. */
+  #flushStuck(queued: Pending): void {
+    const now = this.#now();
+    for (const waiter of [...queued.waiters]) {
+      this.#deliver(
+        queued,
+        waiter,
+        this.#unanswered(queued.entry, waiter.fresh, now, RESOLVER_STUCK, this.#stuckWhy(queued)),
+      );
+    }
+  }
+
+  /**
+   * What is left of the shortest bound among a lookup's waiting checks, 1 ms at least: the bound
+   * its own walk is asked with from the flush (`P-484`), as a check asks with its own.
+   */
+  #leftOfBounds(pending: Pending): number {
+    const now = this.#realNow();
+    let left = Number.POSITIVE_INFINITY;
+    for (const waiter of pending.waiters) {
+      left = Math.min(left, waiter.boundMs - (now - waiter.since));
+    }
+    return Math.max(1, Number.isFinite(left) ? left : DEFAULT_WAIT_MS);
   }
 
   /** One more lookup in a row the resolver did not answer: the name is held for the next step. */
@@ -2902,7 +2939,13 @@ export class NameResolver implements PoolResolver {
     const bound =
       waitMs !== undefined && Number.isFinite(waitMs) && waitMs > 0 ? waitMs : DEFAULT_WAIT_MS;
     return new Promise((resolve) => {
-      const waiter: Waiter = { fresh, deliver: resolve, timers: [] };
+      const waiter: Waiter = {
+        fresh,
+        deliver: resolve,
+        timers: [],
+        boundMs: bound,
+        since: this.#realNow(),
+      };
       const forget = setTimeout(() => {
         this.#deliver(pending, waiter, undefined);
       }, bound + FORGET_SLACK_MS);

@@ -26,11 +26,16 @@ import { AnswerFile, answerFilePath } from '../../src/resolver/answer-file.js';
 import {
   CANARY_NAME,
   caresAsker,
+  HEARD_A_ZONE,
   KEY_SETTLE_MS,
   type DnsAsker,
 } from '../../src/resolver/dns-check.js';
-import { FORWARD_HOLD_MS, questionsOf } from '../../src/resolver/forward-budget.js';
-import { KEY_QUIET } from '../../src/resolver/lane-rule.js';
+import {
+  FORWARD_HOLD_MS,
+  OWN_WALK_PLACES,
+  questionsOf,
+} from '../../src/resolver/forward-budget.js';
+import { candidateKey, KEY_QUIET } from '../../src/resolver/lane-rule.js';
 import type {
   ForkHelper,
   HelperProcess,
@@ -78,6 +83,7 @@ import {
   busiestSecond,
   cachedAllowance,
   cachedCeiling,
+  cachedCeilingOn,
   cachedLongestWait,
   CHANNELS_A_SECOND,
   gapBound,
@@ -2453,6 +2459,8 @@ interface Routed {
  */
 class GateLog {
   readonly routed: Routed[] = [];
+  /** When the check first heard each key, heard or mixed, as its debug line said (`P-484`). */
+  readonly heardKeys = new Map<string, number>();
   readonly passedStuck: string[] = [];
   unsafe = 0;
   proven = false;
@@ -2462,6 +2470,11 @@ class GateLog {
   readonly stream = {
     write: (line: string): void => {
       if (line.includes('the DNS check is proven')) this.proven = true;
+      if (line.includes(`"msg":"${HEARD_A_ZONE}"`)) {
+        const key = String((JSON.parse(line) as Record<string, unknown>)['key']);
+        if (!this.heardKeys.has(key)) this.heardKeys.set(key, performance.now());
+        return;
+      }
       if (line.includes('the DNS check missed a name the lookup helper answered')) this.misses += 1;
       if (line.includes('it stands down, and every name is asked in the lookup helper')) {
         this.standDowns += 1;
@@ -2547,33 +2560,42 @@ function worldShape(arm: WorldArm): WorldShape {
 }
 
 /**
- * `partial`'s row for its cached checks given up (`P-478`'s fix round 2, `P-480`): the names and
- * checks the judge allows, the rest, the longest a cached name waited from its first ask to its
- * first answer, the ceiling that wait has with the check off, and the words they gave up with.
+ * `partial`'s row for its cached checks given up (`P-478`'s fix round 2, `P-480`, `P-484`): the
+ * names and checks the judge allows, the rest, the longest a cached name waited from its first ask
+ * to its first answer, the ceiling that wait is judged by in the run's mode, with its parts, and
+ * the words they gave up with.
  */
-function cachedRow(facts: WorldFacts, intervalSeconds: number): string {
+function cachedRow(facts: WorldFacts): string {
   const given = facts.cachedGivenUp;
   if (given === undefined) return 'cached given up: not recorded';
   const allowance = cachedAllowance(facts);
   const longest = cachedLongestWait(given);
-  const ceiling = cachedCeiling(given);
   const lag = given.lagMs === undefined ? 'unmeasured' : `${String(Math.round(given.lagMs))} ms`;
   const words = new Map<string, number>();
   for (const { message } of given.checks) {
     const said = wordsOf(message);
     words.set(said, (words.get(said) ?? 0) + 1);
   }
-  const rule = facts.checkOn
-    ? `asked within the arm’s first scan interval of ${String(intervalSeconds)} s, before the name’s first answer and the ${lag} lag, in a held name’s words`
-    : `the check off: before the name’s first answer and the ${lag} lag, or, never answered, within the ceiling of its first ask, in a held name’s words`;
-  const ceilingSaid =
-    'missing' in ceiling
-      ? `not placed (${ceiling.missing.join(', ')} not recorded)`
-      : `${String(Math.round(ceiling.ms))} ms (${String(ceiling.untried)} silent names never yet tried × ${String(ceiling.holdMs)} ms over ${String(ceiling.lanes)} lanes, plus the lag)`;
+  const ms = (value: number): string => `${String(Math.round(value))} ms`;
+  const rule = `the check ${facts.checkOn ? 'on' : 'off'}: before the name’s first answer and the ${lag} lag, or, never answered, within the ceiling of its first ask, in a held name’s words`;
+  let ceilingSaid: string;
+  if (facts.checkOn) {
+    const on = cachedCeilingOn(given);
+    ceilingSaid =
+      'missing' in on
+        ? `not placed (${on.missing.join(', ')} not recorded)`
+        : `${ms(on.ms)} (the check first heard the zone at ${ms(on.keyHeardMs)}, a check’s spacing ${ms(on.spacingMs)} (${String(given.intervalMs / 1_000)} s ÷ ${String(given.sensorsPerName)} sensors), ${String(on.ownWalks)} silent names’ own walks × ${ms(on.holdMs)} over ${String(on.places)} places, plus the lag)`;
+  } else {
+    const off = cachedCeiling(given);
+    ceilingSaid =
+      'missing' in off
+        ? `not placed (${off.missing.join(', ')} not recorded)`
+        : `${ms(off.ms)} (${String(off.untried)} silent names never yet tried × ${ms(off.holdMs)} over ${String(off.lanes)} lanes, plus the lag)`;
+  }
   return (
     `cached given up: ${String(allowance.checks)} checks of ${String(allowance.names)} names allowed (${rule}), ${String(allowance.refused.length)} not; ` +
-    `the longest a cached name waited for its first answer ${longest === undefined ? 'none answered' : `${String(Math.round(longest.ms))} ms (${longest.name})`}, ${String(Object.keys(given.firstAnswerMs).length)} answered; ` +
-    `its ceiling with the check off ${ceilingSaid}${facts.checkOn ? ', not judged with the check on' : ''}; ` +
+    `the longest a cached name waited for its first answer ${longest === undefined ? 'none answered' : `${ms(longest.ms)} (${longest.name})`}, ${String(Object.keys(given.firstAnswerMs).length)} answered; ` +
+    `its ceiling with the check ${facts.checkOn ? 'on' : 'off'} ${ceilingSaid}; ` +
     `words: ${[...words].map(([said, n]) => `${String(n)} × ${said}`).join(' | ') || 'none'}`
   );
 }
@@ -3090,6 +3112,10 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
           })
         : undefined;
     const stall = record.stall;
+    // `partial`: the silent zone's key, as the check keys its names, and when it first heard it.
+    const silentHost = [...groupByHost].find(([, group]) => group === 'silent')?.[0];
+    const silentHeardAt =
+      silentHost === undefined ? undefined : log.heardKeys.get(candidateKey(silentHost));
     const facts: WorldFacts = {
       arm: arm.name,
       mode,
@@ -3153,6 +3179,9 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
               ).length,
               // What the world's resolv.conf writes: a silent lookup holds its lane every try.
               silentHoldMs: WORLD_SCHEDULE.tries * WORLD_SCHEDULE.waitMs,
+              // When the check first heard the silent zone's key, as its own debug line said it.
+              ...(silentHeardAt === undefined ? {} : { keyHeardMs: silentHeardAt - startedAt }),
+              sensorsPerName: shape.perDevice,
             },
           }
         : {}),
@@ -3249,7 +3278,7 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
             `${tally(group, tallies[group])}${notRun[group] > 0 ? `, and ${String(notRun[group])} more due not run (refused or deferred)` : ''}`,
         )
         .join('; '),
-      ...(arm.cached === true && mode === 'gate' ? [cachedRow(facts, shape.intervalSeconds)] : []),
+      ...(arm.cached === true && mode === 'gate' ? [cachedRow(facts)] : []),
       `jitter p50 ${ms(percentile(ordered, 0.5))}, p95 ${ms(percentile(ordered, 0.95))}, max ${ms(ordered.at(-1) ?? 0)}; check run p95 ${ms(percentile(sorted(run), 0.95))}; drained in ${ms(drainMs)}`,
       `event loop: p50 ${lagMs(delay.percentile(50))}, p99 ${lagMs(delay.percentile(99))}, max ${lagMs(delay.max)}`,
       `Probe Health: lookupsInFlight max ${String(Math.max(inFlightMax, report.lookupsInFlight ?? 0))}, last ${String(report.lookupsInFlight)}; lookupsGivenUp ${String(report.lookupsGivenUp)}`,
@@ -3982,8 +4011,8 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       : {}),
     // P2's stopped child left 12 answering checks nowhere to be answered, all in its allowance.
     ...(arm === 'P2' ? withHang(cleanHang.notAnswered) : {}),
-    // Its cached names each answered at their first ask, nothing given up: inside the ceiling the
-    // check off is judged by (`P-480`), whose facts the run recorded.
+    // Its cached names each answered at their first ask, nothing given up: inside the ceilings the
+    // check on and off are judged by (`P-484`, `P-480`), whose facts the run recorded.
     ...(arm === 'partial'
       ? {
           cachedGivenUp: {
@@ -3994,6 +4023,8 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
             checks: [],
             silentUntried: 25,
             silentHoldMs: 30_000,
+            keyHeardMs: 1_300,
+            sensorsPerName: 10,
           },
         }
       : {}),
@@ -5178,68 +5209,107 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     },
   ];
 
-  it('partial allows the cached checks given up while their name is held, one episode a name: asked within the first scan interval, before the name’s first answer and the lag, in a held name’s words; no other, and no answering one (P-478 fix rounds 1 and 2)', () => {
+  it('partial with the check on allows a cached check given up in a held name’s words before the name’s first answer and the lag, past the first scan interval, and holds the longest wait to a ceiling read from the run: when the check first heard the zone, a check’s spacing, the silent names’ own walks over their places, and the lag (P-484)', () => {
     const base = clean('partial', 'gate');
     const b20 = 'dev-20.zone-b.test';
     const b40 = 'dev-40.zone-b.test';
     const lanes = '(dev-10.zone-b.test, dev-30.zone-b.test, dev-50.zone-b.test)';
-    /** A held cached name's check, as the arm's runs at 1,000 sensors show it giving up. */
+    /** A held cached name's check, as the arm's runs show it giving up. */
     const held = (name: string): string =>
       `the device’s host name did not resolve, querying ${name}:161 over SNMP — the probe’s resolver is not answering (every lane a lookup for ${name} could use is held by a lookup that has run past 1000 ms ${lanes}: no name of zone-b.test has answered in the lookup helper since one of its lookups ran past 1000 ms, so it holds at most 3 of the helper’s lanes; it stays queued)`;
+    // The zone first heard at 36 s; a check every 60 s ÷ 10 sensors; 25 silent names' own walks
+    // each a hold over the own walks' places; and the 40 ms lag. The constants are the code's.
+    const ceilingMs = 36_000 + 60_000 / 10 + (25 * FORWARD_HOLD_MS) / OWN_WALK_PLACES + 40;
+    const s1 = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
+    const parts = `the check first heard their zone at 36.0 s, a check’s spacing of 6.0 s, 25 silent names’ own walks of ${s1(FORWARD_HOLD_MS)} each over ${String(OWN_WALK_PLACES)} places, and the 40 ms lag`;
     const placed = (
       checks: readonly {
         readonly name: string;
         readonly askedMs: number;
         readonly message?: string;
       }[],
-      given: {
-        readonly lagMs?: number | undefined;
-        readonly firstAnswerMs?: Record<string, number>;
-      } = {},
+      given: Partial<NonNullable<WorldFacts['cachedGivenUp']>> = {},
       patch: Partial<WorldFacts> = {},
     ): WorldFacts => ({
       ...base,
       givenUp: { ...base.givenUp, cached: checks.length },
       cachedGivenUp: {
         intervalMs: 60_000,
-        lagMs: 'lagMs' in given ? given.lagMs : 40,
-        firstAnswerMs: given.firstAnswerMs ?? { [b20]: 12_000, [b40]: 9_000 },
+        lagMs: 40,
+        firstAnswerMs: { [b20]: 70_000, [b40]: 9_000 },
+        firstAskedMs: { [b20]: 1_000, [b40]: 2_000 },
+        silentUntried: 25,
+        silentHoldMs: WORLD_SCHEDULE.tries * WORLD_SCHEDULE.waitMs,
+        keyHeardMs: 36_000,
+        sensorsPerName: 10,
         checks: checks.map((check) => ({ message: held(check.name), ...check })),
+        ...given,
       },
       ...patch,
     });
-    // Its ten sensors, all asked while it was held, before its first answer at 12 s: one episode.
-    const ten = placed(
-      Array.from({ length: 10 }, (_, i) => ({ name: b20, askedMs: 1_000 + 1_100 * i })),
-    );
-    assert.deepEqual(judgeWorld(ten), [], 'ten checks of one name, before its first answer');
-    assert.deepEqual(cachedAllowance(ten), { names: 1, checks: 10, refused: [] });
-    // From the facts, not a count: two names.
-    const two = placed([
-      { name: b20, askedMs: 4_000 },
+    // Inside: its checks while it was held, one of them past the first scan interval of 60 s,
+    // which binds no more.
+    const inside = placed([
+      { name: b20, askedMs: 1_000 },
+      { name: b20, askedMs: 63_000 },
+      { name: b20, askedMs: 69_999 },
       { name: b40, askedMs: 8_999 },
     ]);
-    assert.deepEqual(judgeWorld(two), []);
-    assert.deepEqual(cachedAllowance(two), { names: 2, checks: 2, refused: [] });
-    // Within the lag of its first answer: the main thread may have read its ask late.
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 12_039 }])), []);
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 12_040 }])), [
-      'a cached check of dev-20.zone-b.test given up, asked at 12.0 s, after dev-20.zone-b.test’s first answer at 12.0 s and the 40 ms lag measured',
+    assert.deepEqual(judgeWorld(inside), []);
+    assert.deepEqual(cachedAllowance(inside), { names: 2, checks: 4, refused: [] });
+    assert.deepEqual(cachedCeilingOn(inside.cachedGivenUp ?? assert.fail()), {
+      ms: ceilingMs,
+      keyHeardMs: 36_000,
+      spacingMs: 6_000,
+      ownWalks: 25,
+      holdMs: FORWARD_HOLD_MS,
+      places: OWN_WALK_PLACES,
+      lagMs: 40,
+    });
+    // Within the lag of its first answer; past it, not.
+    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 70_039 }])), []);
+    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 70_040 }])), [
+      'a cached check of dev-20.zone-b.test given up, asked at 70.0 s, after dev-20.zone-b.test’s first answer at 70.0 s and the 40 ms lag measured',
     ]);
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 30_000 }])), [
-      'a cached check of dev-20.zone-b.test given up, asked at 30.0 s, after dev-20.zone-b.test’s first answer at 12.0 s and the 40 ms lag measured',
-    ]);
-    // A name never answered is held for as long as the interval.
+    // The longest wait at the ceiling, and a millisecond past it.
     assert.deepEqual(
-      judgeWorld(placed([{ name: b20, askedMs: 59_999 }], { firstAnswerMs: {} })),
+      judgeWorld(placed([], { firstAnswerMs: { [b20]: 1_000 + ceilingMs, [b40]: 9_000 } })),
       [],
     );
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 60_000 }], { firstAnswerMs: {} })), [
-      'a cached check of dev-20.zone-b.test given up, asked at 60.0 s, past the arm’s first scan interval of 60 s',
-    ]);
-    // A first answer and no lag measured: not placed before it.
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 1_000 }], { lagMs: undefined })), [
-      'a cached check of dev-20.zone-b.test given up, asked at 1.0 s: the lag was not measured, so it is not placed before dev-20.zone-b.test’s first answer',
+    assert.deepEqual(
+      judgeWorld(placed([], { firstAnswerMs: { [b20]: 1_001 + ceilingMs, [b40]: 9_000 } })),
+      [
+        `the longest a cached name waited for its first answer, ${s1(1 + ceilingMs)} (dev-20.zone-b.test), past the ceiling of ${s1(ceilingMs)}: ${parts}`,
+      ],
+    );
+    // A name never answered: held within the ceiling of its first ask, and no longer.
+    const never = { [b40]: 9_000 };
+    assert.deepEqual(
+      judgeWorld(placed([{ name: b20, askedMs: ceilingMs + 999 }], { firstAnswerMs: never })),
+      [],
+    );
+    assert.deepEqual(
+      judgeWorld(placed([{ name: b20, askedMs: ceilingMs + 1_000 }], { firstAnswerMs: never })),
+      [
+        `a cached check of dev-20.zone-b.test given up, asked at ${s1(ceilingMs + 1_000)}: never answered, past its first ask at 1.0 s and the ceiling of ${s1(ceilingMs)}`,
+      ],
+    );
+    // A fact the ceiling needs missing: none allowed, and the run fails once, naming it.
+    for (const [omit, said] of [
+      ['keyHeardMs', 'the time the check first heard their zone'],
+      ['sensorsPerName', 'the sensors a name'],
+      ['silentUntried', 'the silent names asked'],
+      ['lagMs', 'the lag'],
+      ['firstAskedMs', 'the cached names’ first asks'],
+    ] as const) {
+      const facts = placed([{ name: b20, askedMs: 1_000 }], { [omit]: undefined });
+      const expected = `with the name check on, the cached names’ ceiling is not placed: ${said} not recorded`;
+      assert.deepEqual(judgeWorld(facts), [expected], omit);
+      assert.deepEqual(cachedAllowance(facts), { names: 0, checks: 0, refused: [expected] });
+    }
+    const { cachedGivenUp: _unrecorded, ...unplaced } = base;
+    assert.deepEqual(judgeWorld(unplaced), [
+      'with the name check on, the cached names’ ceiling is not placed: the cached names’ waits not recorded',
     ]);
     // Words a held name's check does not give up with: its bound waited out, or another hold.
     const waited =
@@ -5261,21 +5331,24 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
         /in words a held name’s check does not give up with/u,
       );
     }
-    // The facts must place every one.
+    // The facts must place every one, and answering checks have none however they are placed.
     assert.deepEqual(
       judgeWorld(placed([{ name: b20, askedMs: 1_000 }], {}, { givenUp: { cached: 2 } })),
       ['2 cached checks given up, and 1 placed by name and time'],
     );
-    const { cachedGivenUp: _unrecorded, ...unplaced } = base;
-    assert.deepEqual(judgeWorld({ ...unplaced, givenUp: { cached: 1 } }), [
-      '1 cached checks given up',
-    ]);
-    // Answering checks have none, however the cached ones are placed.
     assert.deepEqual(
       judgeWorld(
         placed([{ name: b20, askedMs: 1_000 }], {}, { givenUp: { cached: 1, answering: 1 } }),
       ),
       ['1 answering checks given up'],
+    );
+    // With the check off, its own ceiling: the same wait, past the ceiling on, is inside it.
+    assert.deepEqual(
+      judgeWorld({
+        ...placed([], { firstAnswerMs: { [b20]: 1_001 + ceilingMs, [b40]: 9_000 } }),
+        checkOn: false,
+      }),
+      [],
     );
   });
 
@@ -5384,9 +5457,9 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       judgeWorld({ ...placed([{ name: b20, askedMs: 1_000 }]), givenUp: { cached: 2 } }),
       ['2 cached checks given up, and 1 placed by name and time'],
     );
-    // With the check on, round 2's rule as it was: the first scan interval binds.
+    // With the check on, its own ceiling (`P-484`), whose facts these do not record.
     assert.deepEqual(judgeWorld({ ...placed([{ name: b20, askedMs: 120_000 }]), checkOn: true }), [
-      'a cached check of dev-20.zone-b.test given up, asked at 120.0 s, past the arm’s first scan interval of 60 s',
+      'with the name check on, the cached names’ ceiling is not placed: the time the check first heard their zone, the sensors a name not recorded',
     ]);
   });
 

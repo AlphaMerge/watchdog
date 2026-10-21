@@ -11,6 +11,11 @@
  * walks stop short of by `WALK_KEY_RESERVE`, so the check adds at most 10 questions a second to
  * each server at every instant.
  *
+ * **An own walk's places** (`P-484`): a queued helper lookup's own walk (`P-480`) takes a discovery
+ * place, and, while discovery is full, one of heard's, at most `OWN_WALK_HEARD` of them at once,
+ * so the walks of zones that answer keep the rest: 8 places in all (`OWN_WALK_PLACES`), inside the
+ * pools' 12 (D16).
+ *
  * **A question held** is one sent and not answered: glibc sends A and AAAA together for family 0,
  * so a lookup holds 2 there and 1 for family 4 or 6 (`questionsOf`).
  *
@@ -56,6 +61,14 @@ export const WALK_QUESTIONS: Readonly<Record<WalkPool, number>> = {
   discovery: 4,
   urgent: 2,
 };
+
+/**
+ * The heard pool's places an own walk may take while discovery is full (`P-484`): half of them, so
+ * that heard zones' walks keep the other half however many silent names are walked on their own.
+ */
+export const OWN_WALK_HEARD = 4;
+/** The places own walks hold at once at most: discovery's, and `OWN_WALK_HEARD` of heard's. */
+export const OWN_WALK_PLACES = WALK_QUESTIONS.discovery + OWN_WALK_HEARD;
 
 /** D19: a server's bucket refills at this many questions a second, up to the burst. */
 export const WALK_RATE = 10;
@@ -139,10 +152,14 @@ export interface ForwardBudgetOptions {
   readonly walk?: Readonly<Record<WalkPool, number>>;
   /** D19's bucket: `WALK_RATE`, `WALK_BURST` and `WALK_KEY_RESERVE` unless a test says. */
   readonly rate?: { readonly perSecond: number; readonly burst: number; readonly reserve: number };
+  /** `OWN_WALK_HEARD` unless a test says. */
+  readonly ownHeard?: number;
 }
 
 interface OpenWalkQuestion {
   readonly pool: WalkPool;
+  /** An own walk's (`P-484`): in heard, one of the `OWN_WALK_HEARD` places own walks may hold. */
+  readonly own: boolean;
   readonly sentAt: number;
   readonly until: number;
   closed: boolean;
@@ -169,6 +186,7 @@ export class ForwardBudget {
   #peak = 0;
   #released = 0;
   readonly #walkCaps: Readonly<Record<WalkPool, number>>;
+  readonly #ownHeard: number;
   /** The walk's questions open, oldest first: the head is the next to expire. */
   #walkOpen: OpenWalkQuestion[] = [];
   readonly #walkHandles = new WeakMap<WalkQuestion, OpenWalkQuestion>();
@@ -186,6 +204,7 @@ export class ForwardBudget {
     this.#holdMs = options.holdMs ?? FORWARD_HOLD_MS;
     this.#tokens = options.tokens ?? GAI_TOKENS;
     this.#walkCaps = options.walk ?? WALK_QUESTIONS;
+    this.#ownHeard = options.ownHeard ?? OWN_WALK_HEARD;
     this.#rate = options.rate ?? {
       perSecond: WALK_RATE,
       burst: WALK_BURST,
@@ -201,10 +220,54 @@ export class ForwardBudget {
     return this.#walkOf(pool) + questions <= this.#walkCaps[pool];
   }
 
-  /** A question sent: open in its pool until `reply`, or its hold. */
-  open(pool: WalkPool): WalkQuestion {
+  /**
+   * The pool an own walk's question may take now (`P-484`): discovery while it has room, else heard
+   * while it has room and fewer than `OWN_WALK_HEARD` own questions are open there; or none.
+   */
+  ownPlace(): WalkPool | undefined {
+    if (this.admit('discovery', 1)) return 'discovery';
+    if (this.admit('heard', 1) && this.ownOpen() < this.#ownHeard) return 'heard';
+    return undefined;
+  }
+
+  /** The own walks' questions open in the heard pool now (`P-484`). */
+  ownOpen(): number {
+    this.#expire();
+    let count = 0;
+    for (const open of this.#walkOpen) if (open.pool === 'heard' && open.own) count += 1;
+    return count;
+  }
+
+  /**
+   * When an own walk's place frees with no reply (`P-484`): the sooner of discovery's oldest hold's
+   * end and the heard place it may take, which is heard's oldest while fewer than `OWN_WALK_HEARD`
+   * own questions are open there, and the oldest of those once they are. Undefined while neither
+   * pool holds anything.
+   */
+  ownFreesAt(): number | undefined {
+    this.#expire();
+    const heard =
+      this.ownOpen() < this.#ownHeard
+        ? this.walkFreesAt('heard')
+        : this.#walkOpen.find((open) => open.pool === 'heard' && open.own)?.until;
+    const discovery = this.walkFreesAt('discovery');
+    if (heard === undefined) return discovery;
+    return discovery === undefined ? heard : Math.min(heard, discovery);
+  }
+
+  /**
+   * A question sent: open in its pool until `reply`, or its hold. `own` marks an own walk's
+   * (`P-484`), which `ownPlace` counts in heard.
+   */
+  open(pool: WalkPool, own = false): WalkQuestion {
     const now = this.#now();
-    const held: OpenWalkQuestion = { pool, sentAt: now, until: now + this.#holdMs, closed: false };
+    const held: OpenWalkQuestion = {
+      pool,
+      own,
+      sentAt: now,
+      until: now + this.#holdMs,
+      closed: false,
+    };
     this.#walkOpen.push(held);
     const handle: WalkQuestion = {
       pool,

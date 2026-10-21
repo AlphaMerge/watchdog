@@ -518,7 +518,9 @@ ms-probe`: the setting is read only at start
   then wait behind the silent ones for its first answer, at most the zone's silent names not yet
   asked, times how long the system's resolver takes to give up on one (from `resolv.conf`'s
   `timeout` and `attempts`), divided by 2, and its checks give up meanwhile. With the check on,
-  such a name is walked, heard, and asked on the probe's own lanes.
+  such a name is walked, heard, and asked on the probe's own lanes, once the check has heard one
+  of the zone's names answer: its next check waits at most the zone's silent names times 10 s,
+  divided by 8, for that walk (`P-484`).
 
   A name the check found silent that the helper then answered within a second is a miss: one
   skips the check for that name for an hour, three of one zone in ten minutes skip the zone for an

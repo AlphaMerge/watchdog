@@ -190,6 +190,7 @@ async function walk(asked: ModesLookup): Promise<ModesReply> {
         lastRanMs: undefined,
         boundMs: undefined,
         ref: {},
+        own: false,
       }),
     ),
   );
