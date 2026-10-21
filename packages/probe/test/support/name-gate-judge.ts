@@ -140,13 +140,22 @@ export interface WorldFacts {
     { readonly perSecond: number; readonly keys: number } | { readonly notReached: string };
   /** `zone`: answering names first kept more than a second after their first ask, or never. */
   readonly keptLate?: readonly string[];
-  /**
-   * `partial`: each cached check given up, by its name and when it was asked, in ms from the arm's
-   * start, and the arm's scan interval (`cachedAllowance`).
-   */
+  /** `partial`: the cached checks given up, and what places them (`cachedAllowance`). */
   readonly cachedGivenUp?: {
     readonly intervalMs: number;
-    readonly checks: readonly { readonly name: string; readonly askedMs: number }[];
+    /**
+     * The event loop's longest turn while the wheel ran, in ms: how late the main thread can have
+     * read a time (`P-472`'s `lagMs`). Undefined if it was not measured.
+     */
+    readonly lagMs: number | undefined;
+    /** Each cached name's first answer, in ms from the arm's start. A name never answered is absent. */
+    readonly firstAnswerMs: Readonly<Record<string, number>>;
+    /** Each cached check given up: its name, when it was asked, and the check's words. */
+    readonly checks: readonly {
+      readonly name: string;
+      readonly askedMs: number;
+      readonly message: string;
+    }[];
   };
   /** The helper, in gate mode. */
   readonly helper?: {
@@ -562,21 +571,44 @@ function allAnswered(facts: WorldFacts, said: (violation: string) => void, group
 }
 
 /**
- * `partial`'s cached checks given up that the judge allows (`P-478`'s fix round 1), and why each of
- * the rest is not. At a cold start a cached name's first lookup may wait in the helper behind its
- * zone's stuck silent lookups, which nothing has yet told apart from it, and give up, as
- * `system`'s does on the probe's lanes. So one cached check given up is allowed a name, asked
- * within the arm's first scan interval, read from the facts, never a count fixed beforehand. Every
- * other is not: a second for the same name, one asked later, or one the facts do not place.
+ * The words a held cached name's check gives up with in `partial` (`P-478`'s fix round 2), and no
+ * others: what the arm's runs showed at 1,000 sensors, check on and off, 12 of 12 each. The
+ * helper's key rule fails the check at once as the last of its zone's 3 lookups runs past
+ * `STUCK_MS`, and the key is then quiet, since a stuck lookup was the last thing it heard: so the
+ * quiet words, never "the DNS check does not vouch for". A check that waited out its bound, or that
+ * any other condition held, is not a held cached name's.
+ */
+export const HELD_CACHED_WORDS =
+  /the probe’s resolver is not answering \(every lane a lookup for \S+ could use is held by a lookup that has run past \d+ ms \([^)]*\): no name of \S+ has answered in the lookup helper since one of its lookups ran past \d+ ms, so it holds at most 3 of the helper’s lanes; it stays queued\)$/u;
+
+/** A check's words with its name and its numbers taken out: what `partial`'s row counts. */
+export function wordsOf(message: string): string {
+  return message.replace(/dev-\d+\.zone-[a-z]\.test/gu, '<name>').replace(/\d[\d,.]*/gu, 'N');
+}
+
+/**
+ * `partial`'s cached checks given up that the judge allows (`P-478`'s fix rounds 1 and 2), and why
+ * each of the rest is not. At a cold start a cached name's first lookup may wait behind its zone's
+ * silent lookups, which nothing has yet told apart from it, and every one of its checks that comes
+ * due meanwhile gives up with it, as `system`'s do on the probe's lanes: ten sensors a device. So a
+ * cached check given up is allowed only while its name is held, one episode a name: asked within
+ * the arm's first scan interval, before its name's first answer plus the lag the run measured,
+ * and in the words a held name's check gives up with (`HELD_CACHED_WORDS`). Read from the facts,
+ * never a count fixed beforehand. Every other is not, nor is one the facts do not place.
  */
 export function cachedAllowance(facts: WorldFacts): {
-  readonly allowed: number;
+  readonly names: number;
+  readonly checks: number;
   readonly refused: readonly string[];
 } {
   const total = count(facts.givenUp, 'cached');
   const given = facts.cachedGivenUp;
   if (given === undefined) {
-    return { allowed: 0, refused: total > 0 ? [`${String(total)} cached checks given up`] : [] };
+    return {
+      names: 0,
+      checks: 0,
+      refused: total > 0 ? [`${String(total)} cached checks given up`] : [],
+    };
   }
   const refused: string[] = [];
   if (given.checks.length !== total) {
@@ -584,19 +616,33 @@ export function cachedAllowance(facts: WorldFacts): {
       `${String(total)} cached checks given up, and ${String(given.checks.length)} placed by name and time`,
     );
   }
-  const allowed = new Set<string>();
+  const names = new Set<string>();
+  let checks = 0;
   const first = `the arm’s first scan interval of ${String(given.intervalMs / 1_000)} s`;
-  for (const { name, askedMs } of [...given.checks].sort((a, b) => a.askedMs - b.askedMs)) {
-    const when = `asked at ${(askedMs / 1_000).toFixed(1)} s`;
+  const s = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
+  for (const { name, askedMs, message } of given.checks) {
+    const which = `a cached check of ${name} given up, asked at ${s(askedMs)}`;
+    const answered = given.firstAnswerMs[name];
     if (askedMs < 0 || askedMs >= given.intervalMs) {
-      refused.push(`a cached check of ${name} given up, ${when}, past ${first}`);
-    } else if (allowed.has(name)) {
-      refused.push(`a second cached check of ${name} given up, ${when}, within ${first}`);
+      refused.push(`${which}, past ${first}`);
+    } else if (answered !== undefined && given.lagMs === undefined) {
+      refused.push(
+        `${which}: the lag was not measured, so it is not placed before ${name}’s first answer`,
+      );
+    } else if (answered !== undefined && askedMs >= answered + (given.lagMs ?? 0)) {
+      refused.push(
+        `${which}, after ${name}’s first answer at ${s(answered)} and the ${String(Math.round(given.lagMs ?? 0))} ms lag measured`,
+      );
+    } else if (!HELD_CACHED_WORDS.test(message)) {
+      refused.push(
+        `${which}, in words a held name’s check does not give up with: ${wordsOf(message)}`,
+      );
     } else {
-      allowed.add(name);
+      names.add(name);
+      checks += 1;
     }
   }
-  return { allowed: allowed.size, refused };
+  return { names: names.size, checks, refused };
 }
 
 function silentOffProbeLanes(facts: WorldFacts, said: (violation: string) => void): void {
