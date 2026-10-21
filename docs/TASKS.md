@@ -12509,7 +12509,7 @@ because each is a decision rather than a defect:
       probe has replaced does not call `lost`, with a test that closes the old connection after
       the new one's `found`.
 
-- [ ] **P-428 — the login timing test compares one login with one other** · XS · A-47 · Found
+- [x] **P-428 — the login timing test compares one login with one other** · XS · A-47 · Found
       2026-10-17 in `P-416`'s full suite. `accounts.test.ts`, "spends comparable time on an account
       that does not exist", times one wrong password for a real account and one for an absent
       account, and asserts the absent one took more than a quarter as long. One stall on the
@@ -12517,6 +12517,22 @@ because each is a decision rather than a defect:
       three times out of three when rerun alone. **Done when** each side is the median of
       several logins, so that one stall cannot decide it, and the claim (the decoy verification
       happens at all) stands.
+
+      **P-428 outcome. Each side is the median of seven logins, taken in turn.** Built 2026-10-21
+      on `fix/flakes-filed`, in `accounts.test.ts` only.
+      - **The test.** Seven wrong-password logins for the real account and seven for the absent
+        one, alternately. The absent side's median must be over a quarter of the real side's, as
+        the one pair's had to be. Taken in turn, a slow stretch of the machine lands on both
+        sides, and a median moves only when four of a side's seven are slow. A failure lists all
+        fourteen times.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** seven a side. The fourteen
+        logins take about 1.3 s on a quiet VM, where the pair took 0.1 s. Five a side would move
+        on three slow logins.
+      - **Mutation: 1 of 1 killed.** An absent account answered with no decoy verification: a
+        median of 1.4 ms against 51.1.
+      - **Runs.** Not reproduced: the old case passed 20 of 20 at a load held near 20, each in
+        204–444 ms. The new one passed 20 of 20 at the same load, in 788–1,021 ms. The file,
+        quiet: 44 of 44.
 
 - [ ] **P-429 — re-wording an acknowledgement does not reword the sensor** · XS · M-02, P-411 ·
       Found 2026-10-17 in `P-411`. `canAcknowledge` lets an operator acknowledge a sensor that is
@@ -12539,7 +12555,7 @@ because each is a decision rather than a defect:
       lost link, in a lost link's words, with no transition, and a test that closes a silent
       probe's link.
 
-- [ ] **P-431 — two sensor tests time a bound with no room for a loaded machine** · XS · A-62,
+- [x] **P-431 — two sensor tests time a bound with no room for a loaded machine** · XS · A-62,
       P-07 · Found 2026-10-17 in the full suite for `P-408`, `P-406` and `P-397` together, on a VM
       that at times carried three runs.
       - **The database case.** `db-checked-target.test.ts`'s connect-bound case for `db.mysql`
@@ -12554,6 +12570,43 @@ because each is a decision rather than a defect:
 
       **Done when** each upper bound sits where the distance between its two outcomes puts it,
       not half a second over the expected one, and the `db.mysql` overrun is explained.
+
+      **P-431 outcome. The jitter case's bound sits under the slower outcome's floor, and the
+      database case reads no wall clock.** Built 2026-10-21 on `fix/flakes-filed`, in
+      `jitter-range.test.ts` and `db-checked-target.test.ts`.
+      - **The jitter case** sends ten packets at 0.2 s, about 1.8 s, and asserts under 8 s. At the
+        default second, ping waits nine seconds between its first packet and its last, so no run
+        of the bug comes in under nine. The bound leaves six seconds for starting ping, where the
+        old one left 1.7.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** ten packets and 8 s, so the
+        bound is set by the slower outcome's floor and not by the faster one's speed. The case
+        takes a second longer.
+      - **The database case** is `P-447`'s, rebuilt (its outcome below). It asserts nothing of the
+        wall clock but a lower bound, so it has no upper bound to place.
+      - **The `db.mysql` overrun.** The old case's clock ran from before the catalogue built the
+        check to after the error was described, and the sensor's budget covers only the lookup
+        and the connect. Measured on the old path at a load held near 20, 15 runs per engine:
+        - before the budget's clock started (catalogue, parameter validation): a median of
+          29–37 ms by engine, 107 at most;
+        - the driver's timer late: 21 ms at most;
+        - from the driver's failure to the error: 2 ms at most;
+        - in all, 2,121 ms at most against a 2,000 ms timeout.
+        None of that is database code. The run that took 3,274 ms was 1,274 ms over, more than
+        the bug's 900 would add, and the bug does not come and go: it fails every run, and the
+        case passed three of three on the same tree. So the rest was the machine, ten times what
+        a held load added here, on a VM that at times carried three runs. Stalls of that kind
+        happen: in the new case's twenty (`P-447`), one `db.mysql` run took 3,476 ms, 476 over its
+        timeout. A wall clock cannot tell them from the bug, which is why the case no longer
+        reads one.
+      - **Mutation: 1 of 1 killed for the jitter case, in two rounds.** ping given the default
+        interval: 9,304 and 9,266 ms. The database case's are `P-447`'s.
+      - **Not changed, the jitter case's kind.** `icmp-ping.test.ts`'s 'spaces the packets it
+        sends' asserts four packets at 0.2 s, about 0.6 s, under 2,000 ms, where the default
+        takes over three: 1.4 s of room, where the jitter case had 1.7 s and a loaded VM overran it.
+        Filed as `P-494`.
+      - **Runs.** Not reproduced: at a load held near 20 the old cases passed 20 of 20, the database
+        case's slowest 2,255 ms and the jitter case's 918. The new ones, 20 in a row at 16–27: 20
+        of 20, the jitter case in 1,876–2,038 ms.
 
 - [ ] **P-432 — c-ares as a second resolver behind the probe's cache** · M · P-426, A-66 · Filed
       2026-10-17 by `P-426`. `P-426` kept every answer `getaddrinfo`'s and bounded what it
@@ -14288,7 +14341,7 @@ because each is a decision rather than a defect:
       **Done when** the API refuses a device whose host is an address of the family its IP
       version rules out, with a refusal naming both, or every connecting check fails naming
       the mismatch (phase `resolve`, the device's host); with tests for each.
-- [ ] **P-446 — four real-worker tests read the host's load: their 5 s bounds include starting workers** · XS ·
+- [x] **P-446 — four real-worker tests read the host's load: their 5 s bounds include starting workers** · XS ·
       P-426, A-66, P-263 · Found 2026-10-18, twice: in `P-437`'s full suite at a load near 20 and
       in the S5 integration's at a load near 12, with two full suites sharing the VM. In
       `packages/probe/test/`, `pool-resolve.test.ts` 'counts a lookup a check stopped waiting for in
@@ -14304,7 +14357,42 @@ because each is a decision rather than a defect:
       under its own bound before it starts the bound on the behaviour it names, so a failure says
       which of the two was slow, with a mutant per test showing it still fails when the behaviour is
       removed.
-- [ ] **P-447 — a database timeout test leaves 400 ms between a loaded pass and the bug it guards** · XS ·
+
+      **P-446 outcome. The workers load under a bound of their own, counted where the pool makes
+      them, before any of the four times what it names.** Built 2026-10-21 on `fix/flakes-filed`,
+      in `packages/probe/test/` only.
+      - **`support/watched-workers.ts`, new.** `watchedWorkers()` is a `createWorker` for the pool
+        that counts the workers made, loading, ready and exited, from each worker's own `ready`
+        message and `exit`, heard before the pool hears them. `loaded(workers, n)` waits until `n`
+        are ready and none is loading, under `LOAD_BOUND_MS` (90 s: one missed 30 s start and its
+        replacement). A failure says how far they got and how many starts the pool counted failed.
+      - **The four.** `poolOf` in `pool-lookups.test.ts` and `pool-resolve.test.ts` waits for its
+        workers, so their three tests time a check only on loaded workers. 'terminates a worker
+        still loading at its bound' waits for the other worker before its first check, and for
+        the replacement before it looks for a check on it. Its checks have a 30 s timeout, so an
+        outcome it reads is the pool's, and a check that did not end ok is named.
+      - **Why they took 40 s.** `start` resolves once each worker has said ready or missed its 30 s
+        start-up bound. A worker that missed it was replaced, and the test's 5 s wait then timed
+        the replacement's load as if it were the behaviour. That fits the 40 s each failure took.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** 90 s for a load. `P-258`
+        measured the catalogue's import at up to 14.8 s on a loaded host, and a worker that
+        misses the 30 s start-up bound loads again after a delay: one miss and its replacement
+        fit. A test that fails there says the workers were slow, in their counts.
+      - **Mutation: 5 of 5 killed, in three rounds, the last on the final build.** A running check
+        not counted in flight; no idle report while a lookup waits; an idle report that ignores in
+        flight; no start-up bound; a hung start not replaced.
+      - **Left, and filed as `P-495`.** 'counts a lookup a check is still waiting for' still has
+        an order window: it must see the idle report before the check's 1.5 s lookup answers. A
+        main thread stalled for the 1.5 s takes the report and the result in one turn, and the
+        poll never sees the lookup in flight. In `pool-resolve.test.ts`, 'answers a worker whose
+        lookup the resolver's handler threw on', not one of the four, makes a pool of its own
+        whose worker is not waited for.
+      - **Runs.** The ten tests of this ticket and `P-448` alone, 20 runs each at a load held near
+        22: the old versions 20 of 20, so a held load alone did not reproduce them (they failed
+        beside full suites), and the new 20 of 20. `pool-lookups.test.ts` and
+        `pool-resolve.test.ts` whole, 20 in a row at 14–49: 20 of 20, in 25 s to 8 minutes a run.
+        The fourth is in `check-pool.test.ts`'s twenty (`P-448`).
+- [x] **P-447 — a database timeout test leaves 400 ms between a loaded pass and the bug it guards** · XS ·
       A-70, A-85 · Found 2026-10-18 in `A-85`'s third round, on a VM at a load near 17. In
       `packages/sensors/test/db-checked-target.test.ts`, 'the lookup and the connection share a
       database sensor’s connect timeout' → `db.mssql` took 2,720 ms against `ms < TIMEOUT + 500`
@@ -14315,7 +14403,43 @@ because each is a decision rather than a defect:
       that takes most of the timeout, so the bug adds well over a second, with the bound between),
       or the case reads the deadline the driver was handed rather than the wall clock; with a
       mutant giving the whole timeout again that still fails it.
-- [ ] **P-448 — four older pool tests time a window or a bound that a loaded host's workers fill** · XS ·
+
+      **P-447 outcome. The case reads what the driver was handed and which of two timers ended
+      first, and the bug adds 1,400 ms.** Built 2026-10-21 on `fix/flakes-filed`, in
+      `db-checked-target.test.ts` only.
+      - **The case.** A 1,400 ms lookup of a 3,000 ms timeout, the most it can take: the lookup is
+        bounded at half the timeout (`resolveBoundMs`). It runs `runDbCheck` with each engine's
+        driver, wrapped, and asserts:
+        - the driver was handed (`connectBudgetMs`) no more than the timeout less the lookup, as
+          long as the lookup took from being asked to answering;
+        - the driver's connect ended before a timer of the whole timeout, armed as it was handed
+          the connect, had fired;
+        - the case took at least the timeout less 150 ms, so the lookup was taken out once and
+          not twice. It is the only read of the wall clock, and a lower bound.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** both of the ticket's ways.
+        The lookup takes most of what it may, and the case reads the deadline rather than the
+        wall clock. Each engine's case takes 3 s, where it took 2.
+      - **What load can move.** A driver given the whole timeout again arms its timer after the
+        case's, for as long or longer, so it can never end first. `mysql2` and `tedious` fail in
+        the turn their timer fires, however late. `pg` fails a phase later, once its socket has
+        closed, so only a single stall of the whole 1,400 ms at its timer could put the case's
+        timer first.
+      - **The lookup's length is read, not assumed.** Asserted against `TIMEOUT - LOOKUP`, the case
+        failed 5 of 20 at a load near 20, by 2.7 ms at most: a timer can fire a little early by
+        `hrtime`, and the 1,400 ms lookup answered in 1,397.3.
+      - **Mutation: 6 of 6 killed, on the final case.** The whole timeout handed again by
+        `runDbCheck`, and read again by `connectBudgetMs`: what the driver was handed, every
+        engine. Given again by the `pg`, `mysql2` or `tedious` driver (the last with its
+        connector's timer): the timer, that engine only. The lookup taken out twice: the lower
+        bound, at 1,603 ms.
+      - **Not changed, of the same kind.** In the same file, 'the driver is told what is left'
+        asserts over 400 ms left of 1,000 after a 300 ms lookup, which a stall of 300 ms fails,
+        and the `tedious` connector case asserts under 1,500 ms for a 400 ms budget. Filed as
+        `P-493`.
+      - **Runs.** At a load held near 20 (16–27), 20 in a row with the jitter case: 20 of 20, each
+        engine in 3,006–3,476 ms. The old case passed 20 of 20 at the same load (`P-431`'s runs):
+        a held load alone did not reach the 400 ms. Both files, quiet: 181 of 181.
+- [x] **P-448 — four older pool tests time a window or a bound that a loaded host's workers fill** · XS ·
       P-26, P-206, P-272, P-437 · Found 2026-10-18 and 19 in `P-437`'s twenty-run re-takes of
       `packages/probe/test/check-pool.test.ts`, each run in a process of its own: 15 of 20 passed
       at a load of 2–39, and 4 of 7 at 17–58, every failure in a test `P-437` did not change.
@@ -14341,6 +14465,81 @@ because each is a decision rather than a defect:
       counters rather than a window of wall-clock time, so that a failure says which was slow;
       with a mutant per test that still fails it when the behaviour is removed, and twenty runs
       of the file in a row at a load near 20 with none of the six failing.
+
+      **P-448 outcome. Each of the six waits for its workers under a bound of its own, or counts
+      where the pool makes them, before it times what it names.** Built 2026-10-21 on
+      `fix/flakes-filed`, in `check-pool.test.ts`, with `P-446`'s watcher.
+      - **'gives back the workers a lighter load stopped needing' (`P-26`).** The light load runs
+        until the burst's workers have loaded, under `LOAD_BOUND_MS`, then until the pool gives a
+        worker back, under 10 s. The old policy never gives one back while work arrives. It
+        asserts the pool held fewer than its peak when it did.
+      - **'gives up after a streak of hangs…' (`P-272`).** The starts are counted where the pool
+        makes them, not by heartbeats, two seconds after the latch: three. A retry would be made
+        when a timer the third hang armed fires, a second after it at most. The test's timer is
+        armed after the latch was seen, so it fires after that one, however late both are.
+      - **'never gives up on hangs once a worker of the pool has been ready' (`P-272`).** The first
+        worker loads before any hang is scripted, and the five hangs are the pool's
+        `startupFailed`, not claims on the script: a start ended before its thread claimed one
+        was a hang the script never saw. A first load that misses the 1 s bound fails the test
+        saying so, not as the rule.
+      - **'loads at most SPAWN_CONCURRENCY workers at once…' (`P-206`).** The most loading at once
+        is counted as each worker is made, not sampled for 300 ms, and the rest load under
+        `LOAD_BOUND_MS`, with a start-up bound past it, so that only a `ready` ends a turn.
+      - **'reaches its ceiling even when the drop lands mid-check (P-45)'.** The full pool's eight
+        load under a bound of their own before the drop. The retry's convergence has 30 s, half
+        the 60 s idle window, so the ordinary decay still cannot account for it.
+      - **'never lets a cumulative counter fall when a worker goes away' (`P-36`).** The pool grows
+        to three, and they load under a bound of their own, before the burst. The idle window is
+        a minute: the ceiling's drop retires the workers at once, and at 50 ms a loaded worker
+        could be given back while the others still loaded.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** the give-back's 10 s, fifty
+        idle windows; the retry's 30 s, half the idle window it must beat; and `P-36`'s idle
+        window of a minute. Each bound is on the behaviour alone, after the load's own.
+      - **Mutation: 7 of 7 killed, in three rounds, the last on the final build.** The old shrink
+        policy (any submission keeps every worker): no give-back in the 10 s. No hang latch. Starts
+        after the latch: four made. A latch after a worker was ready. No loading turns: more than
+        a turn loading at once. No over-ceiling retry: not converged in the 30 s. No banking of a
+        retired worker's counters: a counter fell from 6 to 3.
+      - **Runs.** `check-pool.test.ts` whole, 20 runs in a row, each in a process of its own, at a
+        load held near 20 (14–30): 20 of 20, 83 tests each, in 197–260 s a run against 166 s
+        quiet. The six alone, with `P-446`'s, at a load near 22: the old versions 20 of 20 and
+        the new 20 of 20, so a held load alone did not reproduce them. `P-437`'s re-takes of the
+        old file whole passed 15 of 20 at loads of 2–39 and 4 of 7 at 17–58. Then the three
+        files changed here, quiet: 101 of 101.
+
+- [ ] **P-493 — two database budget tests bound how soon a loaded host answers a timer** · XS ·
+      P-447, A-70 · Filed 2026-10-21 by `P-447`'s build. In
+      `packages/sensors/test/db-checked-target.test.ts`, 'the driver is told what is left, and
+      quotes the timeout the sensor was given' asserts over 400 ms left of a 1,000 ms timeout
+      after a 300 ms lookup, so a stall of 300 ms in the lookup fails it. 'the connector
+      `tedious` waits on ends itself at what is left' asserts its 400 ms budget ended under
+      1,500 ms, against a connector given the whole 5,000. **Done when** the first takes the
+      lookup's measured length out, as `P-447`'s case does, rather than asserting a floor under
+      what is left, and the second reads the order of two timers or bounds the slower outcome's
+      floor; with a mutant each that gives the whole timeout again.
+
+- [ ] **P-494 — `icmp-ping`'s spacing test leaves 1.4 s for a loaded host** · XS · P-431 · Filed
+      2026-10-21 by `P-431`'s build. `packages/sensors/test/icmp-ping.test.ts`, 'spaces the
+      packets it sends, which is the only place the default can be seen', sends four packets at
+      the default 0.2 s, about 0.6 s, and asserts under 2,000 ms. At ping's own second they take
+      over three. `P-431`'s jitter case had 1.7 s of room, and a loaded VM overran it. **Done
+      when** the bound sits under the slower outcome's floor with room for a loaded host, as
+      `P-431` placed the jitter case's (ten packets, under 8 s), and a mutant that drops the
+      default interval still fails it.
+
+- [ ] **P-495 — two probe lookup tests still read a loaded host** · XS · P-446, A-66, P-426 ·
+      Filed 2026-10-21 by `P-446`'s build.
+      - `pool-lookups.test.ts`, 'counts a lookup a check is still waiting for as in flight
+        before the check has finished', polls the pool for the worker's idle report before the
+        check's 1.5 s lookup answers. A main thread stalled for the 1.5 s takes the report and
+        the result in one turn, and the poll never sees the lookup in flight.
+      - `pool-resolve.test.ts`, 'answers a worker whose lookup the resolver's handler threw on,
+        rather than leaving it waiting', makes a pool of its own and does not wait for its
+        worker to load before it times the check, `P-446`'s kind.
+
+      **Done when** the first hears each report as the worker sends it (a listener on the
+      worker, as `watched-workers.ts` attaches), not by polling the pool's sum, and the second
+      waits for its worker with `loaded`; with a mutant each.
 - [x] **P-450 — `pool-resolve`'s "replies on its port are not checks" bounds a worker's start at
       5 s** · XS · P-432, P-446 · Found 2026-10-19 by `P-432` S1. The test failed 6 of 7 twice at a
       host load of 16–22, timing out on the worker's 'ready' message (`until` → `pollWithin`, 5 s

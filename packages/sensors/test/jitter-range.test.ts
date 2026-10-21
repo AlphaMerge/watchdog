@@ -216,14 +216,19 @@ describe('icmp.jitter', () => {
   it('passes the interval it was given to ping, which only the clock can show', async () => {
     // Same reasoning as the ping sensor's: the readings are identical whether or not `-i`
     // reaches the command line, so nothing but elapsed time distinguishes a parameter that works
-    // from one that is silently dropped. Five packets at 0.2 s is about 0.8 s; at the default
-    // second it is over four.
+    // from one that is silently dropped.
+    //
+    // **The bound sits under the slower outcome's floor, not over the faster one** (`P-431`).
+    // Ten packets at 0.2 s take about 1.8 s. At the default second, ping waits nine seconds
+    // between its first packet and its last however fast it starts, so no run of that case can
+    // come in under eight. A loaded host only adds to either, so the eight seconds leave six for
+    // starting ping, where five packets under 2.5 s left 1.7 and a loaded VM took 2,569 ms.
     const started = process.hrtime.bigint();
-    await run(icmpJitter, { count: 5, intervalSeconds: 0.2, timeoutMs: 20_000 });
+    await run(icmpJitter, { count: 10, intervalSeconds: 0.2, timeoutMs: 20_000 });
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
     assert.ok(
-      elapsedMs < 2_500,
-      `five loopback packets took ${elapsedMs.toFixed(0)} ms — ping was not given -i`,
+      elapsedMs < 8_000,
+      `ten loopback packets took ${elapsedMs.toFixed(0)} ms — ping was not given -i`,
     );
   });
 

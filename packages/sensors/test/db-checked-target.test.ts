@@ -1425,8 +1425,9 @@ async function blackhole(): Promise<{ port: number; close: () => Promise<void> }
 }
 
 describe('the lookup and the connection share a database sensor’s connect timeout', () => {
-  // A resolver that takes 900 ms of a 2,000 ms timeout, then an address that never answers.
-  // Given the whole timeout again after the lookup, the check would end 900 ms later.
+  // A resolver that takes 1,400 ms of a 3,000 ms timeout, then an address that never answers.
+  // Given the whole timeout again after the lookup, the check would end 1,400 ms later. The
+  // lookup is bounded at half the timeout (`resolveBoundMs`), so it can take no more than this.
   let hole: Awaited<ReturnType<typeof blackhole>> = null;
   before(async () => {
     hole = await blackhole();
@@ -1434,8 +1435,8 @@ describe('the lookup and the connection share a database sensor’s connect time
   after(async () => {
     await hole?.close();
   });
-  const TIMEOUT = 2_000;
-  const LOOKUP = 900;
+  const TIMEOUT = 3_000;
+  const LOOKUP = 1_400;
 
   for (const engine of ENGINES) {
     it(engine.name, async (t) => {
@@ -1443,16 +1444,86 @@ describe('the lookup and the connection share a database sensor’s connect time
         t.skip('this machine answers a connection to a listener that never accepts');
         return;
       }
+      // **Read from what the driver was handed and from the order of two timers, not from the
+      // wall clock** (`P-431`, `P-447`). Under 2,500 ms of wall clock, the case failed at 2,720
+      // and 3,274 ms on loaded VMs with no database code changed. Its clock started before the
+      // catalogue was built and stopped after the error was described, and the sensor's budget
+      // covers neither, so a loaded host's slowness counted against it as if it were the bug.
+      // Each half of the claim is read where a slow host's time does not count:
+      // - the lookup's time, as long as it actually took, was taken out of what the driver was
+      //   handed. The sensor's clock runs from before the lookup was asked to after it answered,
+      //   so it cannot have spent less, however late the answer;
+      // - the driver ended its connect at what it was handed, before a timer of the whole
+      //   timeout, armed as the driver was handed the connect, had fired. A driver that gives
+      //   itself the whole timeout again arms its timer after that one, for as long or longer,
+      //   so it can never fail first. One that ends at what it was handed fails the lookup's
+      //   1,400 ms before it. `mysql2` and `tedious` fail in the turn their timer fires, however
+      //   late that is. `pg` fails a phase later, once its socket has closed, so only a stall of
+      //   the whole 1,400 ms at its timer could put the other timer first.
+
+      // How long the lookup took, from when it was asked to when it answered, by the clock the
+      // sensor reads. A timer can fire a little before its time by that clock: under load the
+      // lookup's 1,400 ms timer answered within 1,397.3 ms of being asked, so the length to take
+      // out is read, not assumed.
+      let lookupMs = 0;
+      const dns = slow(LOOKUP);
+      const timed: Rebinding = {
+        calls: dns.calls,
+        resolve: async (host, family) => {
+          const asked = process.hrtime.bigint();
+          const answer = await dns.resolve(host, family);
+          lookupMs = Number(process.hrtime.bigint() - asked) / 1e6;
+          return answer;
+        },
+      };
+      const handed: DbConnectOptions[] = [];
+      let wholeFiredFirst: boolean | undefined;
+      const driver: DbDriver = {
+        ...engine.driver,
+        connect: (options, signal) => {
+          handed.push(options);
+          let fired = false;
+          const whole = setTimeout(() => {
+            fired = true;
+          }, options.connectTimeoutMs);
+          return engine.driver.connect(options, signal).finally(() => {
+            wholeFiredFirst = fired;
+            clearTimeout(whole);
+          });
+        },
+      };
       const started = process.hrtime.bigint();
       const error = await failure(
-        execute(engine.type, slow(LOOKUP), {
-          port: hole.port,
-          params: { connectTimeoutMs: TIMEOUT },
-        }),
+        runDbCheck(
+          driver,
+          contextOf(NAME, timed, {
+            port: hole.port,
+            encrypt: 'disable',
+            connectTimeoutMs: TIMEOUT,
+          }),
+        ),
       );
       const ms = Number(process.hrtime.bigint() - started) / 1e6;
       assert.ok(error instanceof DbError, `threw ${String(error)}`);
-      assert.ok(ms >= TIMEOUT - 150 && ms < TIMEOUT + 500, `took ${String(Math.round(ms))} ms`);
+      const [options] = handed;
+      assert.ok(options !== undefined, 'the driver was never handed the connect');
+      assert.equal(options.connectTimeoutMs, TIMEOUT, 'it quotes the timeout the sensor was given');
+      assert.ok(lookupMs > 0, 'the lookup was never asked');
+      const left = connectBudgetMs(options);
+      assert.ok(
+        left <= Math.max(1, TIMEOUT - lookupMs),
+        `the driver was handed ${String(left)} ms of ${String(TIMEOUT)} after a lookup of ` +
+          `${String(lookupMs)} ms`,
+      );
+      assert.equal(
+        wholeFiredFirst,
+        false,
+        'the driver’s connect outlived a timer of the whole timeout armed as it was handed it',
+      );
+      // A lower bound, which a loaded host cannot fail: a timer is late by any amount, but early
+      // by a few milliseconds at most. It is what shows the lookup was taken out once, and not
+      // twice.
+      assert.ok(ms >= TIMEOUT - 150, `took ${String(Math.round(ms))} ms`);
     });
   }
 

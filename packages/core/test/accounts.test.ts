@@ -110,17 +110,33 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       // The timing side of the same claim. A missing account that returns in a microsecond while
       // a real one takes 45 ms is a login enumerator, and a login is half a credential. Generous
       // bounds: this asserts the decoy verification happens at all, not a precise duration.
+      //
+      // **Each side is the median of seven logins, taken in turn** (`P-428`). One login against
+      // one other let a single stall decide it: 111 ms for the absent account against 600 for the
+      // real one, on a VM another run was sharing. Taken in turn, a slow stretch of the machine
+      // lands on both sides, and a median needs four slow logins on one side to move.
       await makeAccount();
       const timeOf = async (login: string): Promise<number> => {
         const started = process.hrtime.bigint();
         await accounts.authenticate(login, 'some-wrong-password');
         return Number(process.hrtime.bigint() - started) / 1e6;
       };
-      const real = await timeOf('ops');
-      const absent = await timeOf('does-not-exist');
+      const reals: number[] = [];
+      const absents: number[] = [];
+      for (let turn = 0; turn < 7; turn += 1) {
+        reals.push(await timeOf('ops'));
+        absents.push(await timeOf('does-not-exist'));
+      }
+      const median = (times: readonly number[]): number =>
+        [...times].sort((a, b) => a - b)[Math.floor(times.length / 2)] ?? Number.NaN;
+      const real = median(reals);
+      const absent = median(absents);
+      const listed = (times: readonly number[]): string =>
+        times.map((ms) => ms.toFixed(1)).join(', ');
       assert.ok(
         absent > real / 4,
-        `an absent account answered in ${absent.toFixed(1)} ms against ${real.toFixed(1)} ms for a real one`,
+        `an absent account answered in a median ${absent.toFixed(1)} ms against ` +
+          `${real.toFixed(1)} ms for a real one (absent ${listed(absents)}; real ${listed(reals)})`,
       );
     });
 

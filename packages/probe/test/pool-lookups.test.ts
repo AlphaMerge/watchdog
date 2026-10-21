@@ -8,7 +8,8 @@ import { lookupsBesideThePool, ProbeHealthReporter } from '../src/health/report.
 import { QueryRunner } from '../src/queries/runner.js';
 import { CheckPool, type ResultMeta } from '../src/runner/index.js';
 import { TimingWheel } from '../src/scheduler/wheel.js';
-import { pollWithin } from './support/within.js';
+import { loaded, LOAD_BOUND_MS, watchedWorkers } from './support/watched-workers.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * The name lookups a pool's workers report, as Probe Health reads them (`A-66`).
@@ -47,17 +48,25 @@ async function poolOf(
   } = {},
 ) {
   const seen: Seen[] = [];
+  const workers = watchedWorkers();
+  const minSize = options.minSize ?? options.size ?? 1;
   const pool = new CheckPool({
     logger: silent,
     size: options.size ?? 1,
-    minSize: options.minSize ?? options.size ?? 1,
+    minSize,
     idleShrinkMs: options.idleShrinkMs ?? 0,
     registryModule: options.registryModule ?? LOOKUPS,
     ...(options.sessionReportMs === undefined ? {} : { sessionReportMs: options.sessionReportMs }),
+    createWorker: workers.createWorker,
     onResult: (result, meta) => seen.push({ result, meta }),
   });
   pools.push(pool);
-  await pool.start();
+  // **The workers load under a bound of their own, before any test times a check** (`P-446`).
+  // `start` resolves once each has said ready or missed its start-up bound, and a loaded host has
+  // taken the second: the five-second wait for a check then timed a replacement's load, and a
+  // slow start read as the lookup counted wrong.
+  await within(LOAD_BOUND_MS, 'the pool to start', pool.start());
+  await loaded(workers, minSize, pool);
   return { pool, seen };
 }
 

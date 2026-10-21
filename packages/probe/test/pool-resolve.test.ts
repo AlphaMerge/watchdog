@@ -16,7 +16,8 @@ import {
 import { CheckPool, type ResultMeta } from '../src/runner/index.js';
 import { TimingWheel } from '../src/scheduler/wheel.js';
 import { FAKE_ANSWER, fakeResolve } from './support/fake-names.js';
-import { pollWithin } from './support/within.js';
+import { loaded, LOAD_BOUND_MS, watchedWorkers } from './support/watched-workers.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * A pool's workers asking the probe's resolver (`P-426`): real workers running the real catalogue
@@ -63,6 +64,7 @@ function resolverOf(options: Partial<NameResolverOptions> = {}) {
 
 async function poolOf(resolver: NameResolver | undefined, size = 1) {
   const seen: Seen[] = [];
+  const workers = watchedWorkers();
   const pool = new CheckPool({
     logger: silent,
     size,
@@ -71,10 +73,16 @@ async function poolOf(resolver: NameResolver | undefined, size = 1) {
     registryModule: LOOKUPS,
     sessionReportMs: 20,
     ...(resolver === undefined ? {} : { resolver }),
+    createWorker: workers.createWorker,
     onResult: (result, meta) => seen.push({ result, meta }),
   });
   pools.push(pool);
-  await pool.start();
+  // **The workers load under a bound of their own, before any test times a check** (`P-446`).
+  // `start` resolves once each has said ready or missed its start-up bound, and a loaded host has
+  // taken the second: the five-second wait for a check to give up then timed a replacement's
+  // load.
+  await within(LOAD_BOUND_MS, 'the pool to start', pool.start());
+  await loaded(workers, size, pool);
   return { pool, seen };
 }
 

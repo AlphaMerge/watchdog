@@ -20,6 +20,12 @@ import {
 import { MAX_CONSECUTIVE_START_HANGS, typicalOf } from '../src/runner/pool.js';
 import { STARTUP_TIMEOUT_MS } from '../src/runner/process-runner.js';
 import { pollWithin, within, type Waited } from './support/within.js';
+import {
+  loaded,
+  LOAD_BOUND_MS,
+  watchedWorkers,
+  type WatchedWorkers,
+} from './support/watched-workers.js';
 import { assertFits } from './support/fits.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
@@ -51,13 +57,16 @@ async function poolOf(
   } = {},
 ) {
   const seen: Seen[] = [];
+  const workers = watchedWorkers();
+  // Fixed unless a test says otherwise, so the sizing loop (`P-18`) is exercised where it is
+  // the subject and cannot quietly change the answer everywhere else.
+  const minSize = options.minSize ?? options.size ?? 2;
   const pool = new CheckPool({
     logger: silent,
     size: options.size ?? 2,
-    // Fixed unless a test says otherwise, so the sizing loop (`P-18`) is exercised where it is
-    // the subject and cannot quietly change the answer everywhere else.
-    minSize: options.minSize ?? options.size ?? 2,
+    minSize,
     registryModule: FIXTURES,
+    createWorker: workers.createWorker,
     ...(options.idleShrinkMs === undefined ? {} : { idleShrinkMs: options.idleShrinkMs }),
     ...(options.growAfterMs === undefined ? {} : { growAfterMs: options.growAfterMs }),
     ...(options.durationWindowMs === undefined
@@ -69,11 +78,15 @@ async function poolOf(
   });
   pools.push(pool);
   await within(
-    60_000,
+    LOAD_BOUND_MS,
     () => `the pool to start; ${String(pool.size)} workers had started`,
     pool.start(),
   );
-  return { pool, seen };
+  // **Loaded under a bound of their own** (`P-446`, `P-448`): `start` resolves when each worker
+  // has said ready or missed its start-up bound, and on a loaded host a test's first wait then
+  // timed a replacement's load as if it were the behaviour.
+  await loaded(workers, minSize, pool);
+  return { pool, seen, workers };
 }
 
 /** Waits for a condition, or fails the test rather than hanging the suite. */
@@ -710,6 +723,7 @@ describe('a worker that hangs while loading (P-263)', () => {
       startupTimeoutMs: number;
       logger?: Logger;
       growAfterMs?: number;
+      workers?: WatchedWorkers;
     },
     seen: Seen[] = [],
   ): CheckPool {
@@ -719,6 +733,7 @@ describe('a worker that hangs while loading (P-263)', () => {
       minSize: options.minSize ?? options.size,
       startupTimeoutMs: options.startupTimeoutMs,
       ...(options.growAfterMs === undefined ? {} : { growAfterMs: options.growAfterMs }),
+      ...(options.workers === undefined ? {} : { createWorker: options.workers.createWorker }),
       registryModule: STALLED,
       onResult: (result, meta) => seen.push({ result, meta }),
     });
@@ -745,7 +760,14 @@ describe('a worker that hangs while loading (P-263)', () => {
     const BOUND = 5_000;
     const hangs = await hangLoads(1);
     const seen: Seen[] = [];
-    const pool = stalledPool({ size: 2, startupTimeoutMs: BOUND }, seen);
+    const workers = watchedWorkers();
+    const pool = stalledPool({ size: 2, startupTimeoutMs: BOUND, workers }, seen);
+    // **A worker's load is waited for under a bound of its own, and a check is given a timeout
+    // it cannot reach** (`P-446`). What this times is the start-up bound. A wait for a check that
+    // included a worker's load, or a check's own second on a loaded host, read as the pool
+    // failing: the run that failed here took 40 s, against 2.5 to 7 when it passed.
+    const check = (sensorId: number, sensorType: string, extra: Record<string, unknown> = {}) =>
+      request(sensorId, sensorType, { timeoutMs: 30_000, ...extra });
     try {
       const t0 = Date.now();
       const started = pool.start();
@@ -754,9 +776,15 @@ describe('a worker that hangs while loading (P-263)', () => {
       // begun, so both of `start`'s workers are in the pool: a check offered before `start` has
       // placed them finds none, and the pool grows a third for it.
       await until(() => hangs.beats.has(0), 'the hanging load to begin', 60_000);
-      assert.equal(pool.submit(request(700, 'test.ok')), 'accepted');
-      await until(() => seen.length === 1, 'a check on the worker that loaded', 60_000);
-      assert.equal(seen[0]?.result.outcome, 'ok');
+      await pollWithin(
+        LOAD_BOUND_MS,
+        () => `the other worker to load: ${workers.said()}`,
+        () => workers.ready() >= 1,
+        5,
+      );
+      assert.equal(pool.submit(check(700, 'test.ok')), 'accepted');
+      await until(() => seen.length === 1, 'a check on the worker that loaded');
+      assert.equal(seen[0]?.result.outcome, 'ok', seen[0]?.result.message);
 
       await until(() => pool.stats().startupFailed >= 1, 'the hang to be counted', BOUND + 60_000);
       assert.ok(
@@ -772,7 +800,14 @@ describe('a worker that hangs while loading (P-263)', () => {
       assert.equal(pool.stats().workerCrashes, 0, 'a hang the pool ended is not a crash');
       assert.equal(pool.stats().disabled, false);
 
-      // Replaced: two checks at once until one runs on a worker started after the first two.
+      // Replaced: a worker made after the first two loads, under a bound of its own, and then two
+      // checks at once until one runs on it.
+      await pollWithin(
+        LOAD_BOUND_MS,
+        () => `the replacement to load: ${workers.said()}`,
+        () => workers.made() >= 3 && workers.ready() >= 2,
+        5,
+      );
       let sensor = 710;
       await until(
         () => {
@@ -780,15 +815,21 @@ describe('a worker that hangs while loading (P-263)', () => {
           if (pool.stats().busy === 0 && pool.stats().queued === 0) {
             for (let n = 0; n < 2; n += 1) {
               sensor += 1;
-              pool.submit(request(sensor, 'test.slow', { delayMs: 200 }));
+              pool.submit(check(sensor, 'test.slow', { delayMs: 200 }));
             }
           }
           return false;
         },
         'a check on the replacement worker',
-        60_000,
+        10_000,
       );
-      assert.ok(seen.every((one) => one.result.outcome === 'ok'));
+      assert.deepEqual(
+        seen
+          .filter((one) => one.result.outcome !== 'ok')
+          .map((one) => `${String(one.result.sensorId)}: ${one.meta.phase} ${one.result.message}`),
+        [],
+        'every check ran to completion',
+      );
       // Waited for, because a worker slow enough under load to miss the bound as well is replaced
       // after a delay; settled, it is two, and a pool that replaced a hang twice stays at three.
       await until(() => pool.size === 2, 'the pool to be back at its size', 30_000);
@@ -969,6 +1010,7 @@ describe('a worker that hangs while loading (P-263)', () => {
       { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
     );
     const seen: Seen[] = [];
+    const workers = watchedWorkers();
     const pool = new CheckPool({
       logger,
       size: 1,
@@ -976,6 +1018,7 @@ describe('a worker that hangs while loading (P-263)', () => {
       startupTimeoutMs: 1_000,
       startHangLimit: 3,
       registryModule: STALLED,
+      createWorker: workers.createWorker,
       onResult: (result, meta) => seen.push({ result, meta }),
     });
     pools.push(pool);
@@ -1004,8 +1047,15 @@ describe('a worker that hangs while loading (P-263)', () => {
       assert.equal(said['gaveUpOn'], 'hangs');
       assert.equal(said['hangs'], 3);
       assert.equal(said['abandoned'], 1);
+      // **No start after the latch, counted where the pool makes its workers** (`P-448`). This
+      // counted the hung starts by their threads' heartbeats, and one the pool ended at its 1 s
+      // bound before its first beat reached here was a start the count missed: 2 against 3. A
+      // start after the latch would be a retry, made in the turn the timer the third hang armed
+      // fires, a second after it at most (250 ms doubling). A timer of two seconds armed after
+      // the latch was seen fires after that one, however late both are.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      assert.equal(workers.made(), 3, `no start after the latch: ${workers.said()}`);
       await until(() => hangs.quiet(2_000), 'the last hung worker’s thread to end', 30_000);
-      assert.equal(hangs.beats.size, 3, 'no start after the latch');
     } finally {
       await pool.stop();
       hangs.close();
@@ -1014,10 +1064,16 @@ describe('a worker that hangs while loading (P-263)', () => {
 
   it('never gives up on hangs once a worker of the pool has been ready', async () => {
     // A pool that has had a worker ready has loaded this registry, so its hangs are the machine
-    // (`P-272`), and a latch would outlast them. The first load is ready and then dies with its
+    // (`P-272`), and a latch would outlast them. The first worker is ready and then dies with its
     // check; every start after it hangs, past the streak that latches a pool that never loaded.
-    const hangs = await scriptLoads(['load', 'hang', 'hang', 'hang', 'hang', 'hang']);
+    //
+    // **The hangs are the pool's count, and the first load happens before any is scripted**
+    // (`P-448`). This waited for five scripted hangs to be claimed, and a start the pool ended
+    // at its 1 s bound before its thread had claimed one is a hang the script never saw: a
+    // loaded host ran out the 180 s waiting. And a scripted load slow enough to miss the bound
+    // took its place in the script with it, leaving hangs where the ready worker should be.
     const seen: Seen[] = [];
+    const workers = watchedWorkers();
     const pool = new CheckPool({
       logger: silent,
       size: 1,
@@ -1025,22 +1081,50 @@ describe('a worker that hangs while loading (P-263)', () => {
       startupTimeoutMs: 1_000,
       startHangLimit: 3,
       registryModule: STALLED,
+      createWorker: workers.createWorker,
       onResult: (result, meta) => seen.push({ result, meta }),
     });
     pools.push(pool);
+    let hangs: Hangs | undefined;
     try {
       await within(60_000, 'start', pool.start());
+      await pollWithin(
+        LOAD_BOUND_MS,
+        () => `the first worker to load: ${workers.said()}`,
+        () => workers.ready() >= 1 || pool.stats().disabled,
+        5,
+      );
+      assert.equal(
+        pool.stats().disabled,
+        false,
+        `the pool latched before a worker loaded: ${String(pool.stats().startupFailed)} starts ` +
+          'missed the 1 s bound, which is the machine and not the rule under test',
+      );
+      // Workers made from here on read the script, as the environment is copied when one is made.
+      hangs = await scriptLoads(['hang', 'hang', 'hang', 'hang', 'hang']);
+      const before = pool.stats().startupFailed;
       assert.equal(pool.submit(request(770, 'test.crash')), 'accepted');
-      await until(() => seen.length === 1, 'the check its worker died running', 60_000);
-      await until(() => hangs.claimed() === 6, 'five hangs after the ready worker', 180_000);
-      await until(() => pool.stats().startupFailed >= 5, 'the fifth hang counted', 60_000);
+      await until(() => seen.length === 1, 'the check its worker died running');
+      await until(
+        () => pool.stats().startupFailed >= before + 5 || pool.stats().disabled,
+        () =>
+          `five hangs after the ready worker; the pool counted ` +
+          `${String(pool.stats().startupFailed - before)}: ${workers.said()}`,
+        180_000,
+      );
       assert.equal(pool.stats().disabled, false, 'five hangs, and the registry had loaded');
       assert.equal(pool.submit(request(771, 'test.ok')), 'accepted');
-      await until(() => seen.length === 2, 'a check once a start loads again', 120_000);
+      await pollWithin(
+        LOAD_BOUND_MS + 60_000,
+        () => `a start to load again: ${workers.said()}`,
+        () => workers.ready() >= 1,
+        5,
+      );
+      await until(() => seen.length === 2, 'a check once a start loads again');
       assert.equal(seen[1]?.result.outcome, 'ok');
     } finally {
       await pool.stop();
-      hangs.close();
+      hangs?.close();
     }
   });
 
@@ -1322,30 +1406,46 @@ describe('growing and shrinking with the load', () => {
     // **`P-206`.** A growth burst started the whole shortfall at once, and a worker loading its
     // registry beside sixty-three others commits about half as much heap again as one loading
     // beside seven — 4.3 GiB against 2.9 at a ceiling of 64, which on an 8 GB box was an OOM kill.
-    // The registry here takes 400 ms to import, so for that long nothing the burst started can
-    // have finished, and every worker the pool holds beyond its first is one still loading.
+    // The registry here takes 400 ms to import, so the burst's workers load in turns.
+    //
+    // **Counted as each worker is made, not sampled in a window** (`P-448`). This read the pool's
+    // size for 300 ms and then waited 10 s for the rest, and both were wall-clock bounds on
+    // threads starting: a loaded host ran the 10 s out with 23 workers loading eight at a time.
+    // A worker is made only when a turn is free, and a turn is freed by a worker's `ready`, which
+    // the watcher has counted by then: so the number loading as each is made is exactly the number
+    // of turns in use, however slowly the threads start.
+    const workers = watchedWorkers();
     const pool = new CheckPool({
       logger: silent,
       size: 24,
       minSize: 1,
       queueMaxLength: 100,
       registryModule: join(import.meta.dirname, 'support', 'slow-registry.js'),
+      // Past the wait below, so that only a `ready` ends a turn here and never the start-up bound,
+      // which a thread on a loaded host could reach while the watcher still counted it loading.
+      startupTimeoutMs: LOAD_BOUND_MS + 60_000,
+      createWorker: workers.createWorker,
       onResult: () => undefined,
     });
     pools.push(pool);
-    await pool.start();
+    await within(LOAD_BOUND_MS, 'the pool to start', pool.start());
+    await loaded(workers, 1, pool);
 
     for (let i = 0; i < 40; i += 1) pool.submit(request(400 + i, 'test.slow', { delayMs: 5_000 }));
-    let most = 0;
-    const window = Date.now() + 300;
-    while (Date.now() < window) {
-      most = Math.max(most, pool.size);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    assert.equal(most, 1 + SPAWN_CONCURRENCY, 'the first worker, and a full turn loading');
-
-    await until(() => pool.size === 24, 'the rest to load in turn', 10_000);
     assert.equal(pool.stats().grown, 23, 'a spawn waiting its turn is not ordered a second time');
+    await pollWithin(
+      LOAD_BOUND_MS,
+      () => `the rest to load in turn: ${workers.said()}`,
+      () => workers.made() === 24 && workers.loading() === 0,
+      5,
+    );
+    assert.equal(
+      workers.mostLoading(),
+      SPAWN_CONCURRENCY,
+      'a full turn loading at once, and never more',
+    );
+    assert.equal(pool.stats().grown, 23, 'and none was ordered again while the rest loaded');
+    assert.equal(pool.size, 24);
   });
 
   it('does not grow for work an idle worker is about to pick up', async () => {
@@ -1375,31 +1475,64 @@ describe('growing and shrinking with the load', () => {
   it('gives back the workers a lighter load stopped needing', async () => {
     // Six at once grows the pool; then one every 40 ms with 60 ms of work is 1.5 workers' worth,
     // so most of what the burst bought is spare from then on.
-    const { pool, seen } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 200 });
-    for (let i = 0; i < 6; i += 1) pool.submit(request(700 + i, 'test.slow', { delayMs: 60 }));
+    //
+    // **The light load runs until the pool gives a worker back, and the burst's workers load
+    // first, under a bound of their own** (`P-448`). This watched 1,200 ms of the light load,
+    // and on a loaded host the burst's workers were still loading for all of it: the ready ones
+    // were busy and the rest not ready, so none was spare a whole 200 ms window. The load arrives
+    // the whole time, so a give-back read from the pool's counter is still one made while work
+    // was arriving, which is what the old policy never did.
+    const { pool, seen, workers } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 200 });
+    let sensor = 700;
+    let submitted = 0;
+    const submit = (): void => {
+      sensor += 1;
+      if (pool.submit(request(sensor, 'test.slow', { delayMs: 60 })) === 'accepted') submitted += 1;
+    };
+    for (let i = 0; i < 6; i += 1) submit();
     await until(() => pool.size > 1, 'the pool to grow');
 
     // **The peak is the highest size actually seen, not a single early sample.** Growth is
     // asynchronous — workers are still spawning when `pool.size > 1` first becomes true — so
     // reading it once races the thing being measured.
     let peak = pool.size;
-    const rounds = 30;
-    for (let round = 0; round < rounds; round += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      pool.submit(request(800 + round, 'test.slow', { delayMs: 60 }));
-      peak = Math.max(peak, pool.size);
-    }
-
-    // Asserted while the load is *still arriving*, which is the whole correction: the old policy
-    // treated any submission as proof every worker was needed.
-    assert.ok(
-      pool.stats().shrunk > 0,
-      `the pool gave nothing back in ${String(rounds * 40)} ms of a load needing ~2 workers`,
+    let atGiveBack: number | undefined;
+    /** The light load, one check every 40 ms, until `done` says so or `ms` have passed. */
+    const lightLoad = async (ms: number, what: () => string, done: () => boolean) => {
+      const deadline = performance.now() + ms;
+      for (;;) {
+        peak = Math.max(peak, pool.size);
+        if (atGiveBack === undefined && pool.stats().shrunk > 0) atGiveBack = pool.size;
+        if (done()) return;
+        if (performance.now() > deadline)
+          assert.fail(`timed out after ${String(ms)} ms: ${what()}`);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        submit();
+      }
+    };
+    await lightLoad(
+      LOAD_BOUND_MS,
+      () => `the burst's workers to load under the light load: ${workers.said()}`,
+      () => workers.loading() === 0,
     );
-    assert.ok(pool.size < peak, `the pool held ${String(pool.size)} of its peak ${String(peak)}`);
+    // Asserted while the load is *still arriving*, which is the whole correction: the old policy
+    // treated any submission as proof every worker was needed. A spare worker is given back
+    // within a window or two of being spare; fifty of them is the old policy, which never does.
+    await lightLoad(
+      10_000,
+      reporting('the pool to give back a worker while the light load arrived', pool, () => ({
+        shrunk: pool.stats().shrunk,
+        peak,
+      })),
+      () => atGiveBack !== undefined,
+    );
+    assert.ok(
+      atGiveBack !== undefined && atGiveBack < peak,
+      `the pool held ${String(atGiveBack)} of its peak ${String(peak)} when it gave one back`,
+    );
 
     // And it took only genuinely spare workers: every check still ran to completion.
-    await until(() => seen.length === 6 + rounds, 'every check to finish', 15_000);
+    await until(() => seen.length === submitted, 'every check to finish', 15_000);
   });
 
   it('never takes a worker that is in the middle of a check', async () => {
@@ -1898,10 +2031,13 @@ describe('sizing the ceiling from the work (P-34)', () => {
     // slots hold jobs, the pass sheds whatever happens to be spare and stops, and before this the
     // next chance was the 60-second idle window. Measured there: 31 workers against a ceiling of
     // 9 for two full minutes, twice observed completely idle while it sat.
-    const { pool, seen } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 60_000 });
+    const { pool, seen, workers } = await poolOf({ size: 8, minSize: 1, idleShrinkMs: 60_000 });
 
     for (let i = 0; i < 8; i += 1) pool.submit(request(i, 'test.slow', { delayMs: 400 }));
     await until(() => pool.size === 8, 'a full pool');
+    // **The burst's workers load under a bound of their own** (`P-448`). The wait for six workers
+    // holding jobs below included their load, and a loaded host ran its five seconds out twice.
+    await loaded(workers, 8, pool);
     await until(() => seen.length === 8, 'the first round to finish');
 
     // A second round, so the drop below lands on workers that are holding jobs.
@@ -1915,8 +2051,9 @@ describe('sizing the ceiling from the work (P-34)', () => {
     );
 
     // At a 60-second idle window the ordinary decay cannot account for any of this, so whatever
-    // converges the pool within five seconds is the retry and nothing else.
-    await until(() => pool.size <= 2, 'the pool to reach its ceiling anyway');
+    // converges the pool in under half of it is the retry and nothing else. The retry takes the
+    // checks' 400 ms and a 250 ms pass or two; the thirty seconds are for a loaded host.
+    await until(() => pool.size <= 2, 'the pool to reach its ceiling anyway', 30_000);
   });
 
   it('still refuses to go under the configured floor, however low the ceiling goes', async () => {
@@ -1974,17 +2111,20 @@ describe('session-pool counters (P-36)', () => {
 
   async function sessionPool(size: number, minSize = size, idleShrinkMs = 0) {
     const seen: Seen[] = [];
+    const workers = watchedWorkers();
     const pool = new CheckPool({
       logger: silent,
       size,
       minSize,
       idleShrinkMs,
       registryModule: SESSION_FIXTURES,
+      createWorker: workers.createWorker,
       onResult: (result, meta) => seen.push({ result, meta }),
     });
     pools.push(pool);
-    await pool.start();
-    return { pool, seen };
+    await within(LOAD_BOUND_MS, 'the pool to start', pool.start());
+    await loaded(workers, minSize, pool);
+    return { pool, seen, workers };
   }
 
   it('reports nothing at all when the registry keeps no pools', async () => {
@@ -2016,23 +2156,38 @@ describe('session-pool counters (P-36)', () => {
     // **The reason the retired baseline exists.** The published figure is a sum over live
     // workers, so shrinking the pool would otherwise lower a counter — and a counter that falls
     // is one an operator cannot put a trigger on.
-    // A pool that *can* shrink: a floor of 1 and a short idle window, since `idleShrinkMs: 0`
-    // means "never give a worker back" and would make this test assert nothing.
-    const { pool, seen } = await sessionPool(3, 1, 50);
+    //
+    // A pool that *can* shrink: a floor of 1 under a ceiling of 3. The workers go when the
+    // ceiling comes down, which retires spare ones at once (`P-34`), so the idle window is a
+    // minute (`P-448`). At 50 ms, a worker that had loaded could be given back while the others
+    // were still loading, and the pool then had fewer than three to report.
+    const { pool, seen, workers } = await sessionPool(3, 1, 60_000);
 
-    // **Every worker must have reported before one is retired, or this proves nothing.** The
-    // pool starts at its floor and grows, so a burst can finish on two workers while the third
-    // is still spawning — retiring a worker that never ran a check loses no counters, and the
-    // test would pass with the banking removed. An earlier version of it did exactly that.
-    let submitted = 0;
-    await until(() => {
-      if (seen.length === submitted && submitted < 24) {
-        for (let i = 0; i < 3; i += 1)
-          pool.submit(request(submitted + i, 'test.slow', { delayMs: 40 }));
-        submitted += 3;
-      }
-      return pool.sessionCounters()?.open === 6;
-    }, 'all three workers to report');
+    // Three at once grows the pool to three, and the two it grows load under a bound of their
+    // own: the wait for all three to report included their load, and a loaded host ran its five
+    // seconds out (`P-448`).
+    for (let i = 0; i < 3; i += 1) pool.submit(request(100 + i, 'test.slow', { delayMs: 40 }));
+    await until(() => pool.size === 3, 'the pool to grow to three');
+    await loaded(workers, 3, pool);
+
+    // **Every worker must have reported before one is retired, or this proves nothing.**
+    // Retiring a worker that never ran a check loses no counters, and the test would pass with
+    // the banking removed. An earlier version of it did exactly that. Three loaded and idle
+    // workers take a burst of three one each.
+    let submitted = 3;
+    await until(
+      () => {
+        if (seen.length === submitted && submitted < 24) {
+          for (let i = 0; i < 3; i += 1)
+            pool.submit(request(submitted + i, 'test.slow', { delayMs: 40 }));
+          submitted += 3;
+        }
+        return pool.sessionCounters()?.open === 6;
+      },
+      reporting('all three workers to report', pool, () => ({
+        open: pool.sessionCounters()?.open,
+      })),
+    );
 
     const before = pool.sessionCounters();
     assert.ok(before !== undefined);
