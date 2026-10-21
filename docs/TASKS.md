@@ -17001,10 +17001,10 @@ because each is a decision rather than a defect:
         - **`#onStuck`'s flush (12 names).** It fails a waiting check without trying an own walk.
         - **Discovery admitted 5 questions against its 4 places**, at 6 deferrals in one run.
       - **Decided 2026-10-21 by Claude, under the user's delegation.**
-        - **An own walk walks in the heard pool** when its key is mixed, or heard and not fresh,
-          in at most 4 of its 8 places, so heard keys keep 4. It adds no question and keeps D16's
-          12 places. A mixed key's known names already walk there (`P-482` records the departure
-          from D18 for both).
+        - **An own walk may take a heard place when discovery is full**, its key mixed, or heard
+          and not fresh: at most 4 of heard's 8 at once, so heard keys keep 4, and own walks have
+          8 places in all. It adds no question and keeps D16's 12 places. A mixed key's known
+          names already walk in heard (`P-482` records the departure from D18 for both).
         - **One backoff step a walk again**, as the design's "5 s doubling to 60 s" reads: a key
           already silent keeps its step at a NotHeard.
         - **A held lookup's own walk carries its key's walk again when that is due**, the key
