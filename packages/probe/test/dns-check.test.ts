@@ -781,7 +781,7 @@ describe('own walks’ places, one step a walk again, and no pool past its place
     asker.rule = (_server, name) => (/^dev-[01]\.zone-f\./u.test(name) ? 'answer' : 'silent');
     assert.equal((await route('dev-0.zone-f.test')).route, 'heard');
     // Fresh: a known name's own walk is one of the zone's walks, in the heard pool, not an own
-    // walk's place (a name never answered takes the own walks' places, `P-485`).
+    // walk's place, as a name never answered's is (`P-488`).
     const fresh = route('dev-1.zone-f.test', { own: true, known: true });
     assert.equal(budget.walkOpen('heard'), 1);
     assert.equal(budget.ownOpen(), 0);
@@ -900,43 +900,42 @@ describe('own walks’ places, one step a walk again, and no pool past its place
 });
 
 describe('own walks of names never answered, and a walk again’s debug lines (P-485)', () => {
-  it('walks an own walk of a name never answered in the own walks’ places whatever its zone’s phase, a fresh heard zone included: discovery’s first, then at most 4 of heard’s, so the zones that answer keep the rest', async () => {
-    const { check, asker, route, budget, clock, ready } = make();
+  it('walks every walk of a zone heard within the minute in heard, own walks of names never answered included, and leaves discovery to a new zone’s scouts (P-488)', async () => {
+    const { check, asker, route, budget, ready } = make();
     await ready;
     asker.rule = (_server, name) =>
-      name === 'dev-0.zone-f.test' || name.endsWith('zone-x.test') ? 'answer' : 'silent';
-    // Zones f and x heard, and fresh.
+      name === 'dev-0.zone-f.test' || name.startsWith('dev-0.zone-n') ? 'answer' : 'silent';
+    // Zone f heard, and fresh.
     assert.equal((await route('dev-0.zone-f.test')).route, 'heard');
-    assert.equal((await route('dev-0.zone-x.test')).route, 'heard');
-    // An own walk of a name never answered takes discovery's room first, fresh zone or not.
-    const first = route('dev-1.zone-f.test', { own: true });
-    assert.equal(budget.walkOpen('discovery'), 1, 'discovery’s');
-    assert.equal(budget.walkOpen('heard'), 0, 'not heard’s');
-    // Discovery full of other zones' silent scouts.
-    const scouts = ['i', 'j'].flatMap((zone) => [
-      route(`dev-1.zone-${zone}.test`),
-      route(`dev-2.zone-${zone}.test`),
-    ]);
-    assert.equal(budget.walkOpen('discovery'), WALK_QUESTIONS.discovery);
-    // Then up to 4 of heard's, and no more: a fifth waits for room, and routes budget.
-    const own = [2, 3, 4, 5].map((i) => route(`dev-${String(i)}.zone-f.test`, { own: true }));
-    assert.equal(budget.ownOpen(), OWN_WALK_HEARD);
-    const fifth = route('dev-6.zone-f.test', { own: true });
-    assert.equal(asker.askedFor('dev-6.zone-f.test').length, 0, 'the own walks’ places held');
-    // A known name's own walk of the fresh zone is one of its walks, in heard, sent at once.
-    const known = route('dev-7.zone-f.test', { own: true, known: true });
-    assert.equal(asker.askedFor('dev-7.zone-f.test').length, 1, 'sent at once');
-    assert.equal(budget.ownOpen(), OWN_WALK_HEARD, 'not one of the own walks’');
-    // The zones that answer keep the rest of heard's, each sent at once, D19's bucket a second on.
-    clock.now += 1_000;
-    const left = WALK_QUESTIONS.heard - budget.walkOpen('heard');
-    assert.equal(left, WALK_QUESTIONS.heard - OWN_WALK_HEARD - 1, 'all but the own walks’ and one');
-    const heardWalks = Array.from({ length: left }, (_, i) =>
-      route(`dev-${String(i + 1)}.zone-x.test`),
+    const discovery = budget.walkOpen('discovery');
+    assert.equal(discovery, 0, 'nothing in discovery');
+    // Its silent names' own walks, never answered: each in heard, none of the own walks' places,
+    // none of discovery's.
+    const own = [1, 2, 3, 4, 5].map((i) => route(`dev-${String(i)}.zone-f.test`, { own: true }));
+    for (const i of [1, 2, 3, 4, 5]) {
+      assert.equal(
+        asker.askedFor(`dev-${String(i)}.zone-f.test`).length,
+        1,
+        `dev-${String(i)} sent`,
+      );
+    }
+    assert.equal(budget.walkOpen('heard'), 5, 'in heard');
+    assert.equal(budget.ownOpen(), 0, 'not the own walks’ places');
+    assert.equal(budget.walkOpen('discovery'), 0, 'not discovery’s');
+    // A known name's own walk of the fresh zone: the same.
+    const known = route('dev-6.zone-f.test', { own: true, known: true });
+    assert.equal(budget.walkOpen('heard'), 6);
+    assert.equal(budget.ownOpen(), 0);
+    // So a zone not yet heard scouts at once, its scout in discovery.
+    const scout = route('dev-0.zone-n.test');
+    assert.equal(
+      asker.askedFor('dev-0.zone-n.test').length,
+      1,
+      'the new zone’s scout sent at once',
     );
-    assert.equal(budget.walkOpen('heard'), WALK_QUESTIONS.heard, 'every heard place held');
-    assert.deepEqual(await fifth, { route: 'unvouched', key: 'd:zone-f.test', why: 'budget' });
-    await Promise.all([first, ...scouts, ...own, known, ...heardWalks]);
+    assert.equal(budget.walkOpen('discovery'), 1, 'in discovery');
+    assert.equal((await scout).route, 'heard');
+    await Promise.all([...own, known]);
     check.stop();
   });
 

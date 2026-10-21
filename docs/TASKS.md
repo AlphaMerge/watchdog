@@ -17238,6 +17238,29 @@ because each is a decision rather than a defect:
         it moves…" failed once under load (`released` 2 of 3) and passed 17 other times.
       - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
 
+- [ ] **P-488 — a freshly heard zone's own walks of names never answered take discovery, so many
+      zones half silent starve new zones' scouts** · XS · P-432, P-485 · Filed 2026-10-21 by the
+      coordinator, from S7 whole at full size on `dda2cb1e`.
+      - **What happened.** `forwarder` in gate mode (a hundred keys of three, three names in five
+        silent) gave up 2,025 of 14,000 answering checks. On `16b6f0de` and `734d4e30` it answered
+        all 14,000. Its walk asked 314 questions, its busiest second 5, against 490 and 23 before,
+        and 151 lookups routed `stall`, against 1: zones' scouts were deferred for want of room,
+        and the lookups waiting on them went to the helper unwalked.
+      - **The cause.** `P-485` made an own walk of a name never answered take the own walks'
+        places in a freshly heard zone too: discovery's first. Each of a hundred zones is heard
+        through the name that answers, and each of their silent names' own walks then held a
+        discovery place 10 s, so new zones' scouts waited. `P-485` took it from the review's
+        finding that "the zones that answer keep 4" was false for a fresh zone; the finding was
+        about the docs' words, and the code change was the coordinator's choice.
+      - **Decided 2026-10-21 by Claude, under the user's delegation:** restore `P-484`'s rule. A
+        zone heard within `KEY_FRESH_MS` walks every name in heard, its own walks included, never
+        in discovery; an own walk of a zone not fresh takes the own walks' places. The docs say
+        so, and no longer say that the zones that answer keep 4 against a fresh zone's walks.
+      - **Done when** a case pins it (a fresh zone's own walks of silent names in heard, none in
+        discovery, a new zone's scout sent at once) and a mutant restoring `P-485`'s line fails
+        it; `forwarder` in gate mode answers every answering check at full size, twice; and
+        `partial` with the check on and `warmzone` still pass.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the

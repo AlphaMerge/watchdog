@@ -1018,11 +1018,12 @@ export class DnsCheck {
         pool = 'discovery';
         kind = 'key';
       } else {
-        // An own walk of a name never answered takes the own walks' places, fresh or not, so that
-        // heard keeps 4 for the zones that answer; a known name's, those of a zone not fresh, as
-        // any walk of it does discovery's (`P-484`, `P-485`).
-        const fresh = state.freshUntil > now;
-        pool = ask.own && !(fresh && ask.known) ? 'own' : fresh ? 'heard' : 'discovery';
+        // A zone heard within `KEY_FRESH_MS` walks every name in heard, its own walks included:
+        // never in discovery, which a zone not yet heard needs for its scouts. With many zones
+        // each heard through a name that answers, their silent names' own walks would otherwise
+        // hold discovery 10 s apiece and starve every new zone's scouts (`P-488`, `forwarder`).
+        // An own walk of a zone not fresh takes the own walks' places (`P-484`).
+        pool = state.freshUntil > now ? 'heard' : ask.own ? 'own' : 'discovery';
         kind = 'name';
         // Out until its verdict, taken or dropped: the zone's other refreshes wait on it.
         if (piloting) {
