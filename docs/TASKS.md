@@ -17603,6 +17603,81 @@ because each is a decision rather than a defect:
         lookup its own walk left unanswered…' (D18), with "dev-s1.zone-b.test: not asked, its
         zone silent", 1 !== 0. The runs stopped there, so as not to load the other builder's.
 
+- [x] **P-490 — four more `name-resolver-check` cases put a walk's reply on a 20 or 30 ms timer
+      and change the world after polling for the walk** · XS · P-480, P-432 · Filed 2026-10-21 by
+      the coordinator, from `P-487`'s runs. dev-c3's in 'walks no queued lookup of a suspect's
+      name…' (the helper to `rejoining`), dev-31's and dev-32's cases of a name avoided during its
+      walk, and D27's nine `verdict` rows each meant the reply to land after the change. A loaded
+      host can let it in first, as `P-487`'s did. None was seen to fail. **Done when** each reply
+      is the test's to give, with asserts before it that the walk is out and unanswered, and a
+      mutant per case that gives the reply first fails those asserts.
+
+      **P-490 outcome. Every walk reply in the file is the test's to give.** Built 2026-10-21 on
+      `fix/flakes-new`, in `name-resolver-check.test.ts` only. No `delayMs` reply is left in it.
+      - **What changed.** Each walked name's rule is `silent`. The test makes its change (dev-c3:
+        the helper to `rejoining`; dev-31: the name avoided; dev-32: avoided and the helper down;
+        D27: `avoid()`), asserts that the walk was asked and has no reply, then answers it.
+        dev-c3 and dev-31 also assert that the lookup has not moved yet. D27's rows switch the
+        rule to `answer` before the release, so a family-0 walk's AAAA, asked after A's reply,
+        answers at once. Each runs on `HELD_ROUTE` with a bound of 4 × it, as `P-487`'s does.
+        D27's other rows stay on `D27_ROUTE`.
+      - **Mutants: 4, all killed by the new asserts.** Each gives the reply and a turn of the loop
+        before the change: dev-c3 ('dev-c3's walk not yet answered'), dev-31 and dev-32 ('its walk
+        not yet answered'), and D27, which fails all 9 `verdict` rows.
+      - **Runs.** The file 79 of 79, 0 skipped, on this branch and against origin/main's
+        `dns-check.ts` (`P-488`'s line). 40 runs of the whole file under load (load average 11 to
+        42 on 8 CPUs): none of these cases failed.
+      - **Found, not fixed:** in one of the 40, 'says at debug when a queued lookup's own walk is
+        deferred…' (`P-485`) timed out in `mixedBehindThree`'s 1 s poll for "dev-s3 not heard:
+        zone b mixed", a walk on the 60 ms `ROUTE` and the real clock. No split was logged in
+        that test. Not traced.
+
+- [ ] **P-491 — K17's first name queues behind the rest of its burst when its step's deadlines
+      split** · XS · P-475, P-483 · Filed 2026-10-21 by the coordinator, from `P-487`'s runs.
+      'K17: vouched keys at a cold start…' failed once in 11 runs of the whole base file under load:
+      dev-1 was not in the helper at the read, and dev-2 to dev-4 were. **Cause, found
+      2026-10-21 on `fix/flakes-new`: the product, `P-475`'s split. Not fixed: gate code, held
+      for the coordinator.**
+      - The six names are asked in one turn, and D19 refuses each walk at once. A step whose two
+        clock reads are `SAME_DEADLINE_MS` (2 ms) apart or more races its chain against the
+        lookup's own deadline. That settles a microtask hop or two after returning the chain
+        would, so that lookup routes after the rest of its turn and queues behind them. dev-1 had
+        not left the helper, as `P-487`'s outcome read it: it never reached a lane.
+      - With the thread held 5 ms between the reads during dev-1's ask, through the resolver's
+        clock, K17 fails every time with the run's exact lanes, on this branch and against
+        origin/main's `dns-check.ts`. Without the hold it passes. With the window widened to
+        1,000 ms it passes despite the hold.
+      - **Under load** (load average on 8 CPUs), K17 failed 1 of 11 runs of the whole base file,
+        at 35 in runs at 24 to 52, and none of 40 later runs at 11 to 42, which leave it as it
+        was. In one of the 40, dev-1's step split by 2 ms and K17 passed: a split is needed, and
+        not enough. What else the failure needs was not traced.
+      - **Done when** `P-475` is fixed, and K17 passes with the thread held as here and over 11
+        runs of the whole file under load, as many as reproduced it.
+
+- [ ] **P-492 — D18's `silentFirst` asks dev-s1 before dev-s0's scout has made zone b silent,
+      when that scout's deadlines split** · XS · P-475, P-480 · Filed 2026-10-21 by the
+      coordinator, from `P-487`'s runs. 'never walks again a queued lookup its own walk left
+      unanswered…' (D18) failed once in 11 runs of the whole base file under load, in
+      `silentFirst`: "dev-s1.zone-b.test: not asked, its zone silent", 1 !== 0. **Cause, found
+      2026-10-21 on `fix/flakes-new`: the product, `P-475`'s split. Not fixed: gate code, held
+      for the coordinator.**
+      - dev-s0 scouts zone b. When its step's reads are 2 ms apart or more, its lookup routes
+        silent to the helper at its own deadline, before the scout's verdict, which comes at the
+        step's later deadline and makes the key silent. The test sees dev-s0 in the helper and
+        asks dev-s1. dev-s1 finds the key still unknown with one scout out (`KEY_SCOUTS` is 2),
+        so it scouts too.
+      - With the thread held 5 ms between the reads during dev-s0's ask, D18 fails every time in
+        the run's words, on this branch and against origin/main's `dns-check.ts`, and the split
+        is logged at 16 ms. Without the hold it passes. With the window widened to 1,000 ms it
+        passes despite the hold.
+      - A `realNow` stepping 3 ms a read, the test `P-475` proposes, did not reproduce it: both
+        deadlines move with that clock, so no timer falls between them. `P-475`'s test should
+        hold the thread instead.
+      - **Under load**, D18 failed 1 of 11 runs of the whole base file, at 47, and none of the 40
+        later runs. In one of the 40, dev-s0's step split by 3 ms and D18 passed.
+      - **Done when** `P-475` is fixed, and D18 passes with the thread held as here and over 11
+        runs of the whole file under load, as many as reproduced it.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the

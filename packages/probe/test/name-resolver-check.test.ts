@@ -47,7 +47,7 @@ const ROUTE = 60;
 /** When a silent walk's question is judged a miss: well before the helper's answer could be slow. */
 const MISS = 80;
 /**
- * A routing wait for a walk whose reply the test gives by hand (`P-487`): longer than the
+ * A routing wait for a walk whose reply the test gives by hand (`P-487`, `P-490`): longer than the
  * `pollWithin` bounds between the walk's send and its reply added together, so that only a test
  * already failing reaches it.
  */
@@ -1165,11 +1165,10 @@ describe('a queued helper lookup’s own walk, once its key is heard again (P-48
   });
 
   it('walks no queued lookup of a suspect’s name, nor any while the helper is not up, nor one walked already, and moves none whose helper stopped being up during its walk', async () => {
-    const { resolver, helper, asker, callsFor, ask } = await coldPartial([
-      'dev-c1.zone-b.test',
-      'dev-c2.zone-b.test',
-      'dev-c3.zone-b.test',
-    ]);
+    const { resolver, helper, asker, callsFor, ask } = await coldPartial(
+      ['dev-c1.zone-b.test', 'dev-c2.zone-b.test', 'dev-c3.zone-b.test'],
+      { routeMs: HELD_ROUTE },
+    );
     // dev-c1's family-0 lookup was in flight at a crash: a suspect, kept off the probe's lanes.
     helper.avoided.add('0:dev-c1.zone-b.test');
     const suspect = await failed(ask('dev-c1.zone-b.test', { waitMs: 2_000 }));
@@ -1181,10 +1180,11 @@ describe('a queued helper lookup’s own walk, once its key is heard again (P-48
     assert.equal(rejoining.code, RESOLVER_STUCK, rejoining.message);
     assert.equal(asker.askedFor('dev-c2.zone-b.test').length, 0, 'not walked while rejoining');
     helper.move('up');
-    // Up as its walk starts, rejoining by its verdict: heard, and left where it is.
+    // Up as its walk starts, rejoining by its verdict: heard, and left where it is. The reply is
+    // the test's to give, once the helper is rejoining (`P-490`).
     asker.rule = (server, name) =>
-      name === 'dev-c3.zone-b.test' ? { reply: 'answer', delayMs: 20 } : partly(server, name);
-    const c3 = failed(ask('dev-c3.zone-b.test', { waitMs: 2_000 }));
+      name === 'dev-c3.zone-b.test' ? 'silent' : partly(server, name);
+    const c3 = failed(ask('dev-c3.zone-b.test', { waitMs: 4 * HELD_ROUTE }));
     await pollWithin(
       1_000,
       'dev-c3 walked',
@@ -1192,6 +1192,11 @@ describe('a queued helper lookup’s own walk, once its key is heard again (P-48
       2,
     );
     helper.move('rejoining');
+    const c3Walk = asker.askedFor('dev-c3.zone-b.test')[0];
+    assert.ok(c3Walk !== undefined, 'dev-c3’s walk asked');
+    assert.equal(c3Walk.replied, undefined, 'dev-c3’s walk not yet answered');
+    assert.equal(callsFor('dev-c3.zone-b.test').length, 0, 'dev-c3 not yet moved');
+    c3Walk.release('answer');
     const moved = await c3;
     assert.equal(moved.code, RESOLVER_STUCK, moved.message);
     helper.move('up');
@@ -1685,11 +1690,17 @@ describe('gate mode with the name check keeps an avoided name off the probe’s 
   });
 
   it('sends a name its walk heard to the helper when a crash during the walk made it one the probe must not ask', async () => {
-    const { resolver, helper, asker, callsFor, ask } = await make();
-    asker.rule = () => ({ reply: 'answer', delayMs: 20 });
-    const got = ask('dev-31.zone-a.test', { waitMs: 2_000 });
+    const { resolver, helper, asker, callsFor, ask } = await make({ routeMs: HELD_ROUTE });
+    // The walk's reply is the test's to give, once the name is avoided (`P-490`).
+    asker.rule = (_server, name) => (name === 'dev-31.zone-a.test' ? 'silent' : 'answer');
+    const got = ask('dev-31.zone-a.test', { waitMs: 4 * HELD_ROUTE });
     await pollWithin(1_000, 'walked', () => asker.askedFor('dev-31.zone-a.test').length === 1, 2);
     helper.avoided.add('4:dev-31.zone-a.test');
+    const walk = asker.askedFor('dev-31.zone-a.test')[0];
+    assert.ok(walk !== undefined, 'its walk asked');
+    assert.equal(walk.replied, undefined, 'its walk not yet answered');
+    assert.equal(helper.asksFor('dev-31.zone-a.test').length, 0, 'not yet routed');
+    walk.release('answer');
     await pollWithin(
       1_000,
       'in the helper',
@@ -1703,12 +1714,18 @@ describe('gate mode with the name check keeps an avoided name off the probe’s 
   });
 
   it('fails the check of a name avoided during its walk at once when the helper went down meanwhile', async () => {
-    const { resolver, helper, asker, callsFor, ask } = await make();
-    asker.rule = () => ({ reply: 'answer', delayMs: 20 });
-    const got = failed(ask('dev-32.zone-a.test', { waitMs: 2_000 }));
+    const { resolver, helper, asker, callsFor, ask } = await make({ routeMs: HELD_ROUTE });
+    // The walk's reply is the test's to give, once the name is avoided and the helper down
+    // (`P-490`).
+    asker.rule = (_server, name) => (name === 'dev-32.zone-a.test' ? 'silent' : 'answer');
+    const got = failed(ask('dev-32.zone-a.test', { waitMs: 4 * HELD_ROUTE }));
     await pollWithin(1_000, 'walked', () => asker.askedFor('dev-32.zone-a.test').length === 1, 2);
     helper.avoided.add('4:dev-32.zone-a.test');
     helper.move('down');
+    const walk = asker.askedFor('dev-32.zone-a.test')[0];
+    assert.ok(walk !== undefined, 'its walk asked');
+    assert.equal(walk.replied, undefined, 'its walk not yet answered');
+    walk.release('answer');
     const said = await got;
     assert.equal(said.code, RESOLVER_FAULT);
     assert.match(said.message, /does not ask its own getaddrinfo for dev-32\.zone-a\.test/u);
@@ -1855,7 +1872,10 @@ const titleOf = (row: D27Row): string =>
 
 /** One row: what X's check is told, and every call of the probe's own getaddrinfo for X. */
 async function d27(row: D27Row): Promise<void> {
-  const made = await make({ stuckMs: 5_000, routeMs: D27_ROUTE });
+  // A `verdict` row's walk is answered by hand (`P-490`), so its routing wait is one only a
+  // failing test reaches.
+  const verdict = row.path === 'verdict';
+  const made = await make({ stuckMs: 5_000, routeMs: verdict ? HELD_ROUTE : D27_ROUTE });
   const { resolver, helper, asker, calls, callsFor, clock, ask } = made;
   const title = titleOf(row);
   const avoid = (): void => {
@@ -1877,11 +1897,20 @@ async function d27(row: D27Row): Promise<void> {
     avoid();
     got = failed(ask(X, { waitMs: 2_000 }, 0));
     assert.equal(asker.askedFor(X).length, 0, `${title}: never walked`);
-  } else if (row.path === 'verdict') {
-    asker.rule = () => ({ reply: 'answer', delayMs: 30 });
-    got = failed(ask(X, { waitMs: 2_000 }, 0));
+  } else if (verdict) {
+    asker.rule = (_server, name) => (name === X ? 'silent' : 'answer');
+    got = failed(ask(X, { waitMs: 4 * HELD_ROUTE }, 0));
     await pollWithin(1_000, `${title}: walked`, () => asker.askedFor(X).length > 0, 1);
     avoid();
+    // Avoided while its walk is out: the walk answered only now, the rest of it at once.
+    const walk = asker.askedFor(X);
+    assert.ok(walk.length > 0, `${title}: its walk asked`);
+    assert.ok(
+      walk.every((question) => question.replied === undefined),
+      `${title}: its walk not yet answered`,
+    );
+    asker.rule = () => 'answer';
+    for (const question of walk) question.release('answer');
   } else {
     got = failed(ask(X, { waitMs: 2_000 }, 0));
     await pollWithin(
