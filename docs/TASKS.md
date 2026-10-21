@@ -16620,7 +16620,7 @@ because each is a decision rather than a defect:
         by one cached check given up 3 s past the first interval, its name queued in the helper
         behind its key's cap, not riding: `P-480`'s.
 
-- [ ] **P-478 — the helper keeps no lane for zones that answer, so silent lookups starve answering
+- [x] **P-478 — the helper keeps no lane for zones that answer, so silent lookups starve answering
       names' first lookups** · S · P-432 · Filed 2026-10-20 by the coordinator, from S7's first
       full-size run at rc.3's cut, on `28b97a7c`. In gate mode, `partial` gave up 1,542 answering
       and 200 cached checks with the check on, and 2,248 and 314 with it off. `forwarder` gave up
@@ -16715,6 +16715,10 @@ because each is a decision rather than a defect:
         (`system` 312): 101 of 17 names allowed, and one of `dev-380.zone-b.test`, asked at 63.0 s,
         past the first interval, its name's first answer 62.2 s after its first ask. With it off,
         494, all allowed under `P-480`'s ceiling. The box stays open on `partial`.
+      - **Full size, again** (2026-10-21, S7 whole on `16b6f0de`, with `P-483` and `P-484`,
+        `ms-server` up): **`partial` passed in both modes**, every answering check answered, 29
+        cached checks given up with the check on, all within the first interval, the longest first
+        answer 23.0 s, and 499 with it off, all allowed. Done.
 
 - [x] **P-479 — the walk's ledger lets a question go after about 6 s while the forwarder holds
       its slot for 10, so the walk can hold twice its budget at the site's DNS server** · XS ·
@@ -16781,7 +16785,7 @@ because each is a decision rather than a defect:
         11 against 18, where the build before this ticket held 19, and the budget's
         `questionsOpen` at most 12. Every gate arm held its bound, at most 13 slots (`slow`) of 18.
 
-- [ ] **P-480 — at a cold start, a partly silent zone's cached names wait minutes in the helper's
+- [x] **P-480 — at a cold start, a partly silent zone's cached names wait minutes in the helper's
       queue behind its silent names** · S · P-432, P-478 · Filed 2026-10-21 by the coordinator,
       from the full-size runs after `P-478`.
       - **What happened.** `partial` in gate mode now answers every answering check, 31,500 of
@@ -16884,6 +16888,10 @@ because each is a decision rather than a defect:
           first answer came 62.2 s after its first ask. 5 cached lookups ran in the helper's
           child and 278 on the probe's lanes.
         - `forwarder`, P1, P5, P5b and P6 passed. The box stays open on the check-on case.
+      - **Full size, again** (2026-10-21, S7 whole on `16b6f0de`, with `P-483` and `P-484`,
+        `ms-server` up): **`partial` passed in both modes.** With the check on, 29 cached checks
+        given up, the longest first answer 23.0 s, all within the first interval; with it off, 499,
+        the longest 317.4 s against the ceiling of 375.2 s. Done.
 
 - [x] **P-481 — a key vouched only by its cached names can take every one of the helper's first
       lanes before any of its lookups is stuck** · XS · P-432, P-478 · Filed 2026-10-21 by the
@@ -16954,7 +16962,7 @@ because each is a decision rather than a defect:
       say what the other does, with a test of the pool a mixed key's walk takes. `P-484` adds the
       own walks to it: a mixed key's own walk takes discovery first, then at most 4 of heard's 8.
 
-- [ ] **P-483 — a key heard through one cached scout can take every one of the helper's first
+- [x] **P-483 — a key heard through one cached scout can take every one of the helper's first
       lanes before another key's lookup queues** · S · P-432, P-481 · Filed 2026-10-21 by the
       coordinator, from a traced root cause of `partial` at full size (three traced runs and two
       plain, beside S7's whole run on `734d4e30`).
@@ -17020,7 +17028,11 @@ because each is a decision rather than a defect:
         of 11 such runs gave up 1,360 to 1,539. Not measurements of record: `ms-server` was up.
       - **Found, not fixed:** lookups let go at a quiet or a configuration change count against no
         key but hold their lanes until they end.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `16b6f0de`, both modes and
+        `partial` with the check off, `ms-server` up, so not of record: 186 of 193 and 165 of 193, 0
+        failed): **`partial` answered all 31,500 answering checks in gate mode**, the silent zone at
+        most 3 in the helper's child, at risk at most 3; `slow`, `zone`, `spread10`, `steady` and
+        `forwarder` passed, `forwarder` answering 14,000 of 14,000 against `system`'s 1,261.
 
 - [ ] **P-484 — with the check on, a partly cached zone's cached names wait behind its silent
       names' own walks** · S · P-432, P-479, P-480 · Filed 2026-10-21 by the coordinator, from
@@ -17119,7 +17131,13 @@ because each is a decision rather than a defect:
         untreated), the longest cached wait 37.0 s against 44.7 s (111.2 s untreated).
       - **Found, not fixed:** `lookup-helper`'s U18 failed once in one 11-file run ("its channel
         to the probe closed") and passed 5 of 5 alone; untraced.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `16b6f0de`, both modes and
+        `partial` with the check off, `ms-server` up, so not of record: 186 of 193 and 165 of 193, 0
+        failed): **`partial` passed in both modes.** With the check on, 29 cached checks of 16 names
+        were given up, all allowed, the longest first answer 23.0 s against this ticket's ceiling of
+        39.0 s and inside the first interval (`system` gave up 423); with it off, 499, the longest
+        317.4 s against 375.2 s. `warmzone`, `zone`, `steady`, `forwarder`, P1, P5 and P5b passed.
+        The judge's ceiling is replaced by `P-485`'s, so the box waits for it.
 
 - [ ] **P-485 — `partial`'s check-on ceiling starts at the run's own time for the zone, so the
       fixes that make that time early are not judged at full size** · S · P-432, P-484 · Filed
