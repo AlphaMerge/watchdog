@@ -314,7 +314,7 @@ From rc.2 or anything older:
     stops answering, and otherwise about one name's questions a second for each DNS zone whose
     devices are being refreshed. A zone that has stopped answering is asked again once per zone,
     every 5 s, backing off to 60 s. `getaddrinfo` still asks each device's name, in the lookup
-    helper at most 4 at a time for a zone that is not answering.
+    helper at most 3 at a time for a zone the name check does not vouch for (`P-478`).
   - **Questions left unanswered.** In an outage the probe's resolver leaves about 24 questions
     unanswered at your DNS server (28 with Check now, 40 at most), against 12 without the gate,
     plus up to 16 more for 10 s after its lookup helper is replaced, at a forwarder that does
@@ -481,11 +481,12 @@ ms-probe`: the setting is read only at start
   `getaddrinfo` on its own lookup lanes only for a name they answered within 250 ms (or a quarter
   of the check's bound, if that is less). Every other name it asks in a helper process it starts,
   `ms-probe: lookups`, with six lanes under the probe resolver's own rules and two more for Check
-  now: a zone that stops answering holds at most 4 of the six, and one is kept for zones that
-  answer. A name the hosts file gives stays on the probe's own lanes while the check is on
-  (below), and Check now goes to the helper without asking first. **Every answer is still the
-  operating system's**: what the probe asks decides only where `getaddrinfo` runs. A zone that
-  stops answering raises nothing of its own, and the probe's own thread pool is not the silent
+  now: a zone that stops answering holds at most 3 of the six, and while the check is on the last
+  lane for new names and the last shared one are kept for zones the check heard answer, or that
+  answer in the helper (`P-478`). A name the hosts file gives stays on the probe's own lanes while
+  the check is on (below), and Check now goes to the helper without asking first. **Every answer is
+  still the operating system's**: what the probe asks decides only where `getaddrinfo` runs. A zone
+  that stops answering raises nothing of its own, and the probe's own thread pool is not the silent
   zone's while the helper is up, so a cold start in the middle of one zone's outage answers the
   other zones from its first scan, with or without the answer file.
 
@@ -507,6 +508,15 @@ ms-probe`: the setting is read only at start
   Every name is then asked in the helper, the hosts file's included. On Ubuntu that includes
   `systemd-resolved` rewriting its stub `resolv.conf` when a DHCP lease or netplan changes the
   search domains.
+
+  **With the check off, a zone your DNS server half answers is slow to answer after a cold start**
+  (`P-480`). When a zone's own servers are silent and your DNS server still answers some of its
+  names from its cache, every name of the zone is asked in the helper, held to 3 lanes, and
+  nothing there tells a cached name from a silent one until its lookup ends. A cached name can
+  then wait behind the silent ones for its first answer, at most the zone's silent names not yet
+  asked, times how long the system's resolver takes to give up on one (from `resolv.conf`'s
+  `timeout` and `attempts`), divided by 2, and its checks give up meanwhile. With the check on,
+  such a name is walked, heard, and asked on the probe's own lanes.
 
   A name the check found silent that the helper then answered within a second is a miss: one
   skips the check for that name for an hour, three of one zone in ten minutes skip the zone for an

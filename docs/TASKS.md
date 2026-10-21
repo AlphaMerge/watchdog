@@ -16275,6 +16275,56 @@ because each is a decision rather than a defect:
         - P2 is run alone at its full 5,000 sensors on the build that lands `P-478` (it changes the
           helper's lanes that P2's queue formed on) and passes;
         - the rc.3 checklist's step 0.7 names both cases.
+
+      **P-472 outcome. P2 allows the hang's lost answering checks only where the run's own facts
+      place them, and fails a name in flight at the quiet that reaches the probe's lanes after it.**
+      Built 2026-10-20 on `fix/p472-p2-allowance`, with one fix round on 2026-10-21 from an
+      adversarial review, and landed on `integ/r8-1020` as `f8a93bf6` and `afc086d0`. In
+      `name-gate-judge.ts` and `name-lookups.test.ts`, with the rc.3 checklist's step 0.7 and the
+      findings' P2 row. Nothing in `src/` changed.
+      - **What was built.** P2's rule calls `hangAllowed` in place of `allAnswered(['answering'])`,
+        and its row prints the exported `hangAllowance`. P2's facts (`HangFacts`, from a pure
+        `hangFacts`) are the route's window as the resolver was handed it, the stopped child's
+        flights (`HelperTap`), the held-back routes, each answering ask as the pool hands it over
+        (`handle` wrapped) with its sensor (`WorkerRuns`, the pool's `createWorker`), each check's
+        end and words (`endedBy`), the lag (`monitorEventLoopDelay`'s max) and probe-lane starts.
+      - **Decided by the builder, under the ticket's decision:**
+        - each check is placed by its ask at the resolver, not by its result's time less its run,
+          which is late by the main thread's lag (201.9 ms at full size) and can cross an edge;
+        - "held back" also takes a lookup queued and unsent at the stopped child's last answer,
+          which sits behind the same stopped lanes (the narrower reading, mutant A5, fails a
+          legitimate run);
+        - facts not measured, or not accounting for every check counted, fail the arm, and the
+          lag's tolerance runs one way, so no check whose bound really ran out is failed on it;
+        - the ceiling applies `laneSet`'s derivation to `RESOLVER_LANES`, since `src` exports
+          neither cap and `name-resolver.ts` was `P-478`'s to change.
+      - **Decided 2026-10-21 by Claude, under the user's delegation** (fix round 1): **the
+        allowance is narrowed to what the run can place.** A held-back name's give-up counts only if
+        its bound ran out by the route's `down` plus the lag, since at `down` its lookup falls back
+        to the probe's lanes and is answered. The review found defective runs that the decision's
+        words let through, and the clean case, S7's 8 given up and 4 refused, still passes.
+      - **The review's eight findings, all fixed.** (1) A late fall-back passed: the held-back
+        bound above. (2) The window was not tied to the helper's route: it must be handed by the
+        time the poll reads it. (3) "Still waiting at the SIGSTOP" was not measured: the end is
+        read after it, and only the bound's own words pass. (4) A check could take another
+        sensor's ask across an edge: it takes its own sensor's, or one of its name within the
+        lag, or is not placed. (5) Five clauses were unpinned: four are pinned, and the fifth,
+        equivalent, is removed. (6) The stopped child missing from the tap passed: it fails, and a
+        kept-off answering name checked since the quiet must have asked. (7) No ceiling: at most
+        the helper's 5 first and retry lanes of answering names in flight at the quiet. (8) The
+        docs now say what the code does.
+      - **Tests.** 33 new in the judge block over the two rounds (158 → 191): each rule at its
+        edges, the review's D1–D4, the report's three mutants as the judge sees each run, and
+        `hangFacts` on a crafted history.
+      - **Mutants: 30 of 30 killed, then 37 of 38 in fix round 1.** The survivor, F7c, sets the cap
+        to every lane: the cases read it from `RESOLVER_LANES` rather than type 5, so that they
+        follow a change of lane count. K9 and LR7's I3 pin the lanes and the derivation.
+      - **Runs.** The judge file, three times: 191 tests, 162 passed, 29 skipped (the arms), 0
+        failed. P2 scaled down (500 sensors), twice: 450 of 450 answered, the route down from 3.3 s
+        to 20.3 s, lag 51 ms, nothing allowed or outside, and 450 of 450 asks read with their
+        sensor. Nothing was given up or refused there, so the placement, the presence rule and the
+        ceiling meet a real lost check first at full size, where a fault fails the arm.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
 - [x] **P-473 — `name-resolver`'s "at once" is under 20 ms of wall clock, which a loaded host
       can exceed** · XS · P-426, P-438 · Found 2026-10-20 beside a `test:perf` run: 'fails a check
       at once when every lane its lookup could use is stuck; the lookup stays queued' failed its
@@ -16505,6 +16555,60 @@ because each is a decision rather than a defect:
           waiters riding after a NotHeard;
         - `steady` and `warmzone` pass at full size in gate mode, and every other arm still passes.
 
+      **P-477 outcome. A refresh that may ride its zone waits for a place rather than walk, at most
+      two ride a zone at once, and a closed window walks one pilot.** Built 2026-10-20 on
+      `fix/p477-walk-riders`, with one fix round on 2026-10-21 from an adversarial review, and
+      landed on `integ/r8-1020` as `338e81ed` and `053cddb8`. In `dns-check.ts`, with a give-back
+      in `name-resolver.ts`'s `#scouted` and the walk's paragraph in `administration.md`. No
+      protocol change and no migration.
+      - **What was built.** `#ride` and `#waitToRide` replace `#sample`. `route()`'s gates are one
+        function, `#judge`, which every wake of a waiter calls again. `KeyState.sampled` is the set
+        of riders out, freed only by `sampledEnded` (a rider's own end, or its move by `#keySilent`,
+        `#offProbe` or `#scouted`), and `KeyState.answers` is gone. `KeyState.pilotOut` holds a
+        closed window's one pilot. `UnvouchedWhy` gains `wait`, counted in `DnsCheckStats.waited`.
+      - **The departure from §1.5, as built.** The table row "a third is walked" is now "a third
+        waits for a place, then rides", and riders are counted per outage, not since the zone's last
+        answer. The design's §1.5 table and D20 are not in the repository (`p432-r2-final.md`):
+        `administration.md`'s paragraph on the walk says what was built.
+      - **Decided by the builder, under the ticket's decision:**
+        - a pilot's lost verdict releases its waiters at once, as D31 treats a scout's, and only a
+          scout's or a pilot's lost verdict drops them, so a heard zone's first lookup refused by
+          D19 does not drop every refresh waiting to ride;
+        - a waiter left under `WALK_MIN_MS` does not walk (§1.3 row 6): its question would be
+          judged before its reply could be read;
+        - the gates are judged on every wake, the deadline's included, so a waiter whose check went
+          off routes `off`, and one woken by a `reset()` routes `unproven`, as a fresh refresh does.
+      - **Decided 2026-10-21 by Claude, under the user's delegation** (fix round 1):
+        - **Riders are held per outage**, at most `SAMPLED_PER_KEY` out at once. Counted since the
+          last answer, each cached name's answer freed two more places for silent names: 6 rode
+          in the review's swapped SC16, where §3 allows 2. The steady walk is unchanged by it.
+        - **`wait` is a reason of its own**, not a deferral: outside `walksDeferred` and never
+          warned. At 100 ms of DNS a share of each burst reaches its deadline, and `stall` keeps
+          D31's meaning, a stalled thread or a lost verdict.
+        - **No truncated pilot.** A waiter pilots only with its whole routing wait left, to within
+          `SAME_DEADLINE_MS`, or routes `wait`, so a slow server that answers is not routed
+          `silent` on a verdict cut short.
+      - **The review's six findings, all fixed.** A woken waiter skipped every gate: now `#judge`,
+        with six gate rows. Riders since the last answer, the truncated pilot and `stall`'s
+        meaning: decided above. Of two survivors, `pilotfalse` is killed by a closed-window wake (1
+        question, the mutant 10), and `slowanswer`'s code went with per-outage counting. Two tests
+        on a 60 ms wall-clock margin now run on 5 s routing waits.
+      - **Tests.** `dns-check.test.ts` 33 → 49, `name-resolver-check.test.ts` 56 → 59, and the
+        outage scenario's SC16b, the review's swapped order, where 2 ride and the old counting gave
+        6 riders. At integration `P-478`'s case kept the name SC16, and the shared
+        `SAMPLED_PER_KEY` import is one (`4c774924`). A 90-simulated-second loop asks 100 questions
+        against the bound of 270; the shipped code asked 904, D19's ceiling.
+      - **Mutants: 14 of 14 killed, then 28 of 28 in fix round 1.** Among them: the shipped
+        behaviour, no pilot, `SAMPLED_PER_KEY` ignored, riding after a NotHeard, each gate skipped
+        on a wake, the old counting, `pilotfalse`, the truncated pilot and `wait` not counted.
+      - **Runs.** The 11 resolver unit files, 1,009 of 1,009; the outage scenario alone, 16 of 16.
+        Scaled down (500 sensors, not a measurement): 158 tests, 135 passed, 0 failed, 23 skipped;
+        `steady` at 0.67 and `warmzone` at 0.50 questions a second at steady state; no route
+        `wait`. In a model at 100 ms of DNS, a burst of 12 rides 4 to 6 and routes the rest `wait`,
+        and a window closing mid-burst routes all but its riders `wait`, at most every other wave.
+        At full size, `check.waited` beside `sampled` in the hourly summaries is that share.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+
 - [ ] **P-478 — the helper keeps no lane for zones that answer, so silent lookups starve answering
       names' first lookups** · S · P-432 · Filed 2026-10-20 by the coordinator, from S7's first
       full-size run at rc.3's cut, on `28b97a7c`. In gate mode, `partial` gave up 1,542 answering
@@ -16540,6 +16644,60 @@ because each is a decision rather than a defect:
         - `partial`, with the check on and off, and `forwarder` pass at full size in gate mode, and
           every other arm still passes, `slow` among them.
 
+      **P-478 outcome. A key the walk does not vouch for holds at most 3 helper lanes, quiet or
+      not, and keeps the last for its names that answer; D23's `vouched` is wired; and with the
+      check on, the helper's last first and shared lanes are kept for lookups the gate does not
+      hold.** Built 2026-10-20 on `fix/p478-helper-lanes`, with two fix rounds on 2026-10-21, and
+      landed on `integ/r8-1020` as `b634e5c5`, `8bde58fd` and `45ed48ac`. No protocol change and
+      no migration.
+      - **What was built.**
+        - `lane-rule.ts`: `helperKeyOk` holds an unvouched key to `KEY_QUIET`; `helperSpare` and
+          `helperClassOk` keep the last lanes while `keepLast`; `helperAnsweringOk` holds a key's
+          failing and never-answered names to `KEY_QUIET - 1` while one of its answering names is
+          queued. `HelperAdmitAsk` gains `classSpare`, `keepLast`, `nameAnswering`,
+          `keyAnsweringQueued` and `keyFailingRunning`.
+        - `name-resolver.ts`: `#vouched` in both admission reads, `#nameAnswering`,
+          `#failingRunning`, the pick's admission cache keyed by answering, and two fail-fast
+          conditions (`kept`, `answering`). `dns-check.ts`: `vouches(key)`, which moves no key.
+        - The judge: `partial`'s helper cap holds with the check off, and `cachedAllowance` judges
+          its cached give-ups from a new fact, `cachedGivenUp`.
+      - **Decided by the builder, under the ticket's decision:**
+        - vouched means the check on (`state() === 1`) as well as the key heard and fresh, so a key
+          heard before a stand-down does not stay vouched on probe-lane answers;
+        - with the check off, unproven or stood down no lane is kept, which leaves `spread10` and
+          `zone` as they were with the check off;
+        - the spare-lane rule is a pure function, so both reserves are tested over the grid;
+        - SC16 asserts per name that none runs on the probe's lanes once DNS left its own question
+          unanswered, and prints its riders, which were `P-477`'s;
+        - LR7 stays a check-off model: a check-on one needs the walk's routing deadline.
+      - **Decided 2026-10-21 by Claude, under the user's delegation** (fix rounds 1 and 2):
+        - **Option (c)**, for round 0's finding that with the check off SC11 could page a sensor of
+          a name that still answers, its refresh starved of its key's 3 lanes by the zone's silent
+          names. (c) keeps the cap at 3 and D12's pick order, and only refuses admissions. The two
+          options round 0 offered, answering names ranked first or a same-name exception, each
+          departed from D12 or F1.
+        - **F4 as one episode a name.** A cached check given up is allowed if asked within the
+          first scan interval, before its name's first answer plus the lag, in a held name's words
+          (`HELD_CACHED_WORDS`). Round 1's one check a name failed both 1,000-sensor runs, since
+          `partial` has 10 sensors a device and each check joins the held lookup. With the check
+          off, `P-480` has since replaced the interval limit.
+      - **Tests.** K2, K17 and SC16, and each starvation at small scale: a cached answer lifting
+        the quiet bit, many small keys, and the check off. (c) has an onset case and a same-class
+        case. `lane-rule` 35 → 38 cases, its grid 12,288 → 262,144 asks; `name-resolver-gate`
+        72 → 75; `name-resolver-check` 26 → 31 cases; LR7's I6 and I11. With (c), SC11 alone passed
+        20 of 20 and the scenario file 8 of 8; without it, the file raised the alarm in 2 of 8 and
+        SC11 alone in 0 of 16, so the unit cases are the proof. At integration this SC16 kept its
+        name, and `P-477`'s became SC16b (`4c774924`).
+      - **Mutants: 13 of 13 killed, then 15 of 16 and 7 of 7 in the fix rounds.** C4, a separate
+        stuck test, was equivalent, since a stuck lookup holds its name and so counts a failure,
+        and it was removed from the code.
+      - **Runs.** The 11 resolver unit files, 1,001 tests, all passed; the judge's describe, 130
+        of 130. Scaled down (500 sensors): 159 tests, 140 passed, 0 failed, 19 skipped, `forwarder`
+        answering 200 of 200 where `system` answered 36. `partial` at 1,000 sensors, check on and
+        off: 900 of 900 answering, 12 cached checks of 2 names given up, all allowed, the longest
+        first answer 24.3 s and 24.0 s.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+
 - [ ] **P-479 — the walk's ledger lets a question go after about 6 s while the forwarder holds
       its slot for 10, so the walk can hold twice its budget at the site's DNS server** · XS ·
       P-432, D16 · Filed 2026-10-21 by the coordinator, from the full-size runs after `P-477` and
@@ -16568,6 +16726,39 @@ because each is a decision rather than a defect:
       - **Done when** a scripted asker that times out the heard pool's 8 questions at 6 s holds the
         pool at 8 until 10 s, and a ninth name walked at 7 s routes `budget`. A mutant that closes
         on `'timeout'` again must fail. `warmzone` must pass at full size in gate mode.
+
+      **P-479 outcome. A walk question holds its ledger place until the server replies or the
+      forwarder's hold ends, and a hold's end wakes the steps waiting for room.** Built 2026-10-21
+      on `fix/p479-p480-walk` with `P-480`'s check-on part, and landed on `integ/r8-1020` as
+      `a35ed141`. In `dns-check.ts` and `forward-budget.ts`. No protocol change and no migration.
+      - **What was built.** `caresAsker` builds each channel with `maxTimeout` equal to its
+        timeout, through an injectable factory (`resolver`), so the test reads the options rather
+        than time a silent socket (`P-473`). `#send` closes a question's ledger entry only on a
+        reply from the server; a `timeout` (`ETIMEOUT`, `ECANCELLED`, `EDESTRUCTION`) leaves it to
+        `FORWARD_HOLD_MS`. `CHANNEL_TIMEOUT_MS`'s comment no longer says a late reply closes it.
+      - **Decided by the builder, under the ticket's decision:**
+        - **A hold's end wakes a waiting step** (`#armExpiry`, with `ForwardBudget.walkFreesAt`):
+          one timer for the soonest hold's end among the pools a step waits in, pumping one waiter
+          a pool, as a reply does. Without it a place freed with no reply reached no waiter, which
+          then routed `budget` with room free: more deferrals at a cold burst, and a worse `P-480`.
+        - **The hold itself is unchanged**, with no margin past dnsmasq's 10 s: the arm has slack
+          of 3, and a longer hold would be a guess.
+        - **The ledger's other readers were checked and left.** `questionsOpen` now counts a
+          silent question to its hold, up to the pools' 14 more during a silence, which is the true
+          number. The `#open` join can send an identical question again and count it twice, a safe
+          overcount. A silent canary and a silent question's channel each live about twice as long.
+      - **Tests.** `dns-check.test.ts`, 49 → 52: the ticket's case (8 questions time out at 6 s
+        and the pool still holds 8, a ninth walked at 7 s routes `budget`, and the pool holds 8 at
+        10 s less 1 ms and none at 10 s); a hold's end that wakes two waiting names, with no
+        `budget`; and the factory's options at 300 ms and at the default.
+      - **Mutants: 4 of 4 killed**: the ledger closed on `timeout` again, no `maxTimeout`, a hold's
+        end that pumps nothing, and no wake for a pool with room now.
+      - **Runs.** The 11 resolver unit files, 1,028 of 1,028. Scaled down (500 sensors, not a
+        measurement): `warmzone` held the forwarder to 5 slots against 18, `questionsOpen` peaking
+        at 9; `forwarder` to 10 against 18, with 15 walks deferred `budget`; P1 to 5 against 26. At
+        2,500 sensors the ledger fix alone made `partial` worse, as the root-cause report said it
+        would: see `P-480`.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
 
 - [ ] **P-480 — at a cold start, a partly silent zone's cached names wait minutes in the helper's
       queue behind its silent names** · S · P-432, P-478 · Filed 2026-10-21 by the coordinator,
@@ -16611,6 +16802,58 @@ because each is a decision rather than a defect:
         - `partial` with the check off holds its ceiling;
         - `forwarder`, P1, P5, P5b and P6 still pass.
 
+      **P-480 outcome. With the check on, a queued helper lookup never walked gets one walk of its
+      own when its check would fail behind its key's cap; with it off, `partial`'s cached give-ups
+      are allowed to each name's first answer, under a ceiling read from the run.** The check-on
+      part was built 2026-10-21 on `fix/p479-p480-walk`, with one fix round, and landed as
+      `a35ed141` and `734d4e30`; the check-off part on `fix/p481-p480-lanes` with `P-481`, landed as
+      `2d7c6180`. No protocol change and no migration.
+      - **Check on** (`name-resolver.ts`). `#ask` calls `#rewalk` when a check joins a queued
+        helper lookup and would fail at once on `key`, `answering` or `unit`, and `#mayRewalk`
+        allows it. `Pending.why` keeps the route's reason, and `NEVER_WALKED` lists those eligible.
+        Fix round 1 split `silent` into `silentZone`, the zone's silence alone, which is eligible,
+        and `silentAsked`, its own step unanswered, which never is. `#rewalked` moves a heard lookup
+        through `#enqueue`, releasing a carried token, and `#afterRewalk` asks the check again, its
+        bound less the walk's time. `DnsCheck.heardOrMixed` is a read that vouches for nothing.
+      - **Check off** (the judge). `cachedAllowanceOff` and `cachedCeiling`: the silent names never
+        yet tried × the silent hold ÷ `UNTRIED_LANES` (`KEY_QUIET - 1`), plus the lag. The hold,
+        `silentHoldMs`, is read from `WORLD_SCHEDULE` (2 × 15 s), since the site's resolv.conf sets
+        it, not the probe. A missing fact fails the arm once, by name.
+      - **Decided by the builder, under the ticket's decision:**
+        - only a later check triggers the walk, never the lookup's first, whose route was just
+          deferred and would defer again;
+        - only behind the key's own cap, not `risk`, `class`, `kept` or `token`, to keep it narrow;
+        - one walk even when a heard verdict can no longer move the lookup, since holding the
+          verdict for later would be a second rule;
+        - "Check now" is left out, as urgent, and no Probe Health field is added (OPEN-5);
+        - the ceiling divides by `KEY_QUIET - 1`, since one of the key's 3 lanes is taken by its
+          silent retry or kept by `P-478`'s (c).
+      - **Decided 2026-10-21 by Claude, under the user's delegation** (fix round 1):
+        - **The zone-evidence silent case is included**, as the root-cause report's move named it.
+          At 1,000 sensors a zone whose first walked name was silent routed its held cached names
+          `silent` on the zone's evidence, and the move took none of them.
+        - **The proposal that a held lookup's walk serve as its key's next walk is deferred until
+          the full-size run.** It moves the condition past "mixed or heard", and the traces do not
+          yet say when the key's walk fell due (the next should carry `rewalkAt`).
+      - **Tests.** `name-resolver-check.test.ts` 64 → 71: the `coldPartial` reproduction (a cached
+        name fails at once behind the cap, then is walked, heard and answers on the probe's lanes,
+        while a silent one is walked once and stays), what is not walked or moved, the token, and
+        `silentFirst` for the zone-evidence case. One new check-off `partial` judge case.
+      - **Mutants.** Check on, 14 run, 12 killed and 2 equivalent: `route === 'unvouched'` dropped,
+        since `why` is set only on an unvouched or silent route, and `!pending.suspect` dropped,
+        since a queued lookup is a suspect only with its entry, which `#avoided` reads. Check off,
+        12 of 12 killed.
+      - **Runs.** The 11 resolver unit files, 1,030 of 1,030; the scenario file 17 of 17. At 2,500
+        sensors, traced: with `P-479` alone `partial` failed, 5 cached checks past the interval and
+        the longest cached wait 82 s; with the move it passed at 27 s, 6 of its 23 own walks heard
+        and moved and 14 deferred `budget`. At 1,000 sensors after fix round 1, untraced, 50 of 50
+        cached answered; traced twice, 12 checks of 2 names were allowed, and the move ran once
+        and moved nothing, the key silent at every held check. Check off at 1,000: passed, the
+        longest wait 24.0 s against a ceiling of 75.1 s.
+      - **Left open.** A mixed key's own walks contend for discovery's 4 places, which is
+        `P-482`'s question.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+
 - [ ] **P-481 — a key vouched only by its cached names can take every one of the helper's first
       lanes before any of its lookups is stuck** · XS · P-432, P-478 · Filed 2026-10-21 by the
       coordinator, from `P-480`'s analysis.
@@ -16630,6 +16873,41 @@ because each is a decision rather than a defect:
         - the other key's name gets the last lane;
         - a mutant without the rule fails;
         - `slow`, `zone`, `spread10` and `steady` still pass at full size.
+
+      **P-481 outcome. A key that runs all but one of the helper's first lanes does not take the
+      last while another key's first lookup waits.** Built 2026-10-21 on `fix/p481-p480-lanes`
+      with `P-480`'s check-off part, and landed on `integ/r8-1020` as `2d7c6180`. In
+      `lane-rule.ts` and `name-resolver.ts`. No protocol change and no migration.
+      - **What was built.** `helperLastFirstOk` in `lane-rule.ts`, asked by `admitHelper` for every
+        lookup but "Check now"'s. The ask gains `keyFirstRunning`, `firstCap` and a lazy
+        `otherKeyFirstQueued`, which the resolver reads once a pick (`#otherFirstQueuedOnce`), and
+        only for a key at `firstCap - 1`. The admission cache's key already covers the fields.
+      - **Decided by the builder, under the ticket's decision:**
+        - "No key takes the last lane" is read as no key that holds every other first lane. Read
+          as any key, two waiting keys would each refuse the lane for the other, and it would idle.
+        - Another key's lookup is a non-urgent first lookup in the helper's first queue. A queued
+          refresh is not counted: refreshes have lanes of their own.
+        - The lane is refused even when the waiting lookup cannot take it. A two-pass pick would
+          let one zone retake every lane a moment before an ungated name arrives, which is this
+          ticket's case. The lane idles only until one of the key's own lanes ends.
+        - No fail-fast condition of its own: a vouched key's lookups are none of them stuck, and
+          one that sticks unvouches the key, which the key rule then holds.
+      - **Where it binds.** Only on a vouched key, since the key rule holds any other to
+        `KEY_QUIET`. So `P-478`'s (c), the kept lanes, SC11 and LR7 are untouched, and K17 and
+        `P-478`'s vouched fourth-lane cases pass unchanged.
+      - **Tests.** In `name-resolver-check.test.ts`, the ticket's case (zone b heard through two
+        cached names, four of its silent names asked at once, zone a's answering name queued: zone
+        a's name takes the last lane, and zone b its fourth once none waits) and a refresh case. In
+        `lane-rule.test.ts`, a lastFirst case, and the admission grid widened to 786,432 asks.
+        LR7's ask carries the new fields.
+      - **Mutants: 8 run, 7 killed, 1 equivalent.** R5, the reader `#helperBlocked` uses never
+        seeing another key, survives: the rule adds no fail-fast block, so the answer does not
+        depend on it. Not run: the pick reader's urgent skip, which no resolver test reaches, and
+        `firstCap` typed as 4, equivalent while the helper's lane set is 6.
+      - **Runs.** The 11 resolver unit files, 1,023 tests, 0 failed. SC11 alone 10 of 10; the
+        scenario file 3 times, 17 of 17; the judge 164 of 164. `partial` at 1,000 sensors passed
+        with the check on and off.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
 
 - [ ] **P-482 — a mixed key's names are walked in the heard pool, where D18 puts them in
       discovery's** · XS · P-432 · Release 1.1 · Filed 2026-10-21 by the coordinator, from
