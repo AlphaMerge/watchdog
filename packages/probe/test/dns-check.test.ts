@@ -1,9 +1,11 @@
 import { strict as assert } from 'node:assert';
+import { Resolver, type ResolverOptions } from 'node:dns';
 import { describe, it } from 'node:test';
 import { pino } from 'pino';
 import { DnsSimulator, replies } from '@ms/simulators';
 import {
   caresAsker,
+  CHANNEL_TIMEOUT_MS,
   DEFER_QUIET_MS,
   DnsCheck,
   KEY_FRESH_MS,
@@ -607,6 +609,77 @@ function burst(check: DnsCheck, hosts: readonly string[]) {
   );
   return { atOnce, settled };
 }
+
+describe('the walk’s ledger holds a question the server never answered for the forwarder’s hold (P-479)', () => {
+  /**
+   * A heard zone's eight names walked by name at once, in the heard pool, each question left
+   * unanswered for the test to settle: the pool full, the zone mixed once their verdicts come.
+   */
+  async function heardPoolFull(made: Made) {
+    const { asker, route, budget, clock } = made;
+    asker.rule = (_server, name) => (name === 'dev-0.zone-x.test' ? 'answer' : 'silent');
+    assert.equal((await route('dev-0.zone-x.test')).route, 'heard');
+    const sentAt = clock.now;
+    const routes = Array.from({ length: 8 }, (_, at) =>
+      route(`dev-${String(at + 1)}.zone-x.test`, { known: true }),
+    );
+    assert.equal(budget.walkOpen('heard'), 8, 'the heard pool full');
+    const routed = await Promise.all(routes);
+    assert.deepEqual(new Set(routed.map((one) => one.route)), new Set(['silent']));
+    const questions = asker.asked.filter(
+      (question) => question.name !== 'localhost.' && question.name !== 'dev-0.zone-x.test',
+    );
+    assert.equal(questions.length, 8);
+    return { sentAt, questions };
+  }
+
+  it('keeps the heard pool’s eight places through a channel’s timeout at 6 s until 10 s, so a ninth name walked at 7 s routes budget', async () => {
+    const made = make();
+    const { check, asker, route, budget, clock, ready } = made;
+    await ready;
+    const { sentAt, questions } = await heardPoolFull(made);
+    // c-ares gives up on each at about 6 s: the forwarder still holds them.
+    clock.now = sentAt + 6_000;
+    for (const question of questions) question.release('timeout');
+    await macrotask();
+    assert.equal(budget.walkOpen('heard'), 8, 'held past the channel’s timeout');
+    clock.now = sentAt + 7_000;
+    const ninth = await route('dev-9.zone-x.test', { known: true });
+    assert.deepEqual(ninth, { route: 'unvouched', key: 'd:zone-x.test', why: 'budget' });
+    assert.equal(asker.askedFor('dev-9.zone-x.test').length, 0, 'nothing asked for it');
+    clock.now = sentAt + FORWARD_HOLD_MS - 1;
+    assert.equal(budget.walkOpen('heard'), 8, 'held until the forwarder’s hold');
+    clock.now = sentAt + FORWARD_HOLD_MS;
+    assert.equal(budget.walkOpen('heard'), 0, 'and let go at it');
+    assert.equal((await route('dev-10.zone-x.test', { known: true })).route, 'silent');
+    assert.equal(asker.askedFor('dev-10.zone-x.test').length, 1, 'walked once there is room');
+    check.stop();
+  });
+
+  it('gives the steps waiting for room in its pool the places a hold frees, with no reply to wake them', async () => {
+    const made = make();
+    const { check, asker, route, budget, clock, ready } = made;
+    await ready;
+    const { sentAt } = await heardPoolFull(made);
+    // Never answered: no reply will come to free a place, only the hold's end, eight at once.
+    clock.now = sentAt + FORWARD_HOLD_MS - 20;
+    const waiting = ['dev-9.zone-x.test', 'dev-10.zone-x.test'];
+    const routes = waiting.map((host) => route(host, { known: true }));
+    for (const host of waiting) assert.equal(asker.askedFor(host).length, 0, 'waiting for room');
+    clock.now = sentAt + FORWARD_HOLD_MS;
+    const routed = await Promise.all(routes);
+    for (const host of waiting) {
+      assert.equal(asker.askedFor(host).length, 1, `${host} asked at the hold’s end`);
+    }
+    assert.deepEqual(
+      routed.map((one) => one.route),
+      ['silent', 'silent'],
+      'each walked within its routing wait, not routed budget',
+    );
+    assert.equal(budget.stats().deferred.budget, 0);
+    check.stop();
+  });
+});
 
 describe('refresh sampling (D20)', () => {
   const ref = (): object => ({});
@@ -1342,6 +1415,20 @@ describe('the OS’s own evidence and the gate’s marks (§1.5, D25)', () => {
 });
 
 describe('c-ares as the check asks with it, against the DNS simulator (§1.4)', () => {
+  it('builds each channel with one try and c-ares’ maxTimeout at the try, so that c-ares does not cap it (P-479)', () => {
+    const built: ResolverOptions[] = [];
+    const resolver = (options: ResolverOptions): Resolver => {
+      built.push(options);
+      return new Resolver(options);
+    };
+    caresAsker({ timeoutMs: 300, resolver }).channel('127.0.0.1').close();
+    caresAsker({ resolver }).channel('127.0.0.1').close();
+    assert.deepEqual(built, [
+      { timeout: 300, tries: 1, maxTimeout: 300 },
+      { timeout: CHANNEL_TIMEOUT_MS, tries: 1, maxTimeout: CHANNEL_TIMEOUT_MS },
+    ]);
+  });
+
   it('reads each reply as the walk does, one fresh channel per server, and routes a walk by it', async (t) => {
     const sim = await DnsSimulator.start({
       zones: {

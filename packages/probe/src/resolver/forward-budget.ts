@@ -233,6 +233,15 @@ export class ForwardBudget {
   }
 
   /**
+   * When a pool's oldest open question reaches its hold, on the budget's clock: the soonest its
+   * place frees with no reply (`P-479`). Undefined while nothing of the pool is open.
+   */
+  walkFreesAt(pool: WalkPool): number | undefined {
+    this.#expire();
+    return this.#walkOpen.find((open) => open.pool === pool)?.until;
+  }
+
+  /**
    * D19: takes this many questions from a server's bucket, or none and false. A key walk (a scout,
    * a walk again, the canary) may empty it; a per-name walk takes only while more than
    * `WALK_KEY_RESERVE` would be left, so key walks always find some.

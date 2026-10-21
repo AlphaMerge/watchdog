@@ -1,4 +1,4 @@
-import { Resolver } from 'node:dns';
+import { Resolver, type ResolverOptions } from 'node:dns';
 import { isIPv6 } from 'node:net';
 import { performance } from 'node:perf_hooks';
 import type { Logger } from '@ms/shared';
@@ -63,8 +63,9 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * `stall`, as a stall does (D31).
  *
  * **The budgets** (§1.6, D19): every question is open in the budget's ledger, in one of three pools,
- * until its first reply or `FORWARD_HOLD_MS`; a step short of room waits in its pool's queue until
- * its deadline, then routes `budget`. Each server's bucket gives at most 10 questions a second;
+ * until the server's first reply or `FORWARD_HOLD_MS`, never less for the channel giving up
+ * (`P-479`); a step short of room waits in its pool's queue until its deadline, woken by a reply
+ * or a hold's end, then routes `budget`. Each server's bucket gives at most 10 questions a second;
  * a step it refuses routes `rate`, at once.
  *
  * **Proven, misses and the stand-down** (§1.10). The check walks nothing until a reply has proven
@@ -79,7 +80,9 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * **Cut, by the design's cut order** (decided 2026-10-19, `docs/TASKS.md`): overflow (1), the
  * pressure detector (3; the check's state never reads 5), per-name walks of a key's queued helper
  * lookups when it is heard again (4), and Check now's walk path (5: Check now goes to the helper on
- * an urgent token, as with the check off).
+ * an urgent token, as with the check off). Item 4 is back in one narrow form (`P-480`): a queued
+ * helper lookup never walked gets one walk of its own when a check of it would fail at once behind
+ * its key's cap, its key heard or mixed (`heardOrMixed`); the resolver moves it on that walk alone.
  */
 
 /** How long a walk may take to be heard: a quarter of a check's bound at most (§1.3). */
@@ -88,7 +91,12 @@ export const ROUTE_MS = 250;
 export const WALK_MIN_MS = 50;
 /** A step still unanswered this long after it was sent, whose lookup the helper answered: a miss. */
 export const MISS_MS = 3_000;
-/** A c-ares channel's one try. Past the forwarder's 10 s hold, so a late reply still closes it. */
+/**
+ * A c-ares channel's one try, past the forwarder's 10 s hold, so that a late reply is still read.
+ * `caresAsker` sets c-ares' `maxTimeout` to it as well: without it, c-ares 1.34 in Node 24 caps the
+ * try at its own default and gives up after about 6 s (`P-479`). Either way, a question's place in
+ * the walk's ledger is not given back when the channel gives up, only at a reply or the hold.
+ */
 export const CHANNEL_TIMEOUT_MS = 11_000;
 export const KEY_SCOUTS = 2;
 export const KEY_SETTLE_MS = 60_000;
@@ -173,16 +181,23 @@ export function caresKind(code: string | undefined): DnsReplyKind {
  * Node's c-ares (`dns.Resolver`), one channel per (candidate, server) with one try and no resend
  * (§1.4): a long-lived channel's adaptive timeout dropped slow answers, a fresh one took them (the
  * channel experiment). It asks with no OPT record, as glibc does without `options edns0`. A
- * server is asked on `port`, 53 unless a test says.
+ * server is asked on `port`, 53 unless a test says. Its try is `timeoutMs` long, with c-ares'
+ * `maxTimeout` the same, since c-ares otherwise caps it (`P-479`). `resolver` builds the channel:
+ * `dns.Resolver` unless a test says.
  */
 export function caresAsker(
-  options: { readonly port?: number; readonly timeoutMs?: number } = {},
+  options: {
+    readonly port?: number;
+    readonly timeoutMs?: number;
+    readonly resolver?: (options: ResolverOptions) => Resolver;
+  } = {},
 ): DnsAsker {
   const port = options.port ?? 53;
   const timeout = options.timeoutMs ?? CHANNEL_TIMEOUT_MS;
+  const build = options.resolver ?? ((given: ResolverOptions) => new Resolver(given));
   return {
     channel(server) {
-      const resolver = new Resolver({ timeout, tries: 1 });
+      const resolver = build({ timeout, tries: 1, maxTimeout: timeout });
       resolver.setServers([
         isIPv6(server) ? `[${server}]:${String(port)}` : `${server}:${String(port)}`,
       ]);
@@ -430,6 +445,8 @@ export class DnsCheck {
   readonly #open = new Map<string, Question>();
   /** Steps waiting for room in a pool, oldest first. */
   readonly #queued: Record<WalkPool, RoomWait[]> = { heard: [], discovery: [], urgent: [] };
+  /** A wake for those steps at the soonest a place frees with no reply (`P-479`). */
+  #expiry: { readonly at: number; readonly timer: NodeJS.Timeout } | undefined;
   readonly #nameSkips = new Map<string, number>();
   readonly #keySkips = new Map<string, number>();
   readonly #keyMisses = new Map<string, Map<string, number>>();
@@ -510,6 +527,8 @@ export class DnsCheck {
     for (const pool of ['heard', 'discovery', 'urgent'] as const) {
       for (const wait of this.#queued[pool].splice(0)) wait.cancel();
     }
+    clearTimeout(this.#expiry?.timer);
+    this.#expiry = undefined;
     this.#nameSkips.clear();
     this.#keySkips.clear();
     this.#keyMisses.clear();
@@ -537,6 +556,19 @@ export class DnsCheck {
     const state = this.#keys.get(key);
     const now = this.#now();
     return state !== undefined && this.#phase(state, now) === 'heard' && state.freshUntil > now;
+  }
+
+  /**
+   * Whether some name of a key answered the walk lately (`P-480`): the check on, and the key's
+   * phase heard or mixed. What lets a queued helper lookup of it have a walk of its own. A read: it
+   * moves no key, and vouches for nothing.
+   */
+  heardOrMixed(key: string): boolean {
+    if (this.state() !== 1) return false;
+    const state = this.#keys.get(key);
+    if (state === undefined) return false;
+    const phase = this.#phase(state, this.#now());
+    return phase === 'heard' || phase === 'mixed';
   }
 
   stats(): DnsCheckStats {
@@ -1153,7 +1185,10 @@ export class DnsCheck {
       reply: undefined,
       replied: asked.then((reply) => {
         question.reply = reply;
-        this.#budget.reply(ledger);
+        // Only the server's reply frees its place: a channel that gave up, was cancelled or was
+        // destroyed (`timeout`) leaves the question held at the forwarder, so the ledger keeps it
+        // until its hold (`P-479`).
+        if (reply !== 'timeout') this.#budget.reply(ledger);
         if (this.#open.get(id) === question) this.#open.delete(id);
         if (reply !== 'timeout') this.#prove();
         this.#pumpRoom();
@@ -1214,17 +1249,48 @@ export class DnsCheck {
         },
       };
       this.#queued[pool].push(wait);
+      this.#armExpiry();
       void this.#deadline(deadline).then(() => {
         end(false);
       });
     });
   }
 
-  /** A question replied: the oldest step waiting in each pool may take its room, one at a time. */
+  /**
+   * A question replied, or a hold ended: the oldest step waiting in each pool may take its room,
+   * one at a time, since a step admitted sends its question only after this turn.
+   */
   #pumpRoom(): void {
     for (const pool of ['heard', 'discovery', 'urgent'] as const) {
       this.#queued[pool][0]?.tryNow();
     }
+    this.#armExpiry();
+  }
+
+  /**
+   * Wakes the steps waiting for room when a place frees with no reply (`P-479`): a question the
+   * server never answered is held in the ledger until its hold, and nothing else pumps then. Armed
+   * for the soonest hold's end among the pools a step waits in, or the next macrotask for a pool
+   * with room now, so that every place freed reaches a waiter while one waits.
+   */
+  #armExpiry(): void {
+    let at: number | undefined;
+    for (const pool of ['heard', 'discovery', 'urgent'] as const) {
+      if (this.#queued[pool].length === 0) continue;
+      const frees = this.#budget.admit(pool, 1) ? this.#now() : this.#budget.walkFreesAt(pool);
+      if (frees !== undefined && (at === undefined || frees < at)) at = frees;
+    }
+    if (at === undefined || (this.#expiry !== undefined && this.#expiry.at <= at)) return;
+    clearTimeout(this.#expiry?.timer);
+    const timer = setTimeout(
+      () => {
+        this.#expiry = undefined;
+        this.#pumpRoom();
+      },
+      Math.max(0, at - this.#now()),
+    );
+    timer.unref();
+    this.#expiry = { at, timer };
   }
 
   /**

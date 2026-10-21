@@ -24,6 +24,7 @@ import {
   type DnsCheckOptions,
   type MissWatch,
   type SilentEvidence,
+  type UnvouchedWhy,
 } from './dns-check.js';
 import { ForwardBudget, questionsOf, type GaiToken, type TokenKind } from './forward-budget.js';
 import {
@@ -483,6 +484,13 @@ interface Pending {
   silent: SilentEvidence | undefined;
   /** Gate mode: it was walked, so the helper's stuck word is not the OS's evidence of its key. */
   walked: boolean;
+  /** Gate mode: why the check routed it unvouched, when the check did (`P-480`). */
+  why: UnvouchedWhy | undefined;
+  /**
+   * Gate mode: its own walk while queued in the helper (`P-480`), under way, or `done` once that
+   * walk heard it or did not: one walk, never a second.
+   */
+  rewalk: Promise<void> | 'done' | undefined;
   /** Gate mode: the helper token it holds, carried across a loss (D7). */
   token: GaiToken | undefined;
   /** Gate mode: detached when the helper went quiet (D26): it no longer stands for its name. */
@@ -910,6 +918,21 @@ interface HelperBlock {
   /** Ghosts and U among the blockers: each stuck. */
   readonly ghosts: number;
 }
+
+/**
+ * The unvouched routes a lookup goes to the helper by without any reply to its walk (`P-480`): a
+ * deferral (`rate`, `budget`, `stall`, `scoutWait`) or a wait to ride that ended (`wait`).
+ */
+const NEVER_WALKED: ReadonlySet<UnvouchedWhy> = new Set([
+  'rate',
+  'budget',
+  'wait',
+  'stall',
+  'scoutWait',
+]);
+
+/** The helper's fail-fast conditions that are its key's cap (§1.8, `P-478`): what `P-480` walks. */
+const CAPPED_BY_KEY: ReadonlySet<HelperBlock['condition']> = new Set(['key', 'answering', 'unit']);
 
 /** A lookup's state as it is now, for a read after a call that may have moved it. */
 function stateOf(pending: Pending): Pending['state'] {
@@ -1544,11 +1567,15 @@ export class NameResolver implements PoolResolver {
     );
   }
 
-  /** What a check asking for a name gets: now, or once a lookup settles. */
+  /**
+   * What a check asking for a name gets: now, or once a lookup settles. `rewalk` is false for a
+   * check asked again after its lookup's own walk (`#afterRewalk`), which takes it no further.
+   */
   #ask(
     rawHost: string,
     family: Family,
     request: { readonly waitMs?: number; readonly fresh?: boolean },
+    rewalk = true,
   ): Asked {
     const host = rawHost.trim().toLowerCase();
     const literal = isIP(host);
@@ -1637,11 +1664,40 @@ export class NameResolver implements PoolResolver {
       return { now: this.#unanswered(entry, fresh, now, RESOLVER_FAULT, refused) };
     }
     if (pending.state === 'queued' && this.#lanesStuck(pending)) {
+      // Gate mode: a queued helper lookup never walked, behind its key's cap, its key heard or
+      // mixed: its own walk first, then this check as it would be asked then (`P-480`).
+      const walking = rewalk ? this.#rewalk(pending, boundOf(request.waitMs)) : undefined;
+      if (walking !== undefined) {
+        return { later: this.#afterRewalk(walking, host, family, request) };
+      }
       return {
         now: this.#unanswered(entry, fresh, now, RESOLVER_STUCK, this.#stuckWhy(pending)),
       };
     }
     return { later: this.#wait(pending, fresh, request.waitMs) };
+  }
+
+  /**
+   * A check that waited on its lookup's own walk (`P-480`), asked again as it was asked, with its
+   * bound less the walk's time and no walk of its own again: on the probe's lanes if the walk heard
+   * the name and moved it, at once behind its key's cap if not. Never rejects.
+   */
+  async #afterRewalk(
+    walking: Promise<void>,
+    host: string,
+    family: Family,
+    request: { readonly waitMs?: number; readonly fresh?: boolean },
+  ): Promise<ResolveOutcome | undefined> {
+    const realNow = this.#gate?.realNow ?? (() => performance.now());
+    const asked = realNow();
+    await walking;
+    try {
+      const waitMs = Math.max(1, boundOf(request.waitMs) - (realNow() - asked));
+      const again = this.#ask(host, family, { ...request, waitMs }, false);
+      return 'now' in again ? again.now : await again.later;
+    } catch (error: unknown) {
+      return failure(RESOLVER_FAULT, this.#fault(error, host).message);
+    }
   }
 
   /**
@@ -2000,7 +2056,12 @@ export class NameResolver implements PoolResolver {
       this.#queuedCount() < this.#maxQueued
     ) {
       const pending = this.#pendingFor(entry, cls, urgent, 'helper', 'unvouched');
-      const verdict = this.#checkRoute(check, pending, cls, boundMs);
+      const verdict = this.#checkRoute(
+        check,
+        pending,
+        cls === 'refresh' && entry.failures === 0,
+        boundMs,
+      );
       if (verdict instanceof Promise) {
         pending.state = 'scouting';
         pending.walked = true;
@@ -2069,6 +2130,8 @@ export class NameResolver implements PoolResolver {
       miss: undefined,
       silent: undefined,
       walked: false,
+      why: undefined,
+      rewalk: undefined,
       token: undefined,
       detached: false,
       suspect: pool === 'helper' && entry.suspect,
@@ -2080,11 +2143,14 @@ export class NameResolver implements PoolResolver {
     };
   }
 
-  /** What the name check makes of a lookup (§1.3): never throws, an unvouched route at worst. */
+  /**
+   * What the name check makes of a lookup (§1.3): never throws, an unvouched route at worst.
+   * `refresh` is a refresh with no failure behind it, which may ride its zone (D20).
+   */
   #checkRoute(
     check: DnsCheck,
     pending: Pending,
-    cls: LaneClass,
+    refresh: boolean,
     boundMs: number | undefined,
   ): CheckRoute | Promise<CheckRoute> {
     const entry = pending.entry;
@@ -2093,7 +2159,7 @@ export class NameResolver implements PoolResolver {
       return check.route({
         host: entry.host,
         family: entry.family,
-        refresh: cls === 'refresh' && entry.failures === 0,
+        refresh,
         known:
           entry.answer !== undefined ||
           (entry.lastAnsweredAt !== undefined && now - entry.lastAnsweredAt <= this.#staleMs),
@@ -2112,6 +2178,7 @@ export class NameResolver implements PoolResolver {
     if (verdict !== undefined) {
       pending.route = verdict.route;
       pending.key = verdict.key;
+      pending.why = verdict.route === 'unvouched' ? verdict.why : undefined;
       if (verdict.route === 'heard') pending.walkKeys = verdict.keys;
       if (verdict.route === 'silent') {
         pending.miss = verdict.miss;
@@ -2269,6 +2336,111 @@ export class NameResolver implements PoolResolver {
       }
     }
     this.#pump();
+  }
+
+  /**
+   * D18's per-name walk of a queued helper lookup, in its narrow form (`P-480`): one walk of its
+   * own, for a lookup the check routed to the helper without walking it (`NEVER_WALKED`), when a
+   * check of it would fail at once behind its key's cap (`key`, `answering` or `unit`) and its key
+   * is heard or mixed. Its verdict is taken by `#rewalked`. The walk under way, joined by any check
+   * of it meanwhile, or undefined when there is none to take: nothing was sent, or it may not walk.
+   */
+  #rewalk(pending: Pending, boundMs: number): Promise<void> | undefined {
+    const gate = this.#gate;
+    const check = gate?.check;
+    if (gate === undefined || check === undefined) return undefined;
+    if (pending.rewalk instanceof Promise) return pending.rewalk;
+    if (pending.rewalk === 'done' || !this.#mayRewalk(gate, pending)) return undefined;
+    const block = this.#helperBlocked(gate, pending);
+    if (block === undefined || !CAPPED_BY_KEY.has(block.condition)) return undefined;
+    if (!check.heardOrMixed(pending.key)) return undefined;
+    // Its own walk, never a ride: what moves it is its own name heard (D18, §3).
+    const verdict = this.#checkRoute(check, pending, false, boundMs);
+    // Judged at once (a skip, a stand-down, a wait too short to walk in): nothing was asked.
+    if (!(verdict instanceof Promise)) return undefined;
+    const walking = verdict.then(
+      (walked) => {
+        this.#rewalked(gate, pending, walked);
+      },
+      (error: unknown) => {
+        this.#logger.error(
+          { err: error, host: pending.entry.host },
+          'the name check failed on a lookup',
+        );
+        pending.rewalk = undefined;
+      },
+    );
+    pending.rewalk = walking;
+    return walking;
+  }
+
+  /**
+   * Whether a lookup is one its own walk may take, and move (`P-480`): queued in the helper as the
+   * check routed it, unvouched and never walked; not Check now's, which goes to the helper on an
+   * urgent token; not a suspect, a poison ask or detached; not a name the probe's own
+   * `getaddrinfo` must not be asked for (`#avoided`: a suspect, poison, a crash's); and only while
+   * the helper's route is up, since at `down` D24's fall-back moves it and while rejoining or
+   * resting the helper asks nothing. Read as the walk starts and again at its verdict.
+   */
+  #mayRewalk(gate: Gate, pending: Pending): boolean {
+    return (
+      pending.state === 'queued' &&
+      pending.pool === 'helper' &&
+      pending.route === 'unvouched' &&
+      pending.why !== undefined &&
+      NEVER_WALKED.has(pending.why) &&
+      !pending.urgent &&
+      !pending.suspect &&
+      !pending.poisonAsk &&
+      !pending.detached &&
+      gate.helper.routeState() === 'up' &&
+      !this.#avoided(gate, pending.entry)
+    );
+  }
+
+  /**
+   * A queued helper lookup's own walk's verdict (`P-480`). Heard: it leaves the helper for its
+   * class on the probe's lanes, any token it carries from a loss released (as `#fallBack` releases
+   * one), and `#run`'s `#offProbe` still refuses it there if its name is avoided by then (D27).
+   * Not heard: it stays in the helper as `silent`, on its own step's evidence and miss watch.
+   * Either way it is not walked again. Only if it is still the lookup the walk may move, as it was
+   * when the walk started; a deferred or dropped verdict leaves it to a later check's walk.
+   */
+  #rewalked(gate: Gate, pending: Pending, walked: CheckRoute): void {
+    if (walked.route !== 'heard' && walked.route !== 'silent') {
+      pending.rewalk = undefined;
+      return;
+    }
+    pending.rewalk = 'done';
+    if (!this.#mayRewalk(gate, pending)) return;
+    const { entry } = pending;
+    if (walked.route === 'silent') {
+      pending.route = 'silent';
+      pending.why = undefined;
+      pending.key = walked.key;
+      pending.miss = walked.miss;
+      pending.silent = walked.evidence;
+      this.#logger.debug(
+        { host: entry.host, family: entry.family, key: pending.key },
+        'a lookup queued in the lookup helper was not heard by its own walk: it stays there',
+      );
+      return;
+    }
+    if (!this.#unqueue(pending)) return;
+    if (pending.token !== undefined) {
+      gate.budget.releaseGai(pending.token);
+      pending.token = undefined;
+    }
+    pending.route = 'heard';
+    pending.why = undefined;
+    pending.key = walked.key;
+    pending.walkKeys = walked.keys;
+    pending.pool = 'probe';
+    this.#logger.debug(
+      { host: entry.host, family: entry.family, key: pending.key },
+      'a lookup queued in the lookup helper was heard by its own walk: moved to the probe’s lanes',
+    );
+    this.#enqueue(pending);
   }
 
   /**
@@ -2805,6 +2977,7 @@ export class NameResolver implements PoolResolver {
     // A sample out for its zone is no longer (D20): it is not asked on the probe's lanes.
     if (pending.route === 'sampled') gate.check?.sampledEnded(pending.key, pending);
     pending.route = 'unvouched';
+    pending.why = 'avoided';
     pending.pool = 'helper';
     this.#logger.debug(
       { host: entry.host, family: entry.family, key: pending.key },
@@ -3899,6 +4072,8 @@ export class NameResolver implements PoolResolver {
         miss: undefined,
         silent: undefined,
         walked: false,
+        why: undefined,
+        rewalk: undefined,
         token: undefined,
         detached: false,
         suspect: false,
