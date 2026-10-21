@@ -81,8 +81,9 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * pressure detector (3; the check's state never reads 5), per-name walks of a key's queued helper
  * lookups when it is heard again (4), and Check now's walk path (5: Check now goes to the helper on
  * an urgent token, as with the check off). Item 4 is back in one narrow form (`P-480`): a queued
- * helper lookup never walked gets one walk of its own when a check of it would fail at once behind
- * its key's cap, its key heard or mixed (`heardOrMixed`); the resolver moves it on that walk alone.
+ * helper lookup whose own name was never walked (deferred, or silent on its zone's evidence alone)
+ * gets one walk of its own when a check of it would fail at once behind its key's cap, its key
+ * heard or mixed (`heardOrMixed`); the resolver moves it on that walk alone.
  */
 
 /** How long a walk may take to be heard: a quarter of a check's bound at most (§1.3). */

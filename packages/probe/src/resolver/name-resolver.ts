@@ -484,8 +484,12 @@ interface Pending {
   silent: SilentEvidence | undefined;
   /** Gate mode: it was walked, so the helper's stuck word is not the OS's evidence of its key. */
   walked: boolean;
-  /** Gate mode: why the check routed it unvouched, when the check did (`P-480`). */
-  why: UnvouchedWhy | undefined;
+  /**
+   * Gate mode: why the check routed it to the helper (`P-480`): unvouched, and why; or silent, on
+   * its zone's silence alone with nothing asked for it (`silentZone`), or on its own step left
+   * unanswered (`silentAsked`), which D18 never walks again.
+   */
+  why: UnvouchedWhy | SilentWhy | undefined;
   /**
    * Gate mode: its own walk while queued in the helper (`P-480`), under way, or `done` once that
    * walk heard it or did not: one walk, never a second.
@@ -919,16 +923,27 @@ interface HelperBlock {
   readonly ghosts: number;
 }
 
+/** What a silent route rests on (`P-480`): its zone's silence alone, or its own step unanswered. */
+type SilentWhy = 'silentZone' | 'silentAsked';
+
+/** A silent route's `why`, by its evidence. */
+function silentWhy(evidence: SilentEvidence): SilentWhy {
+  return evidence.kind === 'zone' ? 'silentZone' : 'silentAsked';
+}
+
 /**
- * The unvouched routes a lookup goes to the helper by without any reply to its walk (`P-480`): a
- * deferral (`rate`, `budget`, `stall`, `scoutWait`) or a wait to ride that ended (`wait`).
+ * The routes a lookup goes to the helper by with nothing asked for its own name, or nothing
+ * answered (`P-480`): unvouched by a deferral (`rate`, `budget`, `stall`, `scoutWait`) or a wait to
+ * ride that ended (`wait`); and silent on its zone's silence alone (`silentZone`). Never
+ * `silentAsked`: a name its own step left unanswered is not walked again (D18).
  */
-const NEVER_WALKED: ReadonlySet<UnvouchedWhy> = new Set([
+const NEVER_WALKED: ReadonlySet<UnvouchedWhy | SilentWhy> = new Set([
   'rate',
   'budget',
   'wait',
   'stall',
   'scoutWait',
+  'silentZone',
 ]);
 
 /** The helper's fail-fast conditions that are its key's cap (§1.8, `P-478`): what `P-480` walks. */
@@ -2178,7 +2193,12 @@ export class NameResolver implements PoolResolver {
     if (verdict !== undefined) {
       pending.route = verdict.route;
       pending.key = verdict.key;
-      pending.why = verdict.route === 'unvouched' ? verdict.why : undefined;
+      pending.why =
+        verdict.route === 'unvouched'
+          ? verdict.why
+          : verdict.route === 'silent'
+            ? silentWhy(verdict.evidence)
+            : undefined;
       if (verdict.route === 'heard') pending.walkKeys = verdict.keys;
       if (verdict.route === 'silent') {
         pending.miss = verdict.miss;
@@ -2340,10 +2360,11 @@ export class NameResolver implements PoolResolver {
 
   /**
    * D18's per-name walk of a queued helper lookup, in its narrow form (`P-480`): one walk of its
-   * own, for a lookup the check routed to the helper without walking it (`NEVER_WALKED`), when a
-   * check of it would fail at once behind its key's cap (`key`, `answering` or `unit`) and its key
-   * is heard or mixed. Its verdict is taken by `#rewalked`. The walk under way, joined by any check
-   * of it meanwhile, or undefined when there is none to take: nothing was sent, or it may not walk.
+   * own, for a lookup the check routed to the helper with nothing asked or answered for its name
+   * (`NEVER_WALKED`: deferred, or silent on its zone's evidence alone), when a check of it would
+   * fail at once behind its key's cap (`key`, `answering` or `unit`) and its key is heard or mixed.
+   * Its verdict is taken by `#rewalked`. The walk under way, joined by any check of it meanwhile,
+   * or undefined when there is none to take: nothing was sent, or it may not walk.
    */
   #rewalk(pending: Pending, boundMs: number): Promise<void> | undefined {
     const gate = this.#gate;
@@ -2376,17 +2397,18 @@ export class NameResolver implements PoolResolver {
 
   /**
    * Whether a lookup is one its own walk may take, and move (`P-480`): queued in the helper as the
-   * check routed it, unvouched and never walked; not Check now's, which goes to the helper on an
-   * urgent token; not a suspect, a poison ask or detached; not a name the probe's own
-   * `getaddrinfo` must not be asked for (`#avoided`: a suspect, poison, a crash's); and only while
-   * the helper's route is up, since at `down` D24's fall-back moves it and while rejoining or
+   * check routed it, unvouched or silent, its own name never walked (`NEVER_WALKED`), and so never
+   * one its own step left unanswered, which D18 never walks again; not Check now's, which goes to
+   * the helper on an urgent token; not a suspect, a poison ask or detached; not a name the probe's
+   * own `getaddrinfo` must not be asked for (`#avoided`: a suspect, poison, a crash's); and only
+   * while the helper's route is up, since at `down` D24's fall-back moves it and while rejoining or
    * resting the helper asks nothing. Read as the walk starts and again at its verdict.
    */
   #mayRewalk(gate: Gate, pending: Pending): boolean {
     return (
       pending.state === 'queued' &&
       pending.pool === 'helper' &&
-      pending.route === 'unvouched' &&
+      (pending.route === 'unvouched' || pending.route === 'silent') &&
       pending.why !== undefined &&
       NEVER_WALKED.has(pending.why) &&
       !pending.urgent &&
@@ -2416,7 +2438,7 @@ export class NameResolver implements PoolResolver {
     const { entry } = pending;
     if (walked.route === 'silent') {
       pending.route = 'silent';
-      pending.why = undefined;
+      pending.why = silentWhy(walked.evidence);
       pending.key = walked.key;
       pending.miss = walked.miss;
       pending.silent = walked.evidence;
@@ -2435,6 +2457,8 @@ export class NameResolver implements PoolResolver {
     pending.why = undefined;
     pending.key = walked.key;
     pending.walkKeys = walked.keys;
+    pending.miss = undefined;
+    pending.silent = undefined;
     pending.pool = 'probe';
     this.#logger.debug(
       { host: entry.host, family: entry.family, key: pending.key },

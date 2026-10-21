@@ -12,7 +12,8 @@ import {
   type ResolvedAddress,
 } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
-import { ForwardBudget } from '../src/resolver/forward-budget.js';
+import { REWALK_FIRST_MS, REWALK_JITTER } from '../src/resolver/dns-check.js';
+import { FORWARD_HOLD_MS, ForwardBudget } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
 import {
   ANSWER_MS,
@@ -909,6 +910,49 @@ async function coldPartial(queued: readonly string[]) {
   return { ...made, stuck, held };
 }
 
+/**
+ * `P-480`'s world with its zone's first walked name silent: `dev-s0` scouts zone b and is not
+ * heard, so the key goes silent, and `dev-s1`, `dev-s2` and then each of `queued` route silent on
+ * the zone's evidence alone, nothing asked for their names. The three silent names stuck in the
+ * helper hold the zone to them, and each of `queued` fails at once behind them. Then the key's
+ * walk again, due 5 s on (±20%), takes `dev-c0`, a cached name: heard, it answers on the probe's
+ * lanes, and the key is mixed.
+ */
+async function silentFirst(queued: readonly string[]) {
+  const made = await make();
+  const { helper, asker, callsFor, clock, ask } = made;
+  asker.rule = partly;
+  const scout = ended(ask('dev-s0.zone-b.test', { waitMs: 60_000 }));
+  await pollWithin(
+    1_000,
+    'dev-s0 not heard, in the helper',
+    () => helper.asksFor('dev-s0.zone-b.test').length === 1,
+    2,
+  );
+  const stuck = [0, 1, 2].map((i) => `dev-s${String(i)}.zone-b.test`);
+  const held = [scout, ...stuck.slice(1).map((host) => ended(ask(host, { waitMs: 60_000 })))];
+  await pollWithin(1_000, 'the three in the helper', () => helper.inFlight().length === 3, 2);
+  for (const host of stuck) helper.last(host).stuck();
+  for (const host of [...stuck.slice(1), ...queued]) {
+    if (queued.includes(host)) {
+      const first = await failed(ask(host, { waitMs: 2_000 }));
+      assert.equal(first.code, RESOLVER_STUCK, `${host}: ${first.message}`);
+      assert.match(
+        first.message,
+        /no name of zone-b\.test has answered in the lookup helper since/u,
+      );
+    }
+    assert.equal(asker.askedFor(host).length, 0, `${host}: not asked, its zone silent`);
+  }
+  // Past the key's walk again, 5 s with up to a fifth's jitter either way.
+  clock.now += REWALK_FIRST_MS * (1 + REWALK_JITTER);
+  const c0 = ask('dev-c0.zone-b.test', { waitMs: 2_000 });
+  await pollWithin(1_000, 'dev-c0 heard', () => callsFor('dev-c0.zone-b.test').length === 1, 2);
+  callsFor('dev-c0.zone-b.test')[0]?.answer();
+  assert.deepEqual(await c0, A);
+  return { ...made, stuck, held };
+}
+
 describe('a queued helper lookup’s own walk, once its key is heard again (P-480, D18)', () => {
   it('walks a cached name the cold burst sent to the helper unwalked once its zone is mixed: heard, it answers on the probe’s lanes; a silent one is walked once and stays in the helper', async () => {
     const { resolver, helper, asker, callsFor, ask, stuck, held } = await coldPartial([
@@ -943,6 +987,59 @@ describe('a queued helper lookup’s own walk, once its key is heard again (P-48
     for (const host of [...stuck, 'dev-s3.zone-b.test', 'dev-s4.zone-b.test']) {
       assert.equal(callsFor(host).length, 0, `${host} never on the probe’s lanes`);
     }
+    resolver.stop();
+  });
+
+  it('walks a cached name its zone’s silence sent to the helper unwalked once the zone is mixed: heard, it answers on the probe’s lanes; a silent one sent so is walked once and stays', async () => {
+    const cached = ['dev-c1.zone-b.test', 'dev-c2.zone-b.test'];
+    const { resolver, helper, asker, callsFor, ask, stuck, held } = await silentFirst([
+      ...cached,
+      'dev-s4.zone-b.test',
+    ]);
+    for (const host of cached) {
+      const got = ask(host, { waitMs: 2_000 });
+      await pollWithin(1_000, `${host} on the probe’s lanes`, () => callsFor(host).length === 1, 2);
+      assert.equal(asker.askedFor(host).length, 1, `${host}: one walk of its own`);
+      callsFor(host)[0]?.answer();
+      assert.deepEqual(await got, A);
+      assert.equal(helper.asksFor(host).length, 0, `${host} never asked in the helper`);
+    }
+    const s4 = await failed(ask('dev-s4.zone-b.test', { waitMs: 2_000 }));
+    assert.equal(s4.code, RESOLVER_STUCK, s4.message);
+    assert.equal(asker.askedFor('dev-s4.zone-b.test').length, 1, 'walked once, not heard');
+    const again = await failed(ask('dev-s4.zone-b.test', { waitMs: 2_000 }));
+    assert.equal(again.code, RESOLVER_STUCK, again.message);
+    assert.equal(asker.askedFor('dev-s4.zone-b.test').length, 1, 'not walked a second time');
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+    }
+    for (const got of held) assert.equal(await got, false);
+    for (const host of [...stuck, 'dev-s4.zone-b.test']) {
+      assert.equal(callsFor(host).length, 0, `${host} never on the probe’s lanes`);
+    }
+    resolver.stop();
+  });
+
+  it('never walks again a queued lookup its own walk left unanswered, though its zone is mixed and it fails at once behind the cap (D18)', async () => {
+    const { resolver, helper, asker, callsFor, clock, ask, held } = await silentFirst([]);
+    // Walked by name in the mixed zone, not heard: silent on its own step, queued behind the cap.
+    const first = await failed(ask('dev-s5.zone-b.test', { waitMs: 2_000 }));
+    assert.equal(first.code, RESOLVER_STUCK, first.message);
+    assert.equal(asker.askedFor('dev-s5.zone-b.test').length, 1, 'its own walk');
+    // Past that question's hold, so that a walk now would ask the server again, not join it.
+    clock.now += FORWARD_HOLD_MS;
+    for (const round of [1, 2]) {
+      const later = await failed(ask('dev-s5.zone-b.test', { waitMs: 2_000 }));
+      assert.equal(later.code, RESOLVER_STUCK, `check ${String(round)}: ${later.message}`);
+      assert.equal(asker.askedFor('dev-s5.zone-b.test').length, 1, 'not walked again');
+    }
+    assert.equal(callsFor('dev-s5.zone-b.test').length, 0, 'never on the probe’s lanes');
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+    }
+    for (const got of held) assert.equal(await got, false);
     resolver.stop();
   });
 
