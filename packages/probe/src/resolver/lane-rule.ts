@@ -476,6 +476,16 @@ export interface HelperAdmitAsk {
    * past `STUCK_MS`, of a name failing, or of one that has never answered.
    */
   readonly keyFailingRunning: number;
+  /**
+   * For a first lookup, its key's first lookups running in the helper, as its unit counts them
+   * (`P-481`): a lookup let go at a configuration change or as the child went quiet counts against
+   * no key. 0 for a refresh or a retry, which take no first lane.
+   */
+  readonly keyFirstRunning: number;
+  /** The helper's first lanes (`P-426`'s `firstCap`). */
+  readonly firstCap: number;
+  /** Another key has a first lookup queued in the helper that is not "Check now"'s (`P-481`). */
+  readonly otherKeyFirstQueued: boolean;
   readonly unitRunning: number;
   readonly unitCapped: boolean;
   /** The helper's lanes at risk now. */
@@ -527,6 +537,24 @@ export function helperAnsweringOk(
   a: Pick<HelperAdmitAsk, 'nameAnswering' | 'keyAnsweringQueued' | 'keyFailingRunning'>,
 ): boolean {
   return a.nameAnswering || a.keyFailingRunning < KEY_QUIET - 1 || !a.keyAnsweringQueued;
+}
+
+/**
+ * Whether a lookup may take the helper's last first lane (`P-481`): never one whose key runs every
+ * other, vouched or not, while another key has a first lookup queued. A key's walk evidence says
+ * that its names answered the walk, not that each will answer `getaddrinfo`: a zone the walk heard
+ * through names its recursor caches took all 4 first lanes with names that hang, for 30 s, while
+ * other zones' names that answer waited. So no key holds every first lane by itself while another
+ * waits for one; with none waiting it may, as `K17`'s does. It binds a vouched key alone, since the
+ * key rule holds one the walk does not vouch for to `KEY_QUIET`, fewer than the first lanes. Never
+ * a fail-fast condition of its own: the key's first lookups it waits behind are none of them past
+ * `STUCK_MS`, since one that is unvouches the key, and the key rule then holds it and names them.
+ * Never asked of "Check now", which takes no lane of a class.
+ */
+export function helperLastFirstOk(
+  a: Pick<HelperAdmitAsk, 'keyFirstRunning' | 'firstCap' | 'otherKeyFirstQueued'>,
+): boolean {
+  return a.keyFirstRunning < a.firstCap - 1 || !a.otherKeyFirstQueued;
 }
 
 /** Whether a lookup is ungated (§1.8, D23): its key answers, or is vouched, and its unit is not capped. */
@@ -586,13 +614,13 @@ export function helperClassOk(
  * §1.8's `admit`). "Check now" takes an urgent token when one is free, under no key rule, so it
  * passes a silent zone's stuck lookups; otherwise a shared one, as its key's first look, under the
  * key rule and T. Any other lookup needs the key rule, T and its class's lane (`helperClassOk`),
- * and takes a shared token, or the kept one only while ungated: the kept token is never a gated
- * lookup's.
+ * never its key's last first lane while another key waits for one (`helperLastFirstOk`), and takes
+ * a shared token, or the kept one only while ungated: the kept token is never a gated lookup's.
  */
 export function admitHelper(a: HelperAdmitAsk): HelperToken | undefined {
   if (a.urgent && a.urgentAvailable > 0) return 'urgent';
   if (!helperKeyOk(a) || !helperRiskOk(a)) return undefined;
-  if (!a.urgent && !helperClassOk(a)) return undefined;
+  if (!a.urgent && (!helperClassOk(a) || !helperLastFirstOk(a))) return undefined;
   if (a.sharedAvailable > 0) return 'shared';
   if (!a.urgent && helperUngated(a) && a.keptAvailable > 0) return 'kept';
   return undefined;

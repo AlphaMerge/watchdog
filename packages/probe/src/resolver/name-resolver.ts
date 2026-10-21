@@ -2958,8 +2958,8 @@ export class NameResolver implements PoolResolver {
    * at a moment nothing is in flight, holding nothing back (D27); while isolating, a suspect alone,
    * one at a time; then "Check now"'s on an urgent token, or a shared one as its key's first look;
    * then `P-426`'s order over the helper's queues, each lookup admitted by its key, the at-risk
-   * count, its class and a token. A lookup asked again after a loss carries its token and starts
-   * first.
+   * count, its class, its key's last first lane (`P-481`) and a token. A lookup asked again after a
+   * loss carries its token and starts first.
    */
   #nextHelper(gate: Gate): { pending: Pending; token: GaiToken } | undefined {
     const running = helperRunning(gate);
@@ -2985,11 +2985,14 @@ export class NameResolver implements PoolResolver {
     this.#seeRisk(gate, atRisk);
     const admitted = new Map<string, HelperToken | undefined>();
     const answeringQueued = this.#answeringQueuedOnce(gate);
+    const otherFirstQueued = this.#otherFirstQueuedOnce(gate);
     const admit = (pending: Pending): HelperToken | undefined => {
       const answering = this.#nameAnswering(pending.entry);
       const at = `${pending.key}|${pending.cls}|${String(pending.urgent)}|${String(answering)}`;
       if (admitted.has(at)) return admitted.get(at);
-      const token = admitHelper(this.#admitAsk(gate, pending, atRisk, answeringQueued));
+      const token = admitHelper(
+        this.#admitAsk(gate, pending, atRisk, answeringQueued, otherFirstQueued),
+      );
       admitted.set(at, token);
       return token;
     };
@@ -3563,6 +3566,35 @@ export class NameResolver implements PoolResolver {
     };
   }
 
+  /** Whether another key has a first lookup queued in the helper, not "Check now"'s (`P-481`). */
+  #otherFirstQueued(gate: Gate, key: string): boolean {
+    return gate.lanes.queues.first.some((queued) => !queued.urgent && queued.key !== key);
+  }
+
+  /**
+   * `#otherFirstQueued` for one pick, read once over the helper's first queue and only if asked:
+   * the first key with a first lookup queued that is not urgent, and whether another follows it.
+   */
+  #otherFirstQueuedOnce(gate: Gate): (key: string) => boolean {
+    let read: { readonly first: string | undefined; readonly two: boolean } | undefined;
+    return (key) => {
+      if (read === undefined) {
+        let first: string | undefined;
+        let two = false;
+        for (const queued of gate.lanes.queues.first) {
+          if (queued.urgent) continue;
+          if (first === undefined) first = queued.key;
+          else if (queued.key !== first) {
+            two = true;
+            break;
+          }
+        }
+        read = { first, two };
+      }
+      return read.first !== undefined && (read.first !== key || read.two);
+    };
+  }
+
   /**
    * A key's lookups running in the helper for names that do not answer now (`#nameAnswering`):
    * past `STUCK_MS`, of a name failing, or of one never answered. Those its key counts: each is its
@@ -3581,6 +3613,7 @@ export class NameResolver implements PoolResolver {
     pending: Pending,
     atRisk: number,
     answeringQueued: (key: string) => boolean = (key) => this.#answeringQueued(gate, key),
+    otherFirstQueued: (key: string) => boolean = (key) => this.#otherFirstQueued(gate, key),
   ): HelperAdmitAsk {
     const { keys, budget } = gate;
     const key = pending.key;
@@ -3603,6 +3636,13 @@ export class NameResolver implements PoolResolver {
         return answeringQueued(key);
       },
       keyFailingRunning: this.#failingRunning(gate, key).length,
+      keyFirstRunning: pending.cls === 'first' ? keys.unitRunning(key, 'first') : 0,
+      firstCap: gate.lanes.firstCap,
+      // As `keyAnsweringQueued`: read only where it decides (`helperLastFirstOk`), for a key that
+      // runs all but one of the first lanes.
+      get otherKeyFirstQueued() {
+        return otherFirstQueued(key);
+      },
       unitRunning: keys.unitRunning(key, pending.cls),
       unitCapped: keys.capped(key, pending.cls),
       atRisk,

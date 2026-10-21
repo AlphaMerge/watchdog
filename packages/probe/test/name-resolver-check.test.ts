@@ -621,6 +621,115 @@ describe('the helper’s lanes with the name check on (P-432 D23, P-478)', () =>
     resolver.stop();
   });
 
+  it('P-481: a key the walk heard through two cached names, four of its silent names asked at once and another key’s answering name queued: that name takes the last first lane, and the key its fourth only once none waits', async () => {
+    // Room for the canary, zone a's scout and two walks of zone b, refilled never: every walk
+    // after them is refused and routes `rate`, unwalked, to the helper.
+    const { resolver, helper, asker, calls, ask } = await make({
+      rate: { perSecond: 0, burst: 4, reserve: 0 },
+    });
+    asker.rule = (_server, name) => (name.startsWith('dev-s') ? 'silent' : 'answer');
+    await scoutZoneA(calls, ask);
+    // Zone b heard through two names its recursor caches, each answered on the probe's lanes.
+    for (const host of ['dev-c0.zone-b.test', 'dev-c1.zone-b.test']) {
+      const cached = ask(host);
+      await pollWithin(1_000, `${host} heard`, () => calls.some((call) => call.host === host), 2);
+      calls.find((call) => call.host === host)?.answer();
+      assert.deepEqual(await cached, A, `${host} answered on the probe’s lanes`);
+    }
+    assert.equal(helper.asks.length, 0, 'nothing in the helper yet');
+    // A name of zone a in the helper first, its walk refused: it holds one first lane.
+    const filler = ended(ask('dev-1.zone-a.test', { waitMs: 60_000 }));
+    await pollWithin(1_000, 'zone a in the helper', () => helper.inFlight().length === 1, 2);
+    const silentNames = [0, 1, 2, 3].map((i) => `dev-s${String(i)}.zone-b.test`);
+    const silentOnes = silentNames.map((host) => ended(ask(host, { waitMs: 60_000 })));
+    const zoneB = (): string[] =>
+      helper
+        .inFlight()
+        .map((sent) => sent.host)
+        .filter((host) => host.endsWith('.zone-b.test'));
+    await pollWithin(1_000, 'zone b in the helper', () => zoneB().length === 3, 2);
+    // Its walk refused too, zone a's answering name queued behind zone b's fourth.
+    const answering = ended(ask('dev-2.zone-a.test', { waitMs: 60_000 }));
+    await pollWithin(
+      1_000,
+      () => `every walk refused: ${String(resolver.gateHealth()?.walksDeferred)}`,
+      () => resolver.gateHealth()?.walksDeferred === 6,
+      2,
+    );
+    await wait(0);
+    assert.deepEqual(zoneB(), silentNames.slice(0, 3), 'vouched: past the 3, with nothing stuck');
+    assert.equal(helper.inFlight().length, 4, 'every first lane held');
+    assert.equal(helper.asksFor('dev-2.zone-a.test').length, 0);
+    // A lane ends: zone b runs the other 3 and zone a's name waits, so that name takes it.
+    helper.last('dev-1.zone-a.test').answer();
+    assert.equal(await filler, true);
+    await pollWithin(
+      1_000,
+      () =>
+        `a lane taken: ${helper
+          .inFlight()
+          .map((sent) => sent.host)
+          .join(', ')}`,
+      () => helper.inFlight().length === 4,
+      2,
+    );
+    assert.equal(helper.asksFor('dev-2.zone-a.test').length, 1, 'the other key’s name took it');
+    assert.deepEqual(zoneB(), silentNames.slice(0, 3), 'not zone b’s fourth');
+    // With none of another key's waiting, zone b takes its fourth, as K17's does.
+    helper.last('dev-2.zone-a.test').answer();
+    assert.equal(await answering, true);
+    await pollWithin(1_000, 'zone b’s fourth', () => zoneB().length === 4, 2);
+    assert.deepEqual(zoneB(), silentNames);
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await wait(0);
+    }
+    for (const got of silentOnes) assert.equal(await got, false);
+    resolver.stop();
+  });
+
+  it('P-481: the rule is the first lanes’: a vouched key running 3 of them refreshes in the helper while another key’s first lookup waits', async () => {
+    const { resolver, helper, calls, clock, ask } = await make({ rate: COLD_BURST });
+    await scoutZoneA(calls, ask);
+    // A name of zone a answered in the helper, its walk refused.
+    const seed = ask('dev-1.zone-a.test');
+    await pollWithin(1_000, 'in the helper', () => helper.asks.length === 1, 2);
+    helper.last('dev-1.zone-a.test').answer();
+    assert.deepEqual(await seed, A);
+    // Another key's first lookup holds a first lane, zone a's 3 the others, and another of that
+    // key's waits for one.
+    const others = [ended(ask('dev-0.k0.zone-b.test', { waitMs: 60_000 }))];
+    await pollWithin(1_000, 'k0 in the helper', () => helper.inFlight().length === 1, 2);
+    const firsts = [2, 3, 4].map((i) =>
+      ended(ask(`dev-${String(i)}.zone-a.test`, { waitMs: 60_000 })),
+    );
+    await pollWithin(1_000, 'every first lane held', () => helper.inFlight().length === 4, 2);
+    others.push(ended(ask('dev-1.k0.zone-b.test', { waitMs: 60_000 })));
+    await pollWithin(
+      1_000,
+      () => `every walk refused: ${String(resolver.gateHealth()?.walksDeferred)}`,
+      () => resolver.gateHealth()?.walksDeferred === 6,
+      2,
+    );
+    // Its answer expired: served at once, and refreshed in the helper behind it, on a shared lane.
+    clock.now += ANSWER_MS + 1;
+    assert.deepEqual(await ask('dev-1.zone-a.test'), A);
+    await pollWithin(
+      1_000,
+      () => `refreshed: ${String(helper.asksFor('dev-1.zone-a.test').length)} asked`,
+      () => helper.asksFor('dev-1.zone-a.test').length === 2,
+      2,
+    );
+    assert.equal(helper.inFlight().length, 5);
+    assert.equal(helper.asksFor('dev-1.k0.zone-b.test').length, 0, 'the first lanes all held');
+    for (let round = 0; round < 10 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.answer();
+      await wait(0);
+    }
+    for (const got of [...firsts, ...others]) assert.equal(await got, true);
+    resolver.stop();
+  });
+
   it('P-478: the check turned off, a key it heard is vouched no more and no lane is kept: held to 3, and a never-seen key’s first look takes the fourth, as system mode’s does', async () => {
     const { resolver, helper, policy, calls, ask } = await make();
     await scoutZoneA(calls, ask);
