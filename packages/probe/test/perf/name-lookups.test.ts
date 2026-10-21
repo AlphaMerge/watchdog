@@ -28,13 +28,14 @@ import {
   caresAsker,
   HEARD_A_ZONE,
   KEY_SETTLE_MS,
+  REWALK_FIRST_MS,
+  REWALK_JITTER,
+  REWALK_MAX_MS,
+  WALKING_AGAIN,
+  ZONE_VERDICT,
   type DnsAsker,
 } from '../../src/resolver/dns-check.js';
-import {
-  FORWARD_HOLD_MS,
-  OWN_WALK_PLACES,
-  questionsOf,
-} from '../../src/resolver/forward-budget.js';
+import { FORWARD_HOLD_MS, questionsOf, WALK_QUESTIONS } from '../../src/resolver/forward-budget.js';
 import { candidateKey, KEY_QUIET } from '../../src/resolver/lane-rule.js';
 import type {
   ForkHelper,
@@ -47,6 +48,7 @@ import {
   ANSWER_MS,
   lookupLanes,
   NameResolver,
+  OWN_WALK_DEFERRED,
   resolverLanes,
   STALE_MS,
   type Family,
@@ -83,8 +85,9 @@ import {
   busiestSecond,
   cachedAllowance,
   cachedCeiling,
-  cachedCeilingOn,
+  cachedCeilingsOn,
   cachedLongestWait,
+  ceilingParts,
   CHANNELS_A_SECOND,
   gapBound,
   hangAllowance,
@@ -94,11 +97,13 @@ import {
   judgeWorld,
   LOSS_WINDOW_MS,
   overBucket,
+  rewalkBaseMs,
   spread10Bound,
   stretches,
   UNTRIED_LANES,
   WALKRATE_P99_OVER_MS,
   wordsOf,
+  zoneWalkFaults,
   type Baseline,
   type GateMode,
   type Group,
@@ -107,7 +112,10 @@ import {
   type NotAnswered,
   type NotAnsweredEnd,
   type PeakWindow,
+  type WalkAgainSeen,
   type WorldFacts,
+  type ZoneVerdict,
+  type ZoneWalks,
 } from '../support/name-gate-judge.js';
 import { pollWithin, within } from '../support/within.js';
 import {
@@ -117,6 +125,7 @@ import {
   teardownLine,
   type WorldReads,
 } from '../support/world-reads.js';
+import { partialFacts, ZoneWalkLog } from '../support/zone-walk-log.js';
 
 /**
  * What a name lookup a scan costs once the probe's resolver keeps answers (`A-66`, `P-426`), and
@@ -1817,6 +1826,8 @@ class WalkCounter {
   readonly channels: number[] = [];
   /** Questions for a name, the canary's (`localhost.`, sent to prove the check) aside. */
   names = 0;
+  /** Each of those questions: the name asked, and when (`P-485`'s drain). */
+  readonly questions: { readonly name: string; readonly at: number }[] = [];
 
   wrap(inner: DnsAsker): DnsAsker {
     return {
@@ -1825,10 +1836,14 @@ class WalkCounter {
         const channel = inner.channel(server);
         return {
           ask: (name, type) => {
+            const at = performance.now();
             const times = this.sends.get(server) ?? [];
-            times.push(performance.now());
+            times.push(at);
             this.sends.set(server, times);
-            if (name !== CANARY_NAME) this.names += 1;
+            if (name !== CANARY_NAME) {
+              this.names += 1;
+              this.questions.push({ name, at });
+            }
             return channel.ask(name, type);
           },
           close: () => {
@@ -2459,8 +2474,11 @@ interface Routed {
  */
 class GateLog {
   readonly routed: Routed[] = [];
-  /** When the check first heard each key, heard or mixed, as its debug line said (`P-484`). */
-  readonly heardKeys = new Map<string, number>();
+  /**
+   * The check's own walks of each key, and each queued helper lookup's own walk deferred, as their
+   * debug lines said them (`P-484`, `P-485`).
+   */
+  readonly zone = new ZoneWalkLog();
   readonly passedStuck: string[] = [];
   unsafe = 0;
   proven = false;
@@ -2470,11 +2488,7 @@ class GateLog {
   readonly stream = {
     write: (line: string): void => {
       if (line.includes('the DNS check is proven')) this.proven = true;
-      if (line.includes(`"msg":"${HEARD_A_ZONE}"`)) {
-        const key = String((JSON.parse(line) as Record<string, unknown>)['key']);
-        if (!this.heardKeys.has(key)) this.heardKeys.set(key, performance.now());
-        return;
-      }
+      if (this.zone.read(line)) return;
       if (line.includes('the DNS check missed a name the lookup helper answered')) this.misses += 1;
       if (line.includes('it stands down, and every name is asked in the lookup helper')) {
         this.standDowns += 1;
@@ -2560,10 +2574,12 @@ function worldShape(arm: WorldArm): WorldShape {
 }
 
 /**
- * `partial`'s row for its cached checks given up (`P-478`'s fix round 2, `P-480`, `P-484`): the
- * names and checks the judge allows, the rest, the longest a cached name waited from its first ask
- * to its first answer, the ceiling that wait is judged by in the run's mode, with its parts, and
- * the words they gave up with.
+ * `partial`'s row for its cached checks given up (`P-478`'s fix round 2, `P-480`, `P-484`,
+ * `P-485`): the names and checks the judge allows, the rest, the longest a cached name waited from
+ * its first ask to its first answer, and the ceiling it is judged by in the run's mode with its
+ * parts: with the check off one ceiling, with it on each name's own, the name nearest its own said
+ * with its parts, and the zone's scouts and walks again its anchor is judged by; and the words they
+ * gave up with.
  */
 function cachedRow(facts: WorldFacts): string {
   const given = facts.cachedGivenUp;
@@ -2577,27 +2593,75 @@ function cachedRow(facts: WorldFacts): string {
     words.set(said, (words.get(said) ?? 0) + 1);
   }
   const ms = (value: number): string => `${String(Math.round(value))} ms`;
-  const rule = `the check ${facts.checkOn ? 'on' : 'off'}: before the name’s first answer and the ${lag} lag, or, never answered, within the ceiling of its first ask, in a held name’s words`;
+  const s = (value: number): string => `${(value / 1_000).toFixed(1)} s`;
+  const rule = facts.checkOn
+    ? `the check on: before the name’s first answer and the ${lag} lag, or, never answered, before its own ceiling, in a held name’s words`
+    : `the check off: before the name’s first answer and the ${lag} lag, or, never answered, within the ceiling of its first ask, in a held name’s words`;
   let ceilingSaid: string;
   if (facts.checkOn) {
-    const on = cachedCeilingOn(given);
-    ceilingSaid =
-      'missing' in on
-        ? `not placed (${on.missing.join(', ')} not recorded)`
-        : `${ms(on.ms)} (the check first heard the zone at ${ms(on.keyHeardMs)}, a check’s spacing ${ms(on.spacingMs)} (${String(given.intervalMs / 1_000)} s ÷ ${String(given.sensorsPerName)} sensors), ${String(on.ownWalks)} silent names’ own walks × ${ms(on.holdMs)} over ${String(on.places)} places, plus the lag)`;
+    const on = cachedCeilingsOn(given);
+    if ('missing' in on) {
+      ceilingSaid = `its ceilings with the check on not placed (${on.missing.join(', ')} not recorded)`;
+    } else {
+      // The name nearest its own ceiling: the least margin, or the one never answered.
+      const margins = Object.entries(on.names).map(([name, ceiling]) => ({
+        name,
+        ceiling,
+        answered: given.firstAnswerMs[name],
+      }));
+      margins.sort(
+        (a, b) =>
+          a.ceiling.ms -
+          (a.answered ?? Number.POSITIVE_INFINITY) -
+          (b.ceiling.ms - (b.answered ?? Number.POSITIVE_INFINITY)),
+      );
+      const nearest = margins[0];
+      ceilingSaid =
+        `its ceilings with the check on, each name’s own, from the arm’s start: ` +
+        (nearest === undefined
+          ? 'no cached name asked'
+          : `the nearest ${nearest.name}, first answered ${nearest.answered === undefined ? 'never' : `at ${s(nearest.answered)}`} against ${s(nearest.ceiling.ms)} (${ceilingParts(nearest.ceiling)})`) +
+        `; ${zoneWalksSaid(given)}`;
+    }
   } else {
     const off = cachedCeiling(given);
     ceilingSaid =
       'missing' in off
-        ? `not placed (${off.missing.join(', ')} not recorded)`
-        : `${ms(off.ms)} (${String(off.untried)} silent names never yet tried × ${ms(off.holdMs)} over ${String(off.lanes)} lanes, plus the lag)`;
+        ? `its ceiling with the check off not placed (${off.missing.join(', ')} not recorded)`
+        : `its ceiling with the check off ${ms(off.ms)} (${String(off.untried)} silent names never yet tried × ${ms(off.holdMs)} over ${String(off.lanes)} lanes, plus the lag)`;
   }
   return (
     `cached given up: ${String(allowance.checks)} checks of ${String(allowance.names)} names allowed (${rule}), ${String(allowance.refused.length)} not; ` +
     `the longest a cached name waited for its first answer ${longest === undefined ? 'none answered' : `${ms(longest.ms)} (${longest.name})`}, ${String(Object.keys(given.firstAnswerMs).length)} answered; ` +
-    `its ceiling with the check ${facts.checkOn ? 'on' : 'off'} ${ceilingSaid}; ` +
+    `${ceilingSaid}; ` +
     `words: ${[...words].map(([said, n]) => `${String(n)} × ${said}`).join(' | ') || 'none'}`
   );
+}
+
+/**
+ * The silent zone's own walks, as `partial`'s row says them (`P-485`): when the check first heard
+ * it and by which, and each walk again: its step, its carrier, how long after its due it was sent,
+ * and its verdict.
+ */
+function zoneWalksSaid(given: NonNullable<WorldFacts['cachedGivenUp']>): string {
+  const walks = given.zoneWalks;
+  if (walks === undefined) return 'the zone’s scouts and walks again not recorded';
+  const s = (value: number): string => `${(value / 1_000).toFixed(1)} s`;
+  const first = walks.verdicts.find((verdict) => verdict.verdict === 'heard');
+  const heard =
+    given.keyHeardMs === undefined
+      ? 'the zone never heard'
+      : `the zone first heard at ${s(given.keyHeardMs)}${first === undefined ? '' : ` by ${first.by === 'scout' ? 'a scout' : 'a walk again'}, ${first.name}`}`;
+  const again =
+    walks.walksAgain.length === 0
+      ? 'no walk again'
+      : `${String(walks.walksAgain.length)} walks again: ${walks.walksAgain
+          .map(
+            (walk) =>
+              `step ${String(walk.step)} by ${walk.carrier}${walk.own ? ' (its own walk)' : ''}, due ${s(walk.dueMs)}, sent ${String(Math.round(walk.sentMs - walk.dueMs))} ms after, ${walk.verdict ?? 'no verdict'}`,
+          )
+          .join('; ')}`;
+  return `${heard}; ${again}`;
 }
 
 async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
@@ -3112,10 +3176,10 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
           })
         : undefined;
     const stall = record.stall;
-    // `partial`: the silent zone's key, as the check keys its names, and when it first heard it.
-    const silentHost = [...groupByHost].find(([, group]) => group === 'silent')?.[0];
-    const silentHeardAt =
-      silentHost === undefined ? undefined : log.heardKeys.get(candidateKey(silentHost));
+    // `partial`: the silent zone's key, as the check keys its names.
+    const named = (group: Group): string[] =>
+      [...groupByHost].filter(([, of]) => of === group).map(([name]) => name);
+    const silentHost = named('silent')[0];
     const facts: WorldFacts = {
       arm: arm.name,
       mode,
@@ -3146,43 +3210,21 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       ...(keptLate === undefined ? {} : { keptLate }),
       ...(arm.cached === true
         ? {
-            cachedGivenUp: {
+            cachedGivenUp: partialFacts({
+              startedAt,
               intervalMs: shape.intervalSeconds * 1_000,
               lagMs: delay.max > 0 ? delay.max / 1e6 : undefined,
-              firstAnswerMs: Object.fromEntries(
-                [...groupByHost]
-                  .filter(([, group]) => group === 'cached')
-                  .flatMap(([name]) => {
-                    const answered = answers(name)[0];
-                    return answered === undefined ? [] : [[name, answered - startedAt] as const];
-                  }),
-              ),
-              checks: cachedGivenUp.map(({ name, at: when, message }) => ({
-                name,
-                askedMs: when - startedAt,
-                message,
-              })),
-              firstAskedMs: Object.fromEntries(
-                [...groupByHost]
-                  .filter(([, group]) => group === 'cached')
-                  .flatMap(([name]) => {
-                    const times = asks.get(deviceByHost.get(name) ?? -1) ?? [];
-                    return times.length === 0
-                      ? []
-                      : [[name, Math.min(...times) - startedAt] as const];
-                  }),
-              ),
-              // Each arm starts its probe cold: every silent name it asks is one never yet tried.
-              silentUntried: [...groupByHost].filter(
-                ([name, group]) =>
-                  group === 'silent' && (asks.get(deviceByHost.get(name) ?? -1) ?? []).length > 0,
-              ).length,
+              cached: named('cached'),
+              silent: named('silent'),
+              key: silentHost === undefined ? '' : candidateKey(silentHost),
+              asksOf: (name) => asks.get(deviceByHost.get(name) ?? -1) ?? [],
+              answersOf: answers,
+              givenUp: cachedGivenUp,
+              questions: walks.questions,
+              log: log.zone,
               // What the world's resolv.conf writes: a silent lookup holds its lane every try.
               silentHoldMs: WORLD_SCHEDULE.tries * WORLD_SCHEDULE.waitMs,
-              // When the check first heard the silent zone's key, as its own debug line said it.
-              ...(silentHeardAt === undefined ? {} : { keyHeardMs: silentHeardAt - startedAt }),
-              sensorsPerName: shape.perDevice,
-            },
+            }),
           }
         : {}),
       ...(helperStats === undefined
@@ -4012,7 +4054,8 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     // P2's stopped child left 12 answering checks nowhere to be answered, all in its allowance.
     ...(arm === 'P2' ? withHang(cleanHang.notAnswered) : {}),
     // Its cached names each answered at their first ask, nothing given up: inside the ceilings the
-    // check on and off are judged by (`P-484`, `P-480`), whose facts the run recorded.
+    // check on and off are judged by (`P-485`, `P-480`), whose facts the run recorded. Zone b was
+    // heard first, by its scout dev-20, at 1.1 s: no walk again.
     ...(arm === 'partial'
       ? {
           cachedGivenUp: {
@@ -4023,8 +4066,24 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
             checks: [],
             silentUntried: 25,
             silentHoldMs: 30_000,
-            keyHeardMs: 1_300,
-            sensorsPerName: 10,
+            keyHeardMs: 1_100,
+            checksAtMs: { 'dev-20.zone-b.test': [1_000, 7_000, 13_000] },
+            ownRefusedMs: { 'dev-20.zone-b.test': [] },
+            zoneQuestionsMs: { 'dev-20.zone-b.test': [1_000], 'dev-10.zone-b.test': [1_000] },
+            zoneWalks: {
+              heardMs: [1_100],
+              verdicts: [
+                {
+                  by: 'scout',
+                  name: 'dev-20.zone-b.test',
+                  sentMs: 1_000,
+                  atMs: 1_100,
+                  verdict: 'heard',
+                  dueMs: undefined,
+                },
+              ],
+              walksAgain: [],
+            },
           },
         }
       : {}),
@@ -5209,147 +5268,589 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
     },
   ];
 
-  it('partial with the check on allows a cached check given up in a held name’s words before the name’s first answer and the lag, past the first scan interval, and holds the longest wait to a ceiling read from the run: when the check first heard the zone, a check’s spacing, the silent names’ own walks over their places, and the lag (P-484)', () => {
-    const base = clean('partial', 'gate');
+  /**
+   * `partial` with the check on, as a silent-first start (`P-485`): zone b's scouts dev-10 and
+   * dev-30 not heard at 1.25 s, so its first walk again falls due 5 s on; dev-50, a silent name,
+   * carries it at 6.3 s on its own walk, not heard at 6.55 s, so the next falls due 10 s on; dev-20,
+   * cached and held, carries that at 16.6 s, heard at 16.65 s: the zone first heard. dev-40's own
+   * walk is refused once by D19 at 15 s, and sent at its check at 21 s.
+   */
+  const silentFirst = (() => {
     const b20 = 'dev-20.zone-b.test';
     const b40 = 'dev-40.zone-b.test';
     const lanes = '(dev-10.zone-b.test, dev-30.zone-b.test, dev-50.zone-b.test)';
     /** A held cached name's check, as the arm's runs show it giving up. */
     const held = (name: string): string =>
       `the device’s host name did not resolve, querying ${name}:161 over SNMP — the probe’s resolver is not answering (every lane a lookup for ${name} could use is held by a lookup that has run past 1000 ms ${lanes}: no name of zone-b.test has answered in the lookup helper since one of its lookups ran past 1000 ms, so it holds at most 3 of the helper’s lanes; it stays queued)`;
-    // The zone first heard at 36 s; a check every 60 s ÷ 10 sensors; 25 silent names' own walks
-    // each a hold over the own walks' places; and the 40 ms lag. The constants are the code's.
-    const ceilingMs = 36_000 + 60_000 / 10 + (25 * FORWARD_HOLD_MS) / OWN_WALK_PLACES + 40;
-    const s1 = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
-    const parts = `the check first heard their zone at 36.0 s, a check’s spacing of 6.0 s, 25 silent names’ own walks of ${s1(FORWARD_HOLD_MS)} each over ${String(OWN_WALK_PLACES)} places, and the 40 ms lag`;
-    const placed = (
-      checks: readonly {
-        readonly name: string;
-        readonly askedMs: number;
-        readonly message?: string;
-      }[],
-      given: Partial<NonNullable<WorldFacts['cachedGivenUp']>> = {},
-      patch: Partial<WorldFacts> = {},
-    ): WorldFacts => ({
+    const scout = (name: string): ZoneVerdict => ({
+      by: 'scout',
+      name,
+      sentMs: 1_000,
+      atMs: 1_250,
+      verdict: 'notHeard',
+      dueMs: 1_250 + REWALK_FIRST_MS,
+    });
+    const walksAgain: WalkAgainSeen[] = [
+      {
+        carrier: 'dev-50.zone-b.test',
+        own: true,
+        step: 0,
+        dueMs: 1_250 + REWALK_FIRST_MS,
+        notHeardMs: 1_250,
+        sentMs: 6_300,
+        verdict: 'notHeard',
+        atMs: 6_550,
+      },
+      {
+        carrier: b20,
+        own: true,
+        step: 1,
+        dueMs: 6_550 + 2 * REWALK_FIRST_MS,
+        notHeardMs: 6_550,
+        sentMs: 16_600,
+        verdict: 'heard',
+        atMs: 16_650,
+      },
+    ];
+    const zoneWalks: ZoneWalks = {
+      heardMs: [16_650],
+      verdicts: [
+        scout('dev-10.zone-b.test'),
+        scout('dev-30.zone-b.test'),
+        {
+          by: 'walkAgain',
+          name: 'dev-50.zone-b.test',
+          sentMs: 6_300,
+          atMs: 6_550,
+          verdict: 'notHeard',
+          dueMs: 6_550 + 2 * REWALK_FIRST_MS,
+        },
+        {
+          by: 'walkAgain',
+          name: b20,
+          sentMs: 16_600,
+          atMs: 16_650,
+          verdict: 'heard',
+          dueMs: undefined,
+        },
+      ],
+      walksAgain,
+    };
+    const given: NonNullable<WorldFacts['cachedGivenUp']> = {
+      intervalMs: 60_000,
+      lagMs: 40,
+      firstAnswerMs: { [b20]: 16_700, [b40]: 21_100 },
+      firstAskedMs: { [b20]: 2_000, [b40]: 3_000 },
+      checks: [],
+      silentUntried: 25,
+      silentHoldMs: 30_000,
+      keyHeardMs: 16_650,
+      checksAtMs: {
+        [b20]: [2_000, 8_000, 16_600, 22_000, 28_000],
+        [b40]: [3_000, 9_000, 15_000, 21_000, 27_000],
+      },
+      ownRefusedMs: { [b20]: [], [b40]: [15_000] },
+      zoneQuestionsMs: {
+        'dev-10.zone-b.test': [1_000, 40_000],
+        'dev-30.zone-b.test': [1_000],
+        'dev-50.zone-b.test': [6_300],
+        [b20]: [16_600, 40_000],
+        [b40]: [21_000],
+      },
+      zoneWalks,
+    };
+    return { b20, b40, held, given, zoneWalks, walksAgain };
+  })();
+
+  /** `silentFirst`'s facts, with its cached checks given up and anything else changed. */
+  const onFacts = (
+    checks: readonly {
+      readonly name: string;
+      readonly askedMs: number;
+      readonly message?: string;
+    }[],
+    given: Partial<NonNullable<WorldFacts['cachedGivenUp']>> = {},
+    patch: Partial<WorldFacts> = {},
+  ): WorldFacts => {
+    const base = clean('partial', 'gate');
+    return {
       ...base,
       givenUp: { ...base.givenUp, cached: checks.length },
       cachedGivenUp: {
-        intervalMs: 60_000,
-        lagMs: 40,
-        firstAnswerMs: { [b20]: 70_000, [b40]: 9_000 },
-        firstAskedMs: { [b20]: 1_000, [b40]: 2_000 },
-        silentUntried: 25,
-        silentHoldMs: WORLD_SCHEDULE.tries * WORLD_SCHEDULE.waitMs,
-        keyHeardMs: 36_000,
-        sensorsPerName: 10,
-        checks: checks.map((check) => ({ message: held(check.name), ...check })),
+        ...silentFirst.given,
+        checks: checks.map((check) => ({ message: silentFirst.held(check.name), ...check })),
         ...given,
       },
       ...patch,
-    });
-    // Inside: its checks while it was held, one of them past the first scan interval of 60 s,
-    // which binds no more.
-    const inside = placed([
-      { name: b20, askedMs: 1_000 },
-      { name: b20, askedMs: 63_000 },
-      { name: b20, askedMs: 69_999 },
-      { name: b40, askedMs: 8_999 },
+    };
+  };
+
+  it('partial with the check on holds each cached name’s first answer to its own ceiling, in times from the arm’s start: the later of its first ask and the zone first heard, its own largest gap between checks once and once more for each own walk D19 refused, the zone’s questions sharing discovery over discovery’s places, and the lag (P-485)', () => {
+    const { b20, b40 } = silentFirst;
+    const s1 = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
+    // dev-20: the zone first heard at 16.65 s, after its first ask; its largest gap 8.6 s; nothing
+    // refused; no question of another name in its span; the 40 ms lag.
+    const b20Ms = 16_650 + 8_600 + 40;
+    // dev-40: 16.65 s; its gap 6 s, twice for its one refusal; dev-20's own walk sharing discovery
+    // in its span, before dev-20's answer, one hold over discovery's places; the lag.
+    const b40Ms = 16_650 + 6_000 * 2 + FORWARD_HOLD_MS / WALK_QUESTIONS.discovery + 40;
+    const inside = onFacts([
+      { name: b20, askedMs: 8_000 },
+      { name: b40, askedMs: 15_000 },
+      { name: b40, askedMs: 21_139 },
     ]);
     assert.deepEqual(judgeWorld(inside), []);
-    assert.deepEqual(cachedAllowance(inside), { names: 2, checks: 4, refused: [] });
-    assert.deepEqual(cachedCeilingOn(inside.cachedGivenUp ?? assert.fail()), {
-      ms: ceilingMs,
-      keyHeardMs: 36_000,
-      spacingMs: 6_000,
-      ownWalks: 25,
+    assert.deepEqual(cachedAllowance(inside), { names: 2, checks: 3, refused: [] });
+    assert.deepEqual(cachedCeilingsOn(silentFirst.given), {
+      keyHeardMs: 16_650,
       holdMs: FORWARD_HOLD_MS,
-      places: OWN_WALK_PLACES,
+      places: WALK_QUESTIONS.discovery,
       lagMs: 40,
+      names: {
+        [b20]: {
+          anchorMs: 16_650,
+          anchoredBy: 'the zone first heard',
+          gapMs: 8_600,
+          refused: 0,
+          questions: 0,
+          drainMs: 0,
+          lagMs: 40,
+          ms: b20Ms,
+        },
+        [b40]: {
+          anchorMs: 16_650,
+          anchoredBy: 'the zone first heard',
+          gapMs: 6_000,
+          refused: 1,
+          questions: 1,
+          drainMs: FORWARD_HOLD_MS / WALK_QUESTIONS.discovery,
+          lagMs: 40,
+          ms: b40Ms,
+        },
+      },
     });
-    // Within the lag of its first answer; past it, not.
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 70_039 }])), []);
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 70_040 }])), [
-      'a cached check of dev-20.zone-b.test given up, asked at 70.0 s, after dev-20.zone-b.test’s first answer at 70.0 s and the 40 ms lag measured',
+    const b40Parts = `the zone first heard at 16.6 s, its largest gap between checks 6.0 s × (1 + 1 own walks D19 refused), 1 of the zone’s questions sharing discovery × 10.0 s ÷ 4 places = 2.5 s, and the 40 ms lag`;
+    // Its first answer at its ceiling, and a millisecond past it, in times from the arm's start:
+    // dev-40 waited 3 s less than that from its first ask, which binds nothing.
+    assert.deepEqual(
+      judgeWorld(onFacts([], { firstAnswerMs: { [b20]: 16_700, [b40]: b40Ms } })),
+      [],
+    );
+    assert.deepEqual(
+      judgeWorld(onFacts([], { firstAnswerMs: { [b20]: 16_700, [b40]: b40Ms + 1 } })),
+      [`${b40} first answered at ${s1(b40Ms + 1)}, past its ceiling of ${s1(b40Ms)}: ${b40Parts}`],
+    );
+    // A refusal after its first answer is not one it waited on: dev-40's at 33 s adds nothing.
+    assert.deepEqual(
+      judgeWorld(
+        onFacts([], {
+          firstAnswerMs: { [b20]: 16_700, [b40]: b40Ms + 1 },
+          checksAtMs: {
+            ...silentFirst.given.checksAtMs,
+            [b40]: [3_000, 9_000, 15_000, 21_000, 27_000, 33_000],
+          },
+          ownRefusedMs: { [b20]: [], [b40]: [15_000, 33_000] },
+        }),
+      ),
+      [`${b40} first answered at ${s1(b40Ms + 1)}, past its ceiling of ${s1(b40Ms)}: ${b40Parts}`],
+    );
+    // dev-20 answered later has dev-40's own walk at 21 s in its span, which dev-20's ceiling at
+    // its first answer does not.
+    const b20Later = b20Ms + FORWARD_HOLD_MS / WALK_QUESTIONS.discovery;
+    assert.deepEqual(
+      judgeWorld(onFacts([], { firstAnswerMs: { [b20]: b20Later, [b40]: 21_100 } })),
+      [],
+    );
+    assert.deepEqual(
+      judgeWorld(onFacts([], { firstAnswerMs: { [b20]: b20Later + 1, [b40]: 21_100 } })),
+      [
+        `${b20} first answered at ${s1(b20Later + 1)}, past its ceiling of ${s1(b20Later)}: the zone first heard at 16.6 s, its largest gap between checks 8.6 s × (1 + 0 own walks D19 refused), 1 of the zone’s questions sharing discovery × 10.0 s ÷ 4 places = 2.5 s, and the 40 ms lag`,
+      ],
+    );
+    // A name first asked after the zone was heard starts from its first ask.
+    const late = cachedCeilingsOn({
+      ...silentFirst.given,
+      firstAnswerMs: { [b20]: 16_700, [b40]: 31_100 },
+      firstAskedMs: { [b20]: 2_000, [b40]: 30_000 },
+      checksAtMs: { ...silentFirst.given.checksAtMs, [b40]: [30_000, 36_000, 42_000] },
+      ownRefusedMs: { [b20]: [], [b40]: [] },
+    });
+    assert.ok(!('missing' in late));
+    assert.deepEqual(late.names[b40], {
+      anchorMs: 30_000,
+      anchoredBy: 'its first ask',
+      gapMs: 6_000,
+      refused: 0,
+      // Its span: dev-20's own walk at 16.6 s is a hold before 30 s and more, let go; dev-20's at
+      // 40 s is a known name's; dev-10's at 40 s is after dev-40's first answer.
+      questions: 0,
+      drainMs: 0,
+      lagMs: 40,
+      ms: 30_000 + 6_000 + 40,
+    });
+    // Every cached name the arm asked answers within the arm.
+    assert.deepEqual(judgeWorld(onFacts([], { firstAnswerMs: { [b20]: 16_700 } })), [
+      `${b40} never answered within the arm, first asked at 3.0 s`,
     ]);
-    // The longest wait at the ceiling, and a millisecond past it.
-    assert.deepEqual(
-      judgeWorld(placed([], { firstAnswerMs: { [b20]: 1_000 + ceilingMs, [b40]: 9_000 } })),
-      [],
+    // Never answered, a check given up is held to the name's own ceiling, never answered
+    // or not, from the arm's start.
+    const never = { firstAnswerMs: { [b20]: 16_700 } };
+    assert.deepEqual(judgeWorld(onFacts([{ name: b40, askedMs: 30_000 }], never)), [
+      `${b40} never answered within the arm, first asked at 3.0 s`,
+    ]);
+    const neverMs = cachedCeilingsOn({ ...silentFirst.given, ...never });
+    assert.ok(!('missing' in neverMs));
+    const b40Never = neverMs.names[b40] ?? assert.fail('dev-40’s ceiling');
+    assert.equal(
+      b40Never.questions,
+      2,
+      'dev-20’s own walk, and dev-10’s at 40 s: to the arm’s end',
     );
     assert.deepEqual(
-      judgeWorld(placed([], { firstAnswerMs: { [b20]: 1_001 + ceilingMs, [b40]: 9_000 } })),
+      judgeWorld(onFacts([{ name: b40, askedMs: b40Never.ms }], never)).slice(0, 1),
       [
-        `the longest a cached name waited for its first answer, ${s1(1 + ceilingMs)} (dev-20.zone-b.test), past the ceiling of ${s1(ceilingMs)}: ${parts}`,
+        `a cached check of ${b40} given up, asked at ${s1(b40Never.ms)}: never answered, past its ceiling of ${s1(b40Never.ms)}: the zone first heard at 16.6 s, its largest gap between checks 6.0 s × (1 + 1 own walks D19 refused), 2 of the zone’s questions sharing discovery × 10.0 s ÷ 4 places = 5.0 s, and the 40 ms lag`,
       ],
     );
-    // A name never answered: held within the ceiling of its first ask, and no longer.
-    const never = { [b40]: 9_000 };
-    assert.deepEqual(
-      judgeWorld(placed([{ name: b20, askedMs: ceilingMs + 999 }], { firstAnswerMs: never })),
-      [],
-    );
-    assert.deepEqual(
-      judgeWorld(placed([{ name: b20, askedMs: ceilingMs + 1_000 }], { firstAnswerMs: never })),
-      [
-        `a cached check of dev-20.zone-b.test given up, asked at ${s1(ceilingMs + 1_000)}: never answered, past its first ask at 1.0 s and the ceiling of ${s1(ceilingMs)}`,
-      ],
-    );
-    // A fact the ceiling needs missing: none allowed, and the run fails once, naming it.
-    for (const [omit, said] of [
-      ['keyHeardMs', 'the time the check first heard their zone'],
-      ['sensorsPerName', 'the sensors a name'],
-      ['silentUntried', 'the silent names asked'],
-      ['lagMs', 'the lag'],
-      ['firstAskedMs', 'the cached names’ first asks'],
-    ] as const) {
-      const facts = placed([{ name: b20, askedMs: 1_000 }], { [omit]: undefined });
-      const expected = `with the name check on, the cached names’ ceiling is not placed: ${said} not recorded`;
-      assert.deepEqual(judgeWorld(facts), [expected], omit);
-      assert.deepEqual(cachedAllowance(facts), { names: 0, checks: 0, refused: [expected] });
-    }
-    const { cachedGivenUp: _unrecorded, ...unplaced } = base;
-    assert.deepEqual(judgeWorld(unplaced), [
-      'with the name check on, the cached names’ ceiling is not placed: the cached names’ waits not recorded',
+    // Within the lag of its first answer; past it, not.
+    assert.deepEqual(judgeWorld(onFacts([{ name: b20, askedMs: 16_739 }])), []);
+    assert.deepEqual(judgeWorld(onFacts([{ name: b20, askedMs: 16_740 }])), [
+      `a cached check of ${b20} given up, asked at 16.7 s, after ${b20}’s first answer at 16.7 s and the 40 ms lag measured`,
     ]);
     // Words a held name's check does not give up with: its bound waited out, or another hold.
     const waited =
       'the device’s host name did not resolve within 3000 ms, querying dev-20.zone-b.test:161 over SNMP — the probe’s resolver is not answering';
-    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 1_000, message: waited }])), [
-      'a cached check of dev-20.zone-b.test given up, asked at 1.0 s, in words a held name’s check does not give up with: the device’s host name did not resolve within N ms, querying <name>:N over SNMP — the probe’s resolver is not answering',
+    assert.deepEqual(judgeWorld(onFacts([{ name: b20, askedMs: 8_000, message: waited }])), [
+      'a cached check of dev-20.zone-b.test given up, asked at 8.0 s, in words a held name’s check does not give up with: the device’s host name did not resolve within N ms, querying <name>:N over SNMP — the probe’s resolver is not answering',
     ]);
-    const unvouched = held(b20).replace(
-      /no name of zone-b\.test has answered in the lookup helper since one of its lookups ran past 1000 ms/u,
-      'the DNS check does not vouch for zone-b.test now',
-    );
-    const atRisk = held(b20).replace(
-      /no name of zone-b\.test .*$/u,
-      '4 of the lookup helper’s lanes are held by lookups that may not answer, the most a name not known to answer waits behind; it stays queued)',
-    );
-    for (const message of [unvouched, atRisk]) {
-      assert.match(
-        judgeWorld(placed([{ name: b20, askedMs: 1_000, message }])).join('\n'),
-        /in words a held name’s check does not give up with/u,
+    const unvouched = silentFirst
+      .held(b20)
+      .replace(
+        /no name of zone-b\.test has answered in the lookup helper since one of its lookups ran past 1000 ms/u,
+        'the DNS check does not vouch for zone-b.test now',
       );
-    }
+    assert.match(
+      judgeWorld(onFacts([{ name: b20, askedMs: 8_000, message: unvouched }])).join('\n'),
+      /in words a held name’s check does not give up with/u,
+    );
     // The facts must place every one, and answering checks have none however they are placed.
     assert.deepEqual(
-      judgeWorld(placed([{ name: b20, askedMs: 1_000 }], {}, { givenUp: { cached: 2 } })),
+      judgeWorld(onFacts([{ name: b20, askedMs: 8_000 }], {}, { givenUp: { cached: 2 } })),
       ['2 cached checks given up, and 1 placed by name and time'],
     );
     assert.deepEqual(
       judgeWorld(
-        placed([{ name: b20, askedMs: 1_000 }], {}, { givenUp: { cached: 1, answering: 1 } }),
+        onFacts([{ name: b20, askedMs: 8_000 }], {}, { givenUp: { cached: 1, answering: 1 } }),
       ),
       ['1 answering checks given up'],
     );
-    // With the check off, its own ceiling: the same wait, past the ceiling on, is inside it.
+  });
+
+  it('partial with the check on judges the anchor: each walk again of zone b at its step of the schedule from its NotHeard, sent by the first check of a held name after its due and the lag, and the zone first heard at its first heard scout or walk again (P-485)', () => {
+    const { b20, given, zoneWalks, walksAgain } = silentFirst;
+    const [first, second] = walksAgain;
+    assert.ok(first !== undefined && second !== undefined);
+    const faults = (walks: Partial<ZoneWalks>, more: Partial<typeof given> = {}): string[] =>
+      zoneWalkFaults({ ...given, zoneWalks: { ...zoneWalks, ...walks }, ...more });
+    assert.deepEqual(faults({}), []);
+    assert.equal(rewalkBaseMs(0), REWALK_FIRST_MS);
+    assert.equal(rewalkBaseMs(9), REWALK_MAX_MS);
+    // The step broken one way: the double step, a NotHeard of a key already silent stepping it
+    // again, as before `P-484`: the first walk again 10 s on, the next 40 s on.
+    const doubled = faults(
+      {
+        heardMs: [51_650],
+        walksAgain: [
+          { ...first, step: 1, dueMs: 1_250 + 2 * REWALK_FIRST_MS, sentMs: 11_300, atMs: 11_550 },
+          {
+            ...second,
+            step: 3,
+            dueMs: 11_550 + 8 * REWALK_FIRST_MS,
+            notHeardMs: 11_550,
+            sentMs: 51_600,
+            atMs: 51_650,
+          },
+        ],
+        verdicts: zoneWalks.verdicts.map((verdict) =>
+          verdict.verdict === 'heard' ? { ...verdict, sentMs: 51_600, atMs: 51_650 } : verdict,
+        ),
+      },
+      { keyHeardMs: 51_650 },
+    );
+    assert.deepEqual(doubled, [
+      'zone b’s walk again 1 by dev-50.zone-b.test, sent at 11.300 s: at step 1, where the schedule has step 0 (5.000 s)',
+      'zone b’s walk again 1 by dev-50.zone-b.test: due 10.000 s after its NotHeard at 1.250 s, not 5.000 s ± 20% (step 0)',
+      'zone b’s walk again 2 by dev-20.zone-b.test, sent at 51.600 s: at step 3, where the schedule has step 1 (10.000 s)',
+      'zone b’s walk again 2 by dev-20.zone-b.test: due 40.000 s after its NotHeard at 11.550 s, not 10.000 s ± 20% (step 1)',
+    ]);
+    // And the other: a step short, the second walk again 5 s on again.
     assert.deepEqual(
-      judgeWorld({
-        ...placed([], { firstAnswerMs: { [b20]: 1_001 + ceilingMs, [b40]: 9_000 } }),
-        checkOn: false,
+      faults({ walksAgain: [first, { ...second, step: 0, dueMs: 6_550 + REWALK_FIRST_MS }] }),
+      [
+        'zone b’s walk again 2 by dev-20.zone-b.test, sent at 16.600 s: at step 0, where the schedule has step 1 (10.000 s)',
+        'zone b’s walk again 2 by dev-20.zone-b.test: due 5.000 s after its NotHeard at 6.550 s, not 10.000 s ± 20% (step 1)',
+        // Due at 11.55 s, it was late too: dev-40, held, was checked at 15 s.
+        'zone b’s walk again 2 by dev-20.zone-b.test, due at 11.550 s, sent at 16.600 s: late, after the first check of a held name after its due, dev-40.zone-b.test’s at 15.000 s, and the 40 ms lag',
+      ],
+    );
+    // At its step, the jitter's edges pass and past them do not; never before its due.
+    const dueAfter = (ms: number) =>
+      faults({
+        walksAgain: [{ ...first, dueMs: 1_250 + ms, sentMs: Math.max(6_300, 1_250 + ms) }, second],
+      });
+    assert.deepEqual(dueAfter(REWALK_FIRST_MS * (1 - REWALK_JITTER)), []);
+    assert.deepEqual(dueAfter(REWALK_FIRST_MS * (1 + REWALK_JITTER)), []);
+    assert.deepEqual(dueAfter(REWALK_FIRST_MS * (1 + REWALK_JITTER) + 2), [
+      'zone b’s walk again 1 by dev-50.zone-b.test: due 6.002 s after its NotHeard at 1.250 s, not 5.000 s ± 20% (step 0)',
+    ]);
+    assert.deepEqual(faults({ walksAgain: [{ ...first, sentMs: 6_000 }, second] }), [
+      'zone b’s walk again 1 by dev-50.zone-b.test: sent at 6.000 s, before its due at 6.250 s',
+    ]);
+    // A walk again with no verdict moved the next due from its own send.
+    assert.deepEqual(
+      faults({
+        walksAgain: [
+          { ...first, verdict: 'none', atMs: 6_310 },
+          { ...second, dueMs: 6_300 + 2 * REWALK_FIRST_MS, notHeardMs: 1_250 },
+        ],
       }),
       [],
     );
+    // A zone found silent again later, from mixed, starts at its step: the run's first stretch, at
+    // step 0, does not.
+    const fromMixed: WalkAgainSeen = {
+      carrier: 'dev-70.zone-b.test',
+      own: false,
+      step: 4,
+      dueMs: 90_000 + REWALK_MAX_MS,
+      notHeardMs: 90_000,
+      sentMs: 150_000,
+      verdict: 'notHeard',
+      atMs: 150_250,
+    };
+    assert.deepEqual(faults({ walksAgain: [...walksAgain, fromMixed] }), []);
+    assert.deepEqual(faults({ walksAgain: [{ ...first, step: 4 }, second] }).slice(0, 1), [
+      'zone b’s walk again 1 by dev-50.zone-b.test, sent at 6.300 s: at step 4, where the schedule has step 0 (5.000 s)',
+    ]);
+    // Late: sent past the first check of a held cached name after its due and the lag, as with
+    // the carried walk again reverted; at the lag's edge, not.
+    assert.deepEqual(faults({ walksAgain: [first, { ...second, sentMs: 16_640 }] }), []);
+    const late = faults({ walksAgain: [first, { ...second, sentMs: 16_641 }] });
+    assert.deepEqual(late, [
+      `zone b’s walk again 2 by ${b20}, due at 16.550 s, sent at 16.641 s: late, after the first check of a held name after its due, ${b20}’s at 16.600 s, and the 40 ms lag`,
+    ]);
+    // A late key: the zone heard at 49 s, on a walk again sent then though held names were
+    // checked from its due on. Each name's own ceiling starts there and passes; the walk again
+    // does not.
+    const lateKey = onFacts([], {
+      keyHeardMs: 49_050,
+      firstAnswerMs: { [b20]: 49_100, [silentFirst.b40]: 49_200 },
+      zoneWalks: {
+        ...zoneWalks,
+        heardMs: [49_050],
+        walksAgain: [first, { ...second, sentMs: 49_000, atMs: 49_050 }],
+        verdicts: zoneWalks.verdicts.map((verdict) =>
+          verdict.verdict === 'heard' ? { ...verdict, sentMs: 49_000, atMs: 49_050 } : verdict,
+        ),
+      },
+    });
+    assert.deepEqual(judgeWorld(lateKey), [
+      `zone b’s walk again 2 by ${b20}, due at 16.550 s, sent at 49.000 s: late, after the first check of a held name after its due, ${b20}’s at 16.600 s, and the 40 ms lag`,
+    ]);
+    // A due after the last verdict, with none sent though a held name was checked.
+    const { keyHeardMs: _never, ...unheard } = given;
+    assert.deepEqual(
+      zoneWalkFaults({
+        ...unheard,
+        zoneWalks: {
+          heardMs: [],
+          walksAgain: [first],
+          verdicts: zoneWalks.verdicts.filter((verdict) => verdict.verdict !== 'heard'),
+        },
+      }),
+      [
+        `zone b’s walk again after its walk again at 6.550 s, due at 16.550 s, never sent, though ${b20}, held, was checked at 16.600 s`,
+      ],
+    );
+    // The anchor: the first heard verdict of its scouts and walks again, and no other time.
+    assert.deepEqual(faults({}, { keyHeardMs: 16_651 }), [
+      `the check first heard zone b at 16.651 s, and its first heard scout or walk again was ${b20}’s at 16.650 s`,
+    ]);
+    assert.deepEqual(
+      faults({ verdicts: zoneWalks.verdicts.filter((verdict) => verdict.verdict !== 'heard') }),
+      [
+        'the check first heard zone b at 16.650 s, and none of its scouts and walks again was heard',
+      ],
+    );
+    // In the run's judgement: one fault, one line.
+    assert.deepEqual(
+      judgeWorld(onFacts([], { keyHeardMs: 16_651 })).at(-1),
+      faults({}, { keyHeardMs: 16_651 })[0],
+    );
+  });
+
+  it('partial with the check on places nothing when a fact its ceilings or their anchor need is missing, and fails once, naming each (P-485)', () => {
+    const { b20, b40 } = silentFirst;
+    for (const [omit, said] of [
+      ['keyHeardMs', 'the time the check first heard their zone'],
+      ['lagMs', 'the lag'],
+      ['firstAskedMs', 'the cached names’ first asks'],
+      ['checksAtMs', 'the cached names’ checks'],
+      ['ownRefusedMs', 'their own walks D19 refused'],
+      ['zoneQuestionsMs', 'the zone’s questions'],
+      ['zoneWalks', 'the zone’s scouts and walks again'],
+    ] as const) {
+      const facts = onFacts([{ name: b20, askedMs: 8_000 }], { [omit]: undefined });
+      const expected = `with the name check on, the cached names’ ceiling is not placed: ${said} not recorded`;
+      assert.deepEqual(judgeWorld(facts), [expected], omit);
+      assert.deepEqual(cachedAllowance(facts), { names: 0, checks: 0, refused: [expected] });
+    }
+    // A name with one check has no gap between checks.
+    assert.deepEqual(
+      judgeWorld(
+        onFacts([], {
+          checksAtMs: { [b20]: [2_000, 8_000, 16_600], [b40]: [3_000] },
+        }),
+      ),
+      [
+        `with the name check on, the cached names’ ceiling is not placed: ${b40}’s gap between checks (1 checks) not recorded`,
+      ],
+    );
+    const { cachedGivenUp: _unrecorded, ...unplaced } = clean('partial', 'gate');
+    assert.deepEqual(judgeWorld(unplaced), [
+      'with the name check on, the cached names’ ceiling is not placed: the cached names’ waits not recorded',
+    ]);
+    // With the check off, its own ceiling, which none of these bind.
+    assert.deepEqual(judgeWorld({ ...onFacts([]), checkOn: false }), []);
+  });
+
+  it('partial’s facts are read from the arm’s log and asks as the check’s debug lines say them, in ms from the arm’s start: the zone first heard at its first line, not its last; its scouts and walks again; each name’s checks, own walks D19 refused and questions (P-485)', () => {
+    const startedAt = 100_000;
+    const key = 'd:zone-b.test';
+    const log = new ZoneWalkLog();
+    const line = (fields: Record<string, unknown>): string =>
+      `${JSON.stringify({ level: 20, ...fields })}\n`;
+    const lines = [
+      line({
+        key: 'd:zone-a.test',
+        name: 'dev-1.zone-a.test',
+        phase: 'heard',
+        at: 100_900,
+        msg: HEARD_A_ZONE,
+      }),
+      line({
+        key,
+        name: 'dev-10.zone-b.test',
+        by: 'scout',
+        sentAt: 101_000,
+        verdict: 'notHeard',
+        at: 101_250,
+        dueAt: 106_250,
+        msg: ZONE_VERDICT,
+      }),
+      line({
+        key,
+        name: 'dev-20.zone-b.test',
+        own: true,
+        step: 0,
+        dueAt: 106_250,
+        notHeardAt: 101_250,
+        sentAt: 106_300,
+        msg: WALKING_AGAIN,
+      }),
+      line({ key, name: 'dev-20.zone-b.test', phase: 'mixed', at: 106_350, msg: HEARD_A_ZONE }),
+      line({
+        key,
+        name: 'dev-20.zone-b.test',
+        by: 'walkAgain',
+        sentAt: 106_300,
+        verdict: 'heard',
+        at: 106_350,
+        dueAt: null,
+        msg: ZONE_VERDICT,
+      }),
+      line({ host: 'dev-40.zone-b.test', key, why: 'rate', at: 108_000, msg: OWN_WALK_DEFERRED }),
+      line({ host: 'dev-40.zone-b.test', key, why: 'budget', at: 109_000, msg: OWN_WALK_DEFERRED }),
+      // Heard again later, from silent: not when it was first heard.
+      line({ key, name: 'dev-40.zone-b.test', phase: 'mixed', at: 190_000, msg: HEARD_A_ZONE }),
+    ];
+    for (const one of lines) assert.equal(log.read(one), true, one);
+    assert.equal(log.read(line({ msg: 'routed a lookup', host: 'dev-1.zone-a.test' })), false);
+    assert.equal(log.firstHeard(key), 106_350);
+    const asks: Record<string, number[]> = {
+      'dev-20.zone-b.test': [108_000, 102_000],
+      'dev-40.zone-b.test': [103_000, 109_000, 115_000],
+      'dev-10.zone-b.test': [101_000],
+    };
+    const facts = partialFacts({
+      startedAt,
+      intervalMs: 60_000,
+      lagMs: 40,
+      cached: ['dev-20.zone-b.test', 'dev-40.zone-b.test'],
+      silent: ['dev-10.zone-b.test', 'dev-30.zone-b.test'],
+      key,
+      asksOf: (name) => asks[name] ?? [],
+      answersOf: (name) => (name === 'dev-20.zone-b.test' ? [106_400, 106_500] : []),
+      givenUp: [{ name: 'dev-40.zone-b.test', at: 109_000, message: 'held' }],
+      questions: [
+        { name: 'dev-10.zone-b.test.', at: 101_000 },
+        { name: 'DEV-20.zone-b.test', at: 106_300 },
+        { name: 'dev-1.zone-a.test', at: 100_500 },
+      ],
+      log,
+      silentHoldMs: 30_000,
+    });
+    assert.deepEqual(facts, {
+      intervalMs: 60_000,
+      lagMs: 40,
+      firstAnswerMs: { 'dev-20.zone-b.test': 6_400 },
+      checks: [{ name: 'dev-40.zone-b.test', askedMs: 9_000, message: 'held' }],
+      firstAskedMs: { 'dev-20.zone-b.test': 2_000, 'dev-40.zone-b.test': 3_000 },
+      silentUntried: 1,
+      silentHoldMs: 30_000,
+      keyHeardMs: 6_350,
+      checksAtMs: {
+        'dev-20.zone-b.test': [2_000, 8_000],
+        'dev-40.zone-b.test': [3_000, 9_000, 15_000],
+      },
+      ownRefusedMs: { 'dev-20.zone-b.test': [], 'dev-40.zone-b.test': [8_000] },
+      zoneQuestionsMs: { 'dev-10.zone-b.test': [1_000], 'dev-20.zone-b.test': [6_300] },
+      zoneWalks: {
+        heardMs: [6_350, 90_000],
+        verdicts: [
+          {
+            by: 'scout',
+            name: 'dev-10.zone-b.test',
+            sentMs: 1_000,
+            atMs: 1_250,
+            verdict: 'notHeard',
+            dueMs: 6_250,
+          },
+          {
+            by: 'walkAgain',
+            name: 'dev-20.zone-b.test',
+            sentMs: 6_300,
+            atMs: 6_350,
+            verdict: 'heard',
+            dueMs: undefined,
+          },
+        ],
+        walksAgain: [
+          {
+            carrier: 'dev-20.zone-b.test',
+            own: true,
+            step: 0,
+            dueMs: 6_250,
+            notHeardMs: 1_250,
+            sentMs: 6_300,
+            verdict: 'heard',
+            atMs: 6_350,
+          },
+        ],
+      },
+    });
+    // The run so read is judged clean, its anchor its walk again's heard verdict.
+    assert.deepEqual(zoneWalkFaults(facts), []);
   });
 
   it('partial with the check off allows a cached check given up in a held name’s words before the name’s first answer and the lag, past the first scan interval, and holds the longest wait to a ceiling read from the run: its silent names never yet tried, times the silent hold, over the lanes they can hold, plus the lag (P-480)', () => {
@@ -5457,9 +5958,9 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       judgeWorld({ ...placed([{ name: b20, askedMs: 1_000 }]), givenUp: { cached: 2 } }),
       ['2 cached checks given up, and 1 placed by name and time'],
     );
-    // With the check on, its own ceiling (`P-484`), whose facts these do not record.
+    // With the check on, its own ceilings (`P-485`), whose facts these do not record.
     assert.deepEqual(judgeWorld({ ...placed([{ name: b20, askedMs: 120_000 }]), checkOn: true }), [
-      'with the name check on, the cached names’ ceiling is not placed: the time the check first heard their zone, the sensors a name not recorded',
+      'with the name check on, the cached names’ ceiling is not placed: the time the check first heard their zone, the cached names’ checks, their own walks D19 refused, the zone’s questions, the zone’s scouts and walks again not recorded',
     ]);
   });
 

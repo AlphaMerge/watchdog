@@ -18,6 +18,7 @@ import {
 import type { Logger } from '@ms/shared';
 import {
   DnsCheck,
+  WALK_MIN_MS,
   type CheckRoute,
   type CheckState,
   type DnsAsker,
@@ -217,6 +218,13 @@ export const CHECK_STATE_SAID: Readonly<Record<0 | CheckState, string>> = {
 };
 /** The domains Probe Health names as not answering (`P-441`). */
 export const NOT_ANSWERING_NAMED = 3;
+/**
+ * The debug line a queued helper lookup's own walk says when it was deferred rather than judged
+ * (`P-485`): its name, key, why (`rate` is D19's refusal) and when, on the resolver's clock. It
+ * waits for its name's next check, and the arms count it so.
+ */
+export const OWN_WALK_DEFERRED =
+  'a lookup queued in the lookup helper had its own walk deferred: its next check walks it';
 
 export type Family = 0 | 4 | 6;
 
@@ -2440,11 +2448,21 @@ export class NameResolver implements PoolResolver {
    * one), and `#run`'s `#offProbe` still refuses it there if its name is avoided by then (D27).
    * Not heard: it stays in the helper as `silent`, on its own step's evidence and miss watch.
    * Either way it is not walked again. Only if it is still the lookup the walk may move, as it was
-   * when the walk started; a deferred or dropped verdict leaves it to a later check's walk.
+   * when the walk started; a deferred or dropped verdict leaves it to a later check's walk, and says
+   * so at debug (`OWN_WALK_DEFERRED`, `P-485`).
    */
   #rewalked(gate: Gate, pending: Pending, walked: CheckRoute): void {
     if (walked.route !== 'heard' && walked.route !== 'silent') {
       pending.rewalk = undefined;
+      this.#logger.debug(
+        {
+          host: pending.entry.host,
+          key: walked.key,
+          why: walked.route === 'unvouched' ? walked.why : walked.route,
+          at: this.#now(),
+        },
+        OWN_WALK_DEFERRED,
+      );
       return;
     }
     pending.rewalk = 'done';
@@ -2700,12 +2718,19 @@ export class NameResolver implements PoolResolver {
     // And whatever is queued behind lanes that are now every one stuck stops waiting too, on
     // either lane set: in gate mode a queued helper lookup its own walk may take first walks, as
     // a fresh check of it would (`P-484`), and its checks stop only if it still waits behind them.
+    // With less of its checks' bounds left than a walk's least routing wait, it walks nothing and
+    // nothing is counted: no pool was short (`P-485`).
+    const check = this.#gate?.check;
     const sets = this.#gate === undefined ? [this.#probe] : [this.#probe, this.#gate.lanes];
     for (const set of sets) {
       for (const cls of ['first', 'refresh', 'retry'] as const) {
         for (const queued of [...set.queues[cls]]) {
           if (queued.waiters.size === 0 || !this.#lanesStuck(queued)) continue;
-          const walking = this.#rewalk(queued, this.#leftOfBounds(queued));
+          const left = this.#leftOfBounds(queued);
+          const walking =
+            check !== undefined && check.walkWindow(left) >= WALK_MIN_MS
+              ? this.#rewalk(queued, left)
+              : undefined;
           if (walking === undefined) {
             this.#flushStuck(queued);
             continue;

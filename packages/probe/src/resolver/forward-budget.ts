@@ -12,9 +12,14 @@
  * each server at every instant.
  *
  * **An own walk's places** (`P-484`): a queued helper lookup's own walk (`P-480`) takes a discovery
- * place, and, while discovery is full, one of heard's, at most `OWN_WALK_HEARD` of them at once,
- * so the walks of zones that answer keep the rest: 8 places in all (`OWN_WALK_PLACES`), inside the
- * pools' 12 (D16).
+ * place, and, while discovery is full, one of heard's, at most `OWN_WALK_HEARD` of them at once:
+ * 8 places in all (`OWN_WALK_PLACES`), inside the pools' 12 (D16). That is the most own walks
+ * hold, not what they are sure of: heard is a cap, not a reservation, and discovery's 4 are shared
+ * with scouts and walks again, so discovery's are the places own walks are sure of. The cap binds
+ * every own walk of a name never answered, whatever its key's phase (`P-485`), and a known name's
+ * while its key is mixed or heard and not fresh; a known name's own walk of a fresh heard key is
+ * one of that zone's heard walks. So the walks of zones that answer keep 4 of heard's 8 from every
+ * other zone's own walks.
  *
  * **A question held** is one sent and not answered: glibc sends A and AAAA together for family 0,
  * so a lookup holds 2 there and 1 for family 4 or 6 (`questionsOf`).
@@ -64,7 +69,8 @@ export const WALK_QUESTIONS: Readonly<Record<WalkPool, number>> = {
 
 /**
  * The heard pool's places an own walk may take while discovery is full (`P-484`): half of them, so
- * that heard zones' walks keep the other half however many silent names are walked on their own.
+ * that heard zones' walks keep the other half however many silent names are walked on their own
+ * (every own walk of a name never answered, `P-485`).
  */
 export const OWN_WALK_HEARD = 4;
 /** The places own walks hold at once at most: discovery's, and `OWN_WALK_HEARD` of heard's. */

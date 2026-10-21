@@ -39,7 +39,11 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * `KEY_SETTLE_MS`), or `unknown`. An unknown key sends at most `KEY_SCOUTS` scouts and its other
  * names wait for their verdict; a silent key sends nothing until its walk again is due (5 s
  * doubling to 60 s, one step a walk again: a NotHeard of a key already silent keeps its step,
- * `P-484`), and its names go straight to the helper; a mixed key walks each name. A
+ * `P-484`), and its names go straight to the helper; a mixed key walks each name. A key found
+ * silent from unknown, or from heard with nothing heard within `KEY_SETTLE_MS`, starts at 5 s; one
+ * that turns silent from mixed starts at the step its NotHeards while mixed took it to, each one
+ * step, up to 60 s. Each walk again says so at debug as it is sent (`WALKING_AGAIN`), and each
+ * scout and walk again its verdict (`ZONE_VERDICT`, `P-485`). A
  * verdict is taken after polls, and one whose timer fired more than `LATE_MS` late is dropped
  * (D31): its scout is released and its waiters route unvouched (`stall`).
  *
@@ -67,10 +71,12 @@ import { afterPolls, LATE_MS } from './verdict-timer.js';
  * until the server's first reply or `FORWARD_HOLD_MS`, never less for the channel giving up
  * (`P-479`); a step short of room waits in its pool's queue until its deadline, woken by a reply
  * or a hold's end, then routes `budget`. A waiter given room sends in the same turn, so that no
- * pool admits past its places however many wakes come in one turn (`P-484`). An own walk of a
- * mixed key, or of a heard one not fresh, takes discovery's room, and while discovery is full up
- * to `OWN_WALK_HEARD` of heard's (`P-484`). Each server's bucket gives at most 10 questions a
- * second; a step it refuses routes `rate`, at once.
+ * pool admits past its places however many wakes come in one turn (`P-484`). An own walk takes
+ * discovery's room, and while discovery is full up to `OWN_WALK_HEARD` of heard's: an own walk of
+ * a name never answered whatever its key's phase, a fresh heard one included (`P-485`), and a known
+ * name's of a mixed key or a heard one not fresh (`P-484`); a known name's own walk of a fresh
+ * heard key is one of that zone's walks, in heard. Each server's bucket gives at most 10 questions
+ * a second; a step it refuses routes `rate`, at once.
  *
  * **Proven, misses and the stand-down** (§1.10). The check walks nothing until a reply has proven
  * the path to the servers under this configuration: any reply to a walk, or to the canary, a
@@ -131,8 +137,24 @@ export const KEY_IDLE_MS = 390_000;
 export const MAX_KEYS = 20_000;
 /** The canary's name (§1.10): a question every server answers at once, NXDOMAIN or not. */
 export const CANARY_NAME = 'localhost.';
-/** The debug line a key heard or mixed from unknown or silent says (`P-484`), with its key. */
+/**
+ * The debug line a key heard or mixed from unknown or silent says (`P-484`), with its key and, on
+ * the resolver's clock, when (`at`, `P-485`).
+ */
 export const HEARD_A_ZONE = 'the DNS check heard a zone it walks';
+/**
+ * The debug line a silent key's walk again says as it is sent (`P-485`): its key; its carrier, the
+ * lookup whose walk it is, by name, and whether that is a queued helper lookup's own walk; the step
+ * its due was counted at; when it fell due and the NotHeard that due was counted from; and when it
+ * was sent, on the resolver's clock. What the arms judge the backoff and the carried walk again by.
+ */
+export const WALKING_AGAIN = 'the DNS check walks a silent zone again';
+/**
+ * The debug line a key's scout or walk again says at its verdict (`P-485`): `heard`, `notHeard`, or
+ * `none` (dropped, deferred, unreadable, or outweighed by a newer Heard of its name); when, on the
+ * resolver's clock; and the walk again then due, if the key is silent.
+ */
+export const ZONE_VERDICT = 'the DNS check has its verdict on a zone’s scout or walk again';
 const STUCK_MS = 1_000;
 const LOG_EVERY_MS = 60_000;
 /** A walk deferred after this long with none for the same reason (and server) starts an episode. */
@@ -251,9 +273,10 @@ export interface CheckAsk {
   /** Its lookup: sampling counts it until `sampledEnded`. */
   readonly ref: object;
   /**
-   * A queued helper lookup's own walk (`P-480`), never a ride: of a mixed key, or a heard one not
-   * fresh, it takes discovery's room and, while discovery is full, up to `OWN_WALK_HEARD` of
-   * heard's (`P-484`).
+   * A queued helper lookup's own walk (`P-480`), never a ride: it takes discovery's room and, while
+   * discovery is full, up to `OWN_WALK_HEARD` of heard's (`P-484`), of a name never answered
+   * whatever its key's phase (`P-485`), of a known one while its key is mixed or heard and not
+   * fresh. A silent key's walk again it carries is the key's, in discovery.
    */
   readonly own: boolean;
 }
@@ -441,6 +464,24 @@ type StepEnd =
   | { readonly kind: 'silent'; readonly question: Question | undefined }
   | { readonly kind: 'stall' | 'bad' }
   | { readonly kind: 'deferred'; readonly why: 'budget' | 'rate'; readonly at: DeferredAt };
+
+/**
+ * A silent key's walk again, as it is sent (`P-485`): what its two debug lines say of it, the one
+ * at its send and the one at its verdict.
+ */
+interface WalkAgain {
+  /** The step its due was counted at: the backoff's, before this walk again steps it. */
+  readonly step: number;
+  /** When it fell due, and the NotHeard that was counted from, on the resolver's clock. */
+  readonly dueAt: number;
+  readonly notHeardAt: number | undefined;
+  /** The lookup whose walk carries it, by name, and whether that is a held lookup's own walk. */
+  readonly carrier: string;
+  readonly own: boolean;
+}
+
+/** A step of a key's own walk, as its verdict line says it (`P-485`): a scout or a walk again. */
+type ZoneWalkBy = 'scout' | 'walkAgain';
 
 /** A step waiting for room in its pool (§1.4). */
 interface RoomWait {
@@ -651,6 +692,15 @@ export class DnsCheck {
   }
 
   /**
+   * The routing wait a lookup asked with this bound would walk in (§1.3): `ROUTE_MS`, or a quarter
+   * of the bound where that is less. Under `WALK_MIN_MS` it walks nothing (row 6), and `route` counts
+   * a `budget` deferral; the stuck flush reads it first, and walks nothing then (`P-485`).
+   */
+  walkWindow(boundMs: number | undefined): number {
+    return Math.min(this.#routeMs, boundMs === undefined ? this.#routeMs : Math.floor(boundMs / 4));
+  }
+
+  /**
    * Where a lookup runs (§1.3 rows 3 to 8): at once when the check need not walk, or once its walk
    * has a verdict, or, for a refresh waiting to ride its zone, once it rides or may not (`P-477`).
    * Never rejects.
@@ -660,10 +710,7 @@ export class DnsCheck {
     const judged = this.#judge(ask, now);
     if (!('candidates' in judged)) return judged;
     const own = candidateKey(ask.host);
-    const waitMs = Math.min(
-      this.#routeMs,
-      ask.boundMs === undefined ? this.#routeMs : Math.floor(ask.boundMs / 4),
-    );
+    const waitMs = this.walkWindow(ask.boundMs);
     if (waitMs < WALK_MIN_MS) return this.#unvouched(own, 'budget', true);
     const deadline = this.#realNow() + waitMs;
     const failed = (error: unknown): CheckRoute => {
@@ -933,12 +980,21 @@ export class DnsCheck {
       let kind: 'key' | 'name';
       let scout = false;
       let asPilot = false;
+      let again: WalkAgain | undefined;
       if (phase === 'silent') {
         if (now < state.rewalkAt) {
           // Nothing asked for this name: its zone's silence is the evidence (finding 10).
           const since = state.lastNotHeardAt ?? now;
           return { route: 'silent', key, miss: undefined, evidence: { kind: 'zone', since } };
         }
+        // What its debug lines say of it (`P-485`): the step and due it was sent at, and by whom.
+        again = {
+          step: state.step,
+          dueAt: state.rewalkAt,
+          notHeardAt: state.lastNotHeardAt,
+          carrier: bare,
+          own: ask.own,
+        };
         // Its walk again: the next one is a step further off, whatever this one finds.
         state.step = Math.min(state.step + 1, 4);
         state.rewalkAt = now + this.#backoff(state.step);
@@ -962,7 +1018,11 @@ export class DnsCheck {
         pool = 'discovery';
         kind = 'key';
       } else {
-        pool = state.freshUntil > now ? 'heard' : ask.own ? 'own' : 'discovery';
+        // An own walk of a name never answered takes the own walks' places, fresh or not, so that
+        // heard keeps 4 for the zones that answer; a known name's, those of a zone not fresh, as
+        // any walk of it does discovery's (`P-484`, `P-485`).
+        const fresh = state.freshUntil > now;
+        pool = ask.own && !(fresh && ask.known) ? 'own' : fresh ? 'heard' : 'discovery';
         kind = 'name';
         // Out until its verdict, taken or dropped: the zone's other refreshes wait on it.
         if (piloting) {
@@ -983,6 +1043,7 @@ export class DnsCheck {
         deadline,
         scout,
         asPilot,
+        again,
       );
       switch (end.kind) {
         case 'silent':
@@ -1037,7 +1098,8 @@ export class DnsCheck {
   /**
    * One step: a candidate asked of its servers in `res_send`'s order (all at once under `rotate`,
    * each of which must reply), its key's verdict taken at `ROUTE_MS` from its send, and the lookup's
-   * at its own deadline, whichever is first.
+   * at its own deadline, whichever is first. A walk again (`again`) says so as it is sent, and a
+   * scout or a walk again says its verdict (`P-485`).
    */
   async #step(
     state: KeyState,
@@ -1049,8 +1111,28 @@ export class DnsCheck {
     deadline: number,
     scout: boolean,
     pilot: boolean,
+    again: WalkAgain | undefined,
   ): Promise<StepEnd> {
     const sentAt = this.#now();
+    if (again !== undefined) {
+      this.#logger.debug(
+        {
+          key,
+          name: again.carrier,
+          own: again.own,
+          step: again.step,
+          dueAt: again.dueAt,
+          notHeardAt: again.notHeardAt ?? null,
+          sentAt,
+        },
+        WALKING_AGAIN,
+      );
+    }
+    const by: ZoneWalkBy | undefined = scout
+      ? 'scout'
+      : again === undefined
+        ? undefined
+        : 'walkAgain';
     let verdictAt = this.#realNow() + this.#routeMs;
     // A step sent as the lookup was asked: its key's verdict and the lookup's are one deadline.
     if (verdictAt - deadline < SAME_DEADLINE_MS) verdictAt = deadline;
@@ -1065,17 +1147,31 @@ export class DnsCheck {
       switch (end.kind) {
         case 'answered':
         case 'next':
-        case 'done':
-          this.#heard(key, sentAt, candidate);
+        case 'done': {
+          const at = this.#heard(key, sentAt, candidate);
+          if (by !== undefined) this.#saidVerdict(key, candidate, by, sentAt, 'heard', at);
           return;
-        case 'silent':
-          this.#notHeard(key, sentAt, candidate);
+        }
+        case 'silent': {
+          const at = this.#notHeard(key, sentAt, candidate);
+          if (by !== undefined) {
+            this.#saidVerdict(
+              key,
+              candidate,
+              by,
+              sentAt,
+              at === undefined ? 'none' : 'notHeard',
+              at ?? this.#now(),
+            );
+          }
           return;
+        }
         default:
           // Dropped (D31), deferred or unreadable: no verdict, and the waiters on it route
           // unvouched. Only a scout's or a pilot's is waited on: another walk of a heard zone
           // deferred says nothing to the refreshes waiting for a place to ride it.
           if (scout || pilot) for (const wake of [...state.waiting]) wake('dropped');
+          if (by !== undefined) this.#saidVerdict(key, candidate, by, sentAt, 'none', this.#now());
       }
     });
     if (deadline >= verdictAt) return chain;
@@ -1463,7 +1559,26 @@ export class DnsCheck {
     return 'unknown';
   }
 
-  #heard(key: string, sentAt: number, name: string): void {
+  /**
+   * A scout's or a walk again's verdict, at debug (`P-485`): with the walk again then due, if the
+   * key is silent, so that a due no walk again was sent at can be judged too.
+   */
+  #saidVerdict(
+    key: string,
+    name: string,
+    by: ZoneWalkBy,
+    sentAt: number,
+    verdict: 'heard' | 'notHeard' | 'none',
+    at: number,
+  ): void {
+    const state = this.#keys.get(key);
+    const dueAt =
+      state !== undefined && this.#phase(state, at) === 'silent' ? state.rewalkAt : null;
+    this.#logger.debug({ key, name, by, sentAt, verdict, at, dueAt }, ZONE_VERDICT);
+  }
+
+  /** A step of a key heard (D18): when, on the resolver's clock. */
+  #heard(key: string, sentAt: number, name: string): number {
     const now = this.#now();
     const state = this.#key(key, now);
     const was = this.#phase(state, now);
@@ -1478,17 +1593,22 @@ export class DnsCheck {
     // Heard or mixed from now, where it was neither (`P-484`): when a queued helper lookup of it
     // may have a walk of its own, as `heardOrMixed` reads it. Debug: what a trace places by.
     if (was === 'unknown' || was === 'silent') {
-      this.#logger.debug({ key, name, phase: this.#phase(state, now) }, HEARD_A_ZONE);
+      this.#logger.debug({ key, name, phase: this.#phase(state, now), at: now }, HEARD_A_ZONE);
     }
     this.#wake(state, now);
+    return now;
   }
 
-  #notHeard(key: string, sentAt: number, name: string): void {
+  /**
+   * A step of a key not heard (D18): when, on the resolver's clock, or undefined where a newer Heard
+   * of the same name outweighs it and nothing was taken.
+   */
+  #notHeard(key: string, sentAt: number, name: string): number | undefined {
     const now = this.#now();
     const state = this.#key(key, now);
     const heardAfter = state.heardSentBy.get(name);
     // Only the same name's newer Heard outweighs it (D18): another name's says nothing of this one.
-    if (heardAfter !== undefined && heardAfter > sentAt) return;
+    if (heardAfter !== undefined && heardAfter > sentAt) return undefined;
     const was = this.#phase(state, now);
     const lately = state.lastHeardAt !== undefined && now - state.lastHeardAt < KEY_SETTLE_MS;
     // One step a walk again (`P-484`): a key already silent keeps its step, which its walk again
@@ -1514,6 +1634,7 @@ export class DnsCheck {
       }
     }
     this.#wake(state, now);
+    return now;
   }
 
   #wake(state: KeyState, now: number): void {

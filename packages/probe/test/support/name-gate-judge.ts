@@ -1,8 +1,13 @@
-import { SAMPLED_PER_KEY } from '../../src/resolver/dns-check.js';
+import {
+  REWALK_FIRST_MS,
+  REWALK_JITTER,
+  REWALK_MAX_MS,
+  SAMPLED_PER_KEY,
+} from '../../src/resolver/dns-check.js';
 import {
   FORWARD_HOLD_MS,
-  OWN_WALK_PLACES,
   WALK_BURST,
+  WALK_QUESTIONS,
   WALK_RATE,
 } from '../../src/resolver/forward-budget.js';
 import { KEY_QUIET, RISK_F, RISK_T } from '../../src/resolver/lane-rule.js';
@@ -94,6 +99,44 @@ export interface LossAt {
   readonly seen: boolean;
 }
 
+/** A verdict on a key's scout or walk again, as the check's debug line said it (`P-485`). */
+export interface ZoneVerdict {
+  readonly by: 'scout' | 'walkAgain';
+  readonly name: string;
+  /** When its step was sent, and when its verdict came, in ms from the arm's start. */
+  readonly sentMs: number;
+  readonly atMs: number;
+  readonly verdict: 'heard' | 'notHeard' | 'none';
+  /** The walk again due after it, in ms from the arm's start, if the key was silent then. */
+  readonly dueMs: number | undefined;
+}
+
+/** A walk again of a key as it was sent, as the check's debug line said it (`P-485`). */
+export interface WalkAgainSeen {
+  /** The lookup whose walk carried it, and whether that was a held lookup's own walk. */
+  readonly carrier: string;
+  readonly own: boolean;
+  /** The step its due was counted at. */
+  readonly step: number;
+  /** When it fell due, the NotHeard that due was counted from, and when it was sent, in ms. */
+  readonly dueMs: number;
+  readonly notHeardMs: number | undefined;
+  readonly sentMs: number;
+  /** Its verdict and when, if the arm saw one: none for one dropped, deferred or outweighed. */
+  readonly verdict: 'heard' | 'notHeard' | 'none' | undefined;
+  readonly atMs: number | undefined;
+}
+
+/** The silent zone's key's own walks (`P-485`): what the anchor of `partial`'s ceiling is judged by. */
+export interface ZoneWalks {
+  /** Its scouts' and walks again's verdicts, in the order they came. */
+  readonly verdicts: readonly ZoneVerdict[];
+  /** Its walks again, in the order they were sent. */
+  readonly walksAgain: readonly WalkAgainSeen[];
+  /** Each time the key was heard or mixed from unknown or silent (`HEARD_A_ZONE`), in order. */
+  readonly heardMs: readonly number[];
+}
+
 export interface WorldFacts {
   readonly arm: string;
   readonly mode: GateMode;
@@ -179,8 +222,22 @@ export interface WorldFacts {
      * walk. Undefined if the key never was, or the arm did not record it.
      */
     readonly keyHeardMs?: number;
-    /** The sensors each name has, so a held name's checks come the interval over them apart. */
-    readonly sensorsPerName?: number;
+    /**
+     * Each cached name's checks, when each was asked, in ms from the arm's start, in order
+     * (`P-485`): its own largest gap between checks, and the held checks a walk again must go out
+     * by.
+     */
+    readonly checksAtMs?: Readonly<Record<string, readonly number[]>>;
+    /** Each cached name's own walks D19 refused (`rate`), when, in ms from the arm's start (`P-485`). */
+    readonly ownRefusedMs?: Readonly<Record<string, readonly number[]>>;
+    /**
+     * The walk's questions for each of the silent zone's names, cached or silent, when each was
+     * sent, in ms from the arm's start (`P-485`): those that share discovery with a cached name's
+     * own walk are the drain.
+     */
+    readonly zoneQuestionsMs?: Readonly<Record<string, readonly number[]>>;
+    /** The silent zone's key's scouts and walks again, as the check's debug lines said them (`P-485`). */
+    readonly zoneWalks?: ZoneWalks;
   };
   /** The helper, in gate mode. */
   readonly helper?: {
@@ -657,58 +714,277 @@ export function cachedCeiling(given: NonNullable<WorldFacts['cachedGivenUp']>): 
   };
 }
 
-/** `partial`'s ceiling with the check on (`P-484`), or what the run did not record to place it. */
-export type CachedCeilingOn =
+/**
+ * One cached name's own ceiling with the check on (`P-485`): the latest its first answer may come,
+ * in ms from the arm's start, and each of its parts, read from the run.
+ */
+export interface NameCeiling {
+  /** Its first ask, or the time the check first heard its zone where that is later. */
+  readonly anchorMs: number;
+  readonly anchoredBy: 'its first ask' | 'the zone first heard';
+  /** Its own largest gap between consecutive checks. */
+  readonly gapMs: number;
+  /** Its own walks D19 refused before its first answer, each waiting for its next check. */
+  readonly refused: number;
+  /** The zone's questions that shared discovery with it in its span, and the time they drain. */
+  readonly questions: number;
+  readonly drainMs: number;
+  readonly lagMs: number;
+  readonly ms: number;
+}
+
+/** `partial`'s ceilings with the check on (`P-485`), or what the run did not record to place them. */
+export type CachedCeilingsOn =
   | {
-      readonly ms: number;
       readonly keyHeardMs: number;
-      readonly spacingMs: number;
-      readonly ownWalks: number;
       readonly holdMs: number;
+      /** The places own walks are sure of: discovery's. */
       readonly places: number;
       readonly lagMs: number;
+      /** Each cached name the arm asked. */
+      readonly names: Readonly<Record<string, NameCeiling>>;
     }
   | { readonly missing: readonly string[] };
 
+/** The largest gap between consecutive times, in any order; undefined for fewer than two. */
+export function largestGap(times: readonly number[]): number | undefined {
+  const sorted = [...times].sort((a, b) => a - b);
+  let largest: number | undefined;
+  for (let i = 1; i < sorted.length; i += 1) {
+    const gap = (sorted[i] ?? 0) - (sorted[i - 1] ?? 0);
+    if (largest === undefined || gap > largest) largest = gap;
+  }
+  return largest;
+}
+
 /**
- * The longest a cached name of `partial` may wait for its first answer with the check on
- * (`P-484`), from the arm's start: the time the check first heard its zone's key, heard or mixed,
- * since a held name's own walk waits for that; one check's spacing, the interval over the sensors a
- * name, for the held name's next check to come and ask for that walk; the zone's silent names' own
- * walks, at most one each of those the arm asked, each holding a place the forwarder's hold
- * (`FORWARD_HOLD_MS`), over the places own walks have (`OWN_WALK_PLACES`), since a cached name's
- * own walk may wait for them; and the lag the run measured. A cached name asked at the arm's start
- * or later waits no longer than that from its first ask. Read from the run's facts and the code's
- * constants, never typed.
+ * The latest each cached name of `partial` may first answer with the check on (`P-485`), in ms from
+ * the arm's start, each name on its own terms, read from the run and the code's constants:
+ * - **its anchor**: its first ask, or the time the check first heard its zone where that is later,
+ *   since a held name's own walk waits for that (`zoneWalkFaults` judges that time);
+ * - **its own largest gap between checks**, for the check that asks for its own walk to come, and
+ *   one gap more for each of its own walks D19 refused before its first answer, since each waits
+ *   for the name's next check;
+ * - **the drain**: each question of the zone that shared discovery with it, sent within the
+ *   forwarder's hold before its anchor or after, up to its first answer (never answered, to the
+ *   arm's end), each holding a place the hold (`FORWARD_HOLD_MS`), over the places own walks are
+ *   sure of, discovery's (`WALK_QUESTIONS.discovery`). Heard's 4 are a cap, not a reservation. The
+ *   questions that share discovery are a silent name's, and a cached name's before its own first
+ *   answer (own walks, walks again, retries walked again, first walks); a cached name's after it
+ *   are a known name's, in heard, and a name's own are not ahead of it;
+ * - **the lag** the run measured.
+ * A run whose facts do not place them has none: what is missing is named.
  */
-export function cachedCeilingOn(given: NonNullable<WorldFacts['cachedGivenUp']>): CachedCeilingOn {
-  const { keyHeardMs, sensorsPerName, silentUntried: ownWalks, lagMs } = given;
+export function cachedCeilingsOn(
+  given: NonNullable<WorldFacts['cachedGivenUp']>,
+): CachedCeilingsOn {
+  const { keyHeardMs, lagMs, firstAskedMs, checksAtMs, ownRefusedMs, zoneQuestionsMs } = given;
   const missing = [
-    ...(given.firstAskedMs === undefined ? ['the cached names’ first asks'] : []),
+    ...(firstAskedMs === undefined ? ['the cached names’ first asks'] : []),
     ...(keyHeardMs === undefined ? ['the time the check first heard their zone'] : []),
-    ...(sensorsPerName === undefined ? ['the sensors a name'] : []),
-    ...(ownWalks === undefined ? ['the silent names asked'] : []),
     ...(lagMs === undefined ? ['the lag'] : []),
+    ...(checksAtMs === undefined ? ['the cached names’ checks'] : []),
+    ...(ownRefusedMs === undefined ? ['their own walks D19 refused'] : []),
+    ...(zoneQuestionsMs === undefined ? ['the zone’s questions'] : []),
+    ...(given.zoneWalks === undefined ? ['the zone’s scouts and walks again'] : []),
   ];
   if (
+    firstAskedMs === undefined ||
     keyHeardMs === undefined ||
-    sensorsPerName === undefined ||
-    ownWalks === undefined ||
     lagMs === undefined ||
+    checksAtMs === undefined ||
+    ownRefusedMs === undefined ||
+    zoneQuestionsMs === undefined ||
     missing.length > 0
   ) {
     return { missing };
   }
-  const spacingMs = given.intervalMs / sensorsPerName;
-  return {
-    ms: keyHeardMs + spacingMs + (ownWalks * FORWARD_HOLD_MS) / OWN_WALK_PLACES + lagMs,
-    keyHeardMs,
-    spacingMs,
-    ownWalks,
-    holdMs: FORWARD_HOLD_MS,
-    places: OWN_WALK_PLACES,
-    lagMs,
+  const cached = new Set([...Object.keys(firstAskedMs), ...Object.keys(given.firstAnswerMs)]);
+  /** The questions that share discovery, by the name they were for. */
+  const shared: { readonly name: string; readonly atMs: number }[] = [];
+  for (const [name, times] of Object.entries(zoneQuestionsMs)) {
+    const answered = cached.has(name) ? given.firstAnswerMs[name] : undefined;
+    for (const atMs of times)
+      if (answered === undefined || atMs < answered) shared.push({ name, atMs });
+  }
+  const places = WALK_QUESTIONS.discovery;
+  const names: Record<string, NameCeiling> = {};
+  for (const [name, asked] of Object.entries(firstAskedMs)) {
+    const checks = checksAtMs[name] ?? [];
+    const gapMs = largestGap(checks);
+    if (gapMs === undefined) {
+      missing.push(`${name}’s gap between checks (${String(checks.length)} checks)`);
+      continue;
+    }
+    const answered = given.firstAnswerMs[name];
+    const until = answered ?? Number.POSITIVE_INFINITY;
+    const anchorMs = Math.max(asked, keyHeardMs);
+    const refused = (ownRefusedMs[name] ?? []).filter((atMs) => atMs <= until).length;
+    const from = anchorMs - FORWARD_HOLD_MS;
+    const questions = shared.filter(
+      (question) => question.name !== name && question.atMs > from && question.atMs <= until,
+    ).length;
+    const drainMs = (questions * FORWARD_HOLD_MS) / places;
+    names[name] = {
+      anchorMs,
+      anchoredBy: asked >= keyHeardMs ? 'its first ask' : 'the zone first heard',
+      gapMs,
+      refused,
+      questions,
+      drainMs,
+      lagMs,
+      ms: anchorMs + gapMs * (1 + refused) + drainMs + lagMs,
+    };
+  }
+  if (missing.length > 0) return { missing };
+  return { keyHeardMs, holdMs: FORWARD_HOLD_MS, places, lagMs, names };
+}
+
+/** A name's ceiling's parts in words, as the judge and the arm's row say them. */
+export function ceilingParts(ceiling: NameCeiling): string {
+  const s = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
+  return (
+    `${ceiling.anchoredBy} at ${s(ceiling.anchorMs)}, its largest gap between checks ` +
+    `${s(ceiling.gapMs)} × (1 + ${String(ceiling.refused)} own walks D19 refused), ` +
+    `${String(ceiling.questions)} of the zone’s questions sharing discovery × ` +
+    `${s(FORWARD_HOLD_MS)} ÷ ${String(WALK_QUESTIONS.discovery)} places = ${s(ceiling.drainMs)}, ` +
+    `and the ${String(Math.round(ceiling.lagMs))} ms lag`
+  );
+}
+
+/** The backoff's base at a step (`P-484`): `REWALK_FIRST_MS` doubling to `REWALK_MAX_MS`. */
+export function rewalkBaseMs(step: number): number {
+  return Math.min(REWALK_MAX_MS, REWALK_FIRST_MS * 2 ** step);
+}
+
+/** The backoff's last step: the one `REWALK_MAX_MS` is first reached at. */
+const LAST_STEP = Math.ceil(Math.log2(REWALK_MAX_MS / REWALK_FIRST_MS));
+
+/**
+ * How far two times taken in one turn of the resolver may be apart and be one: a walk again's due,
+ * moved at its send, and that send's time are read a call apart.
+ */
+const SAME_TURN_MS = 1;
+
+/**
+ * What the silent zone's key's own walks did against what the code says they do (`P-485`), from
+ * the check's debug lines: a fault for each, naming what failed. Read from the facts and the code's
+ * constants, never typed.
+ * - **The step.** The walks again of one silent stretch (none heard between them) step the backoff
+ *   once each: the first of the run's first stretch, a key found silent from unknown, at step 0,
+ *   and the first of a later one at the step it was at, since a key that turns silent from mixed
+ *   starts at its step; each later one a step on, to the last. Each falls due its step's base
+ *   (`REWALK_FIRST_MS` doubling to `REWALK_MAX_MS`) ± `REWALK_JITTER` after its NotHeard, or after
+ *   the walk again before it where that had none, and never before.
+ * - **The late walk again.** Each is sent by the first check after its due of a held cached name
+ *   (one not yet answered), plus the lag: that check's own walk carries it (`P-484`). A due after
+ *   the last verdict with no walk again sent, though such a check came, is one never sent.
+ * - **The anchor.** The time the check first heard the zone is the first heard verdict among its
+ *   scouts and walks again: what the ceilings start from is what these judge.
+ */
+export function zoneWalkFaults(given: NonNullable<WorldFacts['cachedGivenUp']>): string[] {
+  const walks = given.zoneWalks;
+  const keyHeardMs = given.keyHeardMs;
+  if (walks === undefined) return [];
+  const lagMs = given.lagMs ?? 0;
+  const s = (ms: number): string => `${(ms / 1_000).toFixed(3)} s`;
+  const faults: string[] = [];
+  const held: { readonly name: string; readonly atMs: number }[] = [];
+  for (const [name, times] of Object.entries(given.checksAtMs ?? {})) {
+    const answered = given.firstAnswerMs[name];
+    for (const atMs of times)
+      if (answered === undefined || atMs < answered) held.push({ name, atMs });
+  }
+  held.sort((a, b) => a.atMs - b.atMs);
+  const firstHeldFrom = (ms: number) => held.find((check) => check.atMs >= ms);
+  const late = (which: string, dueMs: number, sentMs: number | undefined): void => {
+    const check = firstHeldFrom(dueMs);
+    if (check === undefined) return;
+    if (sentMs === undefined) {
+      faults.push(
+        `${which}, due at ${s(dueMs)}, never sent, though ${check.name}, held, was checked at ${s(check.atMs)}`,
+      );
+    } else if (sentMs > check.atMs + lagMs) {
+      faults.push(
+        `${which}, due at ${s(dueMs)}, sent at ${s(sentMs)}: late, after the first check of a held name after its due, ${check.name}’s at ${s(check.atMs)}, and the ${String(Math.round(lagMs))} ms lag`,
+      );
+    }
   };
+  let previous: WalkAgainSeen | undefined;
+  let expected = 0;
+  walks.walksAgain.forEach((walk, i) => {
+    const which = `zone b’s walk again ${String(i + 1)} by ${walk.carrier}`;
+    const sentBefore = previous?.sentMs;
+    const fresh =
+      sentBefore === undefined ||
+      walks.heardMs.some((heardMs) => heardMs > sentBefore && heardMs <= walk.sentMs);
+    if (fresh) {
+      // A key found silent from unknown starts at 5 s; one silent from mixed, at its step.
+      expected = walks.heardMs.some((heardMs) => heardMs <= walk.sentMs) ? walk.step : 0;
+    } else {
+      expected = Math.min(expected + 1, LAST_STEP);
+    }
+    if (walk.step !== expected) {
+      faults.push(
+        `${which}, sent at ${s(walk.sentMs)}: at step ${String(walk.step)}, where the schedule has step ${String(expected)} (${s(rewalkBaseMs(expected))})`,
+      );
+    }
+    const after =
+      !fresh && previous !== undefined && previous.verdict !== 'notHeard'
+        ? previous.sentMs
+        : undefined;
+    const from = Math.max(
+      walk.notHeardMs ?? Number.NEGATIVE_INFINITY,
+      after ?? Number.NEGATIVE_INFINITY,
+    );
+    if (!Number.isFinite(from)) {
+      faults.push(`${which}, sent at ${s(walk.sentMs)}: no NotHeard its due was counted from`);
+    } else {
+      const base = rewalkBaseMs(expected);
+      const apart = walk.dueMs - from;
+      if (
+        apart < base * (1 - REWALK_JITTER) - SAME_TURN_MS ||
+        apart > base * (1 + REWALK_JITTER) + SAME_TURN_MS
+      ) {
+        faults.push(
+          `${which}: due ${s(apart)} after ${after === from ? 'the walk again before it, which had no verdict,' : 'its NotHeard'} at ${s(from)}, not ${s(base)} ± ${String(Math.round(REWALK_JITTER * 100))}% (step ${String(expected)})`,
+        );
+      }
+    }
+    if (walk.sentMs < walk.dueMs - SAME_TURN_MS) {
+      faults.push(`${which}: sent at ${s(walk.sentMs)}, before its due at ${s(walk.dueMs)}`);
+    }
+    late(which, walk.dueMs, walk.sentMs);
+    previous = walk;
+  });
+  // A due after the last verdict: none sent at all is late too.
+  const verdicts = [...walks.verdicts].sort((a, b) => a.atMs - b.atMs);
+  const last = verdicts.at(-1);
+  if (
+    last?.dueMs !== undefined &&
+    !walks.walksAgain.some((walk) => walk.sentMs >= last.atMs) &&
+    !walks.heardMs.some((heardMs) => heardMs > last.atMs)
+  ) {
+    late(
+      `zone b’s walk again after its ${last.by === 'scout' ? 'scout' : 'walk again'} at ${s(last.atMs)}`,
+      last.dueMs,
+      undefined,
+    );
+  }
+  // The anchor: the first heard verdict of its scouts and walks again, and nothing else.
+  const firstHeard = verdicts.find((verdict) => verdict.verdict === 'heard');
+  if (keyHeardMs !== undefined) {
+    if (firstHeard === undefined) {
+      faults.push(
+        `the check first heard zone b at ${s(keyHeardMs)}, and none of its scouts and walks again was heard`,
+      );
+    } else if (firstHeard.atMs !== keyHeardMs) {
+      faults.push(
+        `the check first heard zone b at ${s(keyHeardMs)}, and its first heard scout or walk again was ${firstHeard.name}’s at ${s(firstHeard.atMs)}`,
+      );
+    }
+  }
+  return faults;
 }
 
 /** The longest a cached name waited from its first ask to its first answer, of those both placed. */
@@ -733,12 +1009,15 @@ export function cachedLongestWait(
  * it, as `system`'s do on the probe's lanes: ten sensors a device. So a cached check given up is
  * allowed only while its name is held: in the words a held name's check gives up with
  * (`HELD_CACHED_WORDS`), asked before its name's first answer plus the lag the run measured, and,
- * for a name never answered, within a ceiling of its first ask; and the longest a cached name
- * waited for its first answer holds that ceiling. A known limit, read from the run: with the check
- * on `cachedCeilingOn`'s (`P-484`), which replaced round 2's first scan interval; with it off
- * `cachedCeiling`'s (`P-480`). A run whose facts do not place the ceiling has none allowed, and
- * fails once, naming what is missing. Every other check is not allowed, nor one the facts do not
- * place.
+ * for a name never answered, within its ceiling. A known limit, read from the run:
+ * - **with the check on** (`P-485`), each name's own ceiling (`cachedCeilingsOn`), in absolute
+ *   times from the arm's start, which its first answer holds; every cached name the arm asked
+ *   answers; and the zone's own walks, which the ceilings start from, hold the schedule
+ *   (`zoneWalkFaults`);
+ * - **with it off**, `cachedCeiling`'s (`P-480`), from each name's first ask, which the longest
+ *   wait for a first answer holds.
+ * A run whose facts do not place the ceiling has none allowed, and fails once, naming what is
+ * missing. Every other check is not allowed, nor one the facts do not place.
  */
 export function cachedAllowance(facts: WorldFacts): {
   readonly names: number;
@@ -757,36 +1036,68 @@ export function cachedAllowance(facts: WorldFacts): {
   if (given === undefined) return unplaced(['the cached names’ waits']);
   const s = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
   if (facts.checkOn) {
-    const on = cachedCeilingOn(given);
+    const on = cachedCeilingsOn(given);
     if ('missing' in on) return unplaced(on.missing);
-    return cachedWithin(
-      facts,
-      given,
-      on,
-      `the check first heard their zone at ${s(on.keyHeardMs)}, a check’s spacing of ${s(on.spacingMs)}, ${String(on.ownWalks)} silent names’ own walks of ${s(on.holdMs)} each over ${String(on.places)} places, and the ${String(Math.round(on.lagMs))} ms lag`,
-    );
+    const within = cachedWithin(facts, given, on.lagMs, (name) => {
+      const ceiling = on.names[name];
+      return ceiling === undefined
+        ? undefined
+        : {
+            untilMs: ceiling.ms,
+            past: `past its ceiling of ${s(ceiling.ms)}: ${ceilingParts(ceiling)}`,
+          };
+    });
+    const refused = [...within.refused];
+    for (const [name, asked] of Object.entries(given.firstAskedMs ?? {})) {
+      if (given.firstAnswerMs[name] === undefined) {
+        refused.push(`${name} never answered within the arm, first asked at ${s(asked)}`);
+      }
+    }
+    for (const [name, ceiling] of Object.entries(on.names)) {
+      const answered = given.firstAnswerMs[name];
+      if (answered !== undefined && answered > ceiling.ms) {
+        refused.push(
+          `${name} first answered at ${s(answered)}, past its ceiling of ${s(ceiling.ms)}: ${ceilingParts(ceiling)}`,
+        );
+      }
+    }
+    refused.push(...zoneWalkFaults(given));
+    return { names: within.names, checks: within.checks, refused };
   }
   const off = cachedCeiling(given);
   if ('missing' in off) return unplaced(off.missing);
-  return cachedWithin(
-    facts,
-    given,
-    off,
-    `${String(off.untried)} silent names never yet tried, ${s(off.holdMs)} each, over ${String(off.lanes)} lanes, and the ${String(Math.round(off.lagMs))} ms lag`,
+  const within = cachedWithin(facts, given, off.lagMs, (_name, asked) =>
+    asked === undefined
+      ? undefined
+      : {
+          untilMs: asked + off.ms,
+          past: `past its first ask at ${s(asked)} and the ceiling of ${s(off.ms)}`,
+        },
   );
+  const longest = cachedLongestWait(given);
+  if (longest === undefined || longest.ms <= off.ms) return within;
+  return {
+    ...within,
+    refused: [
+      ...within.refused,
+      `the longest a cached name waited for its first answer, ${s(longest.ms)} (${longest.name}), past the ceiling of ${s(off.ms)}: ${String(off.untried)} silent names never yet tried, ${s(off.holdMs)} each, over ${String(off.lanes)} lanes, and the ${String(Math.round(off.lagMs))} ms lag`,
+    ],
+  };
 }
 
 /**
- * The cached checks given up that a placed ceiling allows (`P-480`, `P-484`): in a held name's
- * words, before its name's first answer plus the lag, or, never answered, within the ceiling of
- * its first ask; and the longest wait for a first answer within the ceiling, whose parts `parts`
- * says.
+ * The cached checks given up that a placed ceiling allows (`P-480`, `P-484`, `P-485`): in a held
+ * name's words, before its name's first answer plus the lag, or, never answered, before the time
+ * `neverAnswered` gives it, which says what was passed.
  */
 function cachedWithin(
   facts: WorldFacts,
   given: NonNullable<WorldFacts['cachedGivenUp']>,
-  ceiling: { readonly ms: number; readonly lagMs: number },
-  parts: string,
+  lagMs: number,
+  neverAnswered: (
+    name: string,
+    asked: number | undefined,
+  ) => { readonly untilMs: number; readonly past: string } | undefined,
 ): {
   readonly names: number;
   readonly checks: number;
@@ -800,21 +1111,21 @@ function cachedWithin(
     );
   }
   const s = (ms: number): string => `${(ms / 1_000).toFixed(1)} s`;
-  const over = `the ceiling of ${s(ceiling.ms)}`;
   const names = new Set<string>();
   let checks = 0;
   for (const { name, askedMs, message } of given.checks) {
     const which = `a cached check of ${name} given up, asked at ${s(askedMs)}`;
     const answered = given.firstAnswerMs[name];
     const asked = given.firstAskedMs?.[name];
-    if (answered !== undefined && askedMs >= answered + ceiling.lagMs) {
+    const limit = answered === undefined ? neverAnswered(name, asked) : undefined;
+    if (answered !== undefined && askedMs >= answered + lagMs) {
       refused.push(
-        `${which}, after ${name}’s first answer at ${s(answered)} and the ${String(Math.round(ceiling.lagMs))} ms lag measured`,
+        `${which}, after ${name}’s first answer at ${s(answered)} and the ${String(Math.round(lagMs))} ms lag measured`,
       );
-    } else if (answered === undefined && asked === undefined) {
+    } else if (answered === undefined && (asked === undefined || limit === undefined)) {
       refused.push(`${which}: never answered, and its first ask not recorded`);
-    } else if (answered === undefined && asked !== undefined && askedMs >= asked + ceiling.ms) {
-      refused.push(`${which}: never answered, past its first ask at ${s(asked)} and ${over}`);
+    } else if (limit !== undefined && askedMs >= limit.untilMs) {
+      refused.push(`${which}: never answered, ${limit.past}`);
     } else if (!HELD_CACHED_WORDS.test(message)) {
       refused.push(
         `${which}, in words a held name’s check does not give up with: ${wordsOf(message)}`,
@@ -828,12 +1139,6 @@ function cachedWithin(
     if (given.firstAskedMs?.[name] === undefined) {
       refused.push(`${name} answered first at ${s(answered)}, and its first ask was not recorded`);
     }
-  }
-  const longest = cachedLongestWait(given);
-  if (longest !== undefined && longest.ms > ceiling.ms) {
-    refused.push(
-      `the longest a cached name waited for its first answer, ${s(longest.ms)} (${longest.name}), past ${over}: ${parts}`,
-    );
   }
   return { names: names.size, checks, refused };
 }

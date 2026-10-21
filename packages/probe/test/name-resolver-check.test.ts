@@ -12,7 +12,7 @@ import {
   type ResolvedAddress,
 } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
-import { REWALK_FIRST_MS, REWALK_JITTER } from '../src/resolver/dns-check.js';
+import { REWALK_FIRST_MS, REWALK_JITTER, WALK_MIN_MS } from '../src/resolver/dns-check.js';
 import { FORWARD_HOLD_MS, ForwardBudget, WALK_QUESTIONS } from '../src/resolver/forward-budget.js';
 import { HelperKeys } from '../src/resolver/lane-rule.js';
 import {
@@ -20,6 +20,7 @@ import {
   CHECK_STATE_SAID,
   GATE_SUMMARY_MS,
   NameResolver,
+  OWN_WALK_DEFERRED,
   STALE_MS,
   SUMMARY_LISTED,
   type Family,
@@ -28,6 +29,7 @@ import { HelperLostError } from '../src/resolver/lookup-helper.js';
 import { ScriptedAsker, WalkPolicy, type ScriptedReply } from './support/fake-dns.js';
 import { FakeHelper } from './support/fake-helper.js';
 import { pollWithin, within } from './support/within.js';
+import { ZoneWalkLog } from './support/zone-walk-log.js';
 
 /**
  * The resolver in gate mode with the name check built (`P-432` S6, §1.3): a lookup whose walk was
@@ -103,6 +105,8 @@ async function make(
       readonly burst: number;
       readonly reserve: number;
     };
+    /** The gate's real clock, what a check's bound is spent on: `performance.now` unless set. */
+    readonly realNow?: () => number;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -138,6 +142,7 @@ async function make(
       budget,
       keys: new HelperKeys(),
       tickMs: setup.tickMs ?? 3_600_000,
+      ...(setup.realNow === undefined ? {} : { realNow: setup.realNow }),
       check: {
         asker,
         routeMs: setup.routeMs ?? ROUTE,
@@ -1430,7 +1435,12 @@ describe('a queued helper lookup’s own walk: its places, the walk again it car
     await pollWithin(1_000, 'dev-c0 heard', () => callsFor('dev-c0.zone-b.test').length === 1, 2);
     callsFor('dev-c0.zone-b.test')[0]?.answer();
     assert.deepEqual(await c0, A);
-    const s3 = failed(ask('dev-s3.zone-b.test', { waitMs: 10_000 }));
+    // When dev-s3's check settles: dev-c1's lookup on the probe's lanes by then, or not (`P-485`).
+    let c1CallsAtS3: number | undefined;
+    const s3 = failed(ask('dev-s3.zone-b.test', { waitMs: 10_000 })).then((got) => {
+      c1CallsAtS3 = callsFor('dev-c1.zone-b.test').length;
+      return got;
+    });
     await pollWithin(
       1_000,
       'dev-s3 not heard: zone b mixed',
@@ -1477,13 +1487,126 @@ describe('a queued helper lookup’s own walk: its places, the walk again it car
     assert.equal(s4Got.code, RESOLVER_STUCK, s4Got.message);
     assert.match(s4Got.message, CAP_WORDS);
     assert.equal(asker.askedFor('dev-s4.zone-b.test').length, 1, 'walked once');
-    // dev-s3, its own step left unanswered: not walked again, failed at once.
+    // dev-s3, its own step left unanswered: not walked again, failed at once, as the three stuck,
+    // before dev-c1's walk was heard and moved it to the probe's lanes (`P-485`).
     const s3Got = await s3;
     assert.equal(s3Got.code, RESOLVER_STUCK, s3Got.message);
     assert.equal(asker.askedFor('dev-s3.zone-b.test').length, 1, 'not walked again');
+    assert.notEqual(c1CallsAtS3, undefined, 'dev-s3 settled');
+    assert.equal(c1CallsAtS3, 0, 'dev-s3 failed before dev-c1’s walk ended');
     for (const host of [...stuck, 'dev-s3.zone-b.test', 'dev-s4.zone-b.test']) {
       assert.equal(callsFor(host).length, 0, `${host} never on the probe’s lanes`);
     }
+    await drain(helper, held, resolver);
+  });
+});
+
+/**
+ * `P-484`'s flush world, at debug: zone b's three silent names in the helper, not yet stuck; the
+ * zone made mixed, `dev-c0` heard and answered, `dev-s3` walked and not heard and waiting behind
+ * the three; then `dev-c1`, D19 refusing its walk, queued behind them too, its check waiting with a
+ * bound of `waitMs`.
+ */
+async function mixedBehindThree(setup: Parameters<typeof make>[0], waitMs: number) {
+  const raw: string[] = [];
+  const lines: Line[] = [];
+  const logger = pino(
+    { level: 'debug' },
+    {
+      write: (line: string) => {
+        raw.push(line);
+        lines.push(JSON.parse(line) as Line);
+      },
+    },
+  );
+  const made = await make({ ...setup, logger });
+  const { resolver, helper, asker, budget, callsFor, clock, ask } = made;
+  asker.rule = partly;
+  spend(budget);
+  const stuck = [0, 1, 2].map((i) => `dev-s${String(i)}.zone-b.test`);
+  const held = stuck.map((host) => ended(ask(host, { waitMs: 60_000 })));
+  await pollWithin(1_000, 'the three in the helper', () => helper.inFlight().length === 3, 2);
+  clock.now += 2_000;
+  const c0 = ask('dev-c0.zone-b.test', { waitMs: 2_000 });
+  await pollWithin(1_000, 'dev-c0 heard', () => callsFor('dev-c0.zone-b.test').length === 1, 2);
+  callsFor('dev-c0.zone-b.test')[0]?.answer();
+  assert.deepEqual(await c0, A);
+  const s3 = failed(ask('dev-s3.zone-b.test', { waitMs: 60_000 }));
+  await pollWithin(
+    1_000,
+    'dev-s3 not heard: zone b mixed',
+    () =>
+      lines.some(
+        (line) =>
+          line['msg'] === 'a DNS zone the check walks is not answering every name' &&
+          line.key === 'd:zone-b.test' &&
+          line['phase'] === 'mixed',
+      ),
+    2,
+  );
+  spend(budget);
+  const deferred = resolver.gateHealth()?.walksDeferred ?? 0;
+  const c1 = failed(ask('dev-c1.zone-b.test', { waitMs }));
+  await pollWithin(
+    1_000,
+    'dev-c1 routed rate',
+    () => resolver.gateHealth()?.walksDeferred === deferred + 1,
+    2,
+  );
+  assert.equal(asker.askedFor('dev-c1.zone-b.test').length, 0, 'dev-c1 not walked yet');
+  assert.equal(helper.asksFor('dev-c1.zone-b.test').length, 0, 'dev-c1 queued');
+  return { ...made, raw, lines, stuck, held, s3, c1 };
+}
+
+describe('the stuck flush’s own walks, and their deferrals at debug (P-485)', () => {
+  it('walks nothing from the stuck flush, and counts nothing, for a queued lookup whose checks have less of their shortest bound left than a walk’s least routing wait: they fail at once in the cap’s words', async () => {
+    const real = { now: 0 };
+    const world = await mixedBehindThree({ realNow: () => real.now }, 10_000);
+    const { resolver, helper, asker, clock, ask, stuck, held, s3, c1 } = world;
+    // A second check of dev-c1, with twice the bound: the shortest bound is what is left.
+    const c1Longer = failed(ask('dev-c1.zone-b.test', { waitMs: 20_000 }));
+    // 150 ms of the shorter left, a quarter of which is under the 50 ms a walk needs; D19's
+    // bucket refilled, so that only that stops the walk.
+    real.now += 10_000 - 150;
+    assert.ok(Math.floor(150 / 4) < WALK_MIN_MS);
+    clock.now += 2_000;
+    const counted = resolver.gateHealth()?.walksDeferred;
+    for (const host of stuck) helper.last(host).stuck();
+    for (const [check, which] of [
+      [c1, 'the 10 s check'],
+      [c1Longer, 'the 20 s check'],
+    ] as const) {
+      const got = await within(1_000, `dev-c1’s ${which} failed at once`, check);
+      assert.equal(got.code, RESOLVER_STUCK, got.message);
+      assert.match(got.message, CAP_WORDS);
+    }
+    assert.equal(asker.askedFor('dev-c1.zone-b.test').length, 0, 'not walked');
+    assert.equal(resolver.gateHealth()?.walksDeferred, counted, 'no walk deferred');
+    assert.equal((await s3).code, RESOLVER_STUCK);
+    await drain(helper, held, resolver);
+  });
+
+  it('says at debug when a queued lookup’s own walk is deferred, by name, why and when: what the arms count D19’s refusals of a name’s own walk by', async () => {
+    const world = await mixedBehindThree({}, 10_000);
+    const { helper, asker, budget, clock, stuck, held, s3, c1, lines, raw, resolver } = world;
+    // The three stick with D19's bucket still spent: the flush walks dev-c1, refused.
+    spend(budget);
+    for (const host of stuck) helper.last(host).stuck();
+    const got = await within(1_000, 'dev-c1 failed once its walk was refused', c1);
+    assert.equal(got.code, RESOLVER_STUCK, got.message);
+    assert.equal(asker.askedFor('dev-c1.zone-b.test').length, 0, 'refused, nothing asked');
+    assert.deepEqual(
+      lines
+        .filter((line) => line['msg'] === OWN_WALK_DEFERRED)
+        .map((line) => [line.host, line.key, line.why, line['at']]),
+      [['dev-c1.zone-b.test', 'd:zone-b.test', 'rate', clock.now]],
+    );
+    // As the arm reads it.
+    const log = new ZoneWalkLog();
+    for (const line of raw) log.read(line);
+    assert.deepEqual(log.deferredMs('dev-c1.zone-b.test', 'rate', 0), [clock.now]);
+    assert.deepEqual(log.deferredMs('dev-c1.zone-b.test', 'budget', 0), []);
+    assert.equal((await s3).code, RESOLVER_STUCK);
     await drain(helper, held, resolver);
   });
 });

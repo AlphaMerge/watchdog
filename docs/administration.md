@@ -1283,15 +1283,23 @@ lookups by`), then starts the helper, `ms-probe: lookups` in `ps`, before its fi
   heard and 4 for the rest; a name past either goes to the helper. A question with no reply holds
   its place for 10 s from its send, as a forwarder such as dnsmasq holds it (`P-479`). A zone
   that does not answer is not walked again until 5 s later, then 10, 20, 40 and 60 s, each 20%
-  either way, while it stays silent (`P-484`). A name that went to the helper without a walk of
-  its own (past a server's rate or the questions held open, after its wait for a walk of its zone
-  ran out, or while its zone was silent) is walked once, when a check of it would otherwise fail
-  at once behind its zone's share of the helper, or the lookups ahead of it there have all stuck,
-  and the check has heard some of the zone's names answer, or the zone's next walk again is due,
-  which this walk then is: heard, it leaves the helper for the probe's own lanes; not heard, it
-  stays there and is not walked again (`P-480`). Such a walk takes one of the 4 places for zones
-  not yet heard, and while those are full one of the 8 for zones heard, at most 4 of those, so
-  the zones that answer always keep 4 (`P-484`). Check now goes to the helper without a walk.
+  either way, while it stays silent (`P-484`). A zone that answered some names and not others in
+  the last minute, and then answers none, starts further along that schedule: each name it did
+  not answer in that minute moved it one step on, up to 60 s (`P-485`). A name that went to the
+  helper without a walk of its own (past a server's rate or the questions held open, after its
+  wait for a walk of its zone ran out, or while its zone was silent) is walked once, when a check
+  of it would otherwise fail at once behind its zone's share of the helper, or the lookups ahead
+  of it there have all stuck, and the check has heard some of the zone's names answer, or the
+  zone's next walk again is due, which this walk then is: heard, it leaves the helper for the
+  probe's own lanes; not heard, it stays there and is not walked again (`P-480`). Such a walk
+  takes one of the 4 places for zones not yet heard, and while those are full one of the 8 for
+  zones heard, at most 4 of those (`P-484`). The 4 bind every such walk of a name that has never
+  answered, whatever its zone's state, and a walk of a name that has, while its zone answers
+  some names and not others or has had no name answer for a minute; a name that has answered,
+  of a zone that answered within the minute, walks as any of that zone's names. So the zones
+  that answer keep 4 of their 8 from every other zone's such walks (`P-485`). With less of a
+  check's wait left than a walk needs (200 ms), the lookups ahead having stuck, its name is not
+  walked and nothing is counted as deferred. Check now goes to the helper without a walk.
 - **When the check is off, every name not the hosts file's is asked in the helper, and while
   the system's name settings turn it off, the hosts file's too.** The settings turn it off when
   they say it cannot vouch for what glibc would do (`nscd`, an NSS module it does not model,

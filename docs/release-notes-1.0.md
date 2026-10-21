@@ -519,8 +519,13 @@ ms-probe`: the setting is read only at start
   asked, times how long the system's resolver takes to give up on one (from `resolv.conf`'s
   `timeout` and `attempts`), divided by 2, and its checks give up meanwhile. With the check on,
   such a name is walked, heard, and asked on the probe's own lanes, once the check has heard one
-  of the zone's names answer: its next check waits at most the zone's silent names times 10 s,
-  divided by 8, for that walk (`P-484`).
+  of the zone's names answer, or the zone is due to be walked again (5 s after it was found
+  silent, then 10, 20, 40 and 60 s). Typically its checks then wait about the zone's silent names
+  times 10 s, divided by 8, for that walk (`P-484`). That is not a bound: at most, counted from
+  the later of its own first check and the zone first answering, a name waits the longest gap
+  between two of its own checks, that again each time the server's 10 questions a second turned
+  its walk away, and 10 s for every 4 questions the probe asked meanwhile of the zone's names that
+  had not answered (`P-485`).
 
   A name the check found silent that the helper then answered within a second is a miss: one
   skips the check for that name for an hour, three of one zone in ten minutes skip the zone for an
