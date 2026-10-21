@@ -17190,6 +17190,53 @@ because each is a decision rather than a defect:
         reverted, and again with the backoff's double step restored; `partial` at full size passes
         in both modes, heard-first, 3 runs of 2 minutes; and `warmzone` still passes.
 
+      **P-485 outcome. `partial`'s check-on ceiling is each cached name's own, in times from the
+      arm's start; the judge holds zone b's walks again to the schedule, to the check that carries
+      them, and to the time the zone was first heard; an own walk of a name never answered takes
+      discovery, then at most 4 of heard's 8, whatever its zone's phase; and the stuck flush walks
+      nothing with less than a walk's least window left.** Built 2026-10-21 on `fix/p485-ceiling`
+      and landed on `integ/r8-1020` as TODO(integ). No protocol change and no migration.
+      - **What was built.**
+        - Debug lines the judge reads: `WALKING_AGAIN` (key, carrier, own, step, due, the
+          NotHeard it counts from, sent), `ZONE_VERDICT` (a scout's or walk again's verdict and
+          the due it leaves), `HEARD_A_ZONE` with its own time, and `OWN_WALK_DEFERRED` (name,
+          key, why, when), from which the arm counts a name's D19 refusals.
+        - `#walk`'s heard branch: an own walk of a name never answered takes the own walks'
+          places in a fresh heard zone too; a known name's is the zone's own heard walk.
+        - `DnsCheck.walkWindow(bound)`; `#onStuck` fails a lookup unwalked, counting nothing,
+          with less of its waiters' bound left than gives `WALK_MIN_MS` (under 200 ms).
+        - The judge's `cachedCeilingsOn`: each name's anchor, the later of its first ask and the
+          zone first heard, plus its largest gap between checks × (1 + its own walks D19 refused
+          before its first answer), plus the zone's questions sharing discovery in its span ×
+          `FORWARD_HOLD_MS` ÷ discovery's places, plus the lag. Every cached name must answer.
+          `zoneWalkFaults` holds each walk again's step and due to the schedule, its send to the
+          first held check after the due plus the lag, a due never sent, and the zone's first heard
+          time to its first heard verdict. Any fact missing fails the arm once, naming it.
+        - `test/support/zone-walk-log.ts`: `ZoneWalkLog` and `partialFacts`, pure, so a unit test
+          reaches the arm's extraction.
+      - **Decided by the builder, under the ticket's decision:** the drain's span starts a hold
+        before the anchor and ends at the first answer; it counts silent names' questions and a
+        cached name's before its first answer, not the name's own; D19 refusals count up to the
+        first answer; the first walk again of a silent stretch after a heard is expected at its
+        own logged step.
+      - **Tests.** `dns-check` +4, `name-resolver-check` +2 and case E ordered with presence
+        first; the judge's check-on case replaced by 4 on a silent-first fixture, the extraction
+        from real log lines among them. The 11 resolver files 1,049 of 1,049, the scenario 17 of
+        17, the judge 167 of 167.
+      - **Mutants: 33, all killed**, the review's R1 to R5 among them; J15 (refusals after the
+        first answer counted) survived at first, and a case was added.
+      - **Runs**, full size, 2 minutes, on `9e9b09db`, `ms-server` up: `partial` with the check
+        on, 3 of 3 passed, 39 to 42 cached checks given up, all allowed, every cached name
+        answered, the least slack 18.7 s, the zone heard by a scout at 1.3 s each time, so no walk
+        again was judged; with it off, passed; `warmzone` passed, 15,000 of 15,000. **Forced
+        silent-first, in a clone, not of record:** the branch passed, the zone heard at 7.0 s by
+        a carried walk again sent 711 ms after its due; with the carried walk again reverted it
+        failed on two walks again sent 4.9 and 5.8 s late; with the double step restored it failed
+        on the step.
+      - **Found, not fixed:** `name-resolver-check`'s "gives back the token a lookup carries when
+        it moves…" failed once under load (`released` 2 of 3) and passed 17 other times.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
