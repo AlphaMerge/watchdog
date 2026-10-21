@@ -16540,6 +16540,107 @@ because each is a decision rather than a defect:
         - `partial`, with the check on and off, and `forwarder` pass at full size in gate mode, and
           every other arm still passes, `slow` among them.
 
+- [ ] **P-479 — the walk's ledger lets a question go after about 6 s while the forwarder holds
+      its slot for 10, so the walk can hold twice its budget at the site's DNS server** · XS ·
+      P-432, D16 · Filed 2026-10-21 by the coordinator, from the full-size runs after `P-477` and
+      `P-478`.
+      - **What happened.** `warmzone` failed in gate mode with "the forwarder held 19 slots for the
+        probe, past 18", twice, on a quiet VM as well. The budget's own `questionsOpen` peaked at
+        12.
+      - **The cause.** `caresAsker` builds `new Resolver({ timeout, tries: 1 })` without the
+        design's `maxTimeout` (§1.4), and c-ares 1.34.6 in Node 24.19 caps the timeout, so a
+        question with no reply settles `ETIMEOUT` at about 6 s. `#send` closes the question's
+        ledger entry on any settle, timeouts among them, while dnsmasq keeps the slot for 10 s.
+        Each of the heard pool's 8 places is then reused about every 6 s, and the forwarder holds
+        up to 2 × 8.
+        - It happens in the minute after a zone goes silent, when its refreshes are walked by name.
+          It is not at the onset, and it is not riders: no zone-b lookup ran on the probe's lanes
+          after the silence.
+        - `P-477` exposed it, by cutting the steady walk from 7.1 to 0.86 a second. That freed D19's
+          bucket, so the heard pool now binds where the bucket did.
+      - **Decided 2026-10-21 by Claude, under the user's delegation: fix the code, keep the bound.**
+        The outage row's 18 (heard 8 + discovery 4 + 6 tokens) assumes the ledger holds the walk
+        at the forwarder. The worst-case row is about stuck probe lanes, and none were stuck here.
+        Moving the judge to 24 would pass by luck. So:
+        - `maxTimeout` is set to the timeout;
+        - a question's ledger entry closes only on a reply from the server, or at the forwarder's
+          hold (10 s) after it was sent, never on the channel's own timeout.
+      - **Done when** a scripted asker that times out the heard pool's 8 questions at 6 s holds the
+        pool at 8 until 10 s, and a ninth name walked at 7 s routes `budget`. A mutant that closes
+        on `'timeout'` again must fail. `warmzone` must pass at full size in gate mode.
+
+- [ ] **P-480 — at a cold start, a partly silent zone's cached names wait minutes in the helper's
+      queue behind its silent names** · S · P-432, P-478 · Filed 2026-10-21 by the coordinator,
+      from the full-size runs after `P-478`.
+      - **What happened.** `partial` in gate mode now answers every answering check, 31,500 of
+        31,500 with the check on and with it off. But its cached names were given up past the
+        first scan interval: 233 checks with the check on, the longest first answer at 205.6 s;
+        492 with it off, at 317.8 s. `system` gives up 298.
+      - **The cause.** At the cold burst, D19's rate and the full pools send about 15 of zone b's 25
+        cached names to the helper unwalked. There they queue first come, first served, with the
+        silent names' first lookups, in a key held to 3 lanes. A silent lookup holds its lane
+        30 s, so the k-th cached name waits about m × 15 s behind m silent names. No later check
+        routes them again: each joins the queued lookup.
+        - With the check on, the walk would have heard them, since it hears every cached name it
+          walks. They were never walked: the design's per-name move for queued helper lookups (D18)
+          was cut. Its stated cost, "up to 30 s more", was written before `P-478` held every
+          unvouched key to 3 lanes.
+        - With the check off, nothing but the helper's own 30 s lookup can tell a cold cached name
+          from a silent one.
+      - **Decided 2026-10-21 by Claude, under the user's delegation.**
+        - **Check on: restore D18's per-name move, narrowly.** A queued helper lookup that was
+          never walked (routed `rate`, `budget`, `wait`, `stall` or `scoutWait`) gets one walk of
+          its own, while its key is `mixed` or `heard`, when a check of it would otherwise fail at
+          once behind its key's cap.
+          - Heard, it moves to the probe's lanes through `#offProbe`, so D27 holds.
+          - Not heard, it stays in the helper as `silent`, and is not walked again.
+          - It adds no helper load and moves nothing on key evidence (§3 and D18). It is bounded by
+            D19 and the ledger (`P-479`).
+          - It skips suspects and avoided names, and runs only while the route is up.
+        - **Check off: a known limit with an allowance read from the run.** A cached check given up
+          in a held name's words is allowed only before that name's first answer plus the lag.
+          This replaces `P-478`'s first-interval limit. The longest wait has a ceiling from the
+          run's own facts: the key's silent names never yet tried, times the silent hold, over the
+          lanes they can hold, plus the lag. It is said in the release notes.
+      - **Done when**:
+        - a small-scale case reproduces the wait: K2's world, a cold burst with a bucket the test
+          refills, and a cached name that fails at once behind the cap, then with the move is heard
+          and answers on the probe's lanes, while a silent one never reaches them;
+        - mutants are killed;
+        - `partial` with the check on gives up no cached check past its allowance at full size;
+        - `partial` with the check off holds its ceiling;
+        - `forwarder`, P1, P5, P5b and P6 still pass.
+
+- [ ] **P-481 — a key vouched only by its cached names can take every one of the helper's first
+      lanes before any of its lookups is stuck** · XS · P-432, P-478 · Filed 2026-10-21 by the
+      coordinator, from `P-480`'s analysis.
+      - **What happened.** In one instrumented 2,500-sensor `partial` run, zone b was vouched by its
+        two cached scouts before anything stuck. Four of its silent names then took all 4 of the
+        helper's first lanes for 30 s, the kept lane among them, and 361 answering checks of other
+        zones were given up. A vouched key is not held to `KEY_QUIET`, and a vouched lookup is not
+        one the gate holds, so the kept lane does not stop it either. It depends on timing: the
+        same arm run plain passed. Nothing tests a zone vouched only by cached names.
+      - **Decided 2026-10-21 by Claude, under the user's delegation: no key takes the helper's last
+        first-lookup lane, vouched or not, while another key's lookup is queued.** A key's walk
+        evidence says its names answered the walk, not that each of them will answer `getaddrinfo`.
+        So one key cannot take every lane by itself, whatever its evidence.
+      - **Done when**:
+        - a unit case reproduces the run: a key heard through two names, then four of its silent
+          names asked at once, and another key's answering name queued;
+        - the other key's name gets the last lane;
+        - a mutant without the rule fails;
+        - `slow`, `zone`, `spread10` and `steady` still pass at full size.
+
+- [ ] **P-482 — a mixed key's names are walked in the heard pool, where D18 puts them in
+      discovery's** · XS · P-432 · Release 1.1 · Filed 2026-10-21 by the coordinator, from
+      `P-480`'s analysis. `dns-check.ts` walks a `mixed` key's known names in the heard pool's 8
+      places, and D18's cost sentence counts them in discovery's 4. So a zone going silent fills
+      the pool that zones which answer use. Once `P-479` holds the ledger to the forwarder, D16's
+      bound holds either way, and the gate's arms pass. **Decided 2026-10-21 by Claude, under the
+      user's delegation:** release 1.1, not 1.0. The design and the code differ on whom a silent
+      zone's walk crowds, not on what the site's server receives. **Done when** one is changed to
+      say what the other does, with a test of the pool a mixed key's walk takes.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
