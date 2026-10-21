@@ -16225,7 +16225,7 @@ because each is a decision rather than a defect:
         - **Mutants**: under `P-465`'s fix round 1, which ran them in one build.
         - **Quiet-machine runs: owed**, as above. The quiet window's P5 and P5b print the route's
           time down after each kill.
-- [ ] **P-472 — P2's answering checks once `P-463` avoids the names detached at `unresponsive`** ·
+- [x] **P-472 — P2's answering checks once `P-463` avoids the names detached at `unresponsive`** ·
       XS · P-432, P-463 · Filed 2026-10-20 by `P-471`. While P2's child is stopped, the helper is
       `unresponsive` for about 17 s, and `routeState()` reads `down`. Today no name detached then
       is avoided. `P-463` is to give each of them the avoidance entry, so the next check of any
@@ -16324,7 +16324,12 @@ because each is a decision rather than a defect:
         to 20.3 s, lag 51 ms, nothing allowed or outside, and 450 of 450 asks read with their
         sensor. Nothing was given up or refused there, so the placement, the presence rule and the
         ceiling meet a real lost check first at full size, where a fault fails the arm.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `734d4e30`, `ms-server` up,
+        so not of record): **P2 passed.** Answering 4,486 of 4,500: 9 given up at their bound, all 9
+        allowed, and 5 failed otherwise, all 5 allowed as D27's refusals of the name in flight at
+        the quiet, asked while the route read `down` (3.5 s to 20.5 s after the SIGSTOP), none
+        outside it. The most slots held at once 5, against 26. Every other arm passed but `partial`
+        with the check on, by one cached check (`P-480`).
 - [x] **P-473 — `name-resolver`'s "at once" is under 20 ms of wall clock, which a loaded host
       can exceed** · XS · P-426, P-438 · Found 2026-10-20 beside a `test:perf` run: 'fails a check
       at once when every lane its lookup could use is stuck; the lookup stays queued' failed its
@@ -16522,7 +16527,7 @@ because each is a decision rather than a defect:
       (`ssl = on`, a certificate from `scripts/dev-certs.sh`, clients that ask for none still
       served) and the case runs for all three engines, `pg`'s refusal read as the handshake.
 
-- [ ] **P-477 — at steady state the walk asks 7.5 questions a second where D20 says about
+- [x] **P-477 — at steady state the walk asks 7.5 questions a second where D20 says about
       one a zone, because each second's refreshes reach `DnsCheck` together** · S · P-432 ·
       Filed 2026-10-20 by the coordinator, from S7's first full-size run at rc.3's cut, on
       `28b97a7c`. `warmzone` and `steady` failed in gate mode on the judge's steady-state rule:
@@ -16607,7 +16612,13 @@ because each is a decision rather than a defect:
         `wait`. In a model at 100 ms of DNS, a burst of 12 rides 4 to 6 and routes the rest `wait`,
         and a window closing mid-burst routes all but its riders `wait`, at most every other wave.
         At full size, `check.waited` beside `sampled` in the hourly summaries is that share.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `734d4e30`, `ms-server` up,
+        so not of record): **`steady` and `warmzone` passed in gate mode.** `steady` answered 55,000
+        of 55,000, the walk at 1.40 questions a second at steady state, 7,594 refreshes ridden and
+        267 routed `wait`. `warmzone` answered 36,000 of 36,000, at 0.86 a second, with 286 routed
+        `wait` and 11 slots held against 18. Every other arm passed but `partial` with the check on,
+        by one cached check given up 3 s past the first interval, its name queued in the helper
+        behind its key's cap, not riding: `P-480`'s.
 
 - [ ] **P-478 — the helper keeps no lane for zones that answer, so silent lookups starve answering
       names' first lookups** · S · P-432 · Filed 2026-10-20 by the coordinator, from S7's first
@@ -16696,9 +16707,16 @@ because each is a decision rather than a defect:
         answering 200 of 200 where `system` answered 36. `partial` at 1,000 sensors, check on and
         off: 900 of 900 answering, 12 cached checks of 2 names given up, all allowed, the longest
         first answer 24.3 s and 24.0 s.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `734d4e30`, `ms-server` up,
+        so not of record): **`forwarder` and `slow` passed, and `partial` passed with the check off
+        and failed by one check with it on.** `forwarder` answered 14,000 of 14,000 against
+        `system`'s 1,173, with 9 slots held against 18. `partial` answered all 31,500 answering
+        checks in both modes (`system` 29,354). With the check on, 102 cached checks were given up
+        (`system` 312): 101 of 17 names allowed, and one of `dev-380.zone-b.test`, asked at 63.0 s,
+        past the first interval, its name's first answer 62.2 s after its first ask. With it off,
+        494, all allowed under `P-480`'s ceiling. The box stays open on `partial`.
 
-- [ ] **P-479 — the walk's ledger lets a question go after about 6 s while the forwarder holds
+- [x] **P-479 — the walk's ledger lets a question go after about 6 s while the forwarder holds
       its slot for 10, so the walk can hold twice its budget at the site's DNS server** · XS ·
       P-432, D16 · Filed 2026-10-21 by the coordinator, from the full-size runs after `P-477` and
       `P-478`.
@@ -16758,7 +16776,10 @@ because each is a decision rather than a defect:
         at 9; `forwarder` to 10 against 18, with 15 walks deferred `budget`; P1 to 5 against 26. At
         2,500 sensors the ledger fix alone made `partial` worse, as the root-cause report said it
         would: see `P-480`.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `734d4e30`, `ms-server` up,
+        so not of record): **`warmzone` passed in gate mode**, the probe's most slots held at once
+        11 against 18, where the build before this ticket held 19, and the budget's
+        `questionsOpen` at most 12. Every gate arm held its bound, at most 13 slots (`slow`) of 18.
 
 - [ ] **P-480 — at a cold start, a partly silent zone's cached names wait minutes in the helper's
       queue behind its silent names** · S · P-432, P-478 · Filed 2026-10-21 by the coordinator,
@@ -16852,9 +16873,19 @@ because each is a decision rather than a defect:
         longest wait 24.0 s against a ceiling of 75.1 s.
       - **Left open.** A mixed key's own walks contend for discovery's 4 places, which is
         `P-482`'s question.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `734d4e30`, `ms-server` up,
+        so not of record): **`partial` passed with the check off and failed by one check with it
+        on.**
+        - Off: 494 cached checks given up, of 23 names, all allowed. The longest first answer was
+          317.7 s (`dev-20.zone-b.test`), against the ceiling of 375.5 s: 25 silent names never
+          tried × 30 s over 2 lanes, plus the lag.
+        - On: 102 given up (233 before this ticket, `system` 312), 101 of 17 names allowed. One,
+          of `dev-380.zone-b.test`, was asked at 63.0 s, past the first scan interval; its name's
+          first answer came 62.2 s after its first ask. 5 cached lookups ran in the helper's
+          child and 278 on the probe's lanes.
+        - `forwarder`, P1, P5, P5b and P6 passed. The box stays open on the check-on case.
 
-- [ ] **P-481 — a key vouched only by its cached names can take every one of the helper's first
+- [x] **P-481 — a key vouched only by its cached names can take every one of the helper's first
       lanes before any of its lookups is stuck** · XS · P-432, P-478 · Filed 2026-10-21 by the
       coordinator, from `P-480`'s analysis.
       - **What happened.** In one instrumented 2,500-sensor `partial` run, zone b was vouched by its
@@ -16907,7 +16938,10 @@ because each is a decision rather than a defect:
       - **Runs.** The 11 resolver unit files, 1,023 tests, 0 failed. SC11 alone 10 of 10; the
         scenario file 3 times, 17 of 17; the judge 164 of 164. `partial` at 1,000 sensors passed
         with the check on and off.
-      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
+      - **Full size** (2026-10-21, the coordinator's run of S7 whole on `734d4e30`, `ms-server` up,
+        so not of record): **`slow`, `zone`, `spread10` and `steady` passed.** `zone` answered
+        31,500 of 31,500 in both modes, `slow` 5,000 of 5,000 in both, and `steady` 55,000 of
+        55,000. `spread10`, with the check off, answered 13,955 of 21,000 against `system`'s 12,968.
 
 - [ ] **P-482 — a mixed key's names are walked in the heard pool, where D18 puts them in
       discovery's** · XS · P-432 · Release 1.1 · Filed 2026-10-21 by the coordinator, from
