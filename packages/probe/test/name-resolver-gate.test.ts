@@ -24,6 +24,7 @@ import {
   ANSWER_MS,
   GATE_SUMMARY_MS,
   HELPER_LOST_CODE,
+  HOLD_FIRST_MS,
   MAX_ADDRESSES,
   NameResolver,
   STALE_MS,
@@ -32,7 +33,7 @@ import {
   type NameResolverOptions,
 } from '../src/resolver/name-resolver.js';
 import { GlibcNamePolicy, SYSTEM_FILES } from '../src/resolver/system-names.js';
-import { FakeHelper, StubPolicy } from './support/fake-helper.js';
+import { FakeHelper, StubPolicy, type FakeAsk } from './support/fake-helper.js';
 import { pollWithin, within } from './support/within.js';
 import { zoneFork, type ZoneAnswer } from './support/zone-helper.js';
 
@@ -563,6 +564,158 @@ describe('the helper’s lanes (P-432 S3, §1.8)', () => {
       assert.ok(zoneP() <= 3);
     }
     for (const got of await Promise.all(hanging)) assert.ok(!got.ok);
+  });
+
+  it('P-478 fix round 1, check off: a zone fully answering, then half its names silent: while a name that answers waits, its key’s names that do not answer hold at most 2 of its 3, and no answering name of it or of another zone misses its kept answer’s grace', async () => {
+    const { helper, ask, clock } = make();
+    const p = (i: number): string => `p${String(i)}.zone-p.test`;
+    const q = (i: number): string => `q${String(i)}.zone-q.test`;
+    const silentNames = new Set([p(0), p(1), p(2), p(6)]);
+    // Zone p fully answering, and zone q.
+    for (const host of [p(0), p(1), p(2), p(3), p(4), p(5), q(0), q(1)]) {
+      const seeded = ask(host);
+      helper.last(host).answer();
+      assert.deepEqual(await seeded, A, host);
+    }
+    // Past every answer's TTL, within its grace: a check is served its kept answer and the name
+    // refreshed behind it. Half of zone p goes silent: p2's refresh fails, so it is a retry once its
+    // hold ends, and p0's and p1's run past STUCK_MS.
+    clock.now = ANSWER_MS + 1_000;
+    assert.deepEqual(await ask(p(2)), A);
+    helper.last(p(2)).fail('EAI_AGAIN');
+    await settled();
+    for (const host of [p(0), p(1)]) {
+      assert.deepEqual(await ask(host), A);
+      helper.last(host).stuck();
+    }
+    await settled();
+    // Zone q's refreshes fill the refresh lanes, so p3's waits for one.
+    for (const host of [q(0), q(1)]) assert.deepEqual(await ask(host), A);
+    assert.deepEqual(await ask(p(3)), A);
+    assert.equal(helper.asksFor(p(3)).length, 1, 'p3’s refresh waits for a refresh lane');
+    // p2's hold over: its retry has a lane of its own class and one of zone p's 3, but 2 of them
+    // run for names that do not answer, and p3 waits.
+    clock.now += HOLD_FIRST_MS + 1_000;
+    assert.deepEqual(await ask(p(2)), A, 'its kept answer, within its grace');
+    assert.equal(
+      helper.asksFor(p(2)).length,
+      2,
+      'its seed and its refresh: a failing name does not take the last lane',
+    );
+    // Nor does a name never answered, and its check fails at once: what holds it is stuck.
+    const unanswered = await outcome(ask(p(6), 4, { waitMs: 60_000 }));
+    assert.equal(helper.asksFor(p(6)).length, 0, 'a name never answered does not take it');
+    assert.ok(!unanswered.ok && codeOf(unanswered.error) === RESOLVER_STUCK);
+    assert.match(
+      messageOf(unanswered.error),
+      /\(p[01]\.zone-p\.test, p[01]\.zone-p\.test\): the DNS check does not vouch for zone-p\.test now, and one of its names that answers is waiting for a lane, so its names that do not answer hold at most 2 of the helper’s lanes; it stays queued$/u,
+    );
+    // A refresh lane frees: p3 takes the last of zone p's 3, and once it has answered the lane goes
+    // to the failing name.
+    helper.last(q(0)).answer();
+    await settled();
+    assert.equal(helper.asksFor(p(3)).length, 2, 'the answering name has the last lane');
+    assert.equal(helper.asksFor(p(2)).length, 2);
+    helper.last(p(3)).answer();
+    await settled();
+    assert.equal(helper.asksFor(p(2)).length, 3, 'then the failing name’s retry');
+    helper.last(p(2)).stuck();
+    helper.last(q(1)).answer();
+    await settled();
+
+    // Scans a minute apart, to two and a half minutes past the grace of every answer kept at the
+    // start; each silent lookup hangs two scans, then fails. Every check of a name that answers is
+    // answered.
+    const hungSince = new Map<FakeAsk, number>();
+    for (const sent of helper.inFlight()) hungSince.set(sent, 0);
+    /** Answers every answering name's lookup in flight, as its zone does at once; the rest stick. */
+    const serve = async (scan: number): Promise<void> => {
+      for (let round = 0; round < 20; round += 1) {
+        const open = helper.inFlight();
+        const answering = open.filter((sent) => !silentNames.has(sent.host));
+        for (const sent of open) {
+          if (!silentNames.has(sent.host) || sent.stuckSaid) continue;
+          sent.stuck();
+          hungSince.set(sent, scan);
+        }
+        for (const sent of answering) sent.answer();
+        await settled();
+        if (answering.length === 0) return;
+      }
+    };
+    let scan = 0;
+    let judged = 0;
+    for (clock.now = 60_000; clock.now <= ANSWER_MS + STALE_MS + 3 * 60_000; clock.now += 60_000) {
+      scan += 1;
+      for (const sent of helper.inFlight()) {
+        if (scan - (hungSince.get(sent) ?? scan) >= 2) sent.fail('EAI_AGAIN');
+      }
+      await settled();
+      await serve(scan);
+      for (const host of [p(0), p(1), p(2), p(3), p(4), p(5), p(6), q(0), q(1)]) {
+        const got = outcome(ask(host, 4, { waitMs: 60_000 }));
+        await settled();
+        await serve(scan);
+        if (silentNames.has(host)) continue;
+        const result = await got;
+        judged += 1;
+        assert.ok(
+          result.ok,
+          `${host} at ${String(clock.now)} ms: ${result.ok ? '' : messageOf(result.error)}`,
+        );
+      }
+    }
+    assert.equal(judged, 5 * scan, 'every answering name judged at every scan');
+    assert.ok(scan >= 8, 'the scans ran past the grace of the answers kept at the start');
+    for (let round = 0; round < 20 && helper.inFlight().length > 0; round += 1) {
+      for (const sent of helper.inFlight()) sent.fail('EAI_AGAIN');
+      await settled();
+    }
+  });
+
+  it('P-478 fix round 1, check off: a name never answered, queued ahead of one that answers in the same class, does not hold it back from its key’s last lane', async () => {
+    const { helper, ask, clock } = make();
+    const r = (i: number): string => `r${String(i)}.zone-r.test`;
+    const s = (i: number): string => `s${String(i)}.zone-s.test`;
+    for (const host of [r(0), r(1), r(2), s(0), s(1)]) {
+      const seeded = ask(host);
+      helper.last(host).answer();
+      assert.deepEqual(await seeded, A, host);
+    }
+    // r0's and r1's refreshes run past STUCK_MS; s0's and s1's fill the refresh lanes, and s2's
+    // first lookup the last shared lane, so a first lookup waits.
+    clock.now = ANSWER_MS + 1_000;
+    for (const host of [r(0), r(1)]) {
+      assert.deepEqual(await ask(host), A);
+      helper.last(host).stuck();
+    }
+    for (const host of [s(0), s(1)]) assert.deepEqual(await ask(host), A);
+    const first = outcome(ask(s(2), 4, { waitMs: 60_000 }));
+    assert.equal(helper.asksFor(s(2)).length, 1);
+    // r3, never answered, queues first; then r2, which answered and whose answer is past its grace.
+    const never = outcome(ask(r(3), 4, { waitMs: 60_000 }));
+    clock.now = ANSWER_MS + STALE_MS + 1_000;
+    const answering = ask(r(2), 4, { waitMs: 60_000 });
+    assert.equal(helper.asksFor(r(3)).length, 0);
+    assert.equal(helper.asksFor(r(2)).length, 1, 'r2 waits for a first lane');
+    // A first lane frees: r3 is refused the last of zone r's 3, and r2, behind it, takes it.
+    helper.last(s(2)).answer();
+    assert.ok((await first).ok);
+    await settled();
+    assert.equal(
+      helper.asksFor(r(2)).length,
+      2,
+      'the answering name, behind it, has the last lane',
+    );
+    assert.equal(helper.asksFor(r(3)).length, 0, 'the name never answered waits');
+    helper.last(r(2)).answer();
+    assert.deepEqual(await answering, A);
+    await settled();
+    assert.equal(helper.asksFor(r(3)).length, 1, 'then the lane is the name never answered’s');
+    helper.last(r(3)).answer();
+    assert.ok((await never).ok);
+    for (const host of [r(0), r(1), s(0), s(1)]) helper.last(host).answer();
+    await settled();
   });
 
   it('Q1, Q2: with no token free a lookup stays queued, and its check fails at once only while every holder is stuck', async () => {

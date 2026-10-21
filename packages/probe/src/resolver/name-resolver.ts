@@ -32,6 +32,7 @@ import {
   firstLoad,
   gateFirstRule,
   heldBy,
+  helperAnsweringOk,
   helperClassOk,
   helperKeyOk,
   helperRiskOk,
@@ -904,7 +905,7 @@ type Settled =
 
 /** Why a queued helper lookup fails fast, and what holds it (§1.8). */
 interface HelperBlock {
-  readonly condition: 'key' | 'unit' | 'risk' | 'class' | 'kept' | 'token';
+  readonly condition: 'key' | 'answering' | 'unit' | 'risk' | 'class' | 'kept' | 'token';
   readonly lookups: readonly Pending[];
   /** Ghosts and U among the blockers: each stuck. */
   readonly ghosts: number;
@@ -2983,10 +2984,12 @@ export class NameResolver implements PoolResolver {
     gate.riskPeak = Math.max(gate.riskPeak, atRisk);
     this.#seeRisk(gate, atRisk);
     const admitted = new Map<string, HelperToken | undefined>();
+    const answeringQueued = this.#answeringQueuedOnce(gate);
     const admit = (pending: Pending): HelperToken | undefined => {
-      const at = `${pending.key}|${pending.cls}|${String(pending.urgent)}`;
+      const answering = this.#nameAnswering(pending.entry);
+      const at = `${pending.key}|${pending.cls}|${String(pending.urgent)}|${String(answering)}`;
       if (admitted.has(at)) return admitted.get(at);
-      const token = admitHelper(this.#admitAsk(gate, pending, atRisk));
+      const token = admitHelper(this.#admitAsk(gate, pending, atRisk, answeringQueued));
       admitted.set(at, token);
       return token;
     };
@@ -3520,8 +3523,65 @@ export class NameResolver implements PoolResolver {
     return gate.check?.state() === 1;
   }
 
+  /**
+   * Whether a name answers now (`P-478`'s fix round 1): its own last lookup answered, with
+   * addresses or a denial, and none of its lookups is stuck or failing now. A lookup past
+   * `STUCK_MS` holds its name, a failure in a row (`#onStuck`), so its failures say both. A name
+   * never answered does not answer; one whose zone has just gone silent still does, until its own
+   * lookup is stuck or fails. The key's cap of 3 is what holds a cold start, and an outage's onset.
+   */
+  #nameAnswering(entry: Entry): boolean {
+    if (entry.failures > 0) return false;
+    return entry.lastAnsweredAt !== undefined || entry.denial !== undefined;
+  }
+
+  /** Whether a key has a lookup queued in the helper for a name that answers (`#nameAnswering`). */
+  #answeringQueued(gate: Gate, key: string): boolean {
+    const { queues } = gate.lanes;
+    return [queues.first, queues.refresh, queues.retry].some((queue) =>
+      queue.some((queued) => queued.key === key && this.#nameAnswering(queued.entry)),
+    );
+  }
+
+  /**
+   * `#answeringQueued` for one pick, read once over the helper's queues and only if asked: the
+   * keys with a lookup queued for a name that answers. The pick changes neither while it reads.
+   */
+  #answeringQueuedOnce(gate: Gate): (key: string) => boolean {
+    let keys: Set<string> | undefined;
+    return (key) => {
+      if (keys === undefined) {
+        keys = new Set();
+        const { queues } = gate.lanes;
+        for (const queue of [queues.first, queues.refresh, queues.retry]) {
+          for (const queued of queue) {
+            if (this.#nameAnswering(queued.entry)) keys.add(queued.key);
+          }
+        }
+      }
+      return keys.has(key);
+    };
+  }
+
+  /**
+   * A key's lookups running in the helper for names that do not answer now (`#nameAnswering`):
+   * past `STUCK_MS`, of a name failing, or of one never answered. Those its key counts: each is its
+   * name's lookup, since a configuration change and a detach let go of both at once.
+   */
+  #failingRunning(gate: Gate, key: string): Pending[] {
+    return gate.keys
+      .runningOf(key)
+      .map((lookup) => lookup as Pending)
+      .filter((running) => !this.#nameAnswering(running.entry));
+  }
+
   /** What the admission reads of a queued helper lookup (§1.8, `P-478`). */
-  #admitAsk(gate: Gate, pending: Pending, atRisk: number): HelperAdmitAsk {
+  #admitAsk(
+    gate: Gate,
+    pending: Pending,
+    atRisk: number,
+    answeringQueued: (key: string) => boolean = (key) => this.#answeringQueued(gate, key),
+  ): HelperAdmitAsk {
     const { keys, budget } = gate;
     const key = pending.key;
     const domain = pending.entry.domain;
@@ -3536,6 +3596,13 @@ export class NameResolver implements PoolResolver {
       keyQuiet: keys.quiet(key),
       keyRunning: keys.running(key),
       vouched: this.#vouched(gate, key),
+      nameAnswering: this.#nameAnswering(pending.entry),
+      // Read over the helper's queues only where it decides (`helperAnsweringOk`), not at every
+      // pick: a key whose names that do not answer hold fewer than `KEY_QUIET - 1` never asks.
+      get keyAnsweringQueued() {
+        return answeringQueued(key);
+      },
+      keyFailingRunning: this.#failingRunning(gate, key).length,
       unitRunning: keys.unitRunning(key, pending.cls),
       unitCapped: keys.capped(key, pending.cls),
       atRisk,
@@ -3578,8 +3645,11 @@ export class NameResolver implements PoolResolver {
     const blocks: HelperBlock[] = [];
     if (!helperKeyOk(ask)) {
       const unvouched = !ask.vouched;
+      // Under its key's cap, held from the last lane its names that answer keep (`P-478`'s fix
+      // round 1). Its key then runs 2, each for a name that does not answer, as the cap's 3 are.
+      const kept = unvouched && ask.keyRunning < KEY_QUIET && !helperAnsweringOk(ask);
       blocks.push({
-        condition: unvouched ? 'key' : 'unit',
+        condition: kept ? 'answering' : unvouched ? 'key' : 'unit',
         lookups: (unvouched
           ? keys.runningOf(pending.key)
           : keys.runningOf(pending.key, pending.cls)
@@ -3659,6 +3729,12 @@ export class NameResolver implements PoolResolver {
               `${String(KEY_QUIET)} of the helper’s lanes; it stays queued`
           : `${prefix}: the DNS check does not vouch for ${domain} now, so it holds at most ` +
               `${String(KEY_QUIET)} of the helper’s lanes; it stays queued`;
+      case 'answering':
+        return (
+          `${prefix}: the DNS check does not vouch for ${domain} now, and one of its names that ` +
+          `answers is waiting for a lane, so its names that do not answer hold at most ` +
+          `${String(KEY_QUIET - 1)} of the helper’s lanes; it stays queued`
+        );
       case 'unit':
         return (
           `${prefix}: a ${pending.cls} lookup of ${domain} gave up or is stuck in the lookup ` +

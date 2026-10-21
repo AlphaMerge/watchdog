@@ -464,6 +464,18 @@ export interface HelperAdmitAsk {
    * on, and none of its lookups on either lane set past `STUCK_MS`. Never with the check off.
    */
   readonly vouched: boolean;
+  /**
+   * Its name answers (`P-478`'s fix round 1): its own last lookup answered, with addresses or a
+   * denial, and none of its lookups is stuck or failing now.
+   */
+  readonly nameAnswering: boolean;
+  /** Its key has a lookup queued in the helper for a name that answers, as `nameAnswering` says. */
+  readonly keyAnsweringQueued: boolean;
+  /**
+   * Its key's lookups running in the helper for names that do not answer now (`nameAnswering`):
+   * past `STUCK_MS`, of a name failing, or of one that has never answered.
+   */
+  readonly keyFailingRunning: number;
   readonly unitRunning: number;
   readonly unitCapped: boolean;
   /** The helper's lanes at risk now. */
@@ -490,15 +502,31 @@ export type HelperToken = 'urgent' | 'shared' | 'kept';
 
 /**
  * The key rule (§1.8's `keyOk`, `P-478`): a key the walk does not vouch for runs at most
- * `KEY_QUIET`, quiet or not; a vouched one is held by its unit.
+ * `KEY_QUIET`, quiet or not, and keeps the last of them for its names that answer
+ * (`helperAnsweringOk`); a vouched one is held by its unit.
  */
 export function helperKeyOk(a: HelperAdmitAsk): boolean {
   if (a.overflow) return !a.stuckAnywhere;
-  if (!a.vouched) return a.keyRunning < KEY_QUIET;
+  if (!a.vouched) return a.keyRunning < KEY_QUIET && helperAnsweringOk(a);
   return mayStart(
     { running: a.unitRunning, unacked: 0, capped: a.unitCapped, sharedTaken: 0 },
     HELPER_UNIT_RULE,
   );
+}
+
+/**
+ * Whether a lookup of a key held to `KEY_QUIET` may take a lane its names that answer would want
+ * (`P-478`'s fix round 1): while one of them is queued, its key's names that are failing or have
+ * never answered hold at most `KEY_QUIET - 1` of its lanes, and the last goes to the name that
+ * answers. One lane serves all of a key's answering refreshes, since each answers at once; with
+ * none queued, or for a name that answers, the cap alone holds it. A name whose zone has just gone
+ * silent still answers by this until its own lookup is stuck or fails, so at an outage's onset the
+ * cap of 3 is what holds the zone, as before.
+ */
+export function helperAnsweringOk(
+  a: Pick<HelperAdmitAsk, 'nameAnswering' | 'keyAnsweringQueued' | 'keyFailingRunning'>,
+): boolean {
+  return a.nameAnswering || a.keyFailingRunning < KEY_QUIET - 1 || !a.keyAnsweringQueued;
 }
 
 /** Whether a lookup is ungated (§1.8, D23): its key answers, or is vouched, and its unit is not capped. */

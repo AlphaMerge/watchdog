@@ -140,6 +140,14 @@ export interface WorldFacts {
     { readonly perSecond: number; readonly keys: number } | { readonly notReached: string };
   /** `zone`: answering names first kept more than a second after their first ask, or never. */
   readonly keptLate?: readonly string[];
+  /**
+   * `partial`: each cached check given up, by its name and when it was asked, in ms from the arm's
+   * start, and the arm's scan interval (`cachedAllowance`).
+   */
+  readonly cachedGivenUp?: {
+    readonly intervalMs: number;
+    readonly checks: readonly { readonly name: string; readonly askedMs: number }[];
+  };
   /** The helper, in gate mode. */
   readonly helper?: {
     readonly losses: Losses;
@@ -553,6 +561,44 @@ function allAnswered(facts: WorldFacts, said: (violation: string) => void, group
   }
 }
 
+/**
+ * `partial`'s cached checks given up that the judge allows (`P-478`'s fix round 1), and why each of
+ * the rest is not. At a cold start a cached name's first lookup may wait in the helper behind its
+ * zone's stuck silent lookups, which nothing has yet told apart from it, and give up, as
+ * `system`'s does on the probe's lanes. So one cached check given up is allowed a name, asked
+ * within the arm's first scan interval, read from the facts, never a count fixed beforehand. Every
+ * other is not: a second for the same name, one asked later, or one the facts do not place.
+ */
+export function cachedAllowance(facts: WorldFacts): {
+  readonly allowed: number;
+  readonly refused: readonly string[];
+} {
+  const total = count(facts.givenUp, 'cached');
+  const given = facts.cachedGivenUp;
+  if (given === undefined) {
+    return { allowed: 0, refused: total > 0 ? [`${String(total)} cached checks given up`] : [] };
+  }
+  const refused: string[] = [];
+  if (given.checks.length !== total) {
+    refused.push(
+      `${String(total)} cached checks given up, and ${String(given.checks.length)} placed by name and time`,
+    );
+  }
+  const allowed = new Set<string>();
+  const first = `the arm’s first scan interval of ${String(given.intervalMs / 1_000)} s`;
+  for (const { name, askedMs } of [...given.checks].sort((a, b) => a.askedMs - b.askedMs)) {
+    const when = `asked at ${(askedMs / 1_000).toFixed(1)} s`;
+    if (askedMs < 0 || askedMs >= given.intervalMs) {
+      refused.push(`a cached check of ${name} given up, ${when}, past ${first}`);
+    } else if (allowed.has(name)) {
+      refused.push(`a second cached check of ${name} given up, ${when}, within ${first}`);
+    } else {
+      allowed.add(name);
+    }
+  }
+  return { allowed: allowed.size, refused };
+}
+
 function silentOffProbeLanes(facts: WorldFacts, said: (violation: string) => void): void {
   if (count(facts.probeLanes, 'silent') > 0) {
     said(
@@ -906,7 +952,12 @@ const ARM_RULES: Readonly<Record<string, Rule>> = {
   },
   partial(facts, said) {
     if (facts.mode === 'system') return;
-    allAnswered(facts, said, ['answering', 'cached']);
+    allAnswered(facts, said, ['answering']);
+    // A cached check is given up only as `cachedAllowance` allows, and fails no other way.
+    if (count(facts.failedOtherwise, 'cached') > 0) {
+      said(`${String(count(facts.failedOtherwise, 'cached'))} cached checks failed otherwise`);
+    }
+    for (const refused of cachedAllowance(facts).refused) said(refused);
     silentOffProbeLanes(facts, said);
     silentHelperCapped(facts, said);
   },

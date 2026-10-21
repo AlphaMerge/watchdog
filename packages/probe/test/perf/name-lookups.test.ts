@@ -75,6 +75,7 @@ import {
 import {
   baselineOf,
   busiestSecond,
+  cachedAllowance,
   CHANNELS_A_SECOND,
   gapBound,
   hangAllowance,
@@ -2586,6 +2587,8 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
   const notRun: Record<Group, number> = { answering: 0, silent: 0, cached: 0, crash: 0 };
   /** Answering checks failed by D27's refusal of a name in flight at an earlier loss (`P-453`). */
   let avoidedRefused = 0;
+  /** `partial`: each cached check given up, by its name and when it was asked (`P-478`). */
+  const cachedGivenUp: { readonly name: string; readonly at: number }[] = [];
   /** The helper's route as each change of it was handed to the resolver, and when (gate mode). */
   const routeChanges: { readonly at: number; readonly route: RouteState }[] = [];
   /** P2: each answering name's ask at the resolver, and each answering check not answered. */
@@ -2778,6 +2781,12 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
             ended: endedBy(result.message),
             endedAt: performance.now(),
             durationMs: result.durationMs,
+          });
+        }
+        if (group === 'cached' && result.outcome !== 'ok' && GIVEN_UP.test(result.message)) {
+          cachedGivenUp.push({
+            name: worldHost(arm, device),
+            at: performance.now() - result.durationMs,
           });
         }
         const times = asks.get(device) ?? [];
@@ -3070,6 +3079,17 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
       ...(gapsOver === undefined ? {} : { gapsOver }),
       ...(steady === undefined ? {} : { steady }),
       ...(keptLate === undefined ? {} : { keptLate }),
+      ...(arm.cached === true
+        ? {
+            cachedGivenUp: {
+              intervalMs: shape.intervalSeconds * 1_000,
+              checks: cachedGivenUp.map(({ name, at: when }) => ({
+                name,
+                askedMs: when - startedAt,
+              })),
+            },
+          }
+        : {}),
       ...(helperStats === undefined
         ? {}
         : {
@@ -3163,6 +3183,11 @@ async function worldSoak(arm: WorldArm, mode: GateMode): Promise<WorldRun> {
             `${tally(group, tallies[group])}${notRun[group] > 0 ? `, and ${String(notRun[group])} more due not run (refused or deferred)` : ''}`,
         )
         .join('; '),
+      ...(arm.cached === true && mode === 'gate'
+        ? [
+            `cached given up: ${String(cachedAllowance(facts).allowed)} allowed, one a name asked within the arm’s first scan interval of ${String(shape.intervalSeconds)} s; ${String(cachedAllowance(facts).refused.length)} not`,
+          ]
+        : []),
       `jitter p50 ${ms(percentile(ordered, 0.5))}, p95 ${ms(percentile(ordered, 0.95))}, max ${ms(ordered.at(-1) ?? 0)}; check run p95 ${ms(percentile(sorted(run), 0.95))}; drained in ${ms(drainMs)}`,
       `event loop: p50 ${lagMs(delay.percentile(50))}, p99 ${lagMs(delay.percentile(99))}, max ${lagMs(delay.max)}`,
       `Probe Health: lookupsInFlight max ${String(Math.max(inFlightMax, report.lookupsInFlight ?? 0))}, last ${String(report.lookupsInFlight)}; lookupsGivenUp ${String(report.lookupsGivenUp)}`,
@@ -5075,6 +5100,53 @@ describe('the gate arms’ model is glibc’s, and their judge fails what it sho
       says: /the helper’s lanes at risk were not measured/u,
     },
   ];
+
+  it('partial allows a cached check given up once a name, asked within the arm’s first scan interval, read from the facts; no other, and no answering one (P-478 fix round 1)', () => {
+    const base = clean('partial', 'gate');
+    const placed = (
+      checks: readonly { readonly name: string; readonly askedMs: number }[],
+      patch: Partial<WorldFacts> = {},
+    ): WorldFacts => ({
+      ...base,
+      givenUp: { ...base.givenUp, cached: checks.length },
+      cachedGivenUp: { intervalMs: 60_000, checks },
+      ...patch,
+    });
+    const b20 = 'dev-20.zone-b.test';
+    const b40 = 'dev-40.zone-b.test';
+    const inside = placed([{ name: b20, askedMs: 59_999 }]);
+    assert.deepEqual(judgeWorld(inside), [], 'one inside the first interval');
+    assert.equal(cachedAllowance(inside).allowed, 1);
+    // From the facts, not a count: two names, one each, inside it.
+    const two = placed([
+      { name: b20, askedMs: 4_000 },
+      { name: b40, askedMs: 31_000 },
+    ]);
+    assert.deepEqual(judgeWorld(two), []);
+    assert.equal(cachedAllowance(two).allowed, 2);
+    assert.deepEqual(judgeWorld(placed([{ name: b20, askedMs: 60_000 }])), [
+      'a cached check of dev-20.zone-b.test given up, asked at 60.0 s, past the arm’s first scan interval of 60 s',
+    ]);
+    const again = placed([
+      { name: b20, askedMs: 30_000 },
+      { name: b20, askedMs: 2_000 },
+    ]);
+    assert.deepEqual(judgeWorld(again), [
+      'a second cached check of dev-20.zone-b.test given up, asked at 30.0 s, within the arm’s first scan interval of 60 s',
+    ]);
+    assert.equal(cachedAllowance(again).allowed, 1, 'its first, the earlier');
+    // The facts must place every one.
+    assert.deepEqual(
+      judgeWorld(placed([{ name: b20, askedMs: 1_000 }], { givenUp: { cached: 2 } })),
+      ['2 cached checks given up, and 1 placed by name and time'],
+    );
+    assert.deepEqual(judgeWorld({ ...base, givenUp: { cached: 1 } }), ['1 cached checks given up']);
+    // Answering checks have none, however the cached ones are placed.
+    assert.deepEqual(
+      judgeWorld(placed([{ name: b20, askedMs: 1_000 }], { givenUp: { cached: 1, answering: 1 } })),
+      ['1 answering checks given up'],
+    );
+  });
 
   it('a run that holds every assertion is judged clean, in every arm and the modes it runs in', () => {
     for (const arm of WORLD_ARMS) {

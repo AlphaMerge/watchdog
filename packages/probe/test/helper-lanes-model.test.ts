@@ -34,7 +34,9 @@ import { FakeHelper, StubPolicy, type FakeAsk } from './support/fake-helper.js';
  * quiet and being heard again, U rising and falling, time passing); after every command, I1 to I9.
  * And at every call of the probe's own `getaddrinfo`, I10 (D27): the name is not one the helper
  * keeps off the probe's lanes, each name in flight at an `exit`, `memory` or `hung` loss or as the
- * child goes quiet marked as the real helper marks it, and every poison mark.
+ * child goes quiet marked as the real helper marks it, and every poison mark. As each token is
+ * taken, I11 (`P-478`'s fix round 1): a key held to 3 never gives the last of them to a name that
+ * does not answer while a lookup of one that answers waits.
  * The generator is a seeded PRNG of its own: `fast-check` is not one of the probe's dependencies,
  * and a failing run prints its seed and its last commands, which replay it exactly.
  *
@@ -61,6 +63,17 @@ function prng(seed: number): () => number {
   };
 }
 
+/** What the test reads of a name's entry, through a lookup of it (`P-478`'s fix round 1). */
+interface EntryPeek {
+  readonly host: string;
+  readonly family: Family;
+  readonly domain: string;
+  readonly failures: number;
+  readonly lastAnsweredAt: number | undefined;
+  readonly denial: object | undefined;
+  readonly pending: Peek | undefined;
+}
+
 /** What the test reads of a lookup the resolver handed the helper as its reference. */
 interface Peek {
   readonly state: 'queued' | 'running' | 'done';
@@ -74,7 +87,7 @@ interface Peek {
   readonly suspect: boolean;
   readonly ungated: boolean;
   readonly pool: 'probe' | 'helper';
-  readonly entry: { readonly host: string; readonly family: Family; readonly domain: string };
+  readonly entry: EntryPeek;
 }
 
 const peek = (ref: object): Peek => ref as Peek;
@@ -223,6 +236,24 @@ function model(seed: number) {
     return risk;
   };
 
+  /**
+   * Whether a name answers now (`P-478`'s fix round 1), recounted from its entry: its last lookup
+   * answered, with addresses or a denial, and none of its lookups is stuck or failing.
+   */
+  const answeringNow = (entry: EntryPeek): boolean =>
+    entry.failures === 0 &&
+    entry.pending?.stuck !== true &&
+    (entry.lastAnsweredAt !== undefined || entry.denial !== undefined);
+
+  /**
+   * Every name the model has seen a helper lookup of, by its entry: where it looks for a key's
+   * lookups queued for a name that answers. A name only ever asked on the probe's lanes is not
+   * among them, so a queued lookup the model does not see is judged both ways (I2, I11).
+   */
+  const seenEntries = new Set<EntryPeek>();
+  /** Starts I11 judged with a lookup of an answering name known queued: it must be reached. */
+  let keptJudged = 0;
+
   const classOkNow = (cls: HelperClass): boolean => {
     const running = helperRunning().filter((p) => !p.urgent);
     const of = (c: HelperClass): number => running.filter((p) => p.cls === c).length;
@@ -241,6 +272,27 @@ function model(seed: number) {
       (running) =>
         running.stuck && (running.key === p.key || running.entry.domain === p.entry.domain),
     );
+    for (const sent of helper.asks)
+      if (sent.ref !== undefined) seenEntries.add(peek(sent.ref).entry);
+    seenEntries.add(p.entry);
+    const nameAnswering = answeringNow(p.entry);
+    const keyFailingRunning = helperRunning().filter(
+      (running) =>
+        running.key === p.key &&
+        !running.detached &&
+        (running.stuck || !answeringNow(running.entry)),
+    ).length;
+    const knownQueued = [...seenEntries].some((entry) => {
+      const queued = entry.pending;
+      return (
+        queued !== undefined &&
+        queued !== p &&
+        queued.state === 'queued' &&
+        queued.pool === 'helper' &&
+        queued.key === p.key &&
+        answeringNow(entry)
+      );
+    });
     const ask = {
       urgent: p.urgent,
       overflow: false,
@@ -249,6 +301,9 @@ function model(seed: number) {
       keyQuiet: keys.quiet(p.key),
       keyRunning: keys.running(p.key),
       vouched: false,
+      nameAnswering,
+      keyAnsweringQueued: knownQueued,
+      keyFailingRunning,
       unitRunning: keys.unitRunning(p.key, p.cls),
       unitCapped: keys.capped(p.key, p.cls),
       atRisk,
@@ -261,8 +316,10 @@ function model(seed: number) {
       sharedAvailable: budget.available('shared'),
       keptAvailable: budget.available('kept'),
     };
+    // A lookup queued for an answering name the model has not seen may be what the pick read.
     const admitted = admitHelper(ask);
-    if (admitted !== kind) {
+    const unseen = knownQueued ? admitted : admitHelper({ ...ask, keyAnsweringQueued: true });
+    if (admitted !== kind && unseen !== kind) {
       violations.push(
         `I2: ${p.entry.host} took a ${kind} token where admit says ${String(admitted)}`,
       );
@@ -279,6 +336,17 @@ function model(seed: number) {
       violations.push(
         `I6: unvouched key ${p.key} started its ${String(ask.keyRunning + 1)}th (${p.entry.host})`,
       );
+    }
+    // I11 (`P-478`'s fix round 1): while a lookup of a name that answers waits, a key's names
+    // that do not answer never take the last of its 3.
+    if (kind !== 'urgent' && !nameAnswering && knownQueued && ask.keyRunning < KEY_QUIET) {
+      keptJudged += 1;
+      if (keyFailingRunning >= KEY_QUIET - 1) {
+        violations.push(
+          `I11: ${p.entry.host} took the last lane of ${p.key}, held by ` +
+            `${String(keyFailingRunning)} that do not answer, while one that answers waits`,
+        );
+      }
     }
     if (kind === 'kept' && (!ungated || p.urgent)) {
       violations.push(`I8: the kept token taken by a gated lookup, ${p.entry.host}`);
@@ -570,12 +638,20 @@ function model(seed: number) {
     resolver.stop();
   };
 
-  return { step, drain, log, violations, asks: () => helper.asks.length };
+  return {
+    step,
+    drain,
+    log,
+    violations,
+    asks: () => helper.asks.length,
+    keptJudged: () => keptJudged,
+  };
 }
 
 describe('LR7: a model of the lookup helper’s lanes (P-432 S3, §7.2)', () => {
-  it(`holds I1 to I10 over ${String(RUNS)} seeded runs of ${String(COMMANDS)} commands`, async () => {
+  it(`holds I1 to I11 over ${String(RUNS)} seeded runs of ${String(COMMANDS)} commands`, async (t) => {
     let asks = 0;
+    let keptJudged = 0;
     for (let seed = FIRST_SEED; seed < FIRST_SEED + RUNS; seed += 1) {
       const run = model(seed);
       for (let n = 0; n < COMMANDS; n += 1) {
@@ -584,6 +660,7 @@ describe('LR7: a model of the lookup helper’s lanes (P-432 S3, §7.2)', () => 
       }
       if (run.violations.length === 0) await run.drain();
       asks += run.asks();
+      keptJudged += run.keptJudged();
       assert.deepEqual(
         run.violations,
         [],
@@ -593,5 +670,8 @@ describe('LR7: a model of the lookup helper’s lanes (P-432 S3, §7.2)', () => 
     }
     // The model reached the helper: a run that never asked it proves nothing.
     assert.ok(asks > RUNS * 20, `${String(asks)} helper asks over the runs`);
+    t.diagnostic(`I11 judged ${String(keptJudged)} starts of a name that does not answer`);
+    // I11 judged a start that did not answer beside one that does, queued: not vacuous.
+    assert.ok(RUNS < 100 || keptJudged > 0, `I11 judged ${String(keptJudged)} starts`);
   });
 });

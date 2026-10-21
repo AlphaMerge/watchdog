@@ -8,6 +8,7 @@ import {
   heldBy,
   HELPER_UNIT_RULE,
   HelperKeys,
+  helperAnsweringOk,
   helperClassOk,
   helperKeyOk,
   helperRiskOk,
@@ -776,6 +777,9 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
       keyQuiet: true,
       keyRunning: 0,
       vouched: false,
+      nameAnswering: false,
+      keyAnsweringQueued: false,
+      keyFailingRunning: 0,
       unitRunning: 0,
       unitCapped: false,
       atRisk: 0,
@@ -826,6 +830,63 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
       assert.equal(helperKeyOk(t1), false);
       assert.equal(helperKeyOk({ ...t1, vouched: true }), true);
       assert.equal(helperKeyOk({ ...t1, keyRunning: 2, unitRunning: 2 }), true);
+    });
+
+    it('keyOk keeps the last of a key’s 3 for its names that answer: while one is queued, those failing or never answered hold at most 2 (P-478 fix round 1)', () => {
+      // Two of the key's 3 run for names that do not answer, and one that answers waits.
+      const held = asking({
+        keyNew: false,
+        keyQuiet: false,
+        keyRunning: 2,
+        unitRunning: 2,
+        keyFailingRunning: 2,
+        keyAnsweringQueued: true,
+      });
+      assert.equal(helperAnsweringOk(held), false);
+      assert.equal(helperKeyOk(held), false, 'a name failing, or never answered: the last is kept');
+      assert.equal(admitHelper(held), undefined);
+      assert.equal(
+        admitHelper({ ...held, nameAnswering: true }),
+        'shared',
+        'the name that answers',
+      );
+      assert.equal(
+        helperKeyOk({ ...held, nameAnswering: true, keyRunning: 3, unitRunning: 3 }),
+        false,
+        'the cap stays 3 for it too',
+      );
+      assert.equal(helperKeyOk({ ...held, keyAnsweringQueued: false }), true, 'none waits: 3');
+      assert.equal(
+        helperKeyOk({ ...held, keyFailingRunning: 1 }),
+        true,
+        'one of the two answers: a second that does not is its key’s 2nd',
+      );
+      assert.equal(helperKeyOk({ ...held, keyQuiet: true }), false, 'quiet or not');
+      assert.equal(helperKeyOk({ ...held, keyFailingRunning: 3, keyRunning: 3 }), false);
+      // Vouched (D23): not held to 3, so nothing is kept of 3.
+      assert.equal(helperKeyOk({ ...held, vouched: true }), true, 'vouched: its unit alone');
+      assert.equal(
+        admitHelper({ ...held, urgent: true, urgentAvailable: 1 }),
+        'urgent',
+        '"Check now" on an urgent token, under no key rule',
+      );
+      assert.equal(
+        admitHelper({ ...held, urgent: true, urgentAvailable: 0 }),
+        undefined,
+        '"Check now" with no urgent token is under the key rule',
+      );
+      for (let failing = 0; failing <= 3; failing += 1) {
+        for (const answering of [false, true]) {
+          for (const queued of [false, true]) {
+            const a = { ...held, keyFailingRunning: failing, nameAnswering: answering };
+            assert.equal(
+              helperAnsweringOk({ ...a, keyAnsweringQueued: queued }),
+              answering || !queued || failing < 2,
+              `failing ${String(failing)}, answering ${String(answering)}, queued ${String(queued)}`,
+            );
+          }
+        }
+      }
     });
 
     it('classOk: with the check on, a lookup the gate holds never takes the last first or shared lane; one it does not hold may (P-478)', () => {
@@ -991,45 +1052,62 @@ describe('the lookup helper’s lane rule (P-432 S3)', () => {
                       [true, true],
                       [false, true],
                     ] as const)
-                      for (const keyRunning of [0, 1, 3])
-                        for (const atRisk of [0, 3, 4, 5])
-                          for (const urgentAvailable of [0, 1])
-                            for (const sharedAvailable of [0, 1])
-                              for (const keptAvailable of [0, 1]) {
-                                const a = asking({
-                                  urgent,
-                                  overflow,
-                                  keyNew,
-                                  keyQuiet,
-                                  vouched,
-                                  unitCapped,
-                                  classOk,
-                                  classSpare,
-                                  keepLast,
-                                  keyRunning,
-                                  unitRunning: keyRunning,
-                                  atRisk,
-                                  urgentAvailable,
-                                  sharedAvailable,
-                                  keptAvailable,
-                                });
-                                const token = admitHelper(a);
-                                seen += 1;
-                                if (token === undefined) continue;
-                                if (token === 'urgent') {
-                                  assert.ok(urgent && urgentAvailable > 0);
-                                  continue;
+                      for (const [nameAnswering, keyAnsweringQueued, keyFailingRunning] of [
+                        [false, false, 2],
+                        [false, true, 1],
+                        [false, true, 2],
+                        [true, true, 2],
+                      ] as const)
+                        for (const keyRunning of [0, 1, 2, 3])
+                          for (const atRisk of [0, 3, 4, 5])
+                            for (const urgentAvailable of [0, 1])
+                              for (const sharedAvailable of [0, 1])
+                                for (const keptAvailable of [0, 1]) {
+                                  const a = asking({
+                                    urgent,
+                                    overflow,
+                                    keyNew,
+                                    keyQuiet,
+                                    vouched,
+                                    unitCapped,
+                                    classOk,
+                                    classSpare,
+                                    keepLast,
+                                    nameAnswering,
+                                    keyAnsweringQueued,
+                                    keyFailingRunning,
+                                    keyRunning,
+                                    unitRunning: keyRunning,
+                                    atRisk,
+                                    urgentAvailable,
+                                    sharedAvailable,
+                                    keptAvailable,
+                                  });
+                                  const token = admitHelper(a);
+                                  seen += 1;
+                                  if (token === undefined) continue;
+                                  if (token === 'urgent') {
+                                    assert.ok(urgent && urgentAvailable > 0);
+                                    continue;
+                                  }
+                                  assert.ok(helperKeyOk(a) && helperRiskOk(a));
+                                  // P-478's fix round 1: the last of a key's 3 is its answering names'.
+                                  assert.ok(
+                                    overflow ||
+                                      vouched ||
+                                      nameAnswering ||
+                                      keyFailingRunning < 2 ||
+                                      !keyAnsweringQueued,
+                                  );
+                                  assert.ok(urgent || classOk);
+                                  assert.ok(urgent || !keepLast || classSpare || helperUngated(a));
+                                  if (token === 'shared') assert.ok(sharedAvailable > 0);
+                                  if (token === 'kept') {
+                                    assert.ok(keptAvailable > 0 && sharedAvailable === 0);
+                                    assert.ok(helperUngated(a) && !urgent && !overflow);
+                                  }
                                 }
-                                assert.ok(helperKeyOk(a) && helperRiskOk(a));
-                                assert.ok(urgent || classOk);
-                                assert.ok(urgent || !keepLast || classSpare || helperUngated(a));
-                                if (token === 'shared') assert.ok(sharedAvailable > 0);
-                                if (token === 'kept') {
-                                  assert.ok(keptAvailable > 0 && sharedAvailable === 0);
-                                  assert.ok(helperUngated(a) && !urgent && !overflow);
-                                }
-                              }
-      assert.equal(seen, 2 ** 7 * 4 * 3 * 4 * 2 ** 3);
+      assert.equal(seen, 2 ** 7 * 4 * 4 * 4 * 4 * 2 ** 3);
     });
 
     it('the unit’s rule is mayStart’s with no shared lane and no unacked', () => {
