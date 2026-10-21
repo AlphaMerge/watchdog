@@ -16951,7 +16951,8 @@ because each is a decision rather than a defect:
       bound holds either way, and the gate's arms pass. **Decided 2026-10-21 by Claude, under the
       user's delegation:** release 1.1, not 1.0. The design and the code differ on whom a silent
       zone's walk crowds, not on what the site's server receives. **Done when** one is changed to
-      say what the other does, with a test of the pool a mixed key's walk takes.
+      say what the other does, with a test of the pool a mixed key's walk takes. `P-484` adds the
+      own walks to it: a mixed key's own walk takes discovery first, then at most 4 of heard's 8.
 
 - [ ] **P-483 — a key heard through one cached scout can take every one of the helper's first
       lanes before another key's lookup queues** · S · P-432, P-481 · Filed 2026-10-21 by the
@@ -17064,6 +17065,61 @@ because each is a decision rather than a defect:
         - mutants are killed;
         - `partial` with the check on holds its ceiling in 3 full-size runs of 2 minutes;
         - `warmzone`, `zone`, `steady`, `forwarder`, P1, P5 and P5b still pass at full size.
+
+      **P-484 outcome. An own walk takes a discovery place, then, discovery full, at most 4 of
+      heard's 8; a silent key steps its backoff once a walk again; a held lookup's own walk carries
+      its key's walk again when that is due; the stuck flush tries the own walk; no pool admits past
+      its places; and `partial`'s check-on allowance is a ceiling read from the run.** Built
+      2026-10-21 on `fix/p484-own-walks`, and landed on `integ/r8-1020` as `16b6f0de`. In
+      `dns-check.ts`, `forward-budget.ts`, `name-resolver.ts`, the judge and the arm, with the
+      walk's paragraph in `administration.md` and a sentence in the release notes. No protocol
+      change and no migration; D16's 12 places and D19 unchanged.
+      - **What was built.**
+        - `CheckAsk` carries `own`. `ForwardBudget.ownPlace()` gives an own walk of a mixed key, or
+          of a heard key not fresh, discovery if it has room, else heard while fewer than
+          `OWN_WALK_HEARD` (4) own questions are open there (`ownOpen`, `ownFreesAt`), so
+          `OWN_WALK_PLACES` is 8. An own walk with no place waits in a room queue of its own,
+          pumped last and woken at a hold's end.
+        - `#notHeard` keeps a silent key's step: the walks again come at 5, 10, 20, 40 and 60 s,
+          where two steps an ask gave 5, 20 and 60.
+        - `walkAgainAt` and `walkAgainDue` are read by `#rewalk`, which lets a held lookup's own
+          walk past `heardOrMixed` only for a silent key whose walk again is due, as discovery,
+          kind key.
+        - `#onStuck` asks `#rewalk` for each lookup it would fail, with its waiters' shortest bound
+          left, and fails it only if it is still queued and stuck once the walk has ended.
+        - **The 5-of-4 was in `DnsCheck`'s room queue, not `ForwardBudget`.** A waiter given room
+          sent a microtask later, and each reply's pump in the same turn admitted the same place
+          again. `tryNow` now sends in the turn it admits, and a pump drains a queue while room
+          lasts.
+        - `HEARD_A_ZONE`, a debug line said once as a key turns heard or mixed, gives the arm the
+          key's time. The judge's check-on ceiling (`cachedCeilingOn`) is that time, plus the
+          interval ÷ the sensors a name, plus the silent names' own walks × `FORWARD_HOLD_MS` ÷
+          `OWN_WALK_PLACES`, plus the lag; the give-up rules are the check-off ones
+          (`cachedWithin`); a missing fact fails the arm once, naming it.
+      - **Decided by the builder, under the ticket's decision:** a mixed key's known names' own
+        walks take the same 8 places; a fresh heard key's own walk is an ordinary heard walk, not
+        one of the 4; the own queue is pumped after the pools'; the ceiling's own walks are the
+        silent names the arm asked, each walked by name at most once, which held in every run.
+      - **Tests.** `dns-check` +6 (the race; own walks in discovery, then heard, the fifth refused;
+        a heard key not fresh; a wake at a hold's end; `HEARD_A_ZONE` once; the backoff at 5, 10
+        and 20 s). `name-resolver-check` +3 (a cached name's own walk takes heard with discovery
+        full of silent ones; a silent-first zone's walk again carried by a held lookup once due,
+        and not before; the flush's own walk, cached heard, silent failed in the cap's words). The
+        judge's check-on case was replaced, including a give-up at 63 s now allowed.
+      - **Mutants: 24 of 24 killed**: 7 on the own walks' pool, the backoff, 3 on the carried walk
+        again, 2 on the flush, the race, the debug line, and 9 on the judge. One not run: draining
+        against one waiter a pump differs by a macrotask no test can see.
+      - **Runs.** The 11 resolver unit files 1,042 of 1,042; the scenario 17 of 17 twice; the judge
+        164 of 164. **`partial` at full size, 3 runs of 2 minutes, gate, check on**: the cached row
+        held its ceiling in all 3, the longest first answer 33.0, 27.0 and 22.4 s against 39.5,
+        39.2 and 39.0 s, and 38, 29 and 29 checks given up, all allowed (`P-483`'s runs without
+        it: 53.0 to 60.1 s). Runs 1 and 3 failed on `P-483`'s "held 4", which this branch lacked.
+        **`warmzone`, 2 minutes**: 15,000 of 15,000, 11 slots of 18. A forced silent-first start
+        in a clone, not of record: the zone heard at 7.04 s on a carried walk again (62 s
+        untreated), the longest cached wait 37.0 s against 44.7 s (111.2 s untreated).
+      - **Found, not fixed:** `lookup-helper`'s U18 failed once in one 11-file run ("its channel
+        to the probe closed") and passed 5 of 5 alone; untraced.
+      - **Full size**: TODO(full-size), the coordinator's run on the integrated build.
 
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
