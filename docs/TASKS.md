@@ -16953,6 +16953,80 @@ because each is a decision rather than a defect:
       zone's walk crowds, not on what the site's server receives. **Done when** one is changed to
       say what the other does, with a test of the pool a mixed key's walk takes.
 
+- [ ] **P-483 — a key heard through one cached scout can take every one of the helper's first
+      lanes before another key's lookup queues** · S · P-432, P-481 · Filed 2026-10-21 by the
+      coordinator, from a traced root cause of `partial` at full size (three traced runs and two
+      plain, beside S7's whole run on `734d4e30`).
+      - **What happened.** `partial` in gate mode with the check on gave up 1,360 to 1,539
+        answering checks in 6 of 11 full-size runs on `734d4e30`, one of them untraced: "the
+        silent zone held 4 of the helper's lanes, past 3". S7's whole run on the same build did not
+        hit it, so a passing run was the luck of the start order.
+      - **The cause.** Zone b's key was vouched by a cached scout at 1.3 to 1.5 s. Within about
+        30 ms four of its first lookups, routed `unvouched(rate)` by D19, started in the helper:
+        three silent names and one cached. `helperLastFirstOk` refuses a key the last first lane
+        only while another key's first lookup is queued, and none was yet. The other zones' first
+        lookups then queued behind four lookups that each hold a lane 30 s. A key vouched in the
+        first second has nothing stuck to unvouch it (`P-478`).
+      - **Decided 2026-10-21 by Claude, under the user's delegation.** No key takes the helper's
+        last first lane, vouched or not, whether or not another key's lookup waits: `firstCap - 1`
+        for every key. A zone alone in the helper loses a quarter of its first lanes; every other
+        zone keeps one from the first scan, which is what the gate claims. A key not vouched is
+        held to 3 across classes already, so the rule binds only a vouched key. K17's case and
+        `P-481`'s "with nothing else waiting, it takes its fourth" change to pin the new rule.
+      - **Done when**:
+        - a unit case reproduces the run: a key vouched, four of its first lookups asked at once
+          with nothing else queued, then another key's lookup; the fourth does not start, and the
+          other key's lookup takes the last lane;
+        - a mutant without the rule fails;
+        - the admission grid asserts that no key ever runs every first lane;
+        - `partial` in gate mode with the check on holds its answering rule in 5 full-size runs of
+          2 minutes, and `slow`, `zone`, `spread10`, `steady` and `forwarder` still pass at full
+          size.
+
+- [ ] **P-484 — with the check on, a partly cached zone's cached names wait behind its silent
+      names' own walks** · S · P-432, P-479, P-480 · Filed 2026-10-21 by the coordinator, from
+      the same trace.
+      - **What happened.** S7's whole run on `734d4e30` gave up one cached check of `partial` past
+        the first interval with the check on (`dev-380.zone-b.test`, at 63.0 s). The traced runs
+        gave up 0 to 44 such checks, the longest first answer 54 to 110 s.
+      - **The causes**, over 44 cached names held past 20 s in three traced runs:
+        - **The own walks queue in discovery (35 names, every run).** Once the key is mixed,
+          about 25 silent names each get an own walk (`P-480`'s round 1) in discovery's 4 places,
+          each held 10 s (`P-479`). The cached names' own walks were deferred `budget` 153 times,
+          each time with discovery full of silent names' questions and the heard pool at 0 of 8.
+        - **The walk again's backoff steps twice an ask (21 names, one run, both scouts silent).**
+          The walk again steps it, and its own NotHeard steps it again. After two asks the key
+          waited 40 s, where the design's 5 s doubling gives 10 s, and it stayed silent from 1.6 s
+          to 51.0 s.
+        - **`#onStuck`'s flush (12 names).** It fails a waiting check without trying an own walk.
+        - **Discovery admitted 5 questions against its 4 places**, at 6 deferrals in one run.
+      - **Decided 2026-10-21 by Claude, under the user's delegation.**
+        - **An own walk walks in the heard pool** when its key is mixed, or heard and not fresh,
+          in at most 4 of its 8 places, so heard keys keep 4. It adds no question and keeps D16's
+          12 places. A mixed key's known names already walk there (`P-482` records the departure
+          from D18 for both).
+        - **One backoff step a walk again**, as the design's "5 s doubling to 60 s" reads: a key
+          already silent keeps its step at a NotHeard.
+        - **A held lookup's own walk carries its key's walk again when that is due**, the key
+          silent. It adds no question and takes the one discovery place it takes now.
+        - **`#onStuck`'s flush tries the own walk**, as a fresh check does.
+        - **No pool admits past its places**, however many steps are admitted in one turn.
+        - **The check-on allowance becomes a ceiling read from the run.** Even with all of these,
+          a start whose scouts and first walks again land on silent names turns the key mixed
+          late, and the silent names' own walks take at least their number × 10 s ÷ the places to
+          drain. The first scan interval is not what the design guarantees. A cached check given up
+          with the check on is allowed in a held name's words, asked before its name's first answer
+          plus the lag, and the longest wait is held to the key's first heard-or-mixed time, plus a
+          check's spacing, plus the silent names' own walks × the hold ÷ the own walks' places,
+          plus the lag. The arm records the key's time; a run without it fails.
+      - **Done when**:
+        - unit cases reproduce each cause: own walks of cached names admitted while discovery is
+          full of silent ones; two asks stepping the backoff twice, not four times; the walk again
+          carried by a held lookup; the flush's own walk; and the over-admission;
+        - mutants are killed;
+        - `partial` with the check on holds its ceiling in 3 full-size runs of 2 minutes;
+        - `warmzone`, `zone`, `steady`, `forwarder`, P1, P5 and P5b still pass at full size.
+
 - [ ] **P-436 — a late answer from an old resolver configuration marks the name as answered** · XS ·
       P-426 · Found 2026-10-17 by `P-426`'s second review. In `NameResolver`'s `#settle`, the
       branch for a lookup cut loose by a `resolv.conf` change sets `lastAnsweredAt` even when the
